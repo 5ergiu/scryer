@@ -121,6 +121,7 @@ const en: LocaleDictionary = {
   "label.load": "Load",
   "label.edit": "Edit",
   "label.delete": "Delete",
+  "label.account": "Account",
   "label.actions": "Actions",
   "label.advanced": "Advanced",
   "label.custom": "Custom",

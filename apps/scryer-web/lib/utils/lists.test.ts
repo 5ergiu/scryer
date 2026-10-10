@@ -405,6 +405,23 @@ test("a list followed through one linked account is not followed through another
   assert.equal(isListSourceFollowed(followed, { provider: "mal", sourceType: "top", params: [], accountId: "account-one" }), false);
 });
 
+test("personal lists sort by the account they are read through, then by name", () => {
+  const list = (name: string, account: string) => ({
+    name,
+    account,
+    enabled: true,
+    sync: { state: "OK" as const, lastAt: null, nextAt: null, errorMessage: null, errorAt: null, pausedUntil: null },
+  });
+  const lists = [list("Watching", "second"), list("Planning", "First"), list("Watching", "First"), list("Completed", "second")];
+  const shown = (descending: boolean) =>
+    sortListSubscriptions(lists, { key: "account", descending }, (entry) => entry.account).map(
+      (entry) => `${entry.account}/${entry.name}`,
+    );
+  assert.deepEqual(shown(false), ["First/Planning", "First/Watching", "second/Completed", "second/Watching"]);
+  // Reversing the accounts keeps each account's lists in name order.
+  assert.deepEqual(shown(true), ["second/Completed", "second/Watching", "First/Planning", "First/Watching"]);
+});
+
 test("provider intervals read in the largest whole unit", () => {
   assert.deepEqual(listIntervalParts(86_400 * 2), { key: "lists.interval.days", count: 2 });
   assert.deepEqual(listIntervalParts(21_600), { key: "lists.interval.hours", count: 6 });

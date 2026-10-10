@@ -13,7 +13,7 @@ import type {
   ListSourceDraft,
   ListSubscription,
 } from "@/lib/types/lists";
-import { isListSourceFollowed } from "@/lib/utils/lists";
+import { isListSourceFollowed, listAccountLabel } from "@/lib/utils/lists";
 import { buildViewPath } from "@/lib/utils/routing";
 import { CatalogListTable, type CatalogListRow } from "./catalog-list-table";
 import { ListProviderSetup } from "./list-provider-setup";
@@ -57,7 +57,7 @@ export function PersonalAccountConnections(props: ConnectionsProps) {
               <ProviderTile provider={provider} />
               <div className="min-w-0 flex-1">
                 <h3 className="font-semibold">{provider.name}</h3>
-                {linked ? <p className="truncate text-sm text-muted-foreground">{linked.displayName ?? linked.username ?? linked.externalUserId}</p> : null}
+                {linked ? <p className="truncate text-sm text-muted-foreground">{listAccountLabel(linked)}</p> : null}
               </div>
               {linked ? <Badge tone={linked.status === "ACTIVE" ? "positive" : "warning"}>{t(linked.status === "ACTIVE" ? "lists.accounts.connected" : "lists.accounts.reconnect")}</Badge> : null}
             </div>
@@ -196,9 +196,7 @@ export function PersonalAccounts(props: Props) {
                 icon={<ProviderTile provider={entry.provider} size="sm" />}
                 name={entry.provider.name}
                 detail={
-                  entry.linked
-                    ? (entry.linked.displayName ?? entry.linked.username ?? entry.linked.externalUserId)
-                    : t("lists.accounts.notConnected")
+                  entry.linked ? listAccountLabel(entry.linked) : t("lists.accounts.notConnected")
                 }
               />
             ))}

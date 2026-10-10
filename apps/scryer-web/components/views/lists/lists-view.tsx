@@ -309,6 +309,7 @@ export function ListsView(props: ListsViewProps) {
                 <ListTable
                   subscriptions={subscriptions}
                   providers={providers}
+                  accounts={section === "personal" ? props.accounts : undefined}
                   canManageLists={canManageSubscriptions}
                   busyIds={busyIds}
                   onOpen={(subscription) => props.onOpenDetail(subscription.id)}

@@ -1,4 +1,5 @@
 import type {
+  ListAccount,
   ListCounts,
   ListExclusionScopeKind,
   ListFilter,
@@ -159,7 +160,7 @@ export function shownListSyncState(subscription: Pick<ListSubscription, "enabled
   return subscription.enabled ? subscription.sync.state : "OFF";
 }
 
-export type ListSortKey = "name" | "sync";
+export type ListSortKey = "name" | "account" | "sync";
 export type ListSort = { key: ListSortKey; descending: boolean };
 
 /** Sorting by last sync groups lists by how it went: failed, waiting, synced, then switched off. */
@@ -178,12 +179,18 @@ function listSyncTime(subscription: Pick<ListSubscription, "sync">): number {
 export function sortListSubscriptions<T extends Pick<ListSubscription, "name" | "enabled" | "sync">>(
   subscriptions: readonly T[],
   sort: ListSort | null,
+  accountLabel: (subscription: T) => string = () => "",
 ): T[] {
   if (!sort) return [...subscriptions];
   const factor = sort.descending ? -1 : 1;
-  const byName = (a: T, b: T) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
+  const compare = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+  const byName = (a: T, b: T) => compare(a.name, b.name);
   return [...subscriptions].sort((a, b) => {
     if (sort.key === "name") return byName(a, b) * factor;
+    if (sort.key === "account") {
+      const account = compare(accountLabel(a), accountLabel(b));
+      return account !== 0 ? account * factor : byName(a, b);
+    }
     const state = LIST_SYNC_STATE_ORDER[shownListSyncState(a)] - LIST_SYNC_STATE_ORDER[shownListSyncState(b)];
     if (state !== 0) return state * factor;
     const time = listSyncTime(b) - listSyncTime(a);
@@ -375,6 +382,11 @@ export function publicProviders(manifests: readonly ListProviderManifest[]): Lis
  * Whether a followed list already reads this exact source. The server refuses
  * a second follow of the same provider, source type and parameters.
  */
+/** The name a linked account goes by: the provider's display name, else its username, else its id. */
+export function listAccountLabel(account: Pick<ListAccount, "displayName" | "username" | "externalUserId">): string {
+  return account.displayName ?? account.username ?? account.externalUserId;
+}
+
 export function isListSourceFollowed(
   subscriptions: readonly (Pick<ListSubscription, "source"> & Partial<Pick<ListSubscription, "accountId">>)[],
   source: { provider: string; sourceType: string; params: readonly ListParam[]; accountId?: string | null },

@@ -15,11 +15,12 @@ import {
 } from "@/components/ui/table";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
-import type { ListProviderManifest, ListSubscription } from "@/lib/types/lists";
+import type { ListAccount, ListProviderManifest, ListSubscription } from "@/lib/types/lists";
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import {
   type ListSort,
   type ListSortKey,
+  listAccountLabel,
   listModeLabelKey,
   listSyncStateLabelKey,
   listSyncStateTone,
@@ -34,6 +35,8 @@ import { SortableHead } from "./sortable-head";
 type ListTableProps = {
   subscriptions: ListSubscription[];
   providers: ListProviderManifest[];
+  /** The member's linked accounts; given for personal lists, which then name the account each is read through. */
+  accounts?: ListAccount[];
   canManageLists: boolean;
   busyIds: ReadonlySet<string>;
   onOpen: (subscription: ListSubscription) => void;
@@ -44,6 +47,7 @@ type ListTableProps = {
 export function ListTable({
   subscriptions,
   providers,
+  accounts,
   canManageLists,
   busyIds,
   onOpen,
@@ -55,7 +59,17 @@ export function ListTable({
   const providerByType = new Map(providers.map((provider) => [provider.providerType, provider]));
   // Until a column is picked the lists keep the order they were loaded in.
   const [sort, setSort] = React.useState<ListSort | null>(null);
-  const sorted = React.useMemo(() => sortListSubscriptions(subscriptions, sort), [subscriptions, sort]);
+  const accountLabels = React.useMemo(
+    () => new Map((accounts ?? []).map((account) => [account.id, listAccountLabel(account)])),
+    [accounts],
+  );
+  const sorted = React.useMemo(
+    () =>
+      sortListSubscriptions(subscriptions, sort, (subscription) =>
+        (subscription.accountId ? accountLabels.get(subscription.accountId) : null) ?? "",
+      ),
+    [subscriptions, sort, accountLabels],
+  );
   const sortableHead = (key: ListSortKey, label: string) => {
     const active = sort?.key === key;
     return (
@@ -74,6 +88,7 @@ export function ListTable({
       <TableHeader>
         <TableRow>
           {sortableHead("name", t("lists.table.list"))}
+          {accounts ? sortableHead("account", t("label.account")) : null}
           <TableHead className="hidden md:table-cell">{t("lists.table.coverage")}</TableHead>
           <TableHead className="hidden sm:table-cell">{t("lists.table.mode")}</TableHead>
           {canManageLists ? <TableHead className="w-[1%] text-center">{t("label.enabled")}</TableHead> : null}
@@ -116,6 +131,11 @@ export function ListTable({
                   </div>
                 </div>
               </TableCell>
+              {accounts ? (
+                <TableCell data-ui="list-subscription-account" className="text-[13px] text-[var(--scry-ink2)]">
+                  {(subscription.accountId ? accountLabels.get(subscription.accountId) : null) ?? null}
+                </TableCell>
+              ) : null}
               <TableCell className="hidden w-36 md:table-cell">
                 <ListCoverageBar counts={subscription.counts} legend="hover" />
               </TableCell>
