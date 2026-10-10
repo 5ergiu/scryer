@@ -231,6 +231,27 @@ pub fn visible_memberships(
         .collect()
 }
 
+/// Name each entry that is in a library by its library title, which carries
+/// the metadata service's name where a list may spell the title in its
+/// original language. A movie within a series keeps the name the list gave,
+/// since its library title is the series.
+pub fn name_by_library_title(rows: &mut [ListMembership], title_names: &HashMap<String, String>) {
+    for row in rows {
+        if row.series_movie.is_some() {
+            continue;
+        }
+        let name = row
+            .title_id
+            .as_ref()
+            .and_then(|title_id| title_names.get(title_id))
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty());
+        if let Some(name) = name {
+            row.display_title = Some(name.to_string());
+        }
+    }
+}
+
 /// A page of memberships in list order: ranked items first by rank, then
 /// the rest in the order they were first seen.
 pub fn membership_page(
@@ -690,21 +711,24 @@ impl AppUseCase {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let title_libraries = if title_ids.is_empty() {
-            HashMap::new()
+        let titles = if title_ids.is_empty() {
+            Vec::new()
         } else {
-            self.services
-                .catalog
-                .titles
-                .get_by_ids(&title_ids)
-                .await?
-                .into_iter()
-                .map(|title| (title.id, title.library_id))
-                .collect()
+            self.services.catalog.titles.get_by_ids(&title_ids).await?
         };
+        let title_names = titles
+            .iter()
+            .map(|title| (title.id.clone(), title.name.clone()))
+            .collect();
+        let title_libraries = titles
+            .into_iter()
+            .map(|title| (title.id, title.library_id))
+            .collect();
         let viewable = self.viewable_library_ids(actor).await?;
         let rows = visible_memberships(&subscription, rows, &title_libraries, &viewable);
-        Ok(membership_page(rows, limit, offset))
+        let mut page = membership_page(rows, limit, offset);
+        name_by_library_title(&mut page.items, &title_names);
+        Ok(page)
     }
 
     pub async fn public_list_sync_runs(

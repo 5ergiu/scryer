@@ -523,7 +523,7 @@ impl AppUseCase {
         if !self.is_personal_list(actor, id).await? {
             return self.public_list_memberships(actor, id, limit, offset).await;
         }
-        Ok(membership_page(
+        let mut page = membership_page(
             self.services
                 .lists
                 .memberships
@@ -534,7 +534,27 @@ impl AppUseCase {
                 .collect(),
             limit,
             offset,
-        ))
+        );
+        let title_ids = page
+            .items
+            .iter()
+            .filter_map(|row| row.title_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !title_ids.is_empty() {
+            let title_names = self
+                .services
+                .catalog
+                .titles
+                .get_by_ids(&title_ids)
+                .await?
+                .into_iter()
+                .map(|title| (title.id, title.name))
+                .collect();
+            super::public::name_by_library_title(&mut page.items, &title_names);
+        }
+        Ok(page)
     }
     pub async fn visible_list_sync_runs(
         &self,

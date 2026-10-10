@@ -10720,7 +10720,7 @@ type ListMembershipPayload {
 	"""
 	stateReason: String
 	"""
-	The title as the list names it, or null.
+	The library title's name once the entry is in a library; otherwise the title as the list names it, or null.
 	"""
 	displayTitle: String
 	"""

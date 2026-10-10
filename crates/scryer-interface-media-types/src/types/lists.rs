@@ -796,7 +796,7 @@ pub struct ListMembershipPayload {
     pub state: ListMembershipStateValue,
     /// Short reason for the state, such as a filter name, or null.
     pub state_reason: Option<String>,
-    /// The title as the list names it, or null.
+    /// The library title's name once the entry is in a library; otherwise the title as the list names it, or null.
     pub display_title: Option<String>,
     /// Year as the list gives it, or null.
     pub year: Option<i32>,

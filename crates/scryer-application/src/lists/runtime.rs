@@ -52,7 +52,7 @@ fn series_movie_selection(item: &ResolvedItem) -> scryer_domain::MonitorSelectio
     scryer_domain::MonitorSelection {
         seasons: vec![],
         series_movies: vec![scryer_domain::MonitorSelectionMovie {
-            name: item_name(item),
+            name: fallback_name(item, item.item.title.as_deref()),
             external_ids: item.external_ids.clone(),
         }],
     }
@@ -72,11 +72,14 @@ fn series_movie_matches(movie: &scryer_domain::MovieEntity, ids: &[ExternalId]) 
     })
 }
 
+/// What a title the list adds or asks for goes by: the gateway's name when
+/// the item was looked up, and otherwise the name the list gave.
 fn item_name(item: &ResolvedItem) -> String {
-    item.item
-        .title
-        .as_deref()
-        .map(str::trim)
+    fallback_name(item, item.display_title().as_deref())
+}
+
+fn fallback_name(item: &ResolvedItem, name: Option<&str>) -> String {
+    name.map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_string)
         .or_else(|| {

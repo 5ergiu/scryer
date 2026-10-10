@@ -144,6 +144,50 @@ fn membership_pages_follow_list_order() {
 }
 
 #[test]
+fn an_entry_in_a_library_goes_by_its_library_title() {
+    let mut linked = membership("public-a", "linked", ListMembershipState::InLibrary);
+    linked.display_title = Some("Listed Name".into());
+    linked.title_id = Some("title-linked".into());
+    let mut unlinked = membership("public-a", "unlinked", ListMembershipState::Unresolved);
+    unlinked.display_title = Some("Listed Name".into());
+    unlinked.title_id = None;
+    // The title was since removed, so there is no library name to take.
+    let mut gone = membership("public-a", "gone", ListMembershipState::InLibrary);
+    gone.display_title = Some("Listed Name".into());
+    gone.title_id = Some("title-gone".into());
+    // A movie within a series is linked to the series, whose name is not the movie's.
+    let mut within = membership("public-a", "within", ListMembershipState::InLibrary);
+    within.display_title = Some("Listed Movie".into());
+    within.title_id = Some("title-series".into());
+    within.series_movie = Some(scryer_domain::ListSeriesMovieTarget {
+        parent_smg_id: 1,
+        parent_tvdb_id: 1,
+        parent_name: "Fixture Series".into(),
+        link_id: None,
+    });
+
+    let names = HashMap::from([
+        ("title-linked".to_string(), " Library Name ".to_string()),
+        ("title-series".to_string(), "Fixture Series".to_string()),
+    ]);
+    let mut rows = vec![linked, unlinked, gone, within];
+    name_by_library_title(&mut rows, &names);
+    let shown = rows
+        .iter()
+        .map(|row| row.display_title.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        vec![
+            Some("Library Name"),
+            Some("Listed Name"),
+            Some("Listed Name"),
+            Some("Listed Movie"),
+        ]
+    );
+}
+
+#[test]
 fn preview_with_ten_per_sync_only_adds_ten_of_ninety_eight_candidates() {
     for scope in [
         scryer_domain::ListScope::Public,
