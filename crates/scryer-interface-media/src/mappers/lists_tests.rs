@@ -225,3 +225,30 @@ fn a_list_exclusion_needs_its_list() {
         }
     );
 }
+
+#[test]
+fn a_previewed_poster_is_sized_on_tmdb_and_left_alone_elsewhere() {
+    let poster_of = |url: &str| {
+        from_preview_item(ListPreviewItem {
+            canonical_smg_id: None,
+            series_movie: None,
+            facts: None,
+            item_key: "fixture:1".to_string(),
+            display_title: None,
+            year: None,
+            kind: None,
+            poster_url: Some(url.to_string()),
+        })
+        .poster_url
+    };
+
+    assert_eq!(
+        poster_of("https://image.tmdb.org/t/p/original/fixture.jpg").as_deref(),
+        Some("https://image.tmdb.org/t/p/w300/fixture.jpg")
+    );
+    assert_eq!(
+        poster_of("https://artworks.thetvdb.com/banners/posters/fixture.jpg").as_deref(),
+        Some("https://artworks.thetvdb.com/banners/posters/fixture.jpg")
+    );
+    assert_eq!(poster_of("not a url").as_deref(), Some("not a url"));
+}

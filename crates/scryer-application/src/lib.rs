@@ -492,7 +492,7 @@ pub(crate) use helpers::{
     parsed_episode_lookup_season, sanitize_ids, to_hex,
 };
 pub(crate) use helpers::{filesystem_space, filesystem_space_raw};
-pub use image_proxy::image_proxy_source_token;
+pub use image_proxy::{image_proxy_source_token, image_upstream_variant_url};
 pub use indexer_errors::{
     CONNECTION_TEST_INDEXER_ID, ClassifiedIndexerError, IndexerErrorRecorder,
     IndexerErrorRepository, NullIndexerErrorRecorder, PREVIEW_MANAGED_SYNC_INDEXER_ID,

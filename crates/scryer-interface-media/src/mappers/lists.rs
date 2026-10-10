@@ -712,8 +712,15 @@ fn from_preview_item(item: ListPreviewItem) -> ListPreviewItemPayload {
         item_key: item.item_key,
         year: item.year,
         kind: item.kind.map(MediaFacetValue::from_domain),
-        poster_url: item.poster_url,
+        poster_url: item.poster_url.map(preview_poster_url),
     }
+}
+
+/// A previewed title's poster is loaded by the browser from where it is
+/// published, at the size a poster is shown rather than the original.
+fn preview_poster_url(url: String) -> String {
+    scryer_application::image_upstream_variant_url(&url, ImageProxyKind::Poster.as_str(), "w250")
+        .unwrap_or(url)
 }
 
 pub fn from_list_preview(preview: ListPreview) -> ListPreviewPayload {
