@@ -798,6 +798,10 @@ pub struct ListMembershipPayload {
     pub display_title: Option<String>,
     /// Year as the list gives it, or null.
     pub year: Option<i32>,
+    /// Metadata service title the entry was matched to, or null.
+    pub smg_title_id: Option<i64>,
+    /// Identifiers the list gives for the title.
+    pub external_ids: Vec<ExternalIdPayload>,
     /// Library title, or null.
     pub title_id: Option<ID>,
     /// Request the list submitted, or null.

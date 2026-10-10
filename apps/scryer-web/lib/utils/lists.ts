@@ -2,6 +2,7 @@ import type {
   ListCounts,
   ListExclusionScopeKind,
   ListFilter,
+  ListMembership,
   ListMembershipState,
   ListMode,
   ListOnLeave,
@@ -39,6 +40,42 @@ export function listMembershipTitleHref(kind: Facet, titleId: string | null, ser
   const params = new URLSearchParams({ id });
   if (seriesMovieLinkId) params.set("seriesMovie", seriesMovieLinkId);
   return `/${facet.viewId}?${params}`;
+}
+
+export type ListTitleMetadataLookup = {
+  movie: boolean;
+  input: { smgId?: number; tvdbId?: string; tmdbId?: number; imdbId?: string };
+};
+
+/**
+ * How to ask the metadata service about a list entry, or null when the list
+ * gives nothing the service can be asked by. The matched title is asked for
+ * first; otherwise the first id the service takes, skipping one that names
+ * the other kind of title (an anime's own movie id is not the series').
+ */
+export function listMembershipMetadataLookup(
+  membership: Pick<ListMembership, "kind" | "smgTitleId" | "externalIds">,
+): ListTitleMetadataLookup | null {
+  const movie = membership.kind === "MOVIE";
+  if (membership.smgTitleId != null) return { movie, input: { smgId: membership.smgTitleId } };
+  const idOf = (source: string): string | null => {
+    for (const id of membership.externalIds) {
+      const kind = id.kind?.trim().toLowerCase();
+      const otherKind = movie ? kind === "series" || kind === "anime" : kind === "movie";
+      const value = id.value.trim();
+      if (id.source.trim().toLowerCase() === source && !otherKind && value) return value;
+    }
+    return null;
+  };
+  const whole = (value: string | null): number | null => (value && /^\d+$/.test(value) ? Number(value) : null);
+  const smgId = whole(idOf("smg"));
+  if (smgId !== null) return { movie, input: { smgId } };
+  const tvdbId = idOf("tvdb");
+  if (tvdbId) return { movie, input: { tvdbId } };
+  const tmdbId = whole(idOf("tmdb"));
+  if (tmdbId !== null) return { movie, input: { tmdbId } };
+  const imdbId = idOf("imdb");
+  return imdbId ? { movie, input: { imdbId } } : null;
 }
 
 /** Modes offered for public lists. `REQUEST` belongs to personal lists only. */

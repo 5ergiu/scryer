@@ -32,7 +32,6 @@ import {
   listIntervalParts,
   listKindLabelKey,
   listMembershipRowId,
-  listMembershipTitleHref,
   listMembershipReasonKey,
   listMembershipStateLabelKey,
   listMembershipStateTone,
@@ -45,6 +44,7 @@ import {
 } from "@/lib/utils/lists";
 
 import { ListCoverageBar } from "./list-coverage-bar";
+import { ListMembershipTitle } from "./list-membership-title";
 import { ListPreviewSummary } from "./list-preview-summary";
 import { ProviderTile } from "./provider-tile";
 import type { ListDetailState } from "./lists-view";
@@ -284,14 +284,7 @@ export function ListDetailPanel({
                           <TableCodeCell className="text-center text-[12px] text-[var(--scry-muted)]">{membership.rank ?? "—"}</TableCodeCell>
                           <TableCell>
                             <div className="text-[13px] font-medium text-[var(--scry-ink)]">
-                              {listMembershipTitleHref(membership.kind, membership.titleId, membership.seriesMovieLinkId) ? (
-                                <a
-                                  href={listMembershipTitleHref(membership.kind, membership.titleId, membership.seriesMovieLinkId)!}
-                                  className="rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--scry-focus)]"
-                                >
-                                  {membership.displayTitle ?? membership.itemKey}
-                                </a>
-                              ) : membership.displayTitle ?? membership.itemKey}
+                              <ListMembershipTitle membership={membership} />
                               {membership.year ? (
                                 <span className="font-normal text-[var(--scry-muted)]"> ({membership.year})</span>
                               ) : null}

@@ -649,6 +649,16 @@ fn from_membership(row: ListMembership) -> ListMembershipPayload {
         state_reason: row.state_reason,
         display_title: row.display_title,
         year: row.year,
+        smg_title_id: row.smg_title_id,
+        external_ids: row
+            .external_ids
+            .into_iter()
+            .map(|id| ExternalIdPayload {
+                source: id.source,
+                kind: id.kind,
+                value: id.value,
+            })
+            .collect(),
         title_id: row.title_id.map(Into::into),
         request_id: row.request_id.map(Into::into),
         added_by_list: row.added_by_list,

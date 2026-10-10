@@ -10728,6 +10728,14 @@ type ListMembershipPayload {
 	"""
 	year: Int
 	"""
+	Metadata service title the entry was matched to, or null.
+	"""
+	smgTitleId: Int
+	"""
+	Identifiers the list gives for the title.
+	"""
+	externalIds: [ExternalIdPayload!]!
+	"""
 	Library title, or null.
 	"""
 	titleId: ID

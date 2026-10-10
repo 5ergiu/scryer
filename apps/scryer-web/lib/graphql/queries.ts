@@ -4377,6 +4377,16 @@ export const metadataMovieQuery = `query MetadataMovie($input: MetadataMovieInpu
   }
 }`;
 
+/** A series' name, year, overview and poster, without its seasons or episodes. */
+export const metadataSeriesSummaryQuery = `query MetadataSeriesSummary($input: MetadataSeriesInput!) {
+  metadataSeries(input: $input) {
+    name
+    year
+    overview
+    posterUrl
+  }
+}`;
+
 export const metadataSeriesQuery = `query MetadataSeries($input: MetadataSeriesInput!) {
   metadataSeries(input: $input) {
     tvdbId
@@ -5631,6 +5641,8 @@ export const listSubscriptionDetailQuery = `query ListSubscriptionDetail($id: ID
       stateReason
       displayTitle
       year
+      smgTitleId
+      externalIds { source kind value }
       titleId
       seriesMovieLinkId
       requestId

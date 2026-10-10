@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { listMembershipTitleHref } from "./lists.ts";
-import { listMembershipReasonKey, sortListSubscriptions } from "./lists.ts";
+import {
+  listMembershipMetadataLookup,
+  listMembershipReasonKey,
+  listMembershipTitleHref,
+  sortListSubscriptions,
+} from "./lists.ts";
 
 test("a list entry's reason code resolves to its sentence, and an unknown code to none", () => {
   assert.equal(listMembershipReasonKey("media_type_not_included"), "lists.reason.mediaTypeNotIncluded");
@@ -56,6 +60,37 @@ test("followed lists sort by name, and by last sync as failed, waiting, synced, 
     "Bravo 2",
     "charlie",
   ]);
+});
+
+test("a list entry is looked up by its matched title, then by the first id of its own kind", () => {
+  assert.deepEqual(
+    listMembershipMetadataLookup({ kind: "MOVIE", smgTitleId: 41, externalIds: [{ source: "imdb", value: "tt0000001" }] }),
+    { movie: true, input: { smgId: 41 } },
+  );
+  assert.deepEqual(
+    listMembershipMetadataLookup({
+      kind: "ANIME",
+      smgTitleId: null,
+      externalIds: [
+        { source: "mal", value: "9001" },
+        { source: "tmdb", kind: "movie", value: "77" },
+        { source: "TMDB", kind: "series", value: " 88 " },
+      ],
+    }),
+    { movie: false, input: { tmdbId: 88 } },
+  );
+  assert.deepEqual(
+    listMembershipMetadataLookup({ kind: "SERIES", smgTitleId: null, externalIds: [{ source: "tvdb", value: "5005" }, { source: "imdb", value: "tt0000002" }] }),
+    { movie: false, input: { tvdbId: "5005" } },
+  );
+  assert.deepEqual(
+    listMembershipMetadataLookup({ kind: "MOVIE", smgTitleId: null, externalIds: [{ source: "tmdb", value: "abc" }, { source: "imdb", value: "tt0000003" }] }),
+    { movie: true, input: { imdbId: "tt0000003" } },
+  );
+  assert.equal(
+    listMembershipMetadataLookup({ kind: "ANIME", smgTitleId: null, externalIds: [{ source: "anilist", value: "12" }] }),
+    null,
+  );
 });
 
 test("membership title links use library IDs for every facet and omit unlinked titles", () => {

@@ -237,6 +237,9 @@ export type ListMembership = {
   stateReason: string | null;
   displayTitle: string | null;
   year: number | null;
+  /** Metadata service title the entry was matched to. */
+  smgTitleId: number | null;
+  externalIds: ExternalId[];
   titleId: string | null;
   requestId: string | null;
   addedByList: boolean;
