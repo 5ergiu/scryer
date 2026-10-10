@@ -5884,6 +5884,8 @@ const en: LocaleDictionary = {
   "profile.mediaServerAccounts": "Media-server accounts",
   "lists.accounts.connected": "Connected",
   "lists.accounts.reconnect": "Reconnect",
+  "lists.accounts.notConnected": "Not connected",
+  "lists.accounts.needsReconnect": "Needs reconnecting",
   "lists.accounts.manage": "Manage",
   "lists.accounts.manageTitle": "Manage {{provider}} account",
   "lists.accounts.private": "These lists and account details are visible only to you.",

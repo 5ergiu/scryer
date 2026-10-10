@@ -14,11 +14,11 @@ import type {
   ListSubscription,
 } from "@/lib/types/lists";
 import { isListSourceFollowed, publicProviders } from "@/lib/utils/lists";
-import { cn } from "@/lib/utils";
 
 import { AddByUrlCard } from "./add-by-url-card";
 import { CatalogListTable } from "./catalog-list-table";
 import { ProviderSettingsCard } from "./provider-settings-card";
+import { ProviderRail, ProviderRailEntry } from "./provider-rail";
 import { ProviderTile } from "./provider-tile";
 
 /** What a group of lists needs before it can be followed; nothing is said when it needs nothing. */
@@ -31,11 +31,6 @@ const AUTH_BADGE_KEY: Partial<Record<ListAuthBadge, string>> = {
 const CUSTOM = "__custom__";
 /** The provider whose lists are feeds at any address; it has no rail entry of its own. */
 const CUSTOM_PROVIDER_TYPE = "custom";
-
-const RAIL_ENTRY =
-  "flex flex-none items-center gap-2.5 rounded-[10px] border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--scry-focus)]";
-const RAIL_ENTRY_ACTIVE = "border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.12)]";
-const RAIL_ENTRY_IDLE = "border-transparent hover:bg-[var(--scry-hover)]";
 
 type ProviderBrowserProps = {
   providers: ListProviderManifest[];
@@ -87,39 +82,32 @@ export function ProviderBrowser({
           {t("lists.catalog.empty")}
         </p>
       ) : null}
-      <nav aria-label={t("lists.catalog.providers")} className="flex gap-1.5 overflow-x-auto md:flex-col md:overflow-visible">
-        {rail.map((provider) => {
-          const active = provider.providerType === selected?.providerType;
-          return (
-            <button
-              key={provider.providerType}
-              id={`lists-catalog-provider-${provider.providerType}`}
-              type="button"
-              aria-pressed={active}
-              onClick={() => setSelectedType(provider.providerType)}
-              className={cn(RAIL_ENTRY, active ? RAIL_ENTRY_ACTIVE : RAIL_ENTRY_IDLE)}
-            >
-              <ProviderTile provider={provider} size="sm" />
-              <span className="min-w-0 truncate text-[13px] font-semibold text-[var(--scry-ink2)]">{provider.name}</span>
-            </button>
-          );
-        })}
-        <button
+      <ProviderRail label={t("lists.catalog.providers")}>
+        {rail.map((provider) => (
+          <ProviderRailEntry
+            key={provider.providerType}
+            id={`lists-catalog-provider-${provider.providerType}`}
+            active={provider.providerType === selected?.providerType}
+            onSelect={() => setSelectedType(provider.providerType)}
+            icon={<ProviderTile provider={provider} size="sm" />}
+            name={provider.name}
+          />
+        ))}
+        <ProviderRailEntry
           id="lists-catalog-custom"
-          type="button"
-          aria-pressed={!selected}
-          onClick={() => setSelectedType(CUSTOM)}
-          className={cn(RAIL_ENTRY, selected ? RAIL_ENTRY_IDLE : RAIL_ENTRY_ACTIVE)}
-        >
-          <span
-            aria-hidden="true"
-            className="inline-flex h-8 w-8 flex-none items-center justify-center text-[var(--scry-ink2)]"
-          >
-            <Link2 className="h-5 w-5" />
-          </span>
-          <span className="min-w-0 truncate text-[13px] font-semibold text-[var(--scry-ink2)]">{t("label.custom")}</span>
-        </button>
-      </nav>
+          active={!selected}
+          onSelect={() => setSelectedType(CUSTOM)}
+          icon={
+            <span
+              aria-hidden="true"
+              className="inline-flex h-8 w-8 flex-none items-center justify-center text-[var(--scry-ink2)]"
+            >
+              <Link2 className="h-5 w-5" />
+            </span>
+          }
+          name={t("label.custom")}
+        />
+      </ProviderRail>
 
       <div className="min-w-0 space-y-4">
         {/* The rail already says which provider is open, so the pane starts with its lists. */}

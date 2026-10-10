@@ -291,10 +291,6 @@ export function ListsView(props: ListsViewProps) {
           />
         ) : (
           <div className="space-y-8">
-            {section === "personal" ? (
-              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccount={props.managedAccount} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccount} onUnlink={props.onUnlinkAccount} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
-            ) : null}
-
             <section className="space-y-3">
               <div className="flex min-h-8 items-center justify-between gap-3">
                 <h2 className={PANEL_HEADING}>{t("lists.followed.heading")}</h2>
@@ -321,6 +317,10 @@ export function ListsView(props: ListsViewProps) {
                 />
               )}
             </section>
+
+            {section === "personal" ? (
+              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccount={props.managedAccount} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccount} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
+            ) : null}
 
             {canManageLists && section === "public" ? (
               <section className="space-y-3">
