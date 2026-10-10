@@ -1543,6 +1543,7 @@ async fn list_episodes_in_date_range_query(
                 e.season_number, e.episode_number, e.title AS episode_title, \
                 CASE WHEN t.facet = 'movie' THEN t.overview ELSE COALESCE(e.overview, t.overview) END AS overview, \
                 CASE WHEN t.facet = 'movie' THEN t.poster_url ELSE e.image_url END AS image_url, \
+                CASE WHEN t.facet = 'movie' THEN NULL ELSE t.background_url END AS title_background_url, \
                 e.air_date, (e.monitored AND t.monitored) AS monitored \
            FROM episodes e \
            JOIN titles t ON e.title_id = t.id \
@@ -2227,6 +2228,7 @@ fn row_to_calendar_episode(row: &SqlRow) -> AppResult<CalendarEpisode> {
         episode_title: row.opt_text("episode_title")?,
         overview: row.opt_text("overview")?,
         image_url: row.opt_text("image_url")?,
+        title_background_url: row.opt_text("title_background_url")?,
         air_date: row.opt_text("air_date")?,
         monitored: row.bool("monitored")?,
     })

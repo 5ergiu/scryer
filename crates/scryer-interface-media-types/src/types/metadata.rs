@@ -293,6 +293,9 @@ pub struct CalendarEpisodePayload {
     pub overview: Option<String>,
     /// Proxied movie poster or episode-still URL.
     pub image_url: Option<String>,
+    /// Proxied background of an episode's parent title, shown when the episode
+    /// has no still of its own. Null for a movie or a title without one.
+    pub title_background_url: Option<String>,
     /// Air date, or null when unavailable.
     pub air_date: Option<Date>,
     /// Whether both the episode and its parent title are monitored.

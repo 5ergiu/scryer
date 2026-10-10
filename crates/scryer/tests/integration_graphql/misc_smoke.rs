@@ -261,7 +261,7 @@ async fn graphql_calendar_episodes() {
         &ctx,
         r#"query($start: Date!, $end: Date!) {
             calendarEpisodes(startDate: $start, endDate: $end) {
-                episodeTitle seasonNumber episodeNumber overview imageUrl
+                episodeTitle seasonNumber episodeNumber overview imageUrl titleBackgroundUrl
             }
         }"#,
         json!({ "start": "2024-01-01", "end": "2024-12-31" }),

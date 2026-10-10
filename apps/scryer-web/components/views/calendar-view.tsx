@@ -54,6 +54,8 @@ export type CalendarEpisodeItem = {
   episodeTitle: string | null;
   overview: string | null;
   imageUrl: string | null;
+  /** The parent title's background, shown when an episode has no still of its own. */
+  titleBackgroundUrl?: string | null;
   airDate: string | null;
   monitored: boolean;
   playbackLinks: MediaServerPlaybackLink[];
@@ -323,9 +325,11 @@ export function CalendarEventHoverCard({
   const t = useTranslate();
   const { episode, anchor } = preview;
   const [failedImages, setFailedImages] = useState<string[]>([]);
-  const imageUrl = episode.imageUrl && !failedImages.includes(episode.imageUrl)
-    ? episode.imageUrl
-    : posterFallbackUrl && !failedImages.includes(posterFallbackUrl) ? posterFallbackUrl : null;
+  // The episode's own still first, then its title's background, then a poster.
+  const imageUrl =
+    [episode.imageUrl, episode.titleBackgroundUrl, posterFallbackUrl].find(
+      (url) => url && !failedImages.includes(url),
+    ) ?? null;
   const isPoster = imageUrl === posterFallbackUrl || episode.titleFacet === "movie";
 
   if (typeof document === "undefined") return null;

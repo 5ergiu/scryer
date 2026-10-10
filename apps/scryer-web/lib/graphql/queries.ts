@@ -4507,6 +4507,7 @@ export const calendarEpisodesQuery = `query CalendarEpisodes($startDate: Date!, 
     episodeTitle
     overview
     imageUrl
+    titleBackgroundUrl
     airDate
     monitored
     playbackLinks {

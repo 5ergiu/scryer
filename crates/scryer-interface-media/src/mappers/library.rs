@@ -884,6 +884,20 @@ pub fn from_calendar_episode(
         },
         if is_movie { "w250" } else { "w300" },
     );
+    let title_background_url = ep
+        .title_background_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .and_then(|url| {
+            app.media_image_url(
+                Some(url).filter(|url| url.starts_with("http")),
+                Some("title"),
+                Some(&ep.title_id),
+                ImageProxyKind::Fanart,
+                "w1280",
+            )
+        });
     CalendarEpisodePayload {
         id: ep.id.into(),
         title_id: ep.title_id.into(),
@@ -898,6 +912,7 @@ pub fn from_calendar_episode(
         episode_title: ep.episode_title,
         overview: ep.overview,
         image_url,
+        title_background_url,
         air_date: parse_date(ep.air_date),
         monitored: ep.monitored,
         media_availability,

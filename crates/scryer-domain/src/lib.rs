@@ -1890,6 +1890,8 @@ pub struct CalendarEpisode {
     pub episode_title: Option<String>,
     pub overview: Option<String>,
     pub image_url: Option<String>,
+    /// The parent title's background, for an episode; none for a movie.
+    pub title_background_url: Option<String>,
     pub air_date: Option<String>,
     pub monitored: bool,
 }

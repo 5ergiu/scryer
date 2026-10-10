@@ -1305,6 +1305,11 @@ type CalendarEpisodePayload {
 	"""
 	imageUrl: String
 	"""
+	Proxied background of an episode's parent title, shown when the episode
+	has no still of its own. Null for a movie or a title without one.
+	"""
+	titleBackgroundUrl: String
+	"""
 	Air date, or null when unavailable.
 	"""
 	airDate: Date
