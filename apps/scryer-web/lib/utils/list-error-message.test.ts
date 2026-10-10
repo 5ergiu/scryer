@@ -62,6 +62,72 @@ test("a reason on another kind of error is not read as a lists refusal", () => {
   assert.equal(listErrorMessage(error, t, "Update failed"), "that address is not allowed");
 });
 
+test("a failed account sign-in is explained from its reason, not its sentence", () => {
+  const error = refusal("validation: list account authentication failed: provider_not_configured", {
+    code: "VALIDATION_ERROR",
+    reason: "LIST_ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED",
+  });
+
+  assert.equal(listRefusalKey(error), "lists.refusal.accountAuthProviderNotConfigured");
+  assert.equal(
+    listErrorMessage(error, t, "Account linking failed"),
+    dictionary["lists.refusal.accountAuthProviderNotConfigured"],
+  );
+});
+
+test("a rate-limited account sign-in is explained although it is not a validation error", () => {
+  const error = refusal("list account authentication failed: rate_limited", {
+    code: "TEMPORARY_UNAVAILABLE",
+    reason: "LIST_ACCOUNT_AUTH_RATE_LIMITED",
+    retryAfterSeconds: 30,
+  });
+
+  assert.equal(listRefusalKey(error), "lists.refusal.accountAuthRateLimited");
+});
+
+test("a sign-in sentence without a reason is never matched on its text", () => {
+  const error = refusal("validation: list account authentication failed: provider_not_configured", {
+    code: "VALIDATION_ERROR",
+  });
+
+  assert.equal(listRefusalKey(error), null);
+  assert.equal(
+    listErrorMessage(error, t, "Account linking failed"),
+    "list account authentication failed: provider_not_configured",
+  );
+});
+
+test("every account sign-in failure the server can name has a sentence", () => {
+  const codes = [
+    "access_denied",
+    "authorization_failed",
+    "busy",
+    "instance_auth_required",
+    "instance_auth_unavailable",
+    "invalid_provider_app",
+    "invalid_provider_response",
+    "invalid_request",
+    "provider_not_configured",
+    "provider_rejected",
+    "provider_unavailable",
+    "rate_limited",
+    "reconnect_required",
+    "relay_unavailable",
+    "transport_unavailable",
+    "unsupported_exchange",
+    "unsupported_poll",
+    "unsupported_provider",
+    "unsupported_provider_app",
+  ];
+  for (const code of codes) {
+    const reason = `LIST_ACCOUNT_AUTH_${code.toUpperCase()}`;
+    assert.ok(Object.hasOwn(LIST_REFUSAL_KEYS, reason), reason);
+  }
+  const named = Object.keys(LIST_REFUSAL_KEYS).filter((reason) =>
+    reason.startsWith("LIST_ACCOUNT_AUTH_") && reason !== "LIST_ACCOUNT_AUTH_UNAVAILABLE");
+  assert.equal(named.length, codes.length);
+});
+
 test("a failure with no sentence at all shows the caller's fallback", () => {
   assert.equal(listErrorMessage(null, t, "Update failed"), "Update failed");
 });

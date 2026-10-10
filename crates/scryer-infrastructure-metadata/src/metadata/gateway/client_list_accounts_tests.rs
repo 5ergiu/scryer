@@ -1287,13 +1287,15 @@ async fn an_empty_stored_refresh_credential_requires_reconnect_before_any_reques
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
-/// Callers parse `list account authentication failed: <code>` from these
-/// errors, and the set of codes is closed. Emitting, removing or renaming a
-/// code must update `AUTH_FAILURE_CODES` and every caller that reads it.
+/// The host reads `list account authentication failed: <code>` from these
+/// errors, clients read the reason beside it, and the set of codes is closed.
+/// Emitting, removing or renaming a code must update `AUTH_FAILURE_CODES`, its
+/// reason, and every caller that reads either.
 #[test]
 fn auth_failure_message_format_and_code_set_are_pinned() {
     use scryer_application::lists::account_transport::{
-        AUTH_FAILURE_CODES, auth_failure, rate_limited_failure,
+        AUTH_FAILURE_CODES, auth_failure, auth_failure_code, auth_failure_reason,
+        rate_limited_failure, temporary_failure_reason,
     };
     let source = include_str!("client_list_accounts.rs");
     let source = source.split("#[cfg(test)]").next().unwrap();
@@ -1323,12 +1325,27 @@ fn auth_failure_message_format_and_code_set_are_pinned() {
 
     for code in AUTH_FAILURE_CODES {
         let expected = format!("list account authentication failed: {code}");
-        match auth_failure(code) {
-            AppError::Validation(message) => assert_eq!(message, expected),
+        let error = auth_failure(code);
+        assert_eq!(auth_failure_code(&error), Some(*code));
+        assert_eq!(error.validation_reason(), auth_failure_reason(code));
+        match error {
+            AppError::ValidationRefused { message, reason } => {
+                assert_eq!(message, expected);
+                assert_eq!(
+                    reason,
+                    format!("LIST_ACCOUNT_AUTH_{}", code.to_ascii_uppercase())
+                );
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
-    match rate_limited_failure(None) {
+    let limited = rate_limited_failure(None);
+    assert_eq!(auth_failure_code(&limited), Some("rate_limited"));
+    assert_eq!(
+        temporary_failure_reason(&limited),
+        Some("LIST_ACCOUNT_AUTH_RATE_LIMITED")
+    );
+    match limited {
         AppError::TemporaryUnavailable { message, .. } => {
             assert_eq!(message, "list account authentication failed: rate_limited")
         }

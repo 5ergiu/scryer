@@ -6,13 +6,16 @@
 //! never the wording, and is API once released: reword a sentence freely, but
 //! do not rename or reuse its reason.
 //!
+//! An account authentication failure names one too: each code in
+//! `account_transport::AUTH_FAILURE_CODES` has an `ACCOUNT_AUTH_*` reason
+//! here. The rate-limited one is a `TEMPORARY_UNAVAILABLE` rather than a
+//! `VALIDATION_ERROR`, and carries its reason the same way.
+//!
 //! Some lists failures carry no reason. A sentence that only relays what a
-//! provider answered (a failed preview fetch) has nothing stable to name. An
-//! account authentication failure already carries its own bounded code
-//! (`account_transport::AUTH_FAILURE_CODES`). The malformed-filter guards in
-//! the GraphQL mappers reject shapes no client builds on purpose. And the
-//! refusal while lists are switched off is raised before any lists request is
-//! looked at.
+//! provider answered (a failed preview fetch) has nothing stable to name. The
+//! malformed-filter guards in the GraphQL mappers reject shapes no client
+//! builds on purpose. And the refusal while lists are switched off is raised
+//! before any lists request is looked at.
 
 use crate::AppError;
 
@@ -88,6 +91,47 @@ pub const ACCOUNT_LINK_ISSUER_INVALID: &str = "LIST_ACCOUNT_LINK_ISSUER_INVALID"
 pub const ACCOUNT_LINK_NOT_POLLED: &str = "LIST_ACCOUNT_LINK_NOT_POLLED";
 /// This instance has no way to authenticate list accounts.
 pub const ACCOUNT_AUTH_UNAVAILABLE: &str = "LIST_ACCOUNT_AUTH_UNAVAILABLE";
+/// The member or the provider declined the sign-in.
+pub const ACCOUNT_AUTH_ACCESS_DENIED: &str = "LIST_ACCOUNT_AUTH_ACCESS_DENIED";
+/// The provider did not accept the approval or code the sign-in ended with.
+pub const ACCOUNT_AUTH_AUTHORIZATION_FAILED: &str = "LIST_ACCOUNT_AUTH_AUTHORIZATION_FAILED";
+/// This instance is already handling as many account sign-ins as it allows.
+pub const ACCOUNT_AUTH_BUSY: &str = "LIST_ACCOUNT_AUTH_BUSY";
+/// The sign-in relay did not recognise this instance.
+pub const ACCOUNT_AUTH_INSTANCE_AUTH_REQUIRED: &str = "LIST_ACCOUNT_AUTH_INSTANCE_AUTH_REQUIRED";
+/// This instance could not prove its identity to the sign-in relay.
+pub const ACCOUNT_AUTH_INSTANCE_AUTH_UNAVAILABLE: &str =
+    "LIST_ACCOUNT_AUTH_INSTANCE_AUTH_UNAVAILABLE";
+/// The instance's own provider app has an unusable callback address.
+pub const ACCOUNT_AUTH_INVALID_PROVIDER_APP: &str = "LIST_ACCOUNT_AUTH_INVALID_PROVIDER_APP";
+/// The provider's answer to a sign-in was malformed or out of bounds.
+pub const ACCOUNT_AUTH_INVALID_PROVIDER_RESPONSE: &str =
+    "LIST_ACCOUNT_AUTH_INVALID_PROVIDER_RESPONSE";
+/// A value in the sign-in request was empty, oversized or malformed.
+pub const ACCOUNT_AUTH_INVALID_REQUEST: &str = "LIST_ACCOUNT_AUTH_INVALID_REQUEST";
+/// The provider's sign-in is not set up, or its app credentials were refused.
+pub const ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED: &str = "LIST_ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED";
+/// The provider refused the sign-in without saying why.
+pub const ACCOUNT_AUTH_PROVIDER_REJECTED: &str = "LIST_ACCOUNT_AUTH_PROVIDER_REJECTED";
+/// The provider could not answer the sign-in.
+pub const ACCOUNT_AUTH_PROVIDER_UNAVAILABLE: &str = "LIST_ACCOUNT_AUTH_PROVIDER_UNAVAILABLE";
+/// The provider or the relay asked for fewer sign-in requests.
+pub const ACCOUNT_AUTH_RATE_LIMITED: &str = "LIST_ACCOUNT_AUTH_RATE_LIMITED";
+/// The provider no longer accepts the grant or code the sign-in presented.
+pub const ACCOUNT_AUTH_RECONNECT_REQUIRED: &str = "LIST_ACCOUNT_AUTH_RECONNECT_REQUIRED";
+/// The sign-in relay could not answer.
+pub const ACCOUNT_AUTH_RELAY_UNAVAILABLE: &str = "LIST_ACCOUNT_AUTH_RELAY_UNAVAILABLE";
+/// This instance could not reach the provider or the relay.
+pub const ACCOUNT_AUTH_TRANSPORT_UNAVAILABLE: &str = "LIST_ACCOUNT_AUTH_TRANSPORT_UNAVAILABLE";
+/// The provider's sign-in does not finish by exchanging a code.
+pub const ACCOUNT_AUTH_UNSUPPORTED_EXCHANGE: &str = "LIST_ACCOUNT_AUTH_UNSUPPORTED_EXCHANGE";
+/// The provider's sign-in does not finish by polling.
+pub const ACCOUNT_AUTH_UNSUPPORTED_POLL: &str = "LIST_ACCOUNT_AUTH_UNSUPPORTED_POLL";
+/// This instance has no sign-in for the provider.
+pub const ACCOUNT_AUTH_UNSUPPORTED_PROVIDER: &str = "LIST_ACCOUNT_AUTH_UNSUPPORTED_PROVIDER";
+/// The provider's sign-in does not take an instance-owned app.
+pub const ACCOUNT_AUTH_UNSUPPORTED_PROVIDER_APP: &str =
+    "LIST_ACCOUNT_AUTH_UNSUPPORTED_PROVIDER_APP";
 /// The provider does not take an instance-owned app.
 pub const PROVIDER_APP_UNSUPPORTED: &str = "LIST_PROVIDER_APP_UNSUPPORTED";
 /// A provider app's redirect URI is not a URL.
@@ -137,6 +181,25 @@ pub const ALL: &[&str] = &[
     ACCOUNT_LINK_ISSUER_INVALID,
     ACCOUNT_LINK_NOT_POLLED,
     ACCOUNT_AUTH_UNAVAILABLE,
+    ACCOUNT_AUTH_ACCESS_DENIED,
+    ACCOUNT_AUTH_AUTHORIZATION_FAILED,
+    ACCOUNT_AUTH_BUSY,
+    ACCOUNT_AUTH_INSTANCE_AUTH_REQUIRED,
+    ACCOUNT_AUTH_INSTANCE_AUTH_UNAVAILABLE,
+    ACCOUNT_AUTH_INVALID_PROVIDER_APP,
+    ACCOUNT_AUTH_INVALID_PROVIDER_RESPONSE,
+    ACCOUNT_AUTH_INVALID_REQUEST,
+    ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED,
+    ACCOUNT_AUTH_PROVIDER_REJECTED,
+    ACCOUNT_AUTH_PROVIDER_UNAVAILABLE,
+    ACCOUNT_AUTH_RATE_LIMITED,
+    ACCOUNT_AUTH_RECONNECT_REQUIRED,
+    ACCOUNT_AUTH_RELAY_UNAVAILABLE,
+    ACCOUNT_AUTH_TRANSPORT_UNAVAILABLE,
+    ACCOUNT_AUTH_UNSUPPORTED_EXCHANGE,
+    ACCOUNT_AUTH_UNSUPPORTED_POLL,
+    ACCOUNT_AUTH_UNSUPPORTED_PROVIDER,
+    ACCOUNT_AUTH_UNSUPPORTED_PROVIDER_APP,
     PROVIDER_APP_UNSUPPORTED,
     PROVIDER_APP_REDIRECT_INVALID,
     PROVIDER_APP_INCOMPLETE,

@@ -89,9 +89,7 @@ impl ListAccountAuthGateway for Auth {
                 .expect("poll released");
         }
         if let Some(code) = self.poll_failures.lock().unwrap().pop_front() {
-            return Err(AppError::Validation(format!(
-                "list account authentication failed: {code}"
-            )));
+            return Err(auth_failure(code));
         }
         self.exchanges.fetch_add(1, Ordering::SeqCst);
         Ok(Some(token()))
@@ -433,7 +431,7 @@ async fn private_account_poll_ends_on_a_definitive_provider_refusal() {
         let auth = Arc::new(Auth::failing_polls(&[code]));
         let harness = harness(auth.clone()).await;
         let session = start_plex(&harness).await;
-        let Err(AppError::Validation(message)) = harness
+        let Err(AppError::ValidationRefused { message, reason }) = harness
             .app
             .poll_list_account_link(&harness.user, &session)
             .await
@@ -441,6 +439,7 @@ async fn private_account_poll_ends_on_a_definitive_provider_refusal() {
             panic!("{code} must end the link with the provider's reason");
         };
         assert!(message.ends_with(code), "{message}");
+        assert_eq!(Some(reason), auth_failure_reason(code));
         assert!(matches!(
             harness
                 .app
@@ -1307,6 +1306,50 @@ fn every_auth_failure_code_has_a_pinned_class() {
     }
     assert!(AUTH_FAILURE_CODES.contains(&"relay_unavailable"));
     assert!(!renew_requires_reconnect("relay_unavailable"));
+}
+
+#[test]
+fn every_auth_failure_code_names_its_own_reason() {
+    let mut reasons = std::collections::BTreeSet::new();
+    for &code in AUTH_FAILURE_CODES {
+        let reason = auth_failure_reason(code).unwrap_or_else(|| panic!("{code} has no reason"));
+        assert_eq!(
+            reason,
+            format!("LIST_ACCOUNT_AUTH_{}", code.to_ascii_uppercase())
+        );
+        assert!(crate::lists::refusal::ALL.contains(&reason), "{reason}");
+        assert!(reasons.insert(reason), "{reason} names two codes");
+
+        let error = auth_failure(code);
+        assert_eq!(auth_failure_code(&error), Some(code));
+        assert_eq!(error.validation_reason(), Some(reason));
+        assert_eq!(
+            error.to_string(),
+            format!("validation: list account authentication failed: {code}")
+        );
+    }
+    assert_eq!(auth_failure_reason("not_a_code"), None);
+    assert!(matches!(
+        auth_failure("not_a_code"),
+        AppError::Validation(_)
+    ));
+
+    // The rate-limited failure is not a validation refusal; its reason is
+    // offered separately, and only for that failure.
+    let limited = rate_limited_failure(None);
+    assert_eq!(limited.validation_reason(), None);
+    assert_eq!(
+        temporary_failure_reason(&limited),
+        Some(crate::lists::refusal::ACCOUNT_AUTH_RATE_LIMITED)
+    );
+    assert_eq!(
+        temporary_failure_reason(&AppError::temporary_unavailable(
+            "list account refresh is temporarily unavailable",
+            None
+        )),
+        None
+    );
+    assert_eq!(temporary_failure_reason(&auth_failure(RATE_LIMITED)), None);
 }
 
 #[tokio::test]

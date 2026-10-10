@@ -53,9 +53,42 @@ pub enum AuthFailureClass {
     Final,
 }
 
-/// A failed account authentication carrying a bounded, server-owned code.
+/// The stable reason a client is told for an account authentication failure
+/// code, or `None` for a code outside `AUTH_FAILURE_CODES`. A client explains
+/// the failure from this, never from the message.
+pub fn auth_failure_reason(code: &str) -> Option<&'static str> {
+    Some(match code {
+        ACCESS_DENIED => refusal::ACCOUNT_AUTH_ACCESS_DENIED,
+        "authorization_failed" => refusal::ACCOUNT_AUTH_AUTHORIZATION_FAILED,
+        "busy" => refusal::ACCOUNT_AUTH_BUSY,
+        "instance_auth_required" => refusal::ACCOUNT_AUTH_INSTANCE_AUTH_REQUIRED,
+        "instance_auth_unavailable" => refusal::ACCOUNT_AUTH_INSTANCE_AUTH_UNAVAILABLE,
+        "invalid_provider_app" => refusal::ACCOUNT_AUTH_INVALID_PROVIDER_APP,
+        "invalid_provider_response" => refusal::ACCOUNT_AUTH_INVALID_PROVIDER_RESPONSE,
+        "invalid_request" => refusal::ACCOUNT_AUTH_INVALID_REQUEST,
+        "provider_not_configured" => refusal::ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED,
+        PROVIDER_REJECTED => refusal::ACCOUNT_AUTH_PROVIDER_REJECTED,
+        "provider_unavailable" => refusal::ACCOUNT_AUTH_PROVIDER_UNAVAILABLE,
+        RATE_LIMITED => refusal::ACCOUNT_AUTH_RATE_LIMITED,
+        RECONNECT_REQUIRED => refusal::ACCOUNT_AUTH_RECONNECT_REQUIRED,
+        "relay_unavailable" => refusal::ACCOUNT_AUTH_RELAY_UNAVAILABLE,
+        "transport_unavailable" => refusal::ACCOUNT_AUTH_TRANSPORT_UNAVAILABLE,
+        "unsupported_exchange" => refusal::ACCOUNT_AUTH_UNSUPPORTED_EXCHANGE,
+        "unsupported_poll" => refusal::ACCOUNT_AUTH_UNSUPPORTED_POLL,
+        "unsupported_provider" => refusal::ACCOUNT_AUTH_UNSUPPORTED_PROVIDER,
+        "unsupported_provider_app" => refusal::ACCOUNT_AUTH_UNSUPPORTED_PROVIDER_APP,
+        _ => return None,
+    })
+}
+
+/// A failed account authentication carrying a bounded, server-owned code and
+/// the reason that names it to clients.
 pub fn auth_failure(code: &str) -> AppError {
-    AppError::Validation(format!("{AUTH_FAILURE_PREFIX}{code}"))
+    let message = format!("{AUTH_FAILURE_PREFIX}{code}");
+    match auth_failure_reason(code) {
+        Some(reason) => refused(reason, message),
+        None => AppError::Validation(message),
+    }
 }
 
 /// A `rate_limited` failure. It keeps the same message as every other
@@ -68,8 +101,22 @@ pub fn rate_limited_failure(retry_after: Option<std::time::Duration>) -> AppErro
 /// other error.
 pub fn auth_failure_code(error: &AppError) -> Option<&str> {
     match error {
-        AppError::Validation(message) | AppError::TemporaryUnavailable { message, .. } => {
+        AppError::Validation(message)
+        | AppError::ValidationRefused { message, .. }
+        | AppError::TemporaryUnavailable { message, .. } => {
             message.strip_prefix(AUTH_FAILURE_PREFIX)
+        }
+        _ => None,
+    }
+}
+
+/// The reason a temporarily unavailable answer names, when it is a
+/// `rate_limited_failure`. That error is not a validation refusal, so the API
+/// layer asks here for the reason to send beside its own code.
+pub fn temporary_failure_reason(error: &AppError) -> Option<&'static str> {
+    match error {
+        AppError::TemporaryUnavailable { .. } => {
+            auth_failure_code(error).and_then(auth_failure_reason)
         }
         _ => None,
     }

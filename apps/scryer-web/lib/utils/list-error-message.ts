@@ -7,8 +7,10 @@ import {
 /**
  * The server names why it refused a lists request: a `VALIDATION_ERROR`
  * carries the condition as `extensions.reason`, beside the English sentence.
- * Each reason listed here is said in the viewer's language; any other failure,
- * with or without a reason, shows the server's sentence as before.
+ * A rate-limited account sign-in is a `TEMPORARY_UNAVAILABLE` and names its
+ * condition the same way. Each reason listed here is said in the viewer's
+ * language; any other failure, with or without a reason, shows the server's
+ * sentence as before.
  *
  * Some reasons are left out on purpose. Their sentence names the option, title
  * kind or library that was wrong (LIST_PARAM_REQUIRED, LIST_PARAM_INVALID,
@@ -47,6 +49,27 @@ export const LIST_REFUSAL_KEYS: Readonly<Record<string, string>> = {
   LIST_ACCOUNT_LINK_RESULT_INVALID: "lists.refusal.accountLinkResultInvalid",
   LIST_ACCOUNT_LINK_ISSUER_INVALID: "lists.refusal.accountLinkIssuerInvalid",
   LIST_ACCOUNT_AUTH_UNAVAILABLE: "lists.refusal.accountAuthUnavailable",
+  LIST_ACCOUNT_AUTH_ACCESS_DENIED: "lists.refusal.accountAuthAccessDenied",
+  LIST_ACCOUNT_AUTH_AUTHORIZATION_FAILED: "lists.refusal.accountAuthAuthorizationFailed",
+  LIST_ACCOUNT_AUTH_BUSY: "lists.refusal.accountAuthBusy",
+  // Both are trouble between this server and Scryer's sign-in service.
+  LIST_ACCOUNT_AUTH_INSTANCE_AUTH_REQUIRED: "lists.refusal.accountAuthInstanceUnrecognized",
+  LIST_ACCOUNT_AUTH_INSTANCE_AUTH_UNAVAILABLE: "lists.refusal.accountAuthInstanceUnrecognized",
+  LIST_ACCOUNT_AUTH_INVALID_PROVIDER_APP: "lists.refusal.accountAuthInvalidProviderApp",
+  LIST_ACCOUNT_AUTH_INVALID_PROVIDER_RESPONSE: "lists.refusal.accountAuthInvalidProviderResponse",
+  LIST_ACCOUNT_AUTH_INVALID_REQUEST: "lists.refusal.accountAuthInvalidRequest",
+  LIST_ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED: "lists.refusal.accountAuthProviderNotConfigured",
+  LIST_ACCOUNT_AUTH_PROVIDER_REJECTED: "lists.refusal.accountAuthProviderRejected",
+  LIST_ACCOUNT_AUTH_PROVIDER_UNAVAILABLE: "lists.refusal.accountAuthProviderUnavailable",
+  LIST_ACCOUNT_AUTH_RATE_LIMITED: "lists.refusal.accountAuthRateLimited",
+  LIST_ACCOUNT_AUTH_RECONNECT_REQUIRED: "lists.refusal.accountAuthReconnectRequired",
+  LIST_ACCOUNT_AUTH_RELAY_UNAVAILABLE: "lists.refusal.accountAuthRelayUnavailable",
+  LIST_ACCOUNT_AUTH_TRANSPORT_UNAVAILABLE: "lists.refusal.accountAuthTransportUnavailable",
+  // Each is a sign-in step the provider's kind of connection does not have.
+  LIST_ACCOUNT_AUTH_UNSUPPORTED_EXCHANGE: "lists.refusal.accountAuthUnsupported",
+  LIST_ACCOUNT_AUTH_UNSUPPORTED_POLL: "lists.refusal.accountAuthUnsupported",
+  LIST_ACCOUNT_AUTH_UNSUPPORTED_PROVIDER: "lists.refusal.accountAuthUnsupported",
+  LIST_ACCOUNT_AUTH_UNSUPPORTED_PROVIDER_APP: "lists.refusal.accountAuthUnsupportedProviderApp",
   LIST_PROVIDER_APP_UNSUPPORTED: "lists.refusal.providerAppUnsupported",
   LIST_PROVIDER_APP_REDIRECT_INVALID: "lists.refusal.providerAppRedirectInvalid",
   LIST_PROVIDER_APP_INCOMPLETE: "lists.refusal.providerAppIncomplete",
@@ -54,7 +77,9 @@ export const LIST_REFUSAL_KEYS: Readonly<Record<string, string>> = {
 
 /** The translation key for the reason a lists request was refused, if known. */
 export function listRefusalKey(error: unknown): string | null {
-  const reason = graphQlErrorExtension(error, "VALIDATION_ERROR", "reason");
+  const reason =
+    graphQlErrorExtension(error, "VALIDATION_ERROR", "reason") ??
+    graphQlErrorExtension(error, "TEMPORARY_UNAVAILABLE", "reason");
   return reason !== null && Object.hasOwn(LIST_REFUSAL_KEYS, reason)
     ? LIST_REFUSAL_KEYS[reason]
     : null;

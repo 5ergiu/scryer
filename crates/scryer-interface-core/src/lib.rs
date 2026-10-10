@@ -549,6 +549,8 @@ pub fn restore_context_from_ctx(ctx: &Context<'_>) -> GqlResult<RestoreContext> 
 }
 
 pub fn to_gql_error(err: AppError) -> Error {
+    let temporary_reason =
+        scryer_application::lists::account_transport::temporary_failure_reason(&err);
     match err {
         AppError::Unauthorized(message) => {
             coded_gql_error(format!("unauthorized: {message}"), "UNAUTHORIZED")
@@ -676,6 +678,11 @@ pub fn to_gql_error(err: AppError) -> Error {
             extensions.set("code", "TEMPORARY_UNAVAILABLE");
             if let Some(delay) = retry_after {
                 extensions.set("retryAfterSeconds", delay.as_secs());
+            }
+            // A rate-limited list account request names its condition the way
+            // a lists refusal does, beside this code and its pause.
+            if let Some(reason) = temporary_reason {
+                extensions.set("reason", reason);
             }
         }),
         AppError::PluginInstallInProgress(message) => {
@@ -1168,6 +1175,42 @@ mod tests {
         assert_eq!(plain.message, error.message);
         assert_eq!(graphql_error_code(&plain), Some("VALIDATION_ERROR"));
         assert_eq!(graphql_error_extension_string(&plain, "reason"), None);
+    }
+
+    #[test]
+    fn a_list_account_sign_in_failure_names_its_reason_whatever_its_code() {
+        use scryer_application::lists::account_transport::{auth_failure, rate_limited_failure};
+
+        let refused = to_gql_error(auth_failure("provider_not_configured"));
+        assert_eq!(graphql_error_code(&refused), Some("VALIDATION_ERROR"));
+        assert_eq!(
+            graphql_error_extension_string(&refused, "reason"),
+            Some("LIST_ACCOUNT_AUTH_PROVIDER_NOT_CONFIGURED")
+        );
+
+        let limited = to_gql_error(rate_limited_failure(Some(std::time::Duration::from_secs(
+            45,
+        ))));
+        assert_eq!(graphql_error_code(&limited), Some("TEMPORARY_UNAVAILABLE"));
+        assert_eq!(
+            graphql_error_extension_string(&limited, "reason"),
+            Some("LIST_ACCOUNT_AUTH_RATE_LIMITED")
+        );
+        assert_eq!(
+            limited
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get("retryAfterSeconds"))
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("45")
+        );
+
+        let other = to_gql_error(AppError::temporary_unavailable(
+            "list account refresh is temporarily unavailable",
+            None,
+        ));
+        assert_eq!(graphql_error_extension_string(&other, "reason"), None);
     }
 
     #[test]
