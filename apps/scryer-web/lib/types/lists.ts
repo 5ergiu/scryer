@@ -25,6 +25,7 @@ export type ListFilterKind =
   | "RECAP_POLICY"
   | "RATINGS"
   | "EXCLUDE_CANONICAL_TAGS"
+  | "EXCLUDE_ADULT"
   | "RATING_AT_LEAST"
   | "RELEASE_YEAR"
   | "EXCLUDE_GENRES"

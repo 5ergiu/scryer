@@ -56,6 +56,8 @@ pub struct ListMetadataFacts {
     pub ratings: Vec<scryer_domain::TitleExternalRating>,
     pub canonical_names: Vec<String>,
     pub canonical_keys: Vec<String>,
+    /// True when any canonical tag is flagged adult.
+    pub is_adult: bool,
     pub original_language: Option<String>,
     pub year: Option<i32>,
     pub release_date: Option<chrono::NaiveDate>,
@@ -237,7 +239,8 @@ pub async fn resolve_items(
                 .iter()
                 .filter(|filter| match filter {
                     scryer_domain::ListFilter::Ratings { facet, .. }
-                    | scryer_domain::ListFilter::ExcludeCanonicalTags { facet, .. } => {
+                    | scryer_domain::ListFilter::ExcludeCanonicalTags { facet, .. }
+                    | scryer_domain::ListFilter::ExcludeAdult { facet } => {
                         item.kind.as_ref() == Some(facet)
                     }
                     _ => true,
@@ -272,7 +275,9 @@ fn filter_requires_metadata(filter: &scryer_domain::ListFilter) -> bool {
             unresolved_labels,
             ..
         } => !keys.is_empty() || !unresolved_labels.is_empty(),
-        ListFilter::RatingAtLeast { .. } | ListFilter::ReleasedOnly => true,
+        ListFilter::RatingAtLeast { .. }
+        | ListFilter::ReleasedOnly
+        | ListFilter::ExcludeAdult { .. } => true,
         ListFilter::ReleaseYear { from, to } => from.is_some() || to.is_some(),
         ListFilter::ExcludeGenres { genres } => !genres.is_empty(),
         ListFilter::Language { languages } => !languages.is_empty(),

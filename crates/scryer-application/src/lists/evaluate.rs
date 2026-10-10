@@ -245,6 +245,10 @@ pub fn filter_reason(subscription: &ListSubscription, item: &ResolvedItem) -> Op
                     .and_then(|facts| facts.release_date)
                     .is_none(),
                 ListFilter::ExcludeCanonicalTags { .. } => item.facts.is_none(),
+                // Like the genre exclusion, the adult exclusion cannot pass a
+                // title whose SMG details are not known: it stays out, with
+                // its own reason, until a later sync learns them.
+                ListFilter::ExcludeAdult { .. } => item.facts.is_none(),
                 _ => false,
             };
             let label = filter_label(filter);
@@ -298,6 +302,10 @@ fn passes(filter: &ListFilter, item: &ResolvedItem) -> bool {
             unresolved_labels.is_empty()
                 && facts
                     .is_some_and(|facts| !facts.canonical_keys.iter().any(|key| keys.contains(key)))
+        }
+        // Adult is what SMG says about the title, never a provider's own flag.
+        ListFilter::ExcludeAdult { facet } => {
+            item.kind.as_ref() != Some(facet) || facts.is_some_and(|facts| !facts.is_adult)
         }
         ListFilter::RatingAtLeast { scale, value } => rating_passes(facts, scale, *value),
         ListFilter::ReleaseYear { from, to } => match facts.and_then(|facts| facts.year) {
@@ -393,6 +401,7 @@ fn filter_label(filter: &ListFilter) -> String {
         ListFilter::RecapPolicy { .. } => "recap",
         ListFilter::Ratings { .. } => "rating",
         ListFilter::ExcludeCanonicalTags { .. } => "genre",
+        ListFilter::ExcludeAdult { .. } => "adult",
         ListFilter::RatingAtLeast { .. } => "rating",
         ListFilter::ReleaseYear { .. } => "release_year",
         ListFilter::ExcludeGenres { .. } => "genre",

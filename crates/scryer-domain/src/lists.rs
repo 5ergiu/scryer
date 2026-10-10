@@ -243,6 +243,10 @@ pub enum ListFilter {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unresolved_labels: Vec<String>,
     },
+    /// Leaves out a title of this kind that SMG marks adult.
+    ExcludeAdult {
+        facet: MediaFacet,
+    },
     RatingAtLeast {
         scale: String,
         value: f64,

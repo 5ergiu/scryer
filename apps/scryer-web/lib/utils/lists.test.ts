@@ -11,6 +11,8 @@ import {
 test("a list entry's reason code resolves to its sentence, and an unknown code to none", () => {
   assert.equal(listMembershipReasonKey("media_type_not_included"), "lists.reason.mediaTypeNotIncluded");
   assert.equal(listMembershipReasonKey("missing_unreleased"), "lists.reason.missingReleaseDate");
+  assert.equal(listMembershipReasonKey("adult"), "lists.reason.adult");
+  assert.equal(listMembershipReasonKey("missing_adult"), "lists.reason.missingAdult");
   assert.equal(listMembershipReasonKey("constructor"), null);
   assert.equal(listMembershipReasonKey("some_future_reason"), null);
   assert.equal(listMembershipReasonKey(null), null);

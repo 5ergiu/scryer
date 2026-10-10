@@ -261,6 +261,8 @@ pub enum ListFilterKindValue {
     Ratings,
     /// Exclude titles matching selected canonical genre or theme keys in a facet.
     ExcludeCanonicalTags,
+    /// Exclude titles SMG marks adult in a facet.
+    ExcludeAdult,
     /// The provider's rating is at least `value` on `scale`.
     RatingAtLeast,
     /// Released between `from` and `to`, either end open.

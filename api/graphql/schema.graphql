@@ -10585,6 +10585,10 @@ enum ListFilterKind {
 	"""
 	EXCLUDE_CANONICAL_TAGS
 	"""
+	Exclude titles SMG marks adult in a facet.
+	"""
+	EXCLUDE_ADULT
+	"""
 	The provider's rating is at least `value` on `scale`.
 	"""
 	RATING_AT_LEAST

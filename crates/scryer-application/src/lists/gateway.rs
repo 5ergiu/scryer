@@ -331,6 +331,7 @@ impl<L: ListLibraryLookup> ListItemResolver for GatewayListItemResolver<L> {
                             poster_url: Some(metadata.poster_url)
                                 .filter(|url| !url.trim().is_empty()),
                             ratings: metadata.ratings.external_ratings,
+                            is_adult: metadata.canonical_tags.iter().any(|tag| tag.is_adult),
                             canonical_names: metadata
                                 .canonical_tags
                                 .iter()
@@ -377,6 +378,7 @@ impl<L: ListLibraryLookup> ListItemResolver for GatewayListItemResolver<L> {
                             poster_url: Some(metadata.poster_url)
                                 .filter(|url| !url.trim().is_empty()),
                             ratings: metadata.ratings.external_ratings,
+                            is_adult: metadata.canonical_tags.iter().any(|tag| tag.is_adult),
                             canonical_names: metadata
                                 .canonical_tags
                                 .iter()

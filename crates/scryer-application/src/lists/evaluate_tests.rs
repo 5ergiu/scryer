@@ -502,6 +502,58 @@ fn canonical_exclusions_language_and_missing_facts_are_distinct() {
 }
 
 #[test]
+fn the_adult_exclusion_filters_only_its_own_facet_and_fails_closed_without_facts() {
+    use crate::lists::resolve::ListMetadataFacts;
+    use crate::lists::test_support::route;
+    let mut list = subscription("list");
+    list.kinds = vec![MediaFacet::Anime, MediaFacet::Series, MediaFacet::Movie];
+    list.routes = vec![
+        route(MediaFacet::Anime, "anime-library"),
+        route(MediaFacet::Series, "series-library"),
+        route(MediaFacet::Movie, "movie-library"),
+    ];
+    list.filters = vec![ListFilter::ExcludeAdult {
+        facet: MediaFacet::Anime,
+    }];
+    let mut item = resolved_item("facts");
+    item.kind = Some(MediaFacet::Anime);
+
+    // Without SMG's details the filter cannot say the title is not adult.
+    assert_eq!(
+        filter_reason(&list, &item).as_deref(),
+        Some("missing_adult")
+    );
+    item.facts = Some(ListMetadataFacts {
+        is_adult: true,
+        ..Default::default()
+    });
+    assert_eq!(filter_reason(&list, &item).as_deref(), Some("adult"));
+    item.facts = Some(ListMetadataFacts::default());
+    assert_eq!(filter_reason(&list, &item), None);
+
+    // Another kind on the same list is not the filter's to judge, adult or unknown.
+    for kind in [MediaFacet::Series, MediaFacet::Movie] {
+        item.kind = Some(kind);
+        item.facts = Some(ListMetadataFacts {
+            is_adult: true,
+            ..Default::default()
+        });
+        assert_eq!(filter_reason(&list, &item), None);
+        item.facts = None;
+        assert_eq!(filter_reason(&list, &item), None);
+    }
+
+    // A list without the filter keeps an adult anime title.
+    list.filters.clear();
+    item.kind = Some(MediaFacet::Anime);
+    item.facts = Some(ListMetadataFacts {
+        is_adult: true,
+        ..Default::default()
+    });
+    assert_eq!(filter_reason(&list, &item), None);
+}
+
+#[test]
 fn filter_changes_preserve_existing_linked_membership_protection() {
     let mut list = subscription("list");
     list.filters = vec![ListFilter::RatingAtLeast {

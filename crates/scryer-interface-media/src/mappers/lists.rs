@@ -330,6 +330,10 @@ fn from_filter(filter: ListFilter) -> ListFilterPayload {
             unresolved_labels,
             ..empty(ListFilterKindValue::ExcludeCanonicalTags)
         },
+        ListFilter::ExcludeAdult { facet } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            ..empty(ListFilterKindValue::ExcludeAdult)
+        },
         ListFilter::RatingAtLeast { scale, value } => ListFilterPayload {
             scale: Some(scale),
             value: Some(value),
@@ -475,6 +479,12 @@ fn filter_from_input(input: ListFilterInput) -> Result<ListFilter, AppError> {
                 unresolved_labels: input.unresolved_labels,
             }
         }
+        ListFilterKindValue::ExcludeAdult => ListFilter::ExcludeAdult {
+            facet: input
+                .facet
+                .ok_or_else(|| AppError::Validation("the adult exclusion needs a facet".into()))?
+                .into_domain(),
+        },
         ListFilterKindValue::RatingAtLeast => {
             let scale = input
                 .scale
@@ -579,6 +589,48 @@ mod episode_policy_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn list_adult_exclusion_transport_round_trips_and_needs_a_facet() {
+        for facet in [MediaFacet::Anime, MediaFacet::Series, MediaFacet::Movie] {
+            let filter = ListFilter::ExcludeAdult { facet };
+            let payload = from_filter(filter.clone());
+            assert!(payload.kind == ListFilterKindValue::ExcludeAdult);
+            assert!(payload.values.is_empty());
+            let input = ListFilterInput {
+                facet: payload.facet,
+                kind: payload.kind,
+                values: payload.values,
+                match_any: false,
+                minimums: vec![],
+                unresolved_labels: vec![],
+                scale: None,
+                value: None,
+                from: None,
+                to: None,
+            };
+            assert_eq!(filter_from_input(input.clone()).unwrap(), filter);
+            assert!(
+                filter_from_input(ListFilterInput {
+                    facet: None,
+                    ..input
+                })
+                .is_err()
+            );
+        }
+        // The stored form is the tagged filter, so a saved list reads back.
+        let stored = serde_json::to_value(ListFilter::ExcludeAdult {
+            facet: MediaFacet::Anime,
+        })
+        .unwrap();
+        assert_eq!(stored["filter"], "exclude_adult");
+        assert_eq!(
+            serde_json::from_value::<ListFilter>(stored).unwrap(),
+            ListFilter::ExcludeAdult {
+                facet: MediaFacet::Anime
+            }
+        );
     }
 }
 

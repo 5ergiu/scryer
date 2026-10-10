@@ -155,6 +155,8 @@ export function ListFacetFilters({
       ),
     ) ?? [];
   const ratingMatch = ratings[0]?.matchAny ? "any" : "all";
+  const isExcludeAdult = (filter: ListFilter) =>
+    filter.kind === "EXCLUDE_ADULT" && filter.facet === facet;
   return (
     <div className="grid gap-3 border-t border-[var(--scry-border3)] pt-4 sm:grid-cols-2">
       <div className="min-w-0 space-y-1.5">
@@ -280,6 +282,24 @@ export function ListFacetFilters({
         </Popover>
       ) : null}
       </div>
+      {facet === "ANIME" ? (
+        <CheckboxField
+          id={`${idPrefix}-exclude-adult`}
+          className="sm:col-span-2"
+          checked={filters.some(isExcludeAdult)}
+          label={t("lists.filter.excludeAdult")}
+          description={t("lists.filter.excludeAdultHelp")}
+          disabled={disabled}
+          onCheckedChange={(checked) =>
+            onChange([
+              ...filters.filter((filter) => !isExcludeAdult(filter)),
+              ...(checked === true
+                ? [{ ...EMPTY_LIST_FILTER, kind: "EXCLUDE_ADULT" as const, facet }]
+                : []),
+            ])
+          }
+        />
+      ) : null}
       <h4 className="text-sm font-semibold text-[var(--scry-ink2)] sm:col-span-2">
         {t("lists.filter.ratings")}
       </h4>

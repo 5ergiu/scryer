@@ -218,6 +218,8 @@ const LIST_MEMBERSHIP_REASON_KEYS: Readonly<Record<string, string>> = {
   missing_rating: "lists.reason.missingRating",
   genre: "lists.reason.genre",
   missing_genre: "lists.reason.missingGenre",
+  adult: "lists.reason.adult",
+  missing_adult: "lists.reason.missingAdult",
   release_year: "lists.reason.releaseYear",
   missing_release_year: "lists.reason.missingReleaseYear",
   format: "lists.reason.format",

@@ -95,7 +95,26 @@ struct RecordingResolveGateway {
     relationship_calls: Mutex<Vec<Vec<i64>>>,
     relationship_failure: bool,
     metadata_calls: Mutex<Vec<(bool, usize)>>,
+    /// SMG ids whose metadata carries a canonical tag flagged adult.
+    adult_ids: Vec<i64>,
     calls: Mutex<Vec<(String, Vec<TitleExternalRef>)>>,
+}
+
+impl RecordingResolveGateway {
+    fn canonical_tags(&self, smg_id: Option<i64>) -> Vec<scryer_domain::CanonicalMediaTag> {
+        let adult = smg_id.is_some_and(|id| self.adult_ids.contains(&id));
+        vec![scryer_domain::CanonicalMediaTag {
+            affinity_signals: Vec::new(),
+            key: "canonical:genre:fixture".to_string(),
+            category: "genre".to_string(),
+            name: "Fixture".to_string(),
+            confidence: Some(0.9),
+            sources: vec!["fixture".to_string()],
+            source_tag_keys: vec![],
+            is_adult: adult,
+            is_spoiler: false,
+        }]
+    }
 }
 
 #[async_trait]
@@ -131,6 +150,7 @@ impl MetadataGateway for RecordingResolveGateway {
                             original_language: Some("en".into()),
                             poster_url: "https://images.example.test/movie.jpg".into(),
                             year: Some(2020),
+                            canonical_tags: self.canonical_tags(reference.smg_id),
                             ..Default::default()
                         },
                     )
@@ -163,6 +183,7 @@ impl MetadataGateway for RecordingResolveGateway {
                             original_language: Some("ja".into()),
                             poster_url: "https://images.example.test/series.jpg".into(),
                             year: Some(2021),
+                            canonical_tags: self.canonical_tags(reference.smg_id),
                             ..Default::default()
                         },
                     )
@@ -256,6 +277,33 @@ impl MetadataGateway for RecordingResolveGateway {
                 })
             })
             .collect())
+    }
+}
+
+#[tokio::test]
+async fn enrichment_reads_the_adult_mark_from_the_gateway_titles() {
+    let gateway = Arc::new(RecordingResolveGateway {
+        adult_ids: vec![7],
+        ..Default::default()
+    });
+    let resolver = GatewayListItemResolver::new(gateway, FixtureLibrary(HashMap::new()));
+    let mut items = Vec::new();
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        for id in [7, 8] {
+            let mut item = crate::lists::test_support::resolved_item(&format!("{facet:?}-{id}"));
+            item.kind = Some(facet.clone());
+            item.smg_title_id = Some(id);
+            items.push(item);
+        }
+    }
+    resolver.enrich(&mut items).await.unwrap();
+    for item in &items {
+        assert_eq!(
+            item.facts.as_ref().unwrap().is_adult,
+            item.smg_title_id == Some(7),
+            "{}",
+            item.item.item_key
+        );
     }
 }
 
