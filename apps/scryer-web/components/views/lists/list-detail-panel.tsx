@@ -120,18 +120,22 @@ export function ListDetailPanel({
         className="w-full overflow-y-auto border-l border-[var(--scry-border)] bg-[var(--scry-surf)] text-[var(--scry-ink2)] sm:max-w-2xl"
       >
         <SheetHeader className="border-b border-[var(--scry-border3)] pr-12">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <ProviderTile provider={provider} />
-            <div className="min-w-0">
+            <div className="min-w-[8rem] flex-1">
               <SheetTitle className="truncate font-display text-[19px] text-[var(--scry-ink)]">
                 {subscription?.name ?? t("label.loading")}
               </SheetTitle>
               <SheetDescription className="truncate">
-                {[provider?.name ?? subscription?.source.provider, subscription?.source.sourceType]
-                  .filter(Boolean)
-                  .join(" · ")}
+                {provider?.name ?? subscription?.source.provider}
               </SheetDescription>
             </div>
+            {subscription ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={listSyncStateTone(state)}>{t(listSyncStateLabelKey(state, subscription.sync.lastAt))}</Badge>
+                {subscription.kinds.length > 0 ? <FacetTags values={subscription.kinds} emptyLabel={null} /> : null}
+              </div>
+            ) : null}
           </div>
         </SheetHeader>
 
@@ -141,51 +145,47 @@ export function ListDetailPanel({
           </div>
         ) : (
           <div className="space-y-6 px-4 pb-8">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={listSyncStateTone(state)}>{t(listSyncStateLabelKey(state, subscription.sync.lastAt))}</Badge>
-              {subscription.kinds.length > 0 ? <FacetTags values={subscription.kinds} emptyLabel={null} /> : null}
-              {canManageLists ? (
-                <div className="ml-auto flex flex-wrap items-center gap-2">
-                  <label className="flex shrink-0 items-center gap-3">
-                    <Checkbox
-                      id="list-detail-enabled"
-                      size="large"
-                      checked={subscription.enabled}
-                      disabled={busy}
-                      onCheckedChange={(checked) => onSetEnabled(subscription, checked === true)}
-                    />
-                    <span className="text-sm font-medium">{t("label.enabled")}</span>
-                  </label>
-                  <TextActionButton
-                    id="list-detail-sync"
-                    tone="accent"
-                    disabled={busy || !subscription.enabled}
-                    onClick={() => onSyncNow(subscription)}
-                    leadingIcon={<RefreshCw className="h-4 w-4" />}
-                  >
-                    {t("lists.action.syncNow")}
-                  </TextActionButton>
-                  <TextActionButton
-                    id="list-detail-edit"
-                    tone="edit"
+            {canManageLists ? (
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <label className="flex shrink-0 items-center gap-3">
+                  <Checkbox
+                    id="list-detail-enabled"
+                    size="large"
+                    checked={subscription.enabled}
                     disabled={busy}
-                    onClick={() => onEdit(subscription)}
-                    leadingIcon={<Pencil className="h-4 w-4" />}
-                  >
-                    {t("label.edit")}
-                  </TextActionButton>
-                  <TextActionButton
-                    id="list-detail-unfollow"
-                    tone="delete"
-                    disabled={busy}
-                    onClick={() => setConfirmUnfollow(true)}
-                    leadingIcon={<Trash2 className="h-4 w-4" />}
-                  >
-                    {t("lists.action.unfollow")}
-                  </TextActionButton>
-                </div>
-              ) : null}
-            </div>
+                    onCheckedChange={(checked) => onSetEnabled(subscription, checked === true)}
+                  />
+                  <span className="text-sm font-medium">{t("label.enabled")}</span>
+                </label>
+                <TextActionButton
+                  id="list-detail-sync"
+                  tone="accent"
+                  disabled={busy || !subscription.enabled}
+                  onClick={() => onSyncNow(subscription)}
+                  leadingIcon={<RefreshCw className="h-4 w-4" />}
+                >
+                  {t("lists.action.syncNow")}
+                </TextActionButton>
+                <TextActionButton
+                  id="list-detail-edit"
+                  tone="edit"
+                  disabled={busy}
+                  onClick={() => onEdit(subscription)}
+                  leadingIcon={<Pencil className="h-4 w-4" />}
+                >
+                  {t("label.edit")}
+                </TextActionButton>
+                <TextActionButton
+                  id="list-detail-unfollow"
+                  tone="delete"
+                  disabled={busy}
+                  onClick={() => setConfirmUnfollow(true)}
+                  leadingIcon={<Trash2 className="h-4 w-4" />}
+                >
+                  {t("lists.action.unfollow")}
+                </TextActionButton>
+              </div>
+            ) : null}
 
             {state === "FAIL" && subscription.sync.errorMessage ? (
               <p
