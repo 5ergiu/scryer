@@ -69,7 +69,7 @@ export function ListTitleFlyoutBody({
           aria-hidden="true"
           className="absolute inset-0 bg-gradient-to-t from-popover via-popover/80 to-popover/25"
         />
-        <div className="relative flex items-end gap-3 px-4 pb-3 pt-12">
+        <div className="relative flex items-end gap-3 px-4 pb-3 pt-4">
           {posterUrl ? (
             <div className="w-[84px] flex-none overflow-hidden rounded-[8px] border border-[var(--scry-border3)] bg-[var(--scry-inset)] shadow-lg">
               <TitlePoster src={posterUrl} alt="" className="aspect-[2/3] h-full w-full object-cover" />

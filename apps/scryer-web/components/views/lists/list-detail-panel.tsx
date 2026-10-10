@@ -9,6 +9,7 @@ import {
 } from "@/components/views/media-content/title-table-shared";
 import { LabeledFieldset } from "@/components/common/labeled-fieldset";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { FacetTags } from "@/components/common/facet-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -30,7 +31,6 @@ import type { ListMembership, ListPreview, ListProviderManifest, ListSubscriptio
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import {
   listIntervalParts,
-  listKindLabelKey,
   listMembershipRowId,
   listMembershipReasonKey,
   listMembershipStateLabelKey,
@@ -143,11 +143,7 @@ export function ListDetailPanel({
           <div className="space-y-6 px-4 pb-8">
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={listSyncStateTone(state)}>{t(listSyncStateLabelKey(state, subscription.sync.lastAt))}</Badge>
-              {subscription.kinds.map((kind) => (
-                <Badge key={kind} tone="outline">
-                  {t(listKindLabelKey(kind))}
-                </Badge>
-              ))}
+              {subscription.kinds.length > 0 ? <FacetTags values={subscription.kinds} emptyLabel={null} /> : null}
               {canManageLists ? (
                 <div className="ml-auto flex flex-wrap items-center gap-2">
                   <label className="flex shrink-0 items-center gap-3">

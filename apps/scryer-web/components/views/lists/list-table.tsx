@@ -1,6 +1,7 @@
 import * as React from "react";
 import { RefreshCw } from "lucide-react";
 
+import { FacetTags } from "@/components/common/facet-select";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { IconButton } from "@/components/ui/icon-button";
@@ -19,7 +20,6 @@ import { formatUiDateTime } from "@/lib/utils/date-format";
 import {
   type ListSort,
   type ListSortKey,
-  listKindLabelKey,
   listModeLabelKey,
   listSyncStateLabelKey,
   listSyncStateTone,
@@ -111,11 +111,7 @@ export function ListTable({
                     <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px] text-[var(--scry-muted)]">
                       {/* The logo names the provider on screen; this names it to a screen reader. */}
                       <span className="sr-only">{provider?.name ?? subscription.source.provider}</span>
-                      {subscription.kinds.map((kind) => (
-                        <Badge key={kind} tone="outline" className="px-1.5 py-0 text-[10.5px]">
-                          {t(listKindLabelKey(kind))}
-                        </Badge>
-                      ))}
+                      {subscription.kinds.length > 0 ? <FacetTags values={subscription.kinds} emptyLabel={null} /> : null}
                     </div>
                   </div>
                 </div>

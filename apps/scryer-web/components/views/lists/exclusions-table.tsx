@@ -2,6 +2,7 @@ import * as React from "react";
 import { Ban, Trash2 } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import { FacetTags } from "@/components/common/facet-select";
 import { LoadingMark } from "@/components/common/loading-mark";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -193,7 +194,7 @@ export function ExclusionsTable({
                     {exclusion.displayTitle}
                     {exclusion.year ? <span className="text-[var(--scry-muted)]"> ({exclusion.year})</span> : null}
                   </span>
-                  <span className="text-[11.5px] text-[var(--scry-muted)]">{t(listKindLabelKey(exclusion.kind))}</span>
+                  <FacetTags values={[exclusion.kind]} emptyLabel={null} className="mt-1" />
                 </TableCell>
                 <TableCell className="hidden sm:table-cell">
                   <span className="font-[var(--font-code)] text-[12px] text-[var(--scry-muted)]">

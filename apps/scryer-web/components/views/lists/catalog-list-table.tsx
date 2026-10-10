@@ -2,7 +2,7 @@ import * as React from "react";
 import { Check, Eye, Plus } from "lucide-react";
 
 import { LoadingMark } from "@/components/common/loading-mark";
-import { Badge } from "@/components/ui/badge";
+import { FacetTags } from "@/components/common/facet-select";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -137,13 +137,7 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
                   ) : null}
                 </TableCell>
                 <TableCell className="hidden sm:table-cell">
-                  <div className="flex gap-1">
-                    {row.kinds.map((kind) => (
-                      <Badge key={kind} tone="neutral" className="px-1.5 py-0 text-[10.5px]">
-                        {t(listKindLabelKey(kind))}
-                      </Badge>
-                    ))}
-                  </div>
+                  {row.kinds.length > 0 ? <FacetTags values={row.kinds} emptyLabel={null} /> : null}
                 </TableCell>
                 {showSchedule ? (
                   <TableCell className="hidden whitespace-nowrap text-[12px] text-[var(--scry-muted)] md:table-cell">
