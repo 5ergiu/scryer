@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
 import { useTranslate } from "@/lib/context/translate-context";
+import type { ListAccountMemberKey } from "@/lib/hooks/use-list-account-link";
 import type {
   ListAccount,
   ListExclusion,
@@ -66,8 +67,9 @@ type ListsViewProps = {
   managedAccount: ListAccount | null;
   accountLoading: boolean;
   linkingProvider: string | null;
+  checkingAccountKey: boolean;
   accountLinkError: string | null;
-  onLinkAccount: (provider: string) => void;
+  onLinkAccount: (provider: string, memberKey?: ListAccountMemberKey) => void;
   onCancelLink: () => void;
   onManageAccount: (account: ListAccount | null) => void;
   onUnlinkAccount: (account: ListAccount) => Promise<boolean>;
@@ -320,7 +322,7 @@ export function ListsView(props: ListsViewProps) {
             </section>
 
             {section === "personal" ? (
-              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccount={props.managedAccount} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccount} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
+              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccount={props.managedAccount} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} checkingKey={props.checkingAccountKey} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccount} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
             ) : null}
 
             {canManageLists && section === "public" ? (

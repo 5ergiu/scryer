@@ -355,18 +355,22 @@ async fn private_account_schema_has_owner_queries_and_never_exposes_credentials(
         "myListAccounts",
         "myListSubscriptions",
         "startListAccountLink",
+        "linkListAccountWithKey",
         "completeListAccountLink",
         "unlinkListAccount",
     ] {
         assert!(sdl.contains(field));
     }
-    let payload = sdl
-        .split("type ListAccountPayload {")
-        .nth(1)
-        .unwrap()
-        .split('}')
-        .next()
-        .unwrap();
+    let type_body = |name: &str| {
+        sdl.split(&format!("type {name} {{"))
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let payload = type_body("ListAccountPayload");
     for secret in [
         "accessToken",
         "refreshToken",
@@ -376,6 +380,17 @@ async fn private_account_schema_has_owner_queries_and_never_exposes_credentials(
         "appConfig",
     ] {
         assert!(!payload.contains(secret), "account schema exposes {secret}");
+    }
+    // A member's key goes in as an argument and is described, never returned.
+    for name in ["ListAccountKeyLinkPayload", "ListMemberKeyPayload"] {
+        let body = type_body(name);
+        for line in body.lines().filter(|line| !line.trim().is_empty()) {
+            let field = line.trim().split(':').next().unwrap_or_default();
+            assert!(
+                !["key", "apiKey", "token", "accessToken", "credential"].contains(&field),
+                "{name} returns {field}"
+            );
+        }
     }
     let body = gql(
         &ctx,
@@ -797,8 +812,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Reopening a dismissed request and saving one catalog layout add
     // `reopenMediaRequest` and `setMyCatalogView`: 265->267.
     // Rebased to the release tree, as with the query count above: 267->271.
+    // Linking a list account with a key the member supplies adds
+    // `linkListAccountWithKey`: 271->272.
     assert_eq!(
-        mutation_field_count, 271,
+        mutation_field_count, 272,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1114,8 +1131,14 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     ] {
         assert!(public_type_names.contains(&name), "missing type {name}");
     }
-    assert_eq!(public_types.len(), 962);
-    assert_eq!(kind_count("OBJECT"), 516);
+    // Linking a list account with a key the member supplies adds the key
+    // description on a provider and the link result: public types 962->964,
+    // OBJECT 516->518.
+    for name in ["ListMemberKeyPayload", "ListAccountKeyLinkPayload"] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert_eq!(public_types.len(), 964);
+    assert_eq!(kind_count("OBJECT"), 518);
     assert_eq!(kind_count("INPUT_OBJECT"), 239);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);

@@ -193,3 +193,30 @@ export async function finishCurrentListAccountLink(
     if (isCurrent()) fail(reason);
   }
 }
+
+/** What a member's key form asks the link to do. */
+export type ListAccountKeyEntry =
+  | { kind: "key"; key: string; approval: boolean }
+  | { kind: "server" }
+  | { kind: "missing" };
+
+/**
+ * Reads what a member typed into a provider's key form. An empty field falls
+ * back to the server's own key where the provider says one can stand in.
+ */
+export function listAccountKeyEntry(memberKey: { approval: boolean; required: boolean }, typed: string): ListAccountKeyEntry {
+  const key = typed.trim();
+  if (key) return { kind: "key", key, approval: memberKey.approval };
+  return memberKey.required ? { kind: "missing" } : { kind: "server" };
+}
+
+/** A provider's "where to find the key" address, when it is a plain https link. */
+export function listAccountKeyHelpUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}

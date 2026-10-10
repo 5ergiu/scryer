@@ -17,7 +17,9 @@ pub use scryer_plugin_sdk::{
     ListProviderNote, ListProviderTile, ListSourceParam, ListSourceParamType, ListUrlPattern,
     ListUrlPatternCapture,
 };
-use scryer_plugin_sdk::{ListProviderDescriptor, PluginDescriptor, ProviderDescriptor};
+use scryer_plugin_sdk::{
+    ListMemberKeyUse, ListProviderDescriptor, PluginDescriptor, ProviderDescriptor,
+};
 
 use super::gateway::ListChartCatalogEntry;
 use super::provider_settings::{ListProviderSettingField, declared_server_fields};
@@ -44,6 +46,23 @@ pub struct ListProviderManifest {
     /// Server-wide settings the provider declares. `is_set` is filled only
     /// for callers who manage lists; values are never carried here.
     pub config_fields: Vec<ListProviderSettingField>,
+    /// The key each member supplies to connect their own account, if the
+    /// provider takes one.
+    pub member_key: Option<ListMemberKeyManifest>,
+}
+
+/// A provider's member key as the connect form shows it. The key itself is
+/// never carried here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListMemberKeyManifest {
+    pub label: String,
+    pub help_text: Option<String>,
+    pub help_url: Option<String>,
+    /// The member still approves at the provider once the key is accepted.
+    pub approval: bool,
+    /// Connecting needs the member's key: the server holds none of its own
+    /// that could stand in.
+    pub required: bool,
 }
 
 pub fn facet_of(kind: ListMediaKind) -> MediaFacet {
@@ -129,6 +148,13 @@ fn manifest_from_descriptor(
 ) -> ListProviderManifest {
     ListProviderManifest {
         config_fields: declared_server_fields(plugin),
+        member_key: list.member_key.map(|key| ListMemberKeyManifest {
+            label: key.label,
+            help_text: key.help_text,
+            help_url: key.help_url,
+            approval: key.use_as == ListMemberKeyUse::AccountApp,
+            required: true,
+        }),
         name: plugin.name.clone(),
         provider_type: list.provider_type.to_ascii_lowercase(),
         summary: list.summary,
@@ -153,6 +179,7 @@ fn bare_manifest(provider_type: &str) -> ListProviderManifest {
         notes: Vec::new(),
         url_patterns: Vec::new(),
         config_fields: Vec::new(),
+        member_key: None,
     }
 }
 

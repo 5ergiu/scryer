@@ -5610,6 +5610,13 @@ export const listProvidersQuery =`query ListProviders {
         label
       }
     }
+    memberKey {
+      label
+      helpText
+      helpUrl
+      approval
+      required
+    }
     urlPatterns {
       pattern
       sourceType

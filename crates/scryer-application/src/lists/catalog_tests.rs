@@ -32,6 +32,7 @@ fn plugin(provider_type: &str, personal: bool, member_only: bool) -> PluginDescr
         brand_url_template: None,
         coverage: vec![ListMediaKind::Series],
         auth: Default::default(),
+        member_key: None,
         groups: vec![ListProviderGroup {
             label: "Lists".to_string(),
             auth_badge: ListAuthBadge::NoAccountNeedsValue,

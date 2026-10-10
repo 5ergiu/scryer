@@ -79,6 +79,12 @@ pub const ACCOUNT_IDENTITY_MISSING: &str = "LIST_ACCOUNT_IDENTITY_MISSING";
 pub const ACCOUNT_IDENTITY_UNVERIFIED: &str = "LIST_ACCOUNT_IDENTITY_UNVERIFIED";
 /// The provider has no member accounts to link.
 pub const ACCOUNT_LINKING_UNSUPPORTED: &str = "LIST_ACCOUNT_LINKING_UNSUPPORTED";
+/// The provider's accounts are not linked with a key the member supplies.
+pub const ACCOUNT_KEY_UNSUPPORTED: &str = "LIST_ACCOUNT_KEY_UNSUPPORTED";
+/// The key the member supplied is empty, oversized, or not a single line.
+pub const ACCOUNT_KEY_INVALID: &str = "LIST_ACCOUNT_KEY_INVALID";
+/// The provider refused the key the member supplied.
+pub const ACCOUNT_KEY_REJECTED: &str = "LIST_ACCOUNT_KEY_REJECTED";
 /// The address the link was started from is not a usable origin.
 pub const ACCOUNT_LINK_ORIGIN_INVALID: &str = "LIST_ACCOUNT_LINK_ORIGIN_INVALID";
 /// Too many account links are waiting to be finished.
@@ -175,6 +181,9 @@ pub const ALL: &[&str] = &[
     ACCOUNT_IDENTITY_MISSING,
     ACCOUNT_IDENTITY_UNVERIFIED,
     ACCOUNT_LINKING_UNSUPPORTED,
+    ACCOUNT_KEY_UNSUPPORTED,
+    ACCOUNT_KEY_INVALID,
+    ACCOUNT_KEY_REJECTED,
     ACCOUNT_LINK_ORIGIN_INVALID,
     ACCOUNT_LINKS_TOO_MANY,
     ACCOUNT_LINK_RESULT_INVALID,

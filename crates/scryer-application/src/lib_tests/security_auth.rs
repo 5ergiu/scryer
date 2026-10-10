@@ -2472,7 +2472,9 @@ async fn token_permission_claims_do_not_override_database_authorization() {
 /// Records every event's fields; enough of a subscriber to assert on what a
 /// login failure writes to the log without pulling in tracing-subscriber.
 #[derive(Clone, Default)]
-struct CapturedEvents(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+pub(super) struct CapturedEvents(
+    pub(super) Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+);
 
 struct CapturedEventFields<'a>(&'a mut std::collections::BTreeMap<String, String>);
 

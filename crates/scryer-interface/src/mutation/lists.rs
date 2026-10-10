@@ -1,4 +1,5 @@
 use async_graphql::{Context, ID, Object, Result as GqlResult};
+use scryer_application::lists::accounts::ListAccountKeyLink;
 use scryer_application::lists::refusal::{self, refused};
 
 use crate::context::{actor_from_ctx, app_from_ctx, to_gql_error};
@@ -9,11 +10,11 @@ use crate::mappers::{
     public_list_patch_from_input,
 };
 use crate::types::{
-    AddListExclusionInput, ListAccountLinkPayload, ListAccountPayload, ListAccountPollPayload,
-    ListAccountPollStatusValue, ListExclusionPayload, ListPolicyValue, ListProviderAppPayload,
-    ListProviderSettingChangeInput, ListProviderSettingsPayload, ListScopeValue,
-    ListSubscriptionPayload, ListSyncEnqueuedPayload, MemberListPolicyPayload, SubscribeListInput,
-    UpdateListSubscriptionInput,
+    AddListExclusionInput, ListAccountKeyLinkPayload, ListAccountLinkPayload, ListAccountPayload,
+    ListAccountPollPayload, ListAccountPollStatusValue, ListExclusionPayload, ListPolicyValue,
+    ListProviderAppPayload, ListProviderSettingChangeInput, ListProviderSettingsPayload,
+    ListScopeValue, ListSubscriptionPayload, ListSyncEnqueuedPayload, MemberListPolicyPayload,
+    SubscribeListInput, UpdateListSubscriptionInput,
 };
 
 fn enqueued(ids: Vec<String>) -> ListSyncEnqueuedPayload {
@@ -47,6 +48,43 @@ impl ListMutations {
             .await
             .map_err(to_gql_error)?
             .into())
+    }
+    /// Link the current member's account with a key they supply, for a provider whose manifest
+    /// declares a member key. The key is stored encrypted on that member's account and is never
+    /// returned.
+    async fn link_list_account_with_key(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Provider whose account is being linked.")] provider: String,
+        #[graphql(desc = "Write-only key the member copied from the provider.", secret)]
+        key: String,
+        #[graphql(
+            desc = "Exact browser origin approved by the instance public URL or local listening address. Needed when the provider still asks for the member's approval."
+        )]
+        origin: Option<String>,
+    ) -> GqlResult<ListAccountKeyLinkPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        let origin = match origin {
+            Some(origin) => {
+                Some(crate::context::list_account_link_origin_from_ctx(ctx, &origin).await?)
+            }
+            None => None,
+        };
+        let linked = app
+            .link_list_account_with_key(&actor, &provider, &key, origin.as_deref())
+            .await
+            .map_err(to_gql_error)?;
+        Ok(match linked {
+            ListAccountKeyLink::Linked(view) => ListAccountKeyLinkPayload {
+                account: Some(ListAccountPayload::from_view(*view)),
+                link: None,
+            },
+            ListAccountKeyLink::Approval(link) => ListAccountKeyLinkPayload {
+                account: None,
+                link: Some(link.into()),
+            },
+        })
     }
     /// Poll an account authorization session owned by the current member.
     async fn poll_list_account_link(

@@ -23,6 +23,13 @@ export const startListAccountLinkMutation = `mutation StartListAccountLink($prov
   }
 }`;
 
+export const linkListAccountWithKeyMutation = `mutation LinkListAccountWithKey($provider: String!, $key: String!, $origin: String) {
+  linkListAccountWithKey(provider: $provider, key: $key, origin: $origin) {
+    account {${ACCOUNT_FIELDS}}
+    link { sessionId state authorizeUrl authorizationOrigin expiresAt pollRequired }
+  }
+}`;
+
 export const pollListAccountLinkMutation = `mutation PollListAccountLink($sessionId: ID!) {
   pollListAccountLink(sessionId: $sessionId) {
     status account {${ACCOUNT_FIELDS}}

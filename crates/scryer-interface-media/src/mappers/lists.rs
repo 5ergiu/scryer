@@ -176,6 +176,13 @@ pub fn from_list_provider(manifest: ListProviderManifest) -> ListProviderPayload
                 ..from_list_provider_setting_field(field)
             })
             .collect(),
+        member_key: manifest.member_key.map(|key| ListMemberKeyPayload {
+            label: key.label,
+            help_text: key.help_text,
+            help_url: key.help_url,
+            approval: key.approval,
+            required: key.required,
+        }),
     }
 }
 

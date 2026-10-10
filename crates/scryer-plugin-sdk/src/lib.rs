@@ -22,13 +22,14 @@ pub use indexer::{
     normalize_info_hash as normalize_indexer_info_hash, torrent_result, usenet_result,
 };
 pub use list::{
-    ListAccountExchange, ListAccountFlow, ListAccountList, ListAccountStatus, ListAuthBadge,
-    ListCredential, ListExternalId, ListMediaKind, ListNoteTone, ListPluginAccountRequest,
-    ListPluginAccountResponse, ListPluginFetchRequest, ListPluginFetchResponse,
-    ListPluginHealthRequest, ListPluginHealthResponse, ListPluginItem, ListProviderAuth,
-    ListProviderCapabilities, ListProviderDescriptor, ListProviderGroup, ListProviderItem,
-    ListProviderNote, ListProviderRating, ListProviderTile, ListSourceParam, ListSourceParamType,
-    ListUrlPattern, ListUrlPatternCapture,
+    LIST_CREDENTIAL_TYPE_API_KEY, ListAccountExchange, ListAccountFlow, ListAccountList,
+    ListAccountStatus, ListAuthBadge, ListCredential, ListExternalId, ListMediaKind, ListMemberKey,
+    ListMemberKeyUse, ListNoteTone, ListPluginAccountRequest, ListPluginAccountResponse,
+    ListPluginFetchRequest, ListPluginFetchResponse, ListPluginHealthRequest,
+    ListPluginHealthResponse, ListPluginItem, ListProviderAuth, ListProviderCapabilities,
+    ListProviderDescriptor, ListProviderGroup, ListProviderItem, ListProviderNote,
+    ListProviderRating, ListProviderTile, ListSourceParam, ListSourceParamType, ListUrlPattern,
+    ListUrlPatternCapture,
 };
 pub use net::{
     SocketCloseRequest, SocketCloseResponse, SocketError, SocketErrorCode, SocketOpenRequest,
@@ -43,7 +44,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.14.0";
+pub const SDK_VERSION: &str = "3.15.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)

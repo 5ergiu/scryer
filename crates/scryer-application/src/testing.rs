@@ -169,6 +169,21 @@ impl Default for ListAccountFixtureProvider {
     }
 }
 impl ListAccountFixtureProvider {
+    /// The same provider, taking a key each member supplies as their credential.
+    pub fn with_member_key() -> Self {
+        let mut provider = Self::default();
+        if let scryer_plugin_sdk::ProviderDescriptor::ListProvider(list) =
+            &mut provider.descriptor.provider
+        {
+            list.member_key = Some(scryer_plugin_sdk::ListMemberKey {
+                label: "Fixture key".into(),
+                help_text: None,
+                help_url: None,
+                use_as: scryer_plugin_sdk::ListMemberKeyUse::Credential,
+            });
+        }
+        provider
+    }
     pub fn account_calls(&self) -> usize {
         self.account_calls.load(std::sync::atomic::Ordering::SeqCst)
     }

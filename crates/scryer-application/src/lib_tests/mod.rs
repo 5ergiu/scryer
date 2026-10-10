@@ -35,6 +35,7 @@ mod interactive_release_search;
 mod landed_bar_memo;
 mod libraries;
 mod library_scan;
+mod list_account_keys;
 mod list_accounts;
 mod list_actions;
 mod list_experimental_gate;

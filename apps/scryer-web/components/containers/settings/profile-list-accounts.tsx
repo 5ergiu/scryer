@@ -90,13 +90,13 @@ export function ProfileListAccounts() {
           providers={personalProviders}
           accounts={accounts}
           linkingProvider={accountLink.provider}
-          onLink={(provider) => void accountLink.start(provider)}
+          onLink={(provider, memberKey) => void accountLink.start(provider, memberKey)}
         />
       )}
       {accountLink.error ? <p role="alert" className="text-sm text-[var(--scry-danger-text)]">{accountLink.error}</p> : null}
       {accountLink.provider ? (
         <div role="status" className="flex flex-wrap items-center gap-2 text-sm">
-          <LoadingMark className="h-4 w-4" />{t("lists.accounts.waiting")}
+          <LoadingMark className="h-4 w-4" />{t(accountLink.checkingKey ? "lists.accounts.key.checking" : "lists.accounts.waiting")}
           <Button size="sm" variant="outline" onClick={accountLink.cancel}>{t("label.cancel")}</Button>
         </div>
       ) : null}

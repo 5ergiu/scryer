@@ -138,3 +138,16 @@ test("every known reason is a lists reason with an English sentence", () => {
     assert.ok(dictionary[key]?.trim(), `${reason} names the missing key ${key}`);
   }
 });
+
+test("a key the provider refuses is explained as the key's fault", () => {
+  const error = refusal("validation: the provider refused this key", {
+    code: "VALIDATION_ERROR",
+    reason: "LIST_ACCOUNT_KEY_REJECTED",
+  });
+
+  assert.equal(listRefusalKey(error), "lists.refusal.accountKeyRejected");
+  assert.equal(
+    listErrorMessage(error, t, "Account linking failed"),
+    dictionary["lists.refusal.accountKeyRejected"],
+  );
+});

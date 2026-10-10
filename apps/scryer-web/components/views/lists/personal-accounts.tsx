@@ -4,15 +4,19 @@ import { LoadingMark } from "@/components/common/loading-mark";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { useTranslate } from "@/lib/context/translate-context";
+import type { ListAccountMemberKey } from "@/lib/hooks/use-list-account-link";
 import type {
   ListAccount,
+  ListMemberKey,
   ListPreview,
   ListProviderItem,
   ListProviderManifest,
   ListSourceDraft,
   ListSubscription,
 } from "@/lib/types/lists";
+import { listAccountKeyEntry, listAccountKeyHelpUrl } from "@/lib/utils/list-account-link";
 import { isListSourceFollowed, listAccountLabel } from "@/lib/utils/lists";
 import { buildViewPath } from "@/lib/utils/routing";
 import { CatalogListTable, type CatalogListRow } from "./catalog-list-table";
@@ -29,8 +33,11 @@ type Props = {
   accountLoading: boolean;
   busyIds: ReadonlySet<string>;
   linkingProvider: string | null;
+  /** The link in progress is a key being checked, with no provider window to finish in. */
+  checkingKey: boolean;
   linkError: string | null;
-  onLink: (provider: string) => void;
+  /** Starts a link: by the provider's sign-in, or with the key the member typed. */
+  onLink: (provider: string, memberKey?: ListAccountMemberKey) => void;
   onCancelLink: () => void;
   onManage: (account: ListAccount | null) => void;
   onUnlink: (account: ListAccount) => Promise<boolean>;
@@ -43,15 +50,80 @@ type ConnectionsProps = Pick<Props, "providers" | "accounts" | "linkingProvider"
   renderActions?: (account: ListAccount) => React.ReactNode;
 };
 
+/** An open key form: whose it is, and whether its key connects a further account or replaces this one's. */
+type KeyFormTarget = { key: string; another: boolean };
+
+/**
+ * Where a member pastes the key a provider issues them, for a provider that
+ * connects by key instead of a sign-in window. The key leaves this form only
+ * in the request that stores it.
+ */
+function MemberKeyForm(props: {
+  id: string;
+  memberKey: ListMemberKey;
+  replacing: boolean;
+  onSubmit: (memberKey?: ListAccountMemberKey) => void;
+  onCancel: () => void;
+}) {
+  const t = useTranslate();
+  const [typed, setTyped] = React.useState("");
+  const [missing, setMissing] = React.useState(false);
+  const helpUrl = listAccountKeyHelpUrl(props.memberKey.helpUrl);
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const entry = listAccountKeyEntry(props.memberKey, typed);
+    if (entry.kind === "missing") {
+      setMissing(true);
+      return;
+    }
+    props.onSubmit(entry.kind === "key" ? { key: entry.key, approval: entry.approval } : undefined);
+  };
+  return (
+    <form id={props.id} className="space-y-2 rounded-[12px] border border-[var(--scry-border3)] p-3 text-sm" onSubmit={submit}>
+      <label className="block space-y-1">
+        <span>{props.memberKey.label}</span>
+        <Input
+          id={`${props.id}-input`}
+          type="password"
+          autoComplete="off"
+          value={typed}
+          aria-invalid={missing || undefined}
+          onChange={(event) => {
+            setTyped(event.target.value);
+            setMissing(false);
+          }}
+        />
+      </label>
+      {missing ? <p role="alert" className="text-[var(--scry-danger-text)]">{t("lists.accounts.key.missing")}</p> : null}
+      {props.memberKey.helpText ? <p className="text-[var(--scry-muted)]">{props.memberKey.helpText}</p> : null}
+      {helpUrl ? (
+        <a className="inline-block underline" href={helpUrl} target="_blank" rel="noreferrer noopener">
+          {t("lists.accounts.key.where")}
+        </a>
+      ) : null}
+      {props.memberKey.required ? null : <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.optional")}</p>}
+      {props.memberKey.approval ? <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.approval")}</p> : null}
+      {props.replacing ? <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.replace")}</p> : null}
+      <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.private")}</p>
+      <div className="flex gap-2">
+        <Button id={`${props.id}-save`} type="submit" size="sm">{t("lists.accounts.connect")}</Button>
+        <Button type="button" size="sm" variant="outline" onClick={props.onCancel}>{t("label.cancel")}</Button>
+      </div>
+    </form>
+  );
+}
+
 export function PersonalAccountConnections(props: ConnectionsProps) {
   const t = useTranslate();
+  // The card whose key form is open, for a provider that connects by key.
+  const [keyFormFor, setKeyFormFor] = React.useState<KeyFormTarget | null>(null);
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {props.providers.flatMap((provider) => {
         const linkedAccounts = props.accounts.filter((entry) => entry.provider === provider.providerType);
         return (linkedAccounts.length ? linkedAccounts : [null]).map((linked) => ({ provider, linked }));
-      }).map(({ provider, linked }) => (
-        <Card key={linked?.id ?? provider.providerType} id={`lists-account-${linked?.id ?? provider.providerType}`}>
+      }).map(({ provider, linked }) => ({ provider, linked, key: linked?.id ?? provider.providerType })).map(({ provider, linked, key }) => (
+        <Card key={key} id={`lists-account-${key}`}>
           <CardContent>
             <div className="flex items-center gap-3">
               <ProviderTile provider={provider} />
@@ -64,15 +136,37 @@ export function PersonalAccountConnections(props: ConnectionsProps) {
             {linked?.errorMessage ? <p className="text-sm text-destructive">{linked.errorMessage}</p> : null}
             <div className="flex flex-wrap gap-2">
               {linked ? props.renderActions?.(linked) : null}
-              <Button size="sm" variant={linked ? "outline" : "default"} disabled={!!props.linkingProvider} onClick={() => props.onLink(provider.providerType)}>
+              <Button
+                size="sm"
+                variant={linked ? "outline" : "default"}
+                disabled={!!props.linkingProvider}
+                onClick={() => (provider.memberKey ? setKeyFormFor({ key, another: false }) : props.onLink(provider.providerType))}
+              >
                 {t(linked ? "lists.accounts.reconnect" : "lists.accounts.connect")}
               </Button>
               {linked ? (
-                <Button size="sm" variant="outline" disabled={!!props.linkingProvider} onClick={() => props.onLink(provider.providerType)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!!props.linkingProvider}
+                  onClick={() => (provider.memberKey ? setKeyFormFor({ key, another: true }) : props.onLink(provider.providerType))}
+                >
                   {t("lists.accounts.connectAnother")}
                 </Button>
               ) : null}
             </div>
+            {provider.memberKey && keyFormFor?.key === key ? (
+              <MemberKeyForm
+                id={`lists-account-key-${key}`}
+                memberKey={provider.memberKey}
+                replacing={!!linked && !keyFormFor.another}
+                onCancel={() => setKeyFormFor(null)}
+                onSubmit={(memberKey) => {
+                  setKeyFormFor(null);
+                  props.onLink(provider.providerType, memberKey);
+                }}
+              />
+            ) : null}
           </CardContent>
         </Card>
       ))}
@@ -109,6 +203,8 @@ export function PersonalAccounts(props: Props) {
     entries[0] ??
     null;
   const [unlinkingId, setUnlinkingId] = React.useState<string | null>(null);
+  // The entry whose key form is open, for a provider that connects by key.
+  const [keyFormFor, setKeyFormFor] = React.useState<KeyFormTarget | null>(null);
 
   // The open account's lists are read from the provider when it is opened, and again once it is reconnected.
   const linked = selected?.linked ?? null;
@@ -170,6 +266,16 @@ export function PersonalAccounts(props: Props) {
     }
   }
   const confirmingUnlink = !!account && unlinkingId === account.id;
+  // Connects a further account of the open provider, which opens once it arrives.
+  const linkAnother = (memberKey?: ListAccountMemberKey) => {
+    if (!selected) return;
+    const providerType = selected.provider.providerType;
+    setAdding({
+      providerType,
+      known: props.accounts.filter((entry) => entry.provider === providerType).map((entry) => entry.id),
+    });
+    props.onLink(providerType, memberKey);
+  };
 
   return (
     <section id="lists-personal-accounts" className="space-y-3">
@@ -216,7 +322,7 @@ export function PersonalAccounts(props: Props) {
                 size="sm"
                 variant={account?.status === "ACTIVE" ? "outline" : "primary"}
                 disabled={!!props.linkingProvider}
-                onClick={() => props.onLink(selected.provider.providerType)}
+                onClick={() => (selected.provider.memberKey ? setKeyFormFor({ key: selected.key, another: false }) : props.onLink(selected.provider.providerType))}
               >
                 {t(account ? "lists.accounts.reconnect" : "lists.accounts.connect")}
               </Button>
@@ -226,14 +332,7 @@ export function PersonalAccounts(props: Props) {
                   size="sm"
                   variant="outline"
                   disabled={!!props.linkingProvider}
-                  onClick={() => {
-                    const providerType = selected.provider.providerType;
-                    setAdding({
-                      providerType,
-                      known: props.accounts.filter((entry) => entry.provider === providerType).map((entry) => entry.id),
-                    });
-                    props.onLink(providerType);
-                  }}
+                  onClick={() => (selected.provider.memberKey ? setKeyFormFor({ key: selected.key, another: true }) : linkAnother())}
                 >
                   {t("lists.accounts.connectAnother")}
                 </Button>
@@ -247,14 +346,27 @@ export function PersonalAccounts(props: Props) {
             {account?.errorMessage ? (
               <p className="text-sm text-[var(--scry-danger-text)]">{account.errorMessage}</p>
             ) : null}
+            {selected.provider.memberKey && keyFormFor?.key === selected.key && !props.linkingProvider ? (
+              <MemberKeyForm
+                id={`lists-account-key-${selected.key}`}
+                memberKey={selected.provider.memberKey}
+                replacing={!!account && !keyFormFor.another}
+                onCancel={() => setKeyFormFor(null)}
+                onSubmit={(memberKey) => {
+                  setKeyFormFor(null);
+                  if (keyFormFor.another) linkAnother(memberKey);
+                  else props.onLink(selected.provider.providerType, memberKey);
+                }}
+              />
+            ) : null}
             {props.linkError ? <p role="alert" className="text-sm text-[var(--scry-danger-text)]">{props.linkError}</p> : null}
             {props.linkingProvider ? (
               <div role="status" className="flex items-center gap-2 text-sm">
-                <LoadingMark className="h-4 w-4" />{t("lists.accounts.waiting")}
+                <LoadingMark className="h-4 w-4" />{t(props.checkingKey ? "lists.accounts.key.checking" : "lists.accounts.waiting")}
                 <Button size="sm" variant="outline" onClick={props.onCancelLink}>{t("label.cancel")}</Button>
               </div>
             ) : null}
-            {props.linkingProvider && adding ? (
+            {props.linkingProvider && adding && !props.checkingKey ? (
               <p className="text-[12.5px] text-[var(--scry-muted)]">{t("lists.accounts.connectAnotherHint")}</p>
             ) : null}
             {account && confirmingUnlink ? (

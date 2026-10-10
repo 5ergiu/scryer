@@ -31,6 +31,10 @@ struct MatrixFixture {
 }
 
 async fn fixture() -> MatrixFixture {
+    fixture_with(ListAccountFixtureProvider::default()).await
+}
+
+async fn fixture_with(provider: ListAccountFixtureProvider) -> MatrixFixture {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
     let mut owner = User::new_admin("private-owner");
@@ -61,7 +65,7 @@ async fn fixture() -> MatrixFixture {
         ctx.db.datastore(),
         ctx.db.encryption_key_state(),
     ));
-    let provider = Arc::new(ListAccountFixtureProvider::default());
+    let provider = Arc::new(provider);
     let app = ctx.app.with_test_overrides(|builder| {
         builder
             .with_list_store(store.clone())
@@ -281,4 +285,56 @@ async fn graphql_private_list_mutations_reject_nonowners_and_preserve_rows() {
         assert_eq!(empty["data"]["myListSubscriptions"], json!([]));
         assert_eq!(fixture.ctx.smg_server.received_requests().await.unwrap().len(), 0, "ownership tests never contact the metadata relay");
     }).await.expect("bounded GraphQL mutation matrix");
+}
+
+#[tokio::test]
+async fn graphql_key_link_keeps_the_key_on_the_members_account_and_never_returns_it() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        const KEY: &str = "synthetic-member-key-7Q";
+        let fixture = fixture_with(ListAccountFixtureProvider::with_member_key()).await;
+        let providers = execute(&fixture, &fixture.member, "{ listProviders { providerType memberKey { label helpText helpUrl approval required } } }").await;
+        assert_no_errors(&providers);
+        let offered = providers["data"]["listProviders"].as_array().unwrap().iter().find(|provider| provider["providerType"] == "trakt").expect("the fixture provider is offered");
+        assert_eq!(offered["memberKey"], json!({"label": "Fixture key", "helpText": null, "helpUrl": null, "approval": false, "required": true}));
+
+        let link = |actor: &User, key: &str| {
+            let request = async_graphql::Request::new(r#"mutation($key: String!) { linkListAccountWithKey(provider:"trakt", key:$key) { account { id provider externalUserId status } link { sessionId } } }"#)
+                .variables(async_graphql::Variables::from_json(json!({"key": key})))
+                .data(actor.clone());
+            let schema = fixture.schema.clone();
+            async move { serde_json::to_value(schema.execute(request).await).unwrap() }
+        };
+        let linked = link(&fixture.member, KEY).await;
+        assert_no_errors(&linked);
+        assert!(!linked.to_string().contains(KEY), "the key came back: {linked}");
+        let account = &linked["data"]["linkListAccountWithKey"]["account"];
+        assert!(linked["data"]["linkListAccountWithKey"]["link"].is_null());
+        assert_eq!(account["provider"], "trakt");
+        assert_eq!(account["status"], "ACTIVE");
+        let id = account["id"].as_str().unwrap().to_string();
+        assert_ne!(id, ACCOUNT_ID, "another member's account is never reused");
+
+        // The encrypted store hands the key back only as that member's credential.
+        let stored = UserListAccountRepository::get_by_id(fixture.store.as_ref(), &id).await.unwrap().unwrap();
+        assert_eq!(stored.user_id, fixture.member.id);
+        assert_eq!(stored.credential.access_token, KEY);
+        assert_eq!(stored.credential.token_type.as_deref(), Some("api_key"));
+        let owners = UserListAccountRepository::get_by_id(fixture.store.as_ref(), ACCOUNT_ID).await.unwrap().unwrap();
+        assert_eq!(owners.credential.access_token, SECRETS[0]);
+
+        let mine = execute(&fixture, &fixture.member, "{ myListAccounts { id provider externalUserId username status } }").await;
+        assert_no_errors(&mine);
+        assert_eq!(mine["data"]["myListAccounts"][0]["id"], id.as_str());
+        assert!(!mine.to_string().contains(KEY));
+
+        let malformed = link(&fixture.member, "two words").await;
+        assert_eq!(malformed["errors"][0]["extensions"]["reason"], "LIST_ACCOUNT_KEY_INVALID");
+        assert!(!malformed.to_string().contains("two words"));
+
+        let denied = execute(&fixture, &fixture.owner, &format!(r#"mutation {{ unlinkListAccount(id:"{id}") }}"#)).await;
+        assert_graphql_field_denied(&denied, "unlinkListAccount");
+        let unlinked = execute(&fixture, &fixture.member, &format!(r#"mutation {{ unlinkListAccount(id:"{id}") }}"#)).await;
+        assert_no_errors(&unlinked);
+        assert!(UserListAccountRepository::get_by_id(fixture.store.as_ref(), &id).await.unwrap().is_none());
+    }).await.expect("bounded GraphQL key link");
 }

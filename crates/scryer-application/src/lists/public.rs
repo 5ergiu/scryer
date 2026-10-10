@@ -530,6 +530,20 @@ impl AppUseCase {
         let plugins = self.services.lists.plugins.descriptors();
         let charts = self.list_chart_catalog().await;
         let mut manifests = merge_provider_catalog(&plugins, &charts);
+        // A key that stands in for the server's own application is optional
+        // while the server holds one.
+        for manifest in &mut manifests {
+            let Some(key) = manifest.member_key.as_mut().filter(|key| key.approval) else {
+                continue;
+            };
+            if let Some(plugin) = plugins.iter().find(|plugin| {
+                plugin
+                    .provider_type()
+                    .eq_ignore_ascii_case(&manifest.provider_type)
+            }) {
+                key.required = self.server_tmdb_app_token(plugin).await.is_none();
+            }
+        }
         if self.can_manage_lists(actor).await? {
             for manifest in &mut manifests {
                 if manifest.config_fields.is_empty() {

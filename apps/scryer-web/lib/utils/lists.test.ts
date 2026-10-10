@@ -235,6 +235,7 @@ function manifest(overrides: Partial<ListProviderManifest> = {}): ListProviderMa
       },
     ],
     configFields: [],
+    memberKey: null,
     ...overrides,
   };
 }

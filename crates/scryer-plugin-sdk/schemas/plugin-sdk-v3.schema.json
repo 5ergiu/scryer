@@ -2262,6 +2262,50 @@
         "smg_relay"
       ]
     },
+    "ListMemberKey": {
+      "description": "A provider key a member pastes in instead of signing in through a redirect.\nThe host asks for it with `label` and `help_text`, stores it as that\nmember's credential and never writes it to the plugin's config.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "help_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "help_url": {
+          "description": "Where the member finds the key at the provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "use_as": {
+          "$ref": "#/$defs/ListMemberKeyUse",
+          "default": "credential"
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
+    "ListMemberKeyUse": {
+      "description": "What the host does with a member's key.",
+      "oneOf": [
+        {
+          "description": "The key is the credential. The host sends it to the account operation\nas `ListCredential.access_token` with `token_type`\n[`LIST_CREDENTIAL_TYPE_API_KEY`]; an `auth_failed` answer means the\nprovider refused the key, and a successful one names the account. The\nsame credential then travels with each of that member's fetches.",
+          "type": "string",
+          "const": "credential"
+        },
+        {
+          "description": "The key stands in for the server's own application in the account flow\n`auth` declares. The member still approves there, and the token that\nflow issues is the credential. Hosts offer this for the\n`tmdb_approval` flow only.",
+          "type": "string",
+          "const": "account_app"
+        }
+      ]
+    },
     "ListProviderGroup": {
       "type": "object",
       "properties": {
@@ -2509,6 +2553,17 @@
           "default": {
             "type": "none"
           }
+        },
+        "member_key": {
+          "description": "A key each member supplies for themselves, declared beside `auth`. A\nhost older than this field ignores it and offers no key form.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListMemberKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "groups": {
           "type": "array",

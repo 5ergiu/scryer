@@ -491,6 +491,26 @@ pub struct ListProviderPayload {
     /// key. `isSet` is reported only to callers who manage lists, and a value
     /// is never included here.
     pub config_fields: Vec<ListProviderSettingFieldPayload>,
+    /// The key each member supplies to connect their own account, or null
+    /// when accounts are connected by signing in at the provider.
+    pub member_key: Option<ListMemberKeyPayload>,
+}
+
+/// The key a member supplies to connect their own account at a provider. The
+/// key itself is write-only and never returned.
+#[derive(SimpleObject, Clone)]
+pub struct ListMemberKeyPayload {
+    /// Label shown next to the key field.
+    pub label: String,
+    /// Help text, or null.
+    pub help_text: Option<String>,
+    /// Where the member finds the key at the provider, or null.
+    pub help_url: Option<String>,
+    /// Whether the member still approves at the provider after the key is accepted.
+    pub approval: bool,
+    /// Whether connecting needs the member's key. False when the server holds
+    /// a key of its own that can stand in.
+    pub required: bool,
 }
 
 /// One server-wide setting of a list provider.
@@ -1151,6 +1171,7 @@ impl ListAccountPayload {
             "trakt" => "my_list",
             "anilist" => "custom_list",
             "tmdb" => "account_list",
+            "mdblist" => "my_list",
             "plex" => "watchlist",
             _ => "list",
         };
@@ -1270,6 +1291,15 @@ pub struct ListAccountPollPayload {
     /// The linked account when authorization completed.
     pub account: Option<ListAccountPayload>,
 }
+/// Where linking with a member's own key left the member: linked, or waiting
+/// for their approval at the provider. Exactly one field is set.
+#[derive(SimpleObject)]
+pub struct ListAccountKeyLinkPayload {
+    /// The linked account, when the key alone connects it.
+    pub account: Option<ListAccountPayload>,
+    /// The session to continue, when the provider still wants the member's approval.
+    pub link: Option<ListAccountLinkPayload>,
+}
 /// Write-only provider application settings, with secret presence only.
 #[derive(SimpleObject)]
 pub struct ListProviderAppPayload {
@@ -1326,11 +1356,12 @@ mod account_projection_tests {
     #[test]
     fn owned_list_parameters_match_completed_provider_descriptors() {
         // Trakt's my_list and AniList's custom_list both declare `list`;
-        // TMDb's account_list declares `list_id`.
+        // TMDb's account_list and MDBList's my_list declare `list_id`.
         for (provider, source, param, id, kind) in [
             ("trakt", "my_list", "list", "42", "movie"),
             ("anilist", "custom_list", "list", "Weekend anime", "anime"),
             ("tmdb", "account_list", "list_id", "42", "movie"),
+            ("mdblist", "my_list", "list_id", "42", "movie"),
         ] {
             let payload = project(
                 provider,

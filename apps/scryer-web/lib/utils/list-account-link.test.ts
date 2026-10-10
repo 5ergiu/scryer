@@ -7,6 +7,8 @@ import {
   LIST_ACCOUNT_LINK_TYPE,
   LIST_ACCOUNT_RELAY_ORIGIN,
   listAccountCompletionInput,
+  listAccountKeyEntry,
+  listAccountKeyHelpUrl,
   LIST_ACCOUNT_POLL_INTERVAL_MS,
   listAccountPollRetryDelay,
   listAccountPollStep,
@@ -166,4 +168,22 @@ test("current account refresh completes once and reports its own failure", { tim
   assert.deepEqual(effects, ["accounts", "finish"]);
   await finishCurrentListAccountLink(() => true, async () => { throw new Error("current refresh failed"); }, () => effects.push("finish"), () => effects.push("fail"));
   assert.deepEqual(effects, ["accounts", "finish", "fail"]);
+});
+
+test("a typed key is trimmed and carries whether the member still approves at the provider", () => {
+  assert.deepEqual(listAccountKeyEntry({ approval: false, required: true }, "  synthetic-key\n"), { kind: "key", key: "synthetic-key", approval: false });
+  assert.deepEqual(listAccountKeyEntry({ approval: true, required: false }, "synthetic-key"), { kind: "key", key: "synthetic-key", approval: true });
+});
+
+test("an empty key field is missing unless the server's own key can stand in", () => {
+  assert.deepEqual(listAccountKeyEntry({ approval: false, required: true }, "   "), { kind: "missing" });
+  assert.deepEqual(listAccountKeyEntry({ approval: true, required: true }, ""), { kind: "missing" });
+  assert.deepEqual(listAccountKeyEntry({ approval: true, required: false }, " "), { kind: "server" });
+});
+
+test("a key help address is linked only when it is a plain https link", () => {
+  assert.equal(listAccountKeyHelpUrl("https://provider.example/settings/api"), "https://provider.example/settings/api");
+  for (const value of [null, undefined, "", "not a link", "http://provider.example/api", "javascript:alert(1)", "https://member:secret@provider.example/api"]) {
+    assert.equal(listAccountKeyHelpUrl(value), null);
+  }
 });

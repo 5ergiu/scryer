@@ -10227,6 +10227,21 @@ type LinkedAccountPayload {
 }
 
 """
+Where linking with a member's own key left the member: linked, or waiting
+for their approval at the provider. Exactly one field is set.
+"""
+type ListAccountKeyLinkPayload {
+	"""
+	The linked account, when the key alone connects it.
+	"""
+	account: ListAccountPayload
+	"""
+	The session to continue, when the provider still wants the member's approval.
+	"""
+	link: ListAccountLinkPayload
+}
+
+"""
 A short-lived account-link session bound to the current member.
 """
 type ListAccountLinkPayload {
@@ -10670,6 +10685,34 @@ type ListFilterPayload {
 	Genres, formats or languages, for the kinds that take a set.
 	"""
 	values: [String!]!
+}
+
+"""
+The key a member supplies to connect their own account at a provider. The
+key itself is write-only and never returned.
+"""
+type ListMemberKeyPayload {
+	"""
+	Label shown next to the key field.
+	"""
+	label: String!
+	"""
+	Help text, or null.
+	"""
+	helpText: String
+	"""
+	Where the member finds the key at the provider, or null.
+	"""
+	helpUrl: String
+	"""
+	Whether the member still approves at the provider after the key is accepted.
+	"""
+	approval: Boolean!
+	"""
+	Whether connecting needs the member's key. False when the server holds
+	a key of its own that can stand in.
+	"""
+	required: Boolean!
 }
 
 """
@@ -11167,6 +11210,11 @@ type ListProviderPayload {
 	is never included here.
 	"""
 	configFields: [ListProviderSettingFieldPayload!]!
+	"""
+	The key each member supplies to connect their own account, or null
+	when accounts are connected by signing in at the provider.
+	"""
+	memberKey: ListMemberKeyPayload
 }
 
 """
@@ -20552,6 +20600,25 @@ type MutationRoot {
 		"""
 		origin: String!
 	): ListAccountLinkPayload!
+	"""
+	Link the current member's account with a key they supply, for a provider whose manifest
+	declares a member key. The key is stored encrypted on that member's account and is never
+	returned.
+	"""
+	linkListAccountWithKey(
+		"""
+		Provider whose account is being linked.
+		"""
+		provider: String!,
+		"""
+		Write-only key the member copied from the provider.
+		"""
+		key: String!,
+		"""
+		Exact browser origin approved by the instance public URL or local listening address. Needed when the provider still asks for the member's approval.
+		"""
+		origin: String
+	): ListAccountKeyLinkPayload!
 	"""
 	Poll an account authorization session owned by the current member.
 	"""

@@ -9,13 +9,16 @@ use scryer_domain::{
     Id, ListAccountCredential, ListPolicy, User, UserListAccount, UserListAccountStatus,
 };
 use scryer_plugin_sdk::{
-    ListCredential, ListPluginAccountResponse, ListProviderAuth, PluginErrorCode, PluginResult,
+    LIST_CREDENTIAL_TYPE_API_KEY, ListAccountFlow, ListCredential, ListMemberKeyUse,
+    ListPluginAccountResponse, ListProviderAuth, PluginDescriptor, PluginErrorCode, PluginResult,
 };
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::Mutex;
 
 const MAX_LINK_SESSIONS: usize = 1024;
 const LINK_TTL_SECONDS: i64 = 600;
+/// Longest key a member may supply for their own account.
+const MAX_MEMBER_KEY_BYTES: usize = 4096;
 /// How long a rate-limited link waits before the provider is asked again,
 /// whatever pace the browser polls at.
 const RATE_LIMITED_PAUSE_SECONDS: i64 = 30;
@@ -555,6 +558,41 @@ pub struct ListAccountPoll {
     pub status: ListAccountPollStatus,
     pub account: Option<ListAccountView>,
 }
+/// Where linking with a member's own key leaves the member.
+pub enum ListAccountKeyLink {
+    /// The key is the credential, and the account is linked.
+    Linked(Box<ListAccountView>),
+    /// The provider still wants the member's approval; the link goes on like
+    /// one started without a key.
+    Approval(ListAccountLink),
+}
+/// The key as it is stored: surrounding space dropped, one bounded line of
+/// printable ASCII.
+fn member_key(value: &str) -> AppResult<String> {
+    let key = value.trim();
+    if key.is_empty()
+        || key.len() > MAX_MEMBER_KEY_BYTES
+        || !key.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(refused(
+            refusal::ACCOUNT_KEY_INVALID,
+            "enter the key as one line without spaces",
+        ));
+    }
+    Ok(key.to_string())
+}
+fn key_unsupported() -> AppError {
+    refused(
+        refusal::ACCOUNT_KEY_UNSUPPORTED,
+        "this provider's accounts are not linked with a key",
+    )
+}
+fn key_rejected() -> AppError {
+    refused(
+        refusal::ACCOUNT_KEY_REJECTED,
+        "the provider refused this key",
+    )
+}
 fn missing() -> AppError {
     AppError::NotFound("list account link not found or expired".into())
 }
@@ -716,16 +754,8 @@ impl AppUseCase {
         ensure_account_owner(actor, &account)?;
         Ok(account)
     }
-    pub async fn start_list_account_link(
-        &self,
-        actor: &User,
-        provider: &str,
-        browser_origin: &str,
-    ) -> AppResult<ListAccountLink> {
-        self.require_personal_lists_allowed(actor).await?;
-        let origin = origin(browser_origin)?;
-        let descriptor = self
-            .services
+    fn list_account_provider(&self, provider: &str) -> AppResult<PluginDescriptor> {
+        self.services
             .lists
             .plugins
             .descriptors()
@@ -736,7 +766,108 @@ impl AppUseCase {
                         || list.provider_aliases.iter().any(|alias| alias == provider)
                 })
             })
-            .ok_or_else(|| AppError::NotFound("list provider not found".into()))?;
+            .ok_or_else(|| AppError::NotFound("list provider not found".into()))
+    }
+    /// The application token the server itself holds for TMDb's approval
+    /// flow: the operator's `api_key`, or the one the provider ships.
+    pub(crate) async fn server_tmdb_app_token(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Option<String> {
+        let values = self.list_provider_config_for("tmdb").await;
+        values
+            .get("api_key")
+            .cloned()
+            .or_else(|| {
+                descriptor
+                    .config_fields()
+                    .iter()
+                    .find(|field| field.key == "api_key")
+                    .and_then(|field| field.default_value.clone())
+            })
+            .filter(|token| !token.trim().is_empty())
+    }
+    pub async fn start_list_account_link(
+        &self,
+        actor: &User,
+        provider: &str,
+        browser_origin: &str,
+    ) -> AppResult<ListAccountLink> {
+        self.begin_list_account_link(actor, provider, browser_origin, None)
+            .await
+    }
+    /// Link the member's account at `provider` with a key they supply, for a
+    /// provider that declares one. The key becomes the member's credential, or
+    /// stands in for the server's application while the member approves; it is
+    /// kept only on that member's account.
+    pub async fn link_list_account_with_key(
+        &self,
+        actor: &User,
+        provider: &str,
+        key: &str,
+        browser_origin: Option<&str>,
+    ) -> AppResult<ListAccountKeyLink> {
+        self.require_personal_lists_allowed(actor).await?;
+        let descriptor = self.list_account_provider(provider)?;
+        let list = descriptor.list_provider().ok_or_else(missing)?;
+        let declared = list.member_key.as_ref().ok_or_else(key_unsupported)?;
+        let key = member_key(key)?;
+        match declared.use_as {
+            ListMemberKeyUse::Credential => {
+                if !list.capabilities.account {
+                    return Err(key_unsupported());
+                }
+                let credential = ListAccountCredential {
+                    access_token: key,
+                    direct: true,
+                    token_type: Some(LIST_CREDENTIAL_TYPE_API_KEY.into()),
+                    ..Default::default()
+                };
+                self.finish_list_account_link(
+                    actor,
+                    list.provider_type.trim_end_matches("-list"),
+                    credential,
+                    None,
+                    Utc::now() + Duration::seconds(LINK_TTL_SECONDS),
+                )
+                .await
+                .map(|view| ListAccountKeyLink::Linked(Box::new(view)))
+            }
+            // Only TMDb's approval flow runs on a single application token.
+            ListMemberKeyUse::AccountApp => {
+                if !matches!(
+                    list.auth,
+                    ListProviderAuth::MemberAccount {
+                        flow: ListAccountFlow::TmdbApproval,
+                        ..
+                    }
+                ) {
+                    return Err(key_unsupported());
+                }
+                let origin = browser_origin.ok_or_else(|| {
+                    refused(
+                        refusal::ACCOUNT_LINK_ORIGIN_INVALID,
+                        "an account link needs a valid origin",
+                    )
+                })?;
+                self.begin_list_account_link(actor, provider, origin, Some(key))
+                    .await
+                    .map(ListAccountKeyLink::Approval)
+            }
+        }
+    }
+    /// Starts a link session. `member_app_token` is the member's own key
+    /// standing in for the server's application token.
+    async fn begin_list_account_link(
+        &self,
+        actor: &User,
+        provider: &str,
+        browser_origin: &str,
+        member_app_token: Option<String>,
+    ) -> AppResult<ListAccountLink> {
+        self.require_personal_lists_allowed(actor).await?;
+        let origin = origin(browser_origin)?;
+        let descriptor = self.list_account_provider(provider)?;
         let list = descriptor.list_provider().ok_or_else(missing)?;
         if !matches!(list.auth, ListProviderAuth::MemberAccount { .. })
             || !list.capabilities.account
@@ -748,19 +879,18 @@ impl AppUseCase {
         }
         let provider = list.provider_type.clone();
         let protocol_provider = provider.trim_end_matches("-list").to_string();
+        let with_member_key = member_app_token.is_some();
         let app = if protocol_provider == "tmdb" {
-            let values = self.list_provider_config_for("tmdb").await;
-            let bearer = values.get("api_key").cloned().or_else(|| {
-                descriptor
-                    .config_fields()
-                    .iter()
-                    .find(|field| field.key == "api_key")
-                    .and_then(|field| field.default_value.clone())
-            });
+            let bearer = match member_app_token {
+                Some(token) => Some(token),
+                None => self.server_tmdb_app_token(&descriptor).await,
+            };
             Some(ListProviderAppConfig {
                 access_token: bearer,
                 ..ListProviderAppConfig::default()
             })
+        } else if with_member_key {
+            return Err(key_unsupported());
         } else {
             self.list_provider_app_config(&protocol_provider).await?
         };
@@ -827,6 +957,11 @@ impl AppUseCase {
             Ok(response) => response,
             Err(error) => {
                 sessions.remove(&id);
+                // The provider refused the first call made with the member's
+                // own key, so the key is what it refused.
+                if with_member_key && auth_failure_code(&error) == Some(PROVIDER_REJECTED) {
+                    return Err(key_rejected());
+                }
                 return Err(error);
             }
         };
@@ -1199,6 +1334,15 @@ impl AppUseCase {
             }
             Err(error @ (AppError::Repository(_) | AppError::TemporaryUnavailable { .. })) => {
                 Err(error)
+            }
+            // A key being linked was refused by the provider; nothing is stored
+            // yet, so the member is asked for the right key rather than to reconnect.
+            Ok(PluginResult::Err(error))
+                if account.is_none()
+                    && error.code == PluginErrorCode::AuthFailed
+                    && token.token_type.as_deref() == Some(LIST_CREDENTIAL_TYPE_API_KEY) =>
+            {
+                Err(key_rejected())
             }
             _ => Err(refused(
                 refusal::ACCOUNT_IDENTITY_UNVERIFIED,

@@ -807,8 +807,9 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
       managedAccount={managedAccount}
       accountLoading={accountLoading}
       linkingProvider={accountLink.provider}
+      checkingAccountKey={accountLink.checkingKey}
       accountLinkError={accountLink.error}
-      onLinkAccount={(provider) => void accountLink.start(provider)}
+      onLinkAccount={(provider, memberKey) => void accountLink.start(provider, memberKey)}
       onCancelLink={accountLink.cancel}
       onManageAccount={(account) => void manageAccount(account)}
       onUnlinkAccount={unlinkAccount}

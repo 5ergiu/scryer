@@ -4,7 +4,7 @@ import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { hasGraphQlErrorCode } from "@/lib/graphql/error-message";
 import { listErrorMessage } from "@/lib/utils/list-error-message";
-import { completeListAccountLinkMutation, pollListAccountLinkMutation, startListAccountLinkMutation } from "@/lib/graphql/list-accounts";
+import { completeListAccountLinkMutation, linkListAccountWithKeyMutation, pollListAccountLinkMutation, startListAccountLinkMutation } from "@/lib/graphql/list-accounts";
 import type { ListAccountLinkSession } from "@/lib/types/lists";
 import {
   LIST_ACCOUNT_LINK_STORAGE_KEY,
@@ -20,12 +20,17 @@ import {
 
 type ActiveLink = { pending: PendingListAccountLink; popup: Window | null; consumed: boolean };
 
+/** A key the member typed, and whether the provider still wants their approval after it. */
+export type ListAccountMemberKey = { key: string; approval: boolean };
+
 export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promise<void>) {
   const client = useClient();
   const t = useTranslate();
   const active = React.useRef<ActiveLink | null>(null);
   const generation = React.useRef(0);
   const [provider, setProvider] = React.useState<string | null>(null);
+  // A key that links on its own opens no provider window to wait on.
+  const [checkingKey, setCheckingKey] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const cancel = React.useCallback(() => {
@@ -34,6 +39,7 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
     active.current = null;
     try { window.sessionStorage.removeItem(LIST_ACCOUNT_LINK_STORAGE_KEY); } catch { /* Storage may be disabled. */ }
     setProvider(null);
+    setCheckingKey(false);
   }, []);
 
   React.useEffect(() => {
@@ -74,21 +80,49 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
     };
   }, [cancel, client, onLinked, t]);
 
-  const start = React.useCallback(async (nextProvider: string) => {
+  const start = React.useCallback(async (nextProvider: string, memberKey?: ListAccountMemberKey) => {
     cancel();
     setError(null);
     setProvider(nextProvider);
+    const keyOnly = !!memberKey && !memberKey.approval;
+    setCheckingKey(keyOnly);
     const request = generation.current;
     // Open during the click, before the network request loses user activation.
-    const popup = window.open("about:blank", "_blank", "popup,width=600,height=750");
+    const popup = keyOnly ? null : window.open("about:blank", "_blank", "popup,width=600,height=750");
     try {
-      const result = await client.mutation(startListAccountLinkMutation, {
-        provider: nextProvider,
-        origin: window.location.origin,
-      }).toPromise();
-      if (request !== generation.current) { popup?.close(); return; }
-      if (result.error) throw result.error;
-      const session = result.data?.startListAccountLink as ListAccountLinkSession | undefined;
+      let session: ListAccountLinkSession | undefined;
+      if (memberKey) {
+        const result = await client.mutation(linkListAccountWithKeyMutation, {
+          provider: nextProvider,
+          key: memberKey.key,
+          origin: memberKey.approval ? window.location.origin : null,
+        }).toPromise();
+        if (request !== generation.current) { popup?.close(); return; }
+        if (result.error) throw result.error;
+        const linked = result.data?.linkListAccountWithKey as { account: unknown; link: ListAccountLinkSession | null } | undefined;
+        if (linked?.account) {
+          popup?.close();
+          await finishCurrentListAccountLink(
+            () => request === generation.current,
+            onLinked,
+            cancel,
+            (reason) => {
+              setError(listErrorMessage(reason, t, t("lists.accounts.linkFailed")));
+              cancel();
+            },
+          );
+          return;
+        }
+        session = linked?.link ?? undefined;
+      } else {
+        const result = await client.mutation(startListAccountLinkMutation, {
+          provider: nextProvider,
+          origin: window.location.origin,
+        }).toPromise();
+        if (request !== generation.current) { popup?.close(); return; }
+        if (result.error) throw result.error;
+        session = result.data?.startListAccountLink as ListAccountLinkSession | undefined;
+      }
       if (!session) throw new Error(t("lists.accounts.linkFailed"));
       const pending = parsePendingListAccountLink(JSON.stringify({ ...session, provider: nextProvider }), window.location.origin);
       if (!pending) throw new Error(t("lists.accounts.linkFailed"));
@@ -175,5 +209,5 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
     }
   }, [cancel, client, onLinked, t]);
 
-  return { provider, error, start, cancel };
+  return { provider, checkingKey, error, start, cancel };
 }

@@ -89,6 +89,18 @@ export type ListProviderManifest = {
   notes: Array<{ tone: ListNoteTone; textKey: string }>;
   urlPatterns: ListUrlPattern[];
   configFields: ListProviderSettingField[];
+  /** The key each member supplies to connect their own account, when the provider takes one. */
+  memberKey: ListMemberKey | null;
+};
+
+export type ListMemberKey = {
+  label: string;
+  helpText: string | null;
+  helpUrl: string | null;
+  /** The member still approves at the provider once the key is accepted. */
+  approval: boolean;
+  /** False when the server holds a key of its own that can stand in. */
+  required: boolean;
 };
 
 export type ListProviderSettingFieldType =
