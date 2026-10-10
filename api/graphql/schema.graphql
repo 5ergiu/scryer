@@ -17624,6 +17624,18 @@ type MetadataMoviePayload {
 	TMDB release date, or null when unavailable.
 	"""
 	tmdbReleaseDate: Date
+	"""
+	Host address of the backdrop image, or null when the title has none.
+	"""
+	backgroundUrl: String
+	"""
+	Ratings from external sources; empty when none are known.
+	"""
+	externalRatings: [DiscoveryExternalRatingPayload!]!
+	"""
+	Genre and theme names; empty when none are known.
+	"""
+	genresAndThemes: [String!]!
 }
 
 """
@@ -17860,6 +17872,18 @@ type MetadataSeriesPayload {
 	Companion movies reported for an anime series; empty for other series.
 	"""
 	animeMovies: [MetadataAnimeMoviePayload!]!
+	"""
+	Host address of the backdrop image, or null when the title has none.
+	"""
+	backgroundUrl: String
+	"""
+	Ratings from external sources; empty when none are known.
+	"""
+	externalRatings: [DiscoveryExternalRatingPayload!]!
+	"""
+	Genre and theme names; empty when none are known.
+	"""
+	genresAndThemes: [String!]!
 }
 
 """

@@ -126,6 +126,12 @@ pub struct MetadataMoviePayload {
     pub studio: String,
     /// TMDB release date, or null when unavailable.
     pub tmdb_release_date: Option<Date>,
+    /// Host address of the backdrop image, or null when the title has none.
+    pub background_url: Option<String>,
+    /// Ratings from external sources; empty when none are known.
+    pub external_ratings: Vec<super::DiscoveryExternalRatingPayload>,
+    /// Genre and theme names; empty when none are known.
+    pub genres_and_themes: Vec<String>,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -167,6 +173,12 @@ pub struct MetadataSeriesPayload {
     pub episodes: Vec<MetadataEpisodePayload>,
     /// Companion movies reported for an anime series; empty for other series.
     pub anime_movies: Vec<MetadataAnimeMoviePayload>,
+    /// Host address of the backdrop image, or null when the title has none.
+    pub background_url: Option<String>,
+    /// Ratings from external sources; empty when none are known.
+    pub external_ratings: Vec<super::DiscoveryExternalRatingPayload>,
+    /// Genre and theme names; empty when none are known.
+    pub genres_and_themes: Vec<String>,
 }
 
 #[derive(SimpleObject, Clone)]

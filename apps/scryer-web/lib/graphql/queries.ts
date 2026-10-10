@@ -4377,13 +4377,45 @@ export const metadataMovieQuery = `query MetadataMovie($input: MetadataMovieInpu
   }
 }`;
 
-/** A series' name, year, overview and poster, without its seasons or episodes. */
+/** What a title's flyout shows of a movie: its description, artwork, ratings and genres. */
+export const metadataMovieSummaryQuery = `query MetadataMovieSummary($input: MetadataMovieInput!) {
+  metadataMovie(input: $input) {
+    name
+    year
+    overview
+    posterUrl
+    backgroundUrl
+    runtimeMinutes
+    externalRatings {
+      source
+      value
+      score
+      normalized
+      votes
+      url
+    }
+    genresAndThemes
+  }
+}`;
+
+/** The same for a series, without its seasons or episodes. */
 export const metadataSeriesSummaryQuery = `query MetadataSeriesSummary($input: MetadataSeriesInput!) {
   metadataSeries(input: $input) {
     name
     year
     overview
     posterUrl
+    backgroundUrl
+    runtimeMinutes
+    externalRatings {
+      source
+      value
+      score
+      normalized
+      votes
+      url
+    }
+    genresAndThemes
   }
 }`;
 

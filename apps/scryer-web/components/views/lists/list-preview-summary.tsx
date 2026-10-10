@@ -1,13 +1,11 @@
 import * as React from "react";
-import { CalendarDays, Languages, Tags } from "lucide-react";
 import { TitlePoster } from "@/components/title-poster";
-import { TitleRatingsDisplay } from "@/components/common/title-ratings-display";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { facetById } from "@/lib/facets/registry";
 import { useTranslate } from "@/lib/context/translate-context";
 import type { ListPreview, ListPreviewItem } from "@/lib/types/lists";
 import { listKindLabelKey, listPreviewMetadataLookup } from "@/lib/utils/lists";
-import { formatLanguage } from "@/lib/utils/media-info-format";
+import { LIST_TITLE_FLYOUT_CLASS, ListTitleFlyoutBody } from "./list-title-flyout";
 import { useListTitleMetadata } from "./use-list-title-metadata";
 
 type ListPreviewSummaryProps = {
@@ -21,7 +19,7 @@ export function ListPreviewPoster({ item }: { item: ListPreviewItem }) {
   const [open, setOpen] = React.useState(false);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearTimer = () => { if (timer.current) clearTimeout(timer.current); };
-  // The description is read from the metadata service as the flyout opens.
+  // The description and backdrop are read from the metadata service as the flyout opens.
   const [metadata, requestMetadata] = useListTitleMetadata(listPreviewMetadataLookup(item));
   const show = () => { clearTimer(); requestMetadata(); setOpen(true); };
   const hide = () => { clearTimer(); timer.current = setTimeout(() => setOpen(false), 150); };
@@ -45,26 +43,24 @@ export function ListPreviewPoster({ item }: { item: ListPreviewItem }) {
       </PopoverTrigger>
       <PopoverContent side="right" align="center" sideOffset={12} collisionPadding={12}
         aria-label={item.displayTitle}
-        className="z-[90] w-[360px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto rounded-xl border-[var(--scry-border3)] text-[var(--scry-ink)] shadow-xl"
+        className={LIST_TITLE_FLYOUT_CLASS}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
         onMouseEnter={clearTimer} onMouseLeave={hide} onFocus={clearTimer} onBlur={hide}>
-        <div className="space-y-3">
-          <div>
-            <p className="mb-1 flex items-center gap-2 text-xs text-[var(--scry-muted)]">
-              {FacetIcon ? <FacetIcon className="h-4 w-4" aria-hidden="true" /> : null}
-              {[item.kind ? t(listKindLabelKey(item.kind)) : null, item.year].filter(Boolean).join(" · ")}
-            </p>
-            <h3 className="font-display text-base font-semibold">{item.displayTitle}</h3>
-          </div>
-          <TitleRatingsDisplay externalRatings={item.externalRatings} />
-          {metadata?.overview ? (
-            <p data-ui="list-preview-overview" className="line-clamp-6 text-sm leading-relaxed text-[var(--scry-ink2)]">{metadata.overview}</p>
-          ) : null}
-          {item.genresAndThemes?.length ? <p className="flex gap-2 text-sm text-[var(--scry-ink2)]"><Tags aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />{item.genresAndThemes.join(" · ")}</p> : null}
-          {item.originalLanguage ? <p className="flex gap-2 text-sm text-[var(--scry-muted)]"><Languages aria-hidden="true" className="h-4 w-4 shrink-0" />{formatLanguage(item.originalLanguage)}</p> : null}
-          {item.releaseDate ? <p className="flex gap-2 text-sm text-[var(--scry-muted)]"><CalendarDays aria-hidden="true" className="h-4 w-4 shrink-0" /><time dateTime={item.releaseDate}>{item.releaseDate}</time></p> : null}
-        </div>
+        <ListTitleFlyoutBody
+          title={item.displayTitle}
+          kindIcon={FacetIcon ? <FacetIcon className="h-4 w-4" aria-hidden="true" /> : null}
+          kindLabel={item.kind ? t(listKindLabelKey(item.kind)) : null}
+          year={item.year}
+          runtimeMinutes={metadata?.runtimeMinutes}
+          posterUrl={item.posterUrl ?? metadata?.posterUrl}
+          backgroundUrl={metadata?.backgroundUrl}
+          externalRatings={item.externalRatings}
+          overview={metadata?.overview}
+          genres={item.genresAndThemes}
+          originalLanguage={item.originalLanguage}
+          releaseDate={item.releaseDate}
+        />
       </PopoverContent>
     </Popover>
   );
