@@ -5499,7 +5499,8 @@ export const LIST_SUBSCRIPTION_FIELDS = `
     counts {${LIST_COUNTS_FIELDS}
     }
     createdAt
-    updatedAt`;
+    updatedAt
+    accountId`;
 
 const LIST_PREVIEW_FIELDS = `
     recognized

@@ -67,6 +67,11 @@ export function PersonalAccountConnections(props: ConnectionsProps) {
               <Button size="sm" variant={linked ? "outline" : "default"} disabled={!!props.linkingProvider} onClick={() => props.onLink(provider.providerType)}>
                 {t(linked ? "lists.accounts.reconnect" : "lists.accounts.connect")}
               </Button>
+              {linked ? (
+                <Button size="sm" variant="outline" disabled={!!props.linkingProvider} onClick={() => props.onLink(provider.providerType)}>
+                  {t("lists.accounts.connectAnother")}
+                </Button>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -95,7 +100,10 @@ export function PersonalAccounts(props: Props) {
   });
   // Linking or unlinking changes an entry's key, so the provider is kept to fall back on.
   const [picked, setPicked] = React.useState<{ key: string; providerType: string } | null>(null);
+  // A further account being connected opens once it arrives; the accounts there before it are kept to tell it apart.
+  const [adding, setAdding] = React.useState<{ providerType: string; known: string[] } | null>(null);
   const selected =
+    entries.find((entry) => entry.linked && entry.provider.providerType === adding?.providerType && !adding.known.includes(entry.key)) ??
     entries.find((entry) => entry.key === picked?.key) ??
     entries.find((entry) => entry.provider.providerType === picked?.providerType) ??
     entries[0] ??
@@ -125,7 +133,7 @@ export function PersonalAccounts(props: Props) {
   const rows: CatalogListRow[] = [];
   if (account && manifest) {
     const followed = (sourceType: string, params: ListSourceDraft["params"]) =>
-      isListSourceFollowed(props.subscriptions, { provider: account.provider, sourceType, params });
+      isListSourceFollowed(props.subscriptions, { provider: account.provider, sourceType, params, accountId: account.id });
     const followId = (key: string) => `lists-account-follow-${account.id}-${key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
     for (const item of items) {
       if (choices.some((choice) => choice.sourceType === item.sourceType)) continue;
@@ -181,7 +189,10 @@ export function PersonalAccounts(props: Props) {
                 key={entry.key}
                 id={`lists-account-${entry.key}`}
                 active={entry.key === selected.key}
-                onSelect={() => setPicked({ key: entry.key, providerType: entry.provider.providerType })}
+                onSelect={() => {
+                  setAdding(null);
+                  setPicked({ key: entry.key, providerType: entry.provider.providerType });
+                }}
                 icon={<ProviderTile provider={entry.provider} size="sm" />}
                 name={entry.provider.name}
                 detail={
@@ -209,6 +220,24 @@ export function PersonalAccounts(props: Props) {
               >
                 {t(account ? "lists.accounts.reconnect" : "lists.accounts.connect")}
               </Button>
+              {account ? (
+                <Button
+                  id={`lists-account-add-${selected.key}`}
+                  size="sm"
+                  variant="outline"
+                  disabled={!!props.linkingProvider}
+                  onClick={() => {
+                    const providerType = selected.provider.providerType;
+                    setAdding({
+                      providerType,
+                      known: props.accounts.filter((entry) => entry.provider === providerType).map((entry) => entry.id),
+                    });
+                    props.onLink(providerType);
+                  }}
+                >
+                  {t("lists.accounts.connectAnother")}
+                </Button>
+              ) : null}
               {account && !confirmingUnlink ? (
                 <Button id={`lists-account-unlink-${account.id}`} size="sm" variant="outline" onClick={() => setUnlinkingId(account.id)}>
                   {t("lists.accounts.unlink")}
@@ -224,6 +253,9 @@ export function PersonalAccounts(props: Props) {
                 <LoadingMark className="h-4 w-4" />{t("lists.accounts.waiting")}
                 <Button size="sm" variant="outline" onClick={props.onCancelLink}>{t("label.cancel")}</Button>
               </div>
+            ) : null}
+            {props.linkingProvider && adding ? (
+              <p className="text-[12.5px] text-[var(--scry-muted)]">{t("lists.accounts.connectAnotherHint")}</p>
             ) : null}
             {account && confirmingUnlink ? (
               <div className="space-y-2 rounded-[12px] border border-[var(--scry-border3)] p-3">

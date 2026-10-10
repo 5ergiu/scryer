@@ -196,6 +196,8 @@ export type ListSubscription = {
   counts: ListCounts;
   createdAt: string;
   updatedAt: string;
+  /** The linked account a personal list is read through; null for a public list. */
+  accountId: string | null;
 };
 
 export type ListPreviewItem = {

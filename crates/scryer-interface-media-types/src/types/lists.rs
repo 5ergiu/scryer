@@ -775,6 +775,8 @@ pub struct ListSubscriptionPayload {
     pub created_at: DateTime<Utc>,
     /// When the list's settings last changed.
     pub updated_at: DateTime<Utc>,
+    /// The linked account a personal list is read through; null for a public list.
+    pub account_id: Option<ID>,
 }
 
 /// One title on a followed list.

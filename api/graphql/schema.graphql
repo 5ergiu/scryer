@@ -11541,6 +11541,10 @@ type ListSubscriptionPayload {
 	When the list's settings last changed.
 	"""
 	updatedAt: DateTime!
+	"""
+	The linked account a personal list is read through; null for a public list.
+	"""
+	accountId: ID
 }
 
 """

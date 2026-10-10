@@ -632,6 +632,7 @@ pub fn from_list_subscription(subscription: ListSubscription) -> ListSubscriptio
         counts: from_counts(subscription.counts),
         created_at: subscription.created_at,
         updated_at: subscription.updated_at,
+        account_id: subscription.credential_id.map(Into::into),
     }
 }
 

@@ -391,6 +391,20 @@ test("a source counts as followed only on the same provider, source type and par
   );
 });
 
+test("a list followed through one linked account is not followed through another", () => {
+  const followed = [
+    { accountId: "account-one", source: { provider: "mal", sourceType: "plan_to_watch", params: [] } },
+    { accountId: null, source: { provider: "mal", sourceType: "top", params: [] } },
+  ];
+  const personal = { provider: "mal", sourceType: "plan_to_watch", params: [] };
+  assert.equal(isListSourceFollowed(followed, { ...personal, accountId: "account-one" }), true);
+  assert.equal(isListSourceFollowed(followed, { ...personal, accountId: "account-two" }), false);
+  // A personal follow does not mark the public list of the same source, nor the other way round.
+  assert.equal(isListSourceFollowed(followed, personal), false);
+  assert.equal(isListSourceFollowed(followed, { provider: "mal", sourceType: "top", params: [] }), true);
+  assert.equal(isListSourceFollowed(followed, { provider: "mal", sourceType: "top", params: [], accountId: "account-one" }), false);
+});
+
 test("provider intervals read in the largest whole unit", () => {
   assert.deepEqual(listIntervalParts(86_400 * 2), { key: "lists.interval.days", count: 2 });
   assert.deepEqual(listIntervalParts(21_600), { key: "lists.interval.hours", count: 6 });

@@ -376,14 +376,17 @@ export function publicProviders(manifests: readonly ListProviderManifest[]): Lis
  * a second follow of the same provider, source type and parameters.
  */
 export function isListSourceFollowed(
-  subscriptions: readonly Pick<ListSubscription, "source">[],
-  source: { provider: string; sourceType: string; params: readonly ListParam[] },
+  subscriptions: readonly (Pick<ListSubscription, "source"> & Partial<Pick<ListSubscription, "accountId">>)[],
+  source: { provider: string; sourceType: string; params: readonly ListParam[]; accountId?: string | null },
 ): boolean {
   const paramsKey = (params: readonly ListParam[]) =>
     params.map((param) => `${param.key}\u0000${param.value.trim()}`).sort().join("\u0001");
   const wanted = paramsKey(source.params);
+  // The same list on two linked accounts is two lists, and neither is a public one.
+  const account = source.accountId ?? null;
   return subscriptions.some(
     (subscription) =>
+      (subscription.accountId ?? null) === account &&
       subscription.source.provider === source.provider &&
       subscription.source.sourceType === source.sourceType &&
       paramsKey(subscription.source.params) === wanted,
