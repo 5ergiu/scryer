@@ -147,7 +147,7 @@ export function ListDetailPanel({
           <div className="space-y-6 px-4 pb-8">
             {canManageLists ? (
               <div className="flex flex-wrap items-center justify-end gap-2">
-                <label className="flex shrink-0 items-center gap-3">
+                <label className="mr-auto flex shrink-0 items-center gap-3">
                   <Checkbox
                     id="list-detail-enabled"
                     size="large"

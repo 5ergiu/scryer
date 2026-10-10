@@ -29,6 +29,8 @@ export type CatalogListRow = {
   name: string;
   description?: string | null;
   kinds: readonly Facet[];
+  /** The linked account the list is read through, for a member's own list. */
+  account?: string;
   /** How often the list syncs once followed; left out when the offer does not say. */
   intervalSeconds?: number | null;
   /** A list already followed is shown as such and cannot be followed again. */
@@ -42,7 +44,7 @@ export type CatalogListRow = {
   onPreview?: () => Promise<ListPreview | null>;
 };
 
-type CatalogSortKey = "name" | "type";
+type CatalogSortKey = "name" | "account" | "type";
 type CatalogSort = { key: CatalogSortKey; descending: boolean };
 /** A row's preview: still loading, or the titles it found. */
 type RowPreview = { titles: ListPreviewItem[] | null };
@@ -58,7 +60,8 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
   const [previews, setPreviews] = React.useState<Readonly<Record<string, RowPreview>>>({});
   const showSchedule = rows.some((row) => row.intervalSeconds != null);
   const showPreview = rows.some((row) => row.onPreview && !row.followed);
-  const columns = 3 + (showSchedule ? 1 : 0);
+  const showAccount = rows.some((row) => row.account);
+  const columns = 3 + (showSchedule ? 1 : 0) + (showAccount ? 1 : 0);
 
   const sorted = React.useMemo(() => {
     if (!sort) return rows;
@@ -68,6 +71,9 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
     const type = (row: CatalogListRow) => row.kinds.map((kind) => t(listKindLabelKey(kind))).join(" ");
     return [...rows].sort((a, b) => {
       if (sort.key === "name") return byName(a, b) * factor;
+      if (sort.key === "account") {
+        return (a.account ?? "").localeCompare(b.account ?? "", undefined, { sensitivity: "base", numeric: true }) * factor || byName(a, b);
+      }
       return type(a).localeCompare(type(b)) * factor || byName(a, b);
     });
   }, [rows, sort, t]);
@@ -116,6 +122,7 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
       <TableHeader>
         <TableRow>
           {sortableHead("name", t("lists.table.list"))}
+          {showAccount ? sortableHead("account", t("label.account"), "w-[1%] whitespace-nowrap") : null}
           {sortableHead("type", t("label.type"), "hidden w-[1%] whitespace-nowrap sm:table-cell")}
           {showSchedule ? (
             <TableHead className="hidden w-[1%] whitespace-nowrap md:table-cell">{t("lists.detail.interval")}</TableHead>
@@ -140,6 +147,11 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
                     <p className="text-[12px] text-[var(--scry-muted)]">{row.description}</p>
                   ) : null}
                 </TableCell>
+                {showAccount ? (
+                  <TableCell data-ui="list-catalog-account" className="whitespace-nowrap text-[13px] text-[var(--scry-ink2)]">
+                    {row.account}
+                  </TableCell>
+                ) : null}
                 <TableCell className="hidden sm:table-cell">
                   {row.kinds.length > 0 ? <FacetTags values={row.kinds} emptyLabel={null} /> : null}
                 </TableCell>
