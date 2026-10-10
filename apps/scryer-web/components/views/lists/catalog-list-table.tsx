@@ -129,10 +129,7 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
           const previewId = `${row.followId}-preview`;
           return (
             <React.Fragment key={row.key}>
-              <TableRow
-                data-ui="list-catalog-row"
-                className={preview ? "border-b-0 hover:bg-[var(--scry-hover)]" : "hover:bg-[var(--scry-hover)]"}
-              >
+              <TableRow data-ui="list-catalog-row" className={preview ? "border-b-0" : undefined}>
                 <TableCell>
                   <p className="text-[13.5px] font-semibold text-[var(--scry-ink)]">{row.name}</p>
                   {row.description ? (
