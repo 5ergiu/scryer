@@ -35,7 +35,10 @@ export type CatalogListRow = {
   followed: boolean;
   followId: string;
   onFollow: () => void;
-  /** Reads the list as it stands, with no filters; left out when it cannot be read without more input. */
+  /**
+   * Reads the list as it stands, with no filters; left out when it cannot be read without more input.
+   * A followed list is not previewed here, since what it would add is on the list itself.
+   */
   onPreview?: () => Promise<ListPreview | null>;
 };
 
@@ -54,7 +57,7 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
   const [sort, setSort] = React.useState<CatalogSort | null>(null);
   const [previews, setPreviews] = React.useState<Readonly<Record<string, RowPreview>>>({});
   const showSchedule = rows.some((row) => row.intervalSeconds != null);
-  const showPreview = rows.some((row) => row.onPreview);
+  const showPreview = rows.some((row) => row.onPreview && !row.followed);
   const columns = 3 + (showSchedule ? 1 : 0);
 
   const sorted = React.useMemo(() => {
@@ -125,7 +128,8 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
       <TableBody>
         {sorted.map((row) => {
           const interval = row.intervalSeconds != null ? listIntervalParts(row.intervalSeconds) : null;
-          const preview = previews[row.key];
+          const canPreview = Boolean(row.onPreview) && !row.followed;
+          const preview = canPreview ? previews[row.key] : undefined;
           const previewId = `${row.followId}-preview`;
           return (
             <React.Fragment key={row.key}>
@@ -152,8 +156,8 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
                         type="button"
                         size="xs"
                         variant={preview ? "secondary" : "outline"}
-                        className={row.onPreview ? undefined : "invisible"}
-                        disabled={!row.onPreview}
+                        className={canPreview ? undefined : "invisible"}
+                        disabled={!canPreview}
                         aria-expanded={Boolean(preview)}
                         aria-controls={preview ? previewId : undefined}
                         onClick={() => togglePreview(row)}

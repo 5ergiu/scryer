@@ -125,15 +125,13 @@ export function ProviderBrowser({
         {shown?.groups.map((group) => {
           const authBadgeKey = AUTH_BADGE_KEY[group.authBadge];
           return (
-            <section key={group.label} className="space-y-2">
-              <div className="flex items-center gap-2">
-                <h4 className="text-[13px] font-semibold text-[var(--scry-ink2)]">{group.label}</h4>
-                {authBadgeKey ? (
-                  <Badge tone="outline" className="text-[10.5px]">
-                    {t(authBadgeKey)}
-                  </Badge>
-                ) : null}
-              </div>
+            // The group's name is not shown; it names the group to a screen reader.
+            <section key={group.label} aria-label={group.label} className="space-y-2">
+              {authBadgeKey ? (
+                <Badge tone="outline" className="text-[10.5px]">
+                  {t(authBadgeKey)}
+                </Badge>
+              ) : null}
               <CatalogListTable
                 id={`lists-catalog-${shown.providerType}-${group.items[0]?.id ?? "group"}`}
                 rows={group.items.map((item) => ({
