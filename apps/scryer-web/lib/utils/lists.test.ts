@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   listMembershipMetadataLookup,
   listMembershipReasonKey,
+  listPreviewMetadataLookup,
   listMembershipTitleHref,
   sortListSubscriptions,
 } from "./lists.ts";
@@ -91,6 +92,13 @@ test("a list entry is looked up by its matched title, then by the first id of it
     listMembershipMetadataLookup({ kind: "ANIME", smgTitleId: null, externalIds: [{ source: "anilist", value: "12" }] }),
     null,
   );
+});
+
+test("a previewed title is looked up by its matched title and kind, and not at all without both", () => {
+  assert.deepEqual(listPreviewMetadataLookup({ kind: "MOVIE", canonicalSmgId: 7 }), { movie: true, input: { smgId: 7 } });
+  assert.deepEqual(listPreviewMetadataLookup({ kind: "ANIME", canonicalSmgId: 8 }), { movie: false, input: { smgId: 8 } });
+  assert.equal(listPreviewMetadataLookup({ kind: "SERIES", canonicalSmgId: null }), null);
+  assert.equal(listPreviewMetadataLookup({ kind: null, canonicalSmgId: 9 }), null);
 });
 
 test("membership title links use library IDs for every facet and omit unlinked titles", () => {

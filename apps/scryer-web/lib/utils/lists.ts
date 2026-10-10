@@ -7,6 +7,7 @@ import type {
   ListMode,
   ListOnLeave,
   ListParam,
+  ListPreviewItem,
   ListProviderGroup,
   ListProviderItem,
   ListProviderManifest,
@@ -76,6 +77,14 @@ export function listMembershipMetadataLookup(
   if (tmdbId !== null) return { movie, input: { tmdbId } };
   const imdbId = idOf("imdb");
   return imdbId ? { movie, input: { imdbId } } : null;
+}
+
+/** How to ask the metadata service about a previewed title, or null when it was not matched to one. */
+export function listPreviewMetadataLookup(
+  item: Pick<ListPreviewItem, "kind" | "canonicalSmgId">,
+): ListTitleMetadataLookup | null {
+  if (item.canonicalSmgId == null || !item.kind) return null;
+  return { movie: item.kind === "MOVIE", input: { smgId: item.canonicalSmgId } };
 }
 
 /** Modes offered for public lists. `REQUEST` belongs to personal lists only. */
