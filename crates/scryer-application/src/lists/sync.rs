@@ -739,13 +739,7 @@ fn membership_row(
         item_key: item.item.item_key.clone(),
         rank: item.item.rank.map(i64::from),
         season: item.item.season,
-        display_title: item
-            .item
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_string),
+        display_title: item.display_title(),
         year: item.item.year,
         external_ids: item.external_ids.clone(),
         smg_title_id: item.smg_title_id,

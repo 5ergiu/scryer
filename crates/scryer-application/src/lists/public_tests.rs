@@ -253,6 +253,7 @@ async fn preview_flyout_enrichment_is_bounded_reuses_facts_and_preserves_decisio
             );
             for item in items {
                 item.facts = Some(ListMetadataFacts {
+                    name: Some(" Looked Up Name ".into()),
                     original_language: Some("ja".into()),
                     poster_url: Some("https://images.example.test/enriched.jpg".into()),
                     canonical_names: vec!["Adventure".into()],
@@ -314,6 +315,15 @@ async fn preview_flyout_enrichment_is_bounded_reuses_facts_and_preserves_decisio
     assert_eq!(
         preview.would_add[1].facts.as_ref().unwrap().canonical_names,
         ["Adventure"]
+    );
+    // A looked-up title goes by the gateway's name; one without keeps the list's.
+    assert_eq!(
+        preview.would_add[1].display_title.as_deref(),
+        Some("Looked Up Name")
+    );
+    assert_eq!(
+        preview.would_add[0].display_title,
+        items[0].item.item.title.clone()
     );
     enrich_preview_candidates(&mut items, &resolver)
         .await

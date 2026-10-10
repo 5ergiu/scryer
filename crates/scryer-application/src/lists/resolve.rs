@@ -50,6 +50,8 @@ pub trait ListItemResolver: Send + Sync {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListMetadataFacts {
+    /// The title's name in the list language, when the gateway has one.
+    pub name: Option<String>,
     pub poster_url: Option<String>,
     pub ratings: Vec<scryer_domain::TitleExternalRating>,
     pub canonical_names: Vec<String>,
@@ -75,6 +77,20 @@ pub struct ResolvedItem {
 }
 
 impl ResolvedItem {
+    /// What to call the item: the gateway's name for the matched title when
+    /// it was looked up, since a list may spell a title in its original
+    /// language, and otherwise the name the list gave.
+    pub fn display_title(&self) -> Option<String> {
+        let named = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        named(self.facts.as_ref().and_then(|facts| facts.name.as_deref()))
+            .or_else(|| named(self.item.title.as_deref()))
+    }
+
     /// An item the resolver was never asked about.
     pub fn unresolved(item: ListPluginItem, kind: Option<MediaFacet>) -> Self {
         let external_ids = item_external_ids(&item);

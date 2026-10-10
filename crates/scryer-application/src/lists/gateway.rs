@@ -327,6 +327,7 @@ impl<L: ListLibraryLookup> ListItemResolver for GatewayListItemResolver<L> {
                     facts.insert(
                         (true, *id),
                         ListMetadataFacts {
+                            name: Some(metadata.name).filter(|name| !name.trim().is_empty()),
                             poster_url: Some(metadata.poster_url)
                                 .filter(|url| !url.trim().is_empty()),
                             ratings: metadata.ratings.external_ratings,
@@ -372,6 +373,7 @@ impl<L: ListLibraryLookup> ListItemResolver for GatewayListItemResolver<L> {
                     facts.insert(
                         (false, *id),
                         ListMetadataFacts {
+                            name: Some(metadata.name).filter(|name| !name.trim().is_empty()),
                             poster_url: Some(metadata.poster_url)
                                 .filter(|url| !url.trim().is_empty()),
                             ratings: metadata.ratings.external_ratings,

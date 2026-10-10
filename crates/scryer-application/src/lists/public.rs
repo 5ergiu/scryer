@@ -380,7 +380,7 @@ pub fn summarize_preview(
                         series_movie: item.item.series_movie.clone(),
                         facts: item.item.facts.clone(),
                         item_key: key.clone(),
-                        display_title: trimmed(item.item.item.title.as_deref()),
+                        display_title: item.item.display_title(),
                         year: item.item.item.year,
                         kind: item.item.kind.clone(),
                         poster_url: posters
