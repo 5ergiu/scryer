@@ -1677,9 +1677,8 @@ impl PagedRead {
     ) -> PluginSearchCallResponse {
         let mut response = self.merged.take().unwrap_or_default();
         response.next_cursor = next_cursor;
-        if self.limit > 0 {
-            response.results.truncate(self.limit);
-        }
+        // A provider cursor advances past the entire page. Keep its tail even
+        // when that page crosses the soft result limit, or resuming skips it.
         PluginSearchCallResponse {
             response,
             completion,
@@ -2247,11 +2246,11 @@ mod tests {
     }
 
     #[test]
-    fn a_paged_read_stops_at_the_limit_and_keeps_the_cursor() {
+    fn a_paged_read_keeps_the_whole_page_when_crossing_the_limit() {
         let mut read = paged_read(3, None, None);
         assert_eq!(next(read.absorb(page(&["A", "B"], Some("p2")))), "p2");
         let response = done(read.absorb(page(&["C", "D"], Some("p3"))));
-        assert_eq!(titles(&response), vec!["A", "B", "C"]);
+        assert_eq!(titles(&response), vec!["A", "B", "C", "D"]);
         assert_eq!(response.response.next_cursor.as_deref(), Some("p3"));
         assert_eq!(
             response.completion,
@@ -2260,6 +2259,16 @@ mod tests {
                 retry_after: None,
             }
         );
+    }
+
+    #[test]
+    fn a_paged_read_preserves_the_tail_of_a_terminal_page() {
+        let mut read = paged_read(3, None, None);
+        assert_eq!(next(read.absorb(page(&["A", "B"], Some("p2")))), "p2");
+        let response = done(read.absorb(page(&["C", "D"], None)));
+        assert_eq!(titles(&response), vec!["A", "B", "C", "D"]);
+        assert_eq!(response.completion, IndexerSearchCompletion::Complete);
+        assert_eq!(response.response.next_cursor, None);
     }
 
     #[test]

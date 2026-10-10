@@ -5165,6 +5165,13 @@ pub struct ReusableIndexerSearchCandidate {
     pub normalized: NormalizedIndexerSearchCandidate,
 }
 
+/// A bounded replay batch, ordered by the opaque source ID.
+#[derive(Debug, Default)]
+pub struct ReusableIndexerSearchCandidatePage {
+    pub candidates: Vec<ReusableIndexerSearchCandidate>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReusableIndexerSearchStrategy {
     pub run_id: String,
@@ -5219,11 +5226,14 @@ pub trait IndexerSearchLearningRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Replays each stored source once across the requested runs, in source-ID order.
     async fn list_search_run_candidates(
         &self,
-        _run_id: &str,
-    ) -> AppResult<Vec<ReusableIndexerSearchCandidate>> {
-        Ok(Vec::new())
+        _run_ids: &[String],
+        _after_source_id: Option<&str>,
+        _limit: u32,
+    ) -> AppResult<ReusableIndexerSearchCandidatePage> {
+        Ok(ReusableIndexerSearchCandidatePage::default())
     }
 
     async fn list_reusable_search_strategies(
