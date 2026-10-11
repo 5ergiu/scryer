@@ -51,14 +51,13 @@ export type ListDetailState = {
   error: string | null;
 };
 
-export type ListTabCounts = Partial<Record<ListsSection, number>>;
+export type ListTabCounts = Partial<Record<Exclude<ListsSection, "providerApps">, number>>;
 
 type ListsViewProps = {
   section: ListsSection;
   onSectionChange: (section: ListsSection) => void;
   /** How many entries each section holds; a section not counted yet is absent. */
   tabCounts: ListTabCounts;
-  onProviderAppsChanged: () => void;
   canManageLists: boolean;
   experimentalFeaturesEnabled: boolean;
   canManageProviderApps: boolean;
@@ -255,7 +254,6 @@ export function ListsView(props: ListsViewProps) {
                 selected={section === "providerApps"}
                 label={t("lists.providerApps.heading")}
                 badge={t("label.advanced")}
-                count={tabCounts.providerApps}
                 onClick={() => onSectionChange("providerApps")}
               />
             ) : null}
@@ -263,7 +261,7 @@ export function ListsView(props: ListsViewProps) {
         </div>
 
         {section === "providerApps" && props.canManageProviderApps && props.experimentalFeaturesEnabled ? (
-          <ProviderAppsPanel onChanged={props.onProviderAppsChanged} />
+          <ProviderAppsPanel />
         ) : (section === "providerApps" || (section === "personal" && !props.experimentalFeaturesEnabled)) ? (
           <p role="status" className="py-6 text-sm">{t("status.permissionDenied")}</p>
         ) : loading ? (

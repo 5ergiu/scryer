@@ -15,7 +15,7 @@ import type { ListProviderApp } from "@/lib/types/lists";
 
 import { ProviderTile } from "./provider-tile";
 
-export function ProviderAppsPanel({ onChanged }: { onChanged?: () => void }) {
+export function ProviderAppsPanel() {
   const client = useClient();
   const t = useTranslate();
   const [apps, setApps] = React.useState<ListProviderApp[] | null>(null);
@@ -44,7 +44,7 @@ export function ProviderAppsPanel({ onChanged }: { onChanged?: () => void }) {
       {apps === null && !error ? <p role="status">{t("label.loading")}</p> : null}
       {apps?.filter((app) => ["trakt", "anilist", "mal"].includes(app.provider)).map((app) => (
         // Keyed by what is saved, so a form shows an app changed elsewhere instead of saving over it.
-        <ProviderAppForm key={[app.provider, app.enabled, app.clientId, app.redirectUri].join("\n")} app={app} onSaved={(saved) => { setApps((current) => current?.map((entry) => entry.provider === saved.provider ? saved : entry) ?? null); onChanged?.(); }} />
+        <ProviderAppForm key={[app.provider, app.enabled, app.clientId, app.redirectUri].join("\n")} app={app} onSaved={(saved) => { setApps((current) => current?.map((entry) => entry.provider === saved.provider ? saved : entry) ?? null); }} />
       ))}
     </section>
   );

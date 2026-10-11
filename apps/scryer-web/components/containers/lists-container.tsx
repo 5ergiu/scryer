@@ -83,13 +83,12 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
   const user = useSessionUser();
   const location = useLocation();
   const section = listsSectionFromPath(location.pathname);
-  const [tabCounts, reloadTabCounts] = useListTabCounts(canManageLists, section);
+  const tabCounts = useListTabCounts(canManageLists, section);
   return (
     <ListsContainerBody
       key={`${user?.id ?? "anonymous"}:${section}`}
       canManageLists={canManageLists}
       tabCounts={tabCounts}
-      onTabCountsChanged={reloadTabCounts}
     />
   );
 }
@@ -100,12 +99,11 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
  * the sections left behind stay current; the section on screen is counted
  * from what it has loaded.
  */
-function useListTabCounts(canManageLists: boolean, section: ListsSection): [ListTabCounts, () => void] {
+function useListTabCounts(canManageLists: boolean, section: ListsSection): ListTabCounts {
   const client = useClient();
   const user = useSessionUser();
   const userId = user?.id;
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
-  const providerApps = experimentalFeaturesEnabled && hasAppPermission(user, APP_PERMISSIONS.manageSystemSettings);
   const [counts, setCounts] = React.useState<ListTabCounts>({});
   const [changes, setChanges] = React.useState(0);
 
@@ -114,7 +112,7 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): [List
     void client
       .query(
         listTabCountsQuery,
-        { personal: experimentalFeaturesEnabled, exclusions: canManageLists, providerApps },
+        { personal: experimentalFeaturesEnabled, exclusions: canManageLists },
         { requestPolicy: "network-only" },
       )
       .toPromise()
@@ -125,25 +123,23 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): [List
           public: data.listSubscriptions?.length,
           personal: data.myListSubscriptions?.length,
           exclusions: data.listExclusions?.length,
-          providerApps: (data.listProviderApps as Array<{ enabled: boolean }> | undefined)?.filter((app) => app.enabled).length,
         });
       });
     return () => {
       active = false;
     };
-  }, [canManageLists, changes, client, experimentalFeaturesEnabled, providerApps, section, userId]);
+  }, [canManageLists, changes, client, experimentalFeaturesEnabled, section, userId]);
 
   const reload = React.useCallback(() => setChanges((value) => value + 1), []);
   useListsReactiveRefresh(listTabCountsChanged, reload);
-  return [counts, reload];
+  return counts;
 }
 
 type ListsContainerBodyProps = ListsContainerProps & {
   tabCounts: ListTabCounts;
-  onTabCountsChanged: () => void;
 };
 
-function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: ListsContainerBodyProps) {
+function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyProps) {
   const client = useClient();
   const t = useTranslate();
   const setGlobalStatus = useGlobalStatus();
@@ -794,7 +790,6 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
       section={section}
       onSectionChange={changeSection}
       tabCounts={shownTabCounts}
-      onProviderAppsChanged={onTabCountsChanged}
       canManageLists={canManageLists}
       experimentalFeaturesEnabled={experimentalFeaturesEnabled}
       canManageProviderApps={canManageProviderApps}

@@ -983,7 +983,6 @@ export const memberListPoliciesChanged: DomainEventPredicate = listSettingChange
 export const listTabCountsChanged: DomainEventPredicate = anyOf(
   followedListsChanged,
   listExclusionsChanged,
-  listProviderAppsChanged,
 );
 
 /**

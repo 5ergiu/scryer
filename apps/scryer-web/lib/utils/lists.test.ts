@@ -906,7 +906,7 @@ test("each part of a lists surface reads again only for the changes it shows", (
   assert.equal(listProvidersChanged(setting("list_provider_settings")), true);
   assert.equal(listProvidersChanged(setting("list_provider_app")), true);
   assert.equal(listProviderAppsChanged(setting("list_provider_settings")), false);
-  assert.equal(listTabCountsChanged(setting("list_provider_app")), true);
+  assert.equal(listTabCountsChanged(setting("list_provider_app")), false);
 
   // Other settings, and a configuration event that names nothing, refresh no part.
   for (const other of [

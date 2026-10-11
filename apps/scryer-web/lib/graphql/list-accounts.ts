@@ -49,11 +49,10 @@ export const listProviderAppsQuery = `query ListProviderApps {
 }`;
 
 /** Only what the Lists page's tab counters need. */
-export const listTabCountsQuery = `query ListTabCounts($personal: Boolean!, $exclusions: Boolean!, $providerApps: Boolean!) {
+export const listTabCountsQuery = `query ListTabCounts($personal: Boolean!, $exclusions: Boolean!) {
   listSubscriptions { id }
   myListSubscriptions @include(if: $personal) { id }
   listExclusions @include(if: $exclusions) { id }
-  listProviderApps @include(if: $providerApps) { provider enabled }
 }`;
 
 export const updateListProviderAppMutation = `mutation UpdateListProviderApp($provider: String!, $clientId: String, $clientSecret: String, $redirectUri: String, $enabled: Boolean!) {
