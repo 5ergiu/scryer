@@ -5900,7 +5900,6 @@ const en: LocaleDictionary = {
   "lists.accounts.heading": "Your accounts",
   "lists.accounts.copy": "Connect an account to follow your private lists and watchlists. Only you can see your accounts and personal lists.",
   "lists.accounts.connect": "Connect",
-  "lists.accounts.linkProfile": "Link accounts in your profile",
   "lists.accounts.installProviders": "Install and enable a personal-list provider below, then connect your account here.",
   "lists.plugins.heading": "List-provider plugins",
   "lists.accounts.askForProviders": "Ask an administrator to install and enable a list-provider plugin so you can connect your account and follow private lists or watchlists.",

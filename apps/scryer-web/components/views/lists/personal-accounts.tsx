@@ -1,5 +1,4 @@
 import * as React from "react";
-import { Link } from "react-router";
 import { LoadingMark } from "@/components/common/loading-mark";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,7 +17,6 @@ import type {
 } from "@/lib/types/lists";
 import { listAccountKeyEntry, listAccountKeyHelpUrl } from "@/lib/utils/list-account-link";
 import { isListSourceFollowed, listAccountLabel } from "@/lib/utils/lists";
-import { buildViewPath } from "@/lib/utils/routing";
 import { CatalogListTable, type CatalogListRow } from "./catalog-list-table";
 import { ListProviderSetup } from "./list-provider-setup";
 import { ProviderRail, ProviderRailEntry } from "./provider-rail";
@@ -296,14 +294,7 @@ export function PersonalAccounts(props: Props) {
 
   return (
     <section id="lists-personal-accounts" className="space-y-3">
-      <div className="flex min-h-8 flex-wrap items-center justify-between gap-3">
-        <h2 className="font-display text-[17px] font-bold">{t("lists.accounts.heading")}</h2>
-        <Button asChild size="sm" variant="outline">
-          <Link id="lists-profile-link" to={buildViewPath("settings", "profile")}>
-            {t("lists.accounts.linkProfile")}
-          </Link>
-        </Button>
-      </div>
+      <h2 className="flex min-h-8 items-center font-display text-[17px] font-bold">{t("lists.accounts.heading")}</h2>
       <p className="text-sm text-[var(--scry-muted)]">{t("lists.accounts.copy")}</p>
       {entries.length === 0 ? <ListProviderSetup /> : null}
       {selected ? (
