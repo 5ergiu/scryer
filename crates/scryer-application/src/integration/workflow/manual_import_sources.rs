@@ -201,16 +201,17 @@ impl AppUseCase {
             ));
         }
         let trusted_root = if selection.trusted_source_root.trim().is_empty() {
-            std::fs::canonicalize(&completed.dest_dir)
+            tokio::fs::canonicalize(&completed.dest_dir).await
         } else {
-            std::fs::canonicalize(crate::stored_paths::stored_path_to_path_buf(
+            tokio::fs::canonicalize(crate::stored_paths::stored_path_to_path_buf(
                 &selection.trusted_source_root,
             ))
+            .await
         }
         .map_err(|_| {
             AppError::Validation("manual import files are no longer available".to_string())
         })?;
-        let download_root = std::fs::canonicalize(&completed.dest_dir).ok();
+        let download_root = tokio::fs::canonicalize(&completed.dest_dir).await.ok();
         for candidate in selection.candidates.iter().filter(|candidate| {
             mappings
                 .iter()

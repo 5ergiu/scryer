@@ -102,7 +102,10 @@ pub(crate) async fn resolve_old_file_recycle_context(
                 ))
             },
         )?;
-    crate::fs_safety::ensure_root_available(&old_file_media_root)?;
+    let root_to_check = old_file_media_root.clone();
+    tokio::task::spawn_blocking(move || crate::fs_safety::ensure_root_available(&root_to_check))
+        .await
+        .map_err(|error| AppError::Repository(format!("media root check failed: {error}")))??;
 
     let recycle_config = app
         .recycle_bin_configs_for_recycling(media_roots)

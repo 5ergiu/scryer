@@ -69,6 +69,7 @@ mod indexer_search_routes;
 mod init;
 mod list_account_origin;
 mod log_buffer;
+mod log_delivery;
 mod metadata_gateway_url;
 mod metrics_setup;
 mod middleware;
@@ -751,7 +752,18 @@ async fn run_application() {
     let log_file_writer = match log_file_config.as_ref() {
         Some(config) => match log_buffer::open_log_file(&config.path, log_file_policy.unwrap()) {
             Ok((writer, guard)) => {
-                _log_file_guard = Some(guard);
+                let (writer, delivery_guard) =
+                    log_delivery::LogDelivery::new("file", move |bytes| {
+                        use std::io::Write;
+                        use tracing_subscriber::fmt::MakeWriter;
+                        let _keep_alive = &guard;
+                        writer.make_writer().write_all(bytes)
+                    })
+                    .unwrap_or_else(|error| {
+                        eprintln!("failed to start file log delivery: {error}");
+                        std::process::exit(1);
+                    });
+                _log_file_guard = Some(delivery_guard);
                 Some(writer)
             }
             Err(error) if config.explicit => {
@@ -775,6 +787,15 @@ async fn run_application() {
         .as_ref()
         .and_then(|_| log_file_config.as_ref().map(|config| config.path.clone()));
 
+    let (stdout_writer, _stdout_guard) = log_delivery::LogDelivery::new("stdout", |bytes| {
+        use std::io::Write;
+        std::io::stdout().lock().write_all(bytes)
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("failed to start console log delivery: {error}");
+        std::process::exit(1);
+    });
+
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -788,6 +809,7 @@ async fn run_application() {
             LogFormat::Json => {
                 let stdout_layer = tracing_subscriber::fmt::layer()
                     .event_format(JsonContextFormatter)
+                    .with_writer(stdout_writer)
                     .with_ansi(false);
                 let buffer_layer = tracing_subscriber::fmt::layer()
                     .event_format(JsonContextFormatter)
@@ -809,7 +831,9 @@ async fn run_application() {
                     .init();
             }
             LogFormat::Text => {
-                let stdout_layer = tracing_subscriber::fmt::layer().with_timer(LocalTimer);
+                let stdout_layer = tracing_subscriber::fmt::layer()
+                    .with_timer(LocalTimer)
+                    .with_writer(stdout_writer);
                 let buffer_layer = tracing_subscriber::fmt::layer()
                     .with_timer(LocalTimer)
                     .with_writer(log_buffer::LogBufferWriter::new(log_ring_buffer.clone()))
