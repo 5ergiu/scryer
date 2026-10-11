@@ -58,14 +58,28 @@ impl IndexerErrorRecorder for BlockingIndexerErrorRecorder {
         .increment(1);
         let repository = Arc::clone(&self.repository);
         let runtime = self.runtime.clone();
-        let result = std::thread::scope(|scope| {
-            scope
-                .spawn(move || runtime.block_on(repository.record(error)))
-                .join()
-                .map_err(|_| {
-                    AppError::Repository("indexer error recorder thread panicked".to_string())
-                })?
-        });
+        let persist = || {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || runtime.block_on(repository.record(error)))
+                    .join()
+                    .map_err(|_| {
+                        AppError::Repository("indexer error recorder thread panicked".to_string())
+                    })?
+            })
+        };
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                // Joining the persistence thread must release this worker's
+                // runtime duties: its database socket needs that runtime's I/O
+                // driver even though the repository future runs on another thread.
+                tokio::task::block_in_place(persist)
+            }
+            Ok(_) => Err(AppError::Repository(
+                "synchronous indexer error capture requires a multi-thread runtime".to_string(),
+            )),
+            Err(_) => persist(),
+        };
         if let Err(error) = &result {
             tracing::warn!(error = %error, "failed to persist indexer HTTP error history");
         }
@@ -672,7 +686,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "issue #312 diagnostic: fails while synchronous error capture can starve Tokio workers"]
     fn concurrent_indexer_error_capture_keeps_runtime_responsive() {
         fn probe(concurrent_errors: usize) -> bool {
             use std::io::Write;
@@ -797,6 +810,43 @@ mod tests {
             probe(2),
             "all workers stalled in synchronous indexer error capture; the unrelated runtime probe ran only after the observer released persistence"
         );
+    }
+
+    #[test]
+    fn current_thread_error_capture_returns_an_error_without_blocking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let subject =
+                BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository));
+            let error = subject
+                .record(error_event("current-thread", "fixture", Utc::now()))
+                .expect_err("a current-thread runtime cannot hand off its driver");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires a multi-thread runtime")
+            );
+        });
+    }
+
+    #[test]
+    fn error_capture_outside_runtime_preserves_repository_failure() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let subject = {
+            let _guard = runtime.enter();
+            BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository))
+        };
+        let error = subject
+            .record(error_event("outside-runtime", "fixture", Utc::now()))
+            .expect_err("repository failure must reach the synchronous caller");
+        assert!(error.to_string().contains("datastore is down"));
     }
 
     #[test]
