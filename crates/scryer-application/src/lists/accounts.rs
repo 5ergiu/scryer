@@ -50,6 +50,10 @@ const INTERACTIVE_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_
 const UNLINK_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The pause suggested to a caller told that the account is still refreshing.
 const REFRESHING_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long the lists a provider reported for an account answer later reads
+/// of that account. Reading an account straight after linking it, or opening
+/// it again inside this window, asks the provider nothing.
+pub(crate) const ACCOUNT_SOURCES_FRESH_SECONDS: i64 = 300;
 
 pub struct ListAccountRuntime {
     /// Held only for map edits, never across an await, so a dropped poll can
@@ -68,6 +72,9 @@ pub struct ListAccountRuntime {
     /// already spent the stored grant, so each is saved before anything else
     /// is done with its account. A restart forgets them.
     unsaved_renewals: std::sync::Mutex<HashMap<String, UnsavedRenewal>>,
+    /// What the provider last reported each account holds, by account id, and
+    /// when it was read. A restart forgets them.
+    account_sources: std::sync::Mutex<HashMap<String, (DateTime<Utc>, ListPluginAccountResponse)>>,
 }
 /// A renewed account that could not be saved, and the stored credential its
 /// renewal spent.
@@ -91,6 +98,7 @@ impl Default for ListAccountRuntime {
             revocations: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             refresh_backoffs: std::sync::Mutex::new(HashMap::new()),
             unsaved_renewals: std::sync::Mutex::new(HashMap::new()),
+            account_sources: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -192,6 +200,40 @@ impl ListAccountRuntime {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
     }
+    /// What the provider reported for `id` recently enough to answer with.
+    fn recent_account_sources(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<ListPluginAccountResponse> {
+        let sources = self
+            .account_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        sources
+            .get(id)
+            .filter(|(read_at, _)| account_sources_fresh(*read_at, now))
+            .map(|(_, sources)| sources.clone())
+    }
+    fn remember_account_sources(
+        &self,
+        id: &str,
+        sources: &ListPluginAccountResponse,
+        now: DateTime<Utc>,
+    ) {
+        let mut kept = self
+            .account_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        kept.retain(|_, (read_at, _)| account_sources_fresh(*read_at, now));
+        kept.insert(id.to_owned(), (now, sources.clone()));
+    }
+    fn forget_account_sources(&self, id: &str) {
+        self.account_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+    }
     fn keep_unsaved_renewal(&self, unsaved: UnsavedRenewal) {
         self.unsaved_renewals
             .lock()
@@ -204,6 +246,11 @@ impl ListAccountRuntime {
             .unwrap_or_else(|e| e.into_inner())
             .remove(id)
     }
+}
+/// Whether lists read at `read_at` still answer a read at `now`. A read dated
+/// after `now` is never fresh, so a clock set back cannot pin an old answer.
+fn account_sources_fresh(read_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    read_at <= now && now - read_at < chrono::Duration::seconds(ACCOUNT_SOURCES_FRESH_SECONDS)
 }
 /// The answer for a renewal that is paused or still running elsewhere.
 fn refresh_pending(backoff: Option<RefreshBackoff>, now: DateTime<Utc>) -> AppError {
@@ -735,14 +782,33 @@ impl AppUseCase {
             .collect())
     }
     pub async fn list_account(&self, actor: &User, id: &str) -> AppResult<ListAccountView> {
+        self.list_account_at(actor, id, Utc::now()).await
+    }
+    /// Reads the account as of `now`, which decides whether the provider is
+    /// asked for its lists again.
+    pub(crate) async fn list_account_at(
+        &self,
+        actor: &User,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<ListAccountView> {
         self.require_personal_lists_allowed(actor).await?;
         let (_guard, account) = self
             .refresh_list_account_interactive(id, |account| ensure_account_owner(actor, account))
             .await?;
         let account = account.ok_or_else(|| AppError::NotFound("list account not found".into()))?;
+        let runtime = &self.services.lists.account_runtime;
+        // Only a working account answers from an earlier read; one that needs
+        // reconnecting still asks, so the provider's refusal is what shows.
+        if account.status == UserListAccountStatus::Active
+            && let Some(sources) = runtime.recent_account_sources(&account.id, now)
+        {
+            return Ok(ListAccountView { account, sources });
+        }
         let sources = self
             .list_account_identity(&account.provider, &account.credential, Some(&account))
             .await?;
+        runtime.remember_account_sources(&account.id, &sources, now);
         Ok(ListAccountView { account, sources })
     }
     pub(crate) async fn owned_list_account(
@@ -1052,12 +1118,12 @@ impl AppUseCase {
                 // The request that linked it may have lost its response; answer
                 // the same way again instead of reporting the link gone.
                 let account = self.owned_list_account(actor, &account_id).await?;
+                let sources = runtime
+                    .recent_account_sources(&account.id, now)
+                    .unwrap_or_default();
                 return Ok(ListAccountPoll {
                     status: ListAccountPollStatus::Linked,
-                    account: Some(ListAccountView {
-                        account,
-                        sources: ListPluginAccountResponse::default(),
-                    }),
+                    account: Some(ListAccountView { account, sources }),
                 });
             }
             PollClaim::Check(session) => session,
@@ -1256,6 +1322,10 @@ impl AppUseCase {
         } else {
             self.services.lists.accounts.create(account).await?
         };
+        self.services
+            .lists
+            .account_runtime
+            .remember_account_sources(&account.id, &sources, now);
         self.append_domain_event(crate::events::domain_events::new_user_domain_event(
             actor,
             actor.id.clone(),
@@ -1528,6 +1598,10 @@ impl AppUseCase {
         account.status = UserListAccountStatus::Expired;
         account.error_message = Some("Reconnect this list account to resume syncing.".into());
         account.updated_at = now;
+        self.services
+            .lists
+            .account_runtime
+            .forget_account_sources(&account.id);
         self.services.lists.accounts.update(account).await
     }
     pub async fn unlink_list_account(&self, actor: &User, id: &str) -> AppResult<String> {
@@ -1577,6 +1651,10 @@ impl AppUseCase {
             let _guard = guard;
             let _permit = permit;
             app.services.lists.accounts.unlink(&id, &owner).await?;
+            app.services
+                .lists
+                .account_runtime
+                .forget_account_sources(&id);
             // A renewal that could not be saved holds the only live grant.
             let credential = app
                 .services

@@ -163,6 +163,8 @@ struct Client {
     fetch_gate: Option<Arc<FetchGate>>,
     /// Identity reads that fail as "provider unavailable" before one succeeds.
     account_outages: AtomicUsize,
+    /// Identity reads the provider was asked for.
+    account_reads: AtomicUsize,
 }
 #[derive(Default)]
 struct FetchGate {
@@ -203,6 +205,7 @@ impl ListProviderClient for Client {
         &self,
         input: ListCredential,
     ) -> AppResult<PluginResult<ListPluginAccountResponse>> {
+        self.account_reads.fetch_add(1, Ordering::SeqCst);
         if self
             .account_outages
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -235,7 +238,7 @@ struct Plugins {
 }
 impl Plugins {
     fn new() -> Self {
-        let clients=["trakt","plex","tmdb","anilist","mal","simkl"].into_iter().map(|provider|Arc::new(Client {fetch_gate:None,account_outages:AtomicUsize::new(0),descriptor:serde_json::from_value(serde_json::json!({"id":format!("{provider}-list"),"name":provider,"version":"1.0.0","sdk_version":scryer_plugin_sdk::SDK_VERSION,"sdk_constraint":scryer_plugin_sdk::current_sdk_constraint(),"provider":{"kind":"list_provider","provider_type":provider,"auth":{"type":"member_account","flow":if provider=="tmdb"{serde_json::json!({"type":"tmdb_approval"})}else{serde_json::json!({"type":"authorization_code","pkce":true})},"exchange":"smg_relay"},"capabilities":{"account":true},"member_key":(provider=="tmdb").then(||serde_json::json!({"label":"Fixture read token","use_as":"account_app"})),"groups":[{"label":"Personal","auth_badge":"member_account","items":[{"id":"watchlist","name":"Watchlist","kinds":["movie"],"source_type":"watchlist","personal":true,"default_interval_seconds":3600}]}]}})).unwrap()})).collect();
+        let clients=["trakt","plex","tmdb","anilist","mal","simkl"].into_iter().map(|provider|Arc::new(Client {fetch_gate:None,account_outages:AtomicUsize::new(0),account_reads:AtomicUsize::new(0),descriptor:serde_json::from_value(serde_json::json!({"id":format!("{provider}-list"),"name":provider,"version":"1.0.0","sdk_version":scryer_plugin_sdk::SDK_VERSION,"sdk_constraint":scryer_plugin_sdk::current_sdk_constraint(),"provider":{"kind":"list_provider","provider_type":provider,"auth":{"type":"member_account","flow":if provider=="tmdb"{serde_json::json!({"type":"tmdb_approval"})}else{serde_json::json!({"type":"authorization_code","pkce":true})},"exchange":"smg_relay"},"capabilities":{"account":true},"member_key":(provider=="tmdb").then(||serde_json::json!({"label":"Fixture read token","use_as":"account_app"})),"groups":[{"label":"Personal","auth_badge":"member_account","items":[{"id":"watchlist","name":"Watchlist","kinds":["movie"],"source_type":"watchlist","personal":true,"default_interval_seconds":3600}]}]}})).unwrap()})).collect();
         Self { clients }
     }
 }
@@ -638,6 +641,69 @@ async fn private_account_poll_keeps_the_grant_when_the_identity_read_is_briefly_
         .expect("the kept grant links once the identity can be read");
     assert_eq!(view.account.user_id, harness.user.id);
     assert_eq!(auth.polls.load(Ordering::SeqCst), 1);
+}
+fn account_reads(plugins: &Plugins, provider: &str) -> usize {
+    plugins
+        .clients
+        .iter()
+        .find(|client| client.descriptor.provider_type() == provider)
+        .expect("fixture provider")
+        .account_reads
+        .load(Ordering::SeqCst)
+}
+#[tokio::test]
+async fn private_account_lists_are_asked_of_the_provider_once_while_they_are_fresh() {
+    let mut harness = harness(Arc::new(Auth::default())).await;
+    let plugins = Arc::new(Plugins::new());
+    harness.app.services.lists.plugins = plugins.clone();
+    let account = seed_expired(&harness).await;
+    let fresh = chrono::Duration::seconds(crate::lists::accounts::ACCOUNT_SOURCES_FRESH_SECONDS);
+    let opened = chrono::Utc::now();
+    for (at, reads) in [
+        (opened, 1),
+        (opened + fresh - chrono::Duration::seconds(1), 1),
+        (opened + fresh, 2),
+        (opened + fresh + chrono::Duration::seconds(1), 2),
+    ] {
+        harness
+            .app
+            .list_account_at(&harness.user, &account.id, at)
+            .await
+            .unwrap();
+        assert_eq!(account_reads(&plugins, "trakt"), reads, "read at {at}");
+    }
+}
+#[tokio::test]
+async fn private_account_read_straight_after_linking_does_not_ask_the_provider_again() {
+    let mut harness = harness(Arc::new(Auth::default())).await;
+    let plugins = Arc::new(Plugins::new());
+    harness.app.services.lists.plugins = plugins.clone();
+    let session = start_plex(&harness).await;
+    let linked = harness
+        .app
+        .poll_list_account_link(&harness.user, &session)
+        .await
+        .unwrap()
+        .account
+        .expect("the approved link");
+    assert_eq!(account_reads(&plugins, "plex"), 1);
+    let view = harness
+        .app
+        .list_account(&harness.user, &linked.account.id)
+        .await
+        .unwrap();
+    assert_eq!(view.sources.username, linked.sources.username);
+    assert_eq!(account_reads(&plugins, "plex"), 1);
+    // A poll whose answer was lost replays the link with the same lists.
+    let replayed = harness
+        .app
+        .poll_list_account_link(&harness.user, &session)
+        .await
+        .unwrap()
+        .account
+        .expect("the replayed link");
+    assert_eq!(replayed.sources.username, linked.sources.username);
+    assert_eq!(account_reads(&plugins, "plex"), 1);
 }
 #[tokio::test]
 async fn private_account_poll_in_progress_is_busy_then_reports_the_link() {
