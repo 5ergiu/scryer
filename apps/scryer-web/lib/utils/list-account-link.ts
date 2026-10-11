@@ -197,17 +197,12 @@ export async function finishCurrentListAccountLink(
 /** What a member's key form asks the link to do. */
 export type ListAccountKeyEntry =
   | { kind: "key"; key: string; approval: boolean }
-  | { kind: "server" }
   | { kind: "missing" };
 
-/**
- * Reads what a member typed into a provider's key form. An empty field falls
- * back to the server's own key where the provider says one can stand in.
- */
-export function listAccountKeyEntry(memberKey: { approval: boolean; required: boolean }, typed: string): ListAccountKeyEntry {
+/** Reads what a member typed into a provider's key form. Connecting always takes the member's own key. */
+export function listAccountKeyEntry(memberKey: { approval: boolean }, typed: string): ListAccountKeyEntry {
   const key = typed.trim();
-  if (key) return { kind: "key", key, approval: memberKey.approval };
-  return memberKey.required ? { kind: "missing" } : { kind: "server" };
+  return key ? { kind: "key", key, approval: memberKey.approval } : { kind: "missing" };
 }
 
 /** A provider's "where to find the key" address, when it is a plain https link. */

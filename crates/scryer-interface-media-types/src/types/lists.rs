@@ -508,9 +508,6 @@ pub struct ListMemberKeyPayload {
     pub help_url: Option<String>,
     /// Whether the member still approves at the provider after the key is accepted.
     pub approval: bool,
-    /// Whether connecting needs the member's key. False when the server holds
-    /// a key of its own that can stand in.
-    pub required: bool,
 }
 
 /// One server-wide setting of a list provider.

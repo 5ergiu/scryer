@@ -81,6 +81,9 @@ pub const ACCOUNT_IDENTITY_UNVERIFIED: &str = "LIST_ACCOUNT_IDENTITY_UNVERIFIED"
 pub const ACCOUNT_LINKING_UNSUPPORTED: &str = "LIST_ACCOUNT_LINKING_UNSUPPORTED";
 /// The provider's accounts are not linked with a key the member supplies.
 pub const ACCOUNT_KEY_UNSUPPORTED: &str = "LIST_ACCOUNT_KEY_UNSUPPORTED";
+/// The provider's accounts are linked with the member's own key, and the
+/// link was started without one.
+pub const ACCOUNT_KEY_REQUIRED: &str = "LIST_ACCOUNT_KEY_REQUIRED";
 /// The key the member supplied is empty, oversized, or not a single line.
 pub const ACCOUNT_KEY_INVALID: &str = "LIST_ACCOUNT_KEY_INVALID";
 /// The provider refused the key the member supplied.
@@ -182,6 +185,7 @@ pub const ALL: &[&str] = &[
     ACCOUNT_IDENTITY_UNVERIFIED,
     ACCOUNT_LINKING_UNSUPPORTED,
     ACCOUNT_KEY_UNSUPPORTED,
+    ACCOUNT_KEY_REQUIRED,
     ACCOUNT_KEY_INVALID,
     ACCOUNT_KEY_REJECTED,
     ACCOUNT_LINK_ORIGIN_INVALID,

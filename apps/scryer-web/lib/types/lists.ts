@@ -99,8 +99,6 @@ export type ListMemberKey = {
   helpUrl: string | null;
   /** The member still approves at the provider once the key is accepted. */
   approval: boolean;
-  /** False when the server holds a key of its own that can stand in. */
-  required: boolean;
 };
 
 export type ListProviderSettingFieldType =

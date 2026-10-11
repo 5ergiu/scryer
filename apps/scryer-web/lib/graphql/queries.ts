@@ -5615,7 +5615,6 @@ export const listProvidersQuery =`query ListProviders {
       helpText
       helpUrl
       approval
-      required
     }
     urlPatterns {
       pattern

@@ -292,10 +292,10 @@ async fn graphql_key_link_keeps_the_key_on_the_members_account_and_never_returns
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         const KEY: &str = "synthetic-member-key-7Q";
         let fixture = fixture_with(ListAccountFixtureProvider::with_member_key()).await;
-        let providers = execute(&fixture, &fixture.member, "{ listProviders { providerType memberKey { label helpText helpUrl approval required } } }").await;
+        let providers = execute(&fixture, &fixture.member, "{ listProviders { providerType memberKey { label helpText helpUrl approval } } }").await;
         assert_no_errors(&providers);
         let offered = providers["data"]["listProviders"].as_array().unwrap().iter().find(|provider| provider["providerType"] == "trakt").expect("the fixture provider is offered");
-        assert_eq!(offered["memberKey"], json!({"label": "Fixture key", "helpText": null, "helpUrl": null, "approval": false, "required": true}));
+        assert_eq!(offered["memberKey"], json!({"label": "Fixture key", "helpText": null, "helpUrl": null, "approval": false}));
 
         let link = |actor: &User, key: &str| {
             let request = async_graphql::Request::new(r#"mutation($key: String!) { linkListAccountWithKey(provider:"trakt", key:$key) { account { id provider externalUserId status } link { sessionId } } }"#)

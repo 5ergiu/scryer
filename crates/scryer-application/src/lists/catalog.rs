@@ -60,9 +60,6 @@ pub struct ListMemberKeyManifest {
     pub help_url: Option<String>,
     /// The member still approves at the provider once the key is accepted.
     pub approval: bool,
-    /// Connecting needs the member's key: the server holds none of its own
-    /// that could stand in.
-    pub required: bool,
 }
 
 pub fn facet_of(kind: ListMediaKind) -> MediaFacet {
@@ -153,7 +150,6 @@ fn manifest_from_descriptor(
             help_text: key.help_text,
             help_url: key.help_url,
             approval: key.use_as == ListMemberKeyUse::AccountApp,
-            required: true,
         }),
         name: plugin.name.clone(),
         provider_type: list.provider_type.to_ascii_lowercase(),

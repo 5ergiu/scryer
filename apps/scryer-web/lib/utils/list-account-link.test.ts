@@ -171,14 +171,13 @@ test("current account refresh completes once and reports its own failure", { tim
 });
 
 test("a typed key is trimmed and carries whether the member still approves at the provider", () => {
-  assert.deepEqual(listAccountKeyEntry({ approval: false, required: true }, "  synthetic-key\n"), { kind: "key", key: "synthetic-key", approval: false });
-  assert.deepEqual(listAccountKeyEntry({ approval: true, required: false }, "synthetic-key"), { kind: "key", key: "synthetic-key", approval: true });
+  assert.deepEqual(listAccountKeyEntry({ approval: false }, "  synthetic-key\n"), { kind: "key", key: "synthetic-key", approval: false });
+  assert.deepEqual(listAccountKeyEntry({ approval: true }, "synthetic-key"), { kind: "key", key: "synthetic-key", approval: true });
 });
 
-test("an empty key field is missing unless the server's own key can stand in", () => {
-  assert.deepEqual(listAccountKeyEntry({ approval: false, required: true }, "   "), { kind: "missing" });
-  assert.deepEqual(listAccountKeyEntry({ approval: true, required: true }, ""), { kind: "missing" });
-  assert.deepEqual(listAccountKeyEntry({ approval: true, required: false }, " "), { kind: "server" });
+test("an empty key field is always missing", () => {
+  assert.deepEqual(listAccountKeyEntry({ approval: false }, "   "), { kind: "missing" });
+  assert.deepEqual(listAccountKeyEntry({ approval: true }, ""), { kind: "missing" });
 });
 
 test("a key help address is linked only when it is a plain https link", () => {

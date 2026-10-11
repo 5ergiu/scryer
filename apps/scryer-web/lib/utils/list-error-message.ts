@@ -49,6 +49,7 @@ export const LIST_REFUSAL_KEYS: Readonly<Record<string, string>> = {
   LIST_ACCOUNT_LINK_RESULT_INVALID: "lists.refusal.accountLinkResultInvalid",
   LIST_ACCOUNT_LINK_ISSUER_INVALID: "lists.refusal.accountLinkIssuerInvalid",
   LIST_ACCOUNT_KEY_UNSUPPORTED: "lists.refusal.accountKeyUnsupported",
+  LIST_ACCOUNT_KEY_REQUIRED: "lists.refusal.accountKeyRequired",
   LIST_ACCOUNT_KEY_INVALID: "lists.refusal.accountKeyInvalid",
   LIST_ACCOUNT_KEY_REJECTED: "lists.refusal.accountKeyRejected",
   LIST_ACCOUNT_AUTH_UNAVAILABLE: "lists.refusal.accountAuthUnavailable",

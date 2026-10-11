@@ -62,7 +62,7 @@ function MemberKeyForm(props: {
   id: string;
   memberKey: ListMemberKey;
   replacing: boolean;
-  onSubmit: (memberKey?: ListAccountMemberKey) => void;
+  onSubmit: (memberKey: ListAccountMemberKey) => void;
   onCancel: () => void;
 }) {
   const t = useTranslate();
@@ -76,7 +76,7 @@ function MemberKeyForm(props: {
       setMissing(true);
       return;
     }
-    props.onSubmit(entry.kind === "key" ? { key: entry.key, approval: entry.approval } : undefined);
+    props.onSubmit({ key: entry.key, approval: entry.approval });
   };
   return (
     <form id={props.id} className="space-y-2 rounded-[12px] border border-[var(--scry-border3)] p-3 text-sm" onSubmit={submit}>
@@ -101,7 +101,6 @@ function MemberKeyForm(props: {
           {t("lists.accounts.key.where")}
         </a>
       ) : null}
-      {props.memberKey.required ? null : <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.optional")}</p>}
       {props.memberKey.approval ? <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.approval")}</p> : null}
       {props.replacing ? <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.replace")}</p> : null}
       <p className="text-[var(--scry-muted)]">{t("lists.accounts.key.private")}</p>

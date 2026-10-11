@@ -125,9 +125,6 @@ impl KeyPlugins {
                             "exchange": "direct"
                         },
                         "capabilities": {"account": true},
-                        "config_fields": [
-                            {"key": "api_key", "label": "API key", "field_type": "password"}
-                        ],
                         "member_key": {"label": "Fixture read token", "use_as": "account_app"}
                     }),
                 ),
@@ -533,15 +530,22 @@ async fn a_key_refused_when_the_approval_starts_names_the_key() {
     let reason = refusal_reason(fixture.link("tmdb", "synthetic-wrong-key-4M").await);
     assert_eq!(reason, refusal::ACCOUNT_KEY_REJECTED);
 
-    // Without a member key the same refusal is about the server's own token.
+    // Started without a key there is no application to run the approval on,
+    // and the provider is never asked.
     let error = fixture
         .harness
         .app
         .start_list_account_link(&fixture.harness.user, "tmdb", ORIGIN)
         .await
         .err()
-        .expect("the server holds no token");
-    assert_eq!(auth_failure_code(&error), Some(PROVIDER_REJECTED));
+        .expect("the server holds no token of its own");
+    assert!(matches!(
+        error,
+        AppError::ValidationRefused {
+            reason: refusal::ACCOUNT_KEY_REQUIRED,
+            ..
+        }
+    ));
     assert!(matches!(
         fixture.link("tmdb", GOOD_KEY).await,
         Ok(ListAccountKeyLink::Approval(_))
@@ -561,7 +565,7 @@ async fn an_approval_started_with_a_key_needs_an_origin() {
 }
 
 #[tokio::test]
-async fn the_catalog_says_when_connecting_needs_the_members_key() {
+async fn the_catalog_offers_a_member_key_where_the_provider_declares_one() {
     let fixture = harness().await;
     let key_of = |manifests: &[crate::lists::catalog::ListProviderManifest], provider: &str| {
         manifests
@@ -583,38 +587,7 @@ async fn the_catalog_says_when_connecting_needs_the_members_key() {
         keyed.help_url.as_deref(),
         Some("https://lists.fixture.invalid/preferences")
     );
-    assert!(keyed.required && !keyed.approval);
-    let approved = key_of(&catalog, "tmdb").expect("declared key");
-    assert!(approved.required && approved.approval);
+    assert!(!keyed.approval);
+    assert!(key_of(&catalog, "tmdb").expect("declared key").approval);
     assert_eq!(key_of(&catalog, "trakt"), None);
-
-    // Once the server holds its own token, a member's is optional.
-    let mut manager = User::new_admin("list-manager");
-    manager.authorization = scryer_domain::UserAuthorization {
-        app: AppPermissionMask::MANAGE_LISTS,
-        loaded: true,
-        ..Default::default()
-    };
-    fixture
-        .harness
-        .app
-        .update_list_provider_settings(
-            &manager,
-            "tmdb",
-            BTreeMap::from([(
-                "api_key".to_string(),
-                Some("synthetic-server-token".to_string()),
-            )]),
-        )
-        .await
-        .expect("store the server token");
-    let catalog = fixture
-        .harness
-        .app
-        .list_provider_catalog(&fixture.harness.user)
-        .await
-        .expect("catalog");
-    let approved = key_of(&catalog, "tmdb").expect("declared key");
-    assert!(!approved.required && approved.approval);
-    assert!(key_of(&catalog, KEYED).expect("declared key").required);
 }

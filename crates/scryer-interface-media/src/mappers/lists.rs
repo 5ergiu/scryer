@@ -181,7 +181,6 @@ pub fn from_list_provider(manifest: ListProviderManifest) -> ListProviderPayload
             help_text: key.help_text,
             help_url: key.help_url,
             approval: key.approval,
-            required: key.required,
         }),
     }
 }

@@ -10708,11 +10708,6 @@ type ListMemberKeyPayload {
 	Whether the member still approves at the provider after the key is accepted.
 	"""
 	approval: Boolean!
-	"""
-	Whether connecting needs the member's key. False when the server holds
-	a key of its own that can stand in.
-	"""
-	required: Boolean!
 }
 
 """

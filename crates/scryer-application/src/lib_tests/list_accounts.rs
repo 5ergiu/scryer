@@ -235,7 +235,7 @@ struct Plugins {
 }
 impl Plugins {
     fn new() -> Self {
-        let clients=["trakt","plex","tmdb","anilist","mal","simkl"].into_iter().map(|provider|Arc::new(Client {fetch_gate:None,account_outages:AtomicUsize::new(0),descriptor:serde_json::from_value(serde_json::json!({"id":format!("{provider}-list"),"name":provider,"version":"1.0.0","sdk_version":scryer_plugin_sdk::SDK_VERSION,"sdk_constraint":scryer_plugin_sdk::current_sdk_constraint(),"provider":{"kind":"list_provider","provider_type":provider,"auth":{"type":"member_account","flow":{"type":"authorization_code","pkce":true},"exchange":"smg_relay"},"capabilities":{"account":true},"groups":[{"label":"Personal","auth_badge":"member_account","items":[{"id":"watchlist","name":"Watchlist","kinds":["movie"],"source_type":"watchlist","personal":true,"default_interval_seconds":3600}]}]}})).unwrap()})).collect();
+        let clients=["trakt","plex","tmdb","anilist","mal","simkl"].into_iter().map(|provider|Arc::new(Client {fetch_gate:None,account_outages:AtomicUsize::new(0),descriptor:serde_json::from_value(serde_json::json!({"id":format!("{provider}-list"),"name":provider,"version":"1.0.0","sdk_version":scryer_plugin_sdk::SDK_VERSION,"sdk_constraint":scryer_plugin_sdk::current_sdk_constraint(),"provider":{"kind":"list_provider","provider_type":provider,"auth":{"type":"member_account","flow":if provider=="tmdb"{serde_json::json!({"type":"tmdb_approval"})}else{serde_json::json!({"type":"authorization_code","pkce":true})},"exchange":"smg_relay"},"capabilities":{"account":true},"member_key":(provider=="tmdb").then(||serde_json::json!({"label":"Fixture read token","use_as":"account_app"})),"groups":[{"label":"Personal","auth_badge":"member_account","items":[{"id":"watchlist","name":"Watchlist","kinds":["movie"],"source_type":"watchlist","personal":true,"default_interval_seconds":3600}]}]}})).unwrap()})).collect();
         Self { clients }
     }
 }
@@ -312,11 +312,31 @@ async fn private_account_start_complete_and_poll_store_verified_owner_accounts()
     let auth = Arc::new(Auth::default());
     let harness = harness(auth.clone()).await;
     for provider in ["trakt", "anilist", "mal", "plex", "tmdb"] {
-        let start = harness
-            .app
-            .start_list_account_link(&harness.user, provider, "https://instance.invalid")
-            .await
-            .unwrap();
+        let start = if provider == "tmdb" {
+            // TMDb's approval runs on the member's own key.
+            match harness
+                .app
+                .link_list_account_with_key(
+                    &harness.user,
+                    provider,
+                    "synthetic-read-token",
+                    Some("https://instance.invalid"),
+                )
+                .await
+                .unwrap()
+            {
+                crate::lists::accounts::ListAccountKeyLink::Approval(start) => start,
+                crate::lists::accounts::ListAccountKeyLink::Linked(_) => {
+                    panic!("TMDb still needs the member's approval")
+                }
+            }
+        } else {
+            harness
+                .app
+                .start_list_account_link(&harness.user, provider, "https://instance.invalid")
+                .await
+                .unwrap()
+        };
         let view = if start.poll_required {
             harness
                 .app

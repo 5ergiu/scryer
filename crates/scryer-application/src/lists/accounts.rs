@@ -587,6 +587,12 @@ fn key_unsupported() -> AppError {
         "this provider's accounts are not linked with a key",
     )
 }
+fn key_required() -> AppError {
+    refused(
+        refusal::ACCOUNT_KEY_REQUIRED,
+        "this provider's accounts are linked with the member's own key",
+    )
+}
 fn key_rejected() -> AppError {
     refused(
         refusal::ACCOUNT_KEY_REJECTED,
@@ -768,25 +774,6 @@ impl AppUseCase {
             })
             .ok_or_else(|| AppError::NotFound("list provider not found".into()))
     }
-    /// The application token the server itself holds for TMDb's approval
-    /// flow: the operator's `api_key`, or the one the provider ships.
-    pub(crate) async fn server_tmdb_app_token(
-        &self,
-        descriptor: &PluginDescriptor,
-    ) -> Option<String> {
-        let values = self.list_provider_config_for("tmdb").await;
-        values
-            .get("api_key")
-            .cloned()
-            .or_else(|| {
-                descriptor
-                    .config_fields()
-                    .iter()
-                    .find(|field| field.key == "api_key")
-                    .and_then(|field| field.default_value.clone())
-            })
-            .filter(|token| !token.trim().is_empty())
-    }
     pub async fn start_list_account_link(
         &self,
         actor: &User,
@@ -798,8 +785,8 @@ impl AppUseCase {
     }
     /// Link the member's account at `provider` with a key they supply, for a
     /// provider that declares one. The key becomes the member's credential, or
-    /// stands in for the server's application while the member approves; it is
-    /// kept only on that member's account.
+    /// is the application the member approves through; it is kept only on that
+    /// member's account.
     pub async fn link_list_account_with_key(
         &self,
         actor: &User,
@@ -856,8 +843,8 @@ impl AppUseCase {
             }
         }
     }
-    /// Starts a link session. `member_app_token` is the member's own key
-    /// standing in for the server's application token.
+    /// Starts a link session. `member_app_token` is the member's own key, the
+    /// application token TMDb's approval runs on. The server holds none.
     async fn begin_list_account_link(
         &self,
         actor: &User,
@@ -881,12 +868,11 @@ impl AppUseCase {
         let protocol_provider = provider.trim_end_matches("-list").to_string();
         let with_member_key = member_app_token.is_some();
         let app = if protocol_provider == "tmdb" {
-            let bearer = match member_app_token {
-                Some(token) => Some(token),
-                None => self.server_tmdb_app_token(&descriptor).await,
+            let Some(token) = member_app_token else {
+                return Err(key_required());
             };
             Some(ListProviderAppConfig {
-                access_token: bearer,
+                access_token: Some(token),
                 ..ListProviderAppConfig::default()
             })
         } else if with_member_key {
