@@ -703,8 +703,8 @@ fn token_issue_time_accepts_small_positive_skew_but_rejects_stale_and_impossible
 }
 
 #[tokio::test]
-async fn tmdb_pending_status_is_restricted_to_expected_unauthorized_response() {
-    for (status, pending) in [(401, true), (503, false), (307, false)] {
+async fn tmdb_pending_status_is_read_only_from_the_statuses_tmdb_sends_it_on() {
+    for (status, pending) in [(422, true), (401, true), (503, false), (307, false)] {
         let server = MockServer::start().await;
         let transport = transport(&server).await;
         let app = ListProviderAppConfig {

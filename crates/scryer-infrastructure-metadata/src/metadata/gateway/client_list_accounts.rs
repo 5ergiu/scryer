@@ -414,11 +414,14 @@ impl ListAccountAuthGateway for HttpListAccountAuthGateway {
                     .json(&json!({"request_token": poll_token}));
                 let answer = self.send(request, provider, "poll").await?;
                 // TMDb's documented status 41 means the user has not approved
-                // yet. Only a 401 can carry it; any other status is judged on the
-                // status alone, so an HTML 5xx page reads as unavailable.
-                if answer.status == StatusCode::UNAUTHORIZED
-                    && serde_json::from_slice::<TmdbAccessToken>(&answer.body)
-                        .is_ok_and(|reply| reply.status_code == Some(41))
+                // yet. TMDb documents it on a 422; a 401 is accepted with it. Any
+                // other status is judged on the status alone, so an HTML 5xx page
+                // reads as unavailable.
+                if matches!(
+                    answer.status,
+                    StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNAUTHORIZED
+                ) && serde_json::from_slice::<TmdbAccessToken>(&answer.body)
+                    .is_ok_and(|reply| reply.status_code == Some(41))
                 {
                     return Ok(None);
                 }
