@@ -160,7 +160,9 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
 
   const [providers, setProviders] = React.useState<ListProviderManifest[]>([]);
   const [accounts, setAccounts] = React.useState<ListAccount[]>([]);
-  const [managedAccount, setManagedAccount] = React.useState<ListAccount | null>(null);
+  const [managedAccounts, setManagedAccounts] = React.useState<ListAccount[]>([]);
+  // The latest read of an open provider's accounts; an earlier one still in flight is dropped.
+  const manageRun = React.useRef(0);
   const [accountLoading, setAccountLoading] = React.useState(false);
   const [providerSettings, setProviderSettings] = React.useState<ListProviderSettings[] | null>(null);
   const [publicSubscriptions, setPublicSubscriptions] = React.useState<ListSubscription[]>([]);
@@ -208,17 +210,25 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
   }, [client]);
   const accountLink = useListAccountLink(loadAccounts);
 
-  const manageAccount = async (account: ListAccount | null) => {
-    setManagedAccount(account);
-    if (!account) return;
-    setAccountLoading(true);
-    try {
-      const result = await client.query(listAccountQuery, { id: account.id }, { requestPolicy: "network-only" }).toPromise();
-      if (result.error) throw result.error;
-      setManagedAccount((current) => current?.id === account.id ? result.data?.listAccount ?? null : current);
-    } catch (error) {
-      setGlobalStatus(listErrorMessage(error, t, t("status.failedToLoad")), { level: "ERROR" });
-    } finally { setAccountLoading(false); }
+  const manageAccounts = async (open: ListAccount[]) => {
+    const run = ++manageRun.current;
+    setManagedAccounts([]);
+    setAccountLoading(open.length > 0);
+    if (open.length === 0) return;
+    // An account that cannot be read keeps its place without lists, and the others still load.
+    const loaded = await Promise.all(open.map(async (account): Promise<ListAccount | null> => {
+      try {
+        const result = await client.query(listAccountQuery, { id: account.id }, { requestPolicy: "network-only" }).toPromise();
+        if (result.error) throw result.error;
+        return result.data?.listAccount ?? null;
+      } catch (error) {
+        if (run === manageRun.current) setGlobalStatus(listErrorMessage(error, t, t("status.failedToLoad")), { level: "ERROR" });
+        return null;
+      }
+    }));
+    if (run !== manageRun.current) return;
+    setManagedAccounts(loaded.filter((account): account is ListAccount => account !== null));
+    setAccountLoading(false);
   };
 
   const unlinkAccount = async (account: ListAccount) => {
@@ -226,7 +236,7 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
     try {
       const result = await client.mutation(unlinkListAccountMutation, { id: account.id }).toPromise();
       if (result.error) throw result.error;
-      setManagedAccount(null);
+      setManagedAccounts((current) => current.filter((entry) => entry.id !== account.id));
       await Promise.all([loadAccounts(), loadSubscriptions()]);
       setGlobalStatus(t("lists.accounts.unlinked"));
       return true;
@@ -804,14 +814,14 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
       canManageProviderApps={canManageProviderApps}
       onRefreshProviders={refreshProviders}
       accounts={accounts}
-      managedAccount={managedAccount}
+      managedAccounts={managedAccounts}
       accountLoading={accountLoading}
       linkingProvider={accountLink.provider}
       checkingAccountKey={accountLink.checkingKey}
       accountLinkError={accountLink.error}
       onLinkAccount={(provider, memberKey) => void accountLink.start(provider, memberKey)}
       onCancelLink={accountLink.cancel}
-      onManageAccount={(account) => void manageAccount(account)}
+      onManageAccounts={(open) => void manageAccounts(open)}
       onUnlinkAccount={unlinkAccount}
       loading={loading}
       loadError={loadError}

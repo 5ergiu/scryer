@@ -29,7 +29,8 @@ type Props = {
   accounts: ListAccount[];
   /** The member's own follows, so a list already followed is not offered again. */
   subscriptions: ListSubscription[];
-  managedAccount: ListAccount | null;
+  /** The open provider's accounts as read from the provider, each carrying its lists. */
+  managedAccounts: ListAccount[];
   accountLoading: boolean;
   busyIds: ReadonlySet<string>;
   linkingProvider: string | null;
@@ -39,7 +40,8 @@ type Props = {
   /** Starts a link: by the provider's sign-in, or with the key the member typed. */
   onLink: (provider: string, memberKey?: ListAccountMemberKey) => void;
   onCancelLink: () => void;
-  onManage: (account: ListAccount | null) => void;
+  /** Reads the lists of the open provider's accounts from the provider. */
+  onManage: (accounts: ListAccount[]) => void;
   onUnlink: (account: ListAccount) => Promise<boolean>;
   onFollow: (manifest: ListProviderManifest, item: ListProviderItem, source: ListSourceDraft, name: string) => void;
   /** Reads one of the account's lists as it stands, for the preview in its row. */
@@ -174,108 +176,123 @@ export function PersonalAccountConnections(props: ConnectionsProps) {
   );
 }
 
-/** A provider in the rail: one entry per linked account, or one for a provider with none. */
-type AccountEntry = { key: string; provider: ListProviderManifest; linked: ListAccount | null };
+/** A provider in the rail, with every account the member has linked to it. */
+type ProviderEntry = { provider: ListProviderManifest; linked: ListAccount[] };
 
 /**
  * The member's own provider accounts: a rail of the providers that offer
- * personal lists, and for the open one its connection and the lists that
- * account can follow.
+ * personal lists, and for the open one its connections and the lists every
+ * account linked to it can follow.
  */
 export function PersonalAccounts(props: Props) {
   const t = useTranslate();
   const { onManage } = props;
-  const catalog = props.providers.filter((provider) => provider.groups.some((group) => group.items.some((item) => item.personal)));
-  const entries = catalog.flatMap((provider): AccountEntry[] => {
-    const linkedAccounts = props.accounts.filter((entry) => entry.provider === provider.providerType);
-    return linkedAccounts.length
-      ? linkedAccounts.map((linked) => ({ key: linked.id, provider, linked }))
-      : [{ key: provider.providerType, provider, linked: null }];
-  });
-  // Linking or unlinking changes an entry's key, so the provider is kept to fall back on.
-  const [picked, setPicked] = React.useState<{ key: string; providerType: string } | null>(null);
-  // A further account being connected opens once it arrives; the accounts there before it are kept to tell it apart.
-  const [adding, setAdding] = React.useState<{ providerType: string; known: string[] } | null>(null);
-  const selected =
-    entries.find((entry) => entry.linked && entry.provider.providerType === adding?.providerType && !adding.known.includes(entry.key)) ??
-    entries.find((entry) => entry.key === picked?.key) ??
-    entries.find((entry) => entry.provider.providerType === picked?.providerType) ??
-    entries[0] ??
-    null;
+  const entries = props.providers
+    .filter((provider) => provider.groups.some((group) => group.items.some((item) => item.personal)))
+    .map((provider): ProviderEntry => ({
+      provider,
+      linked: props.accounts.filter((entry) => entry.provider === provider.providerType),
+    }));
+  const [picked, setPicked] = React.useState<string | null>(null);
+  const selected = entries.find((entry) => entry.provider.providerType === picked) ?? entries[0] ?? null;
+  // The link in progress adds a further account, which the provider settles by who is signed in there.
+  const [linkingAnother, setLinkingAnother] = React.useState(false);
   const [unlinkingId, setUnlinkingId] = React.useState<string | null>(null);
-  // The entry whose key form is open, for a provider that connects by key.
+  // The account or provider whose key form is open, for a provider that connects by key.
   const [keyFormFor, setKeyFormFor] = React.useState<KeyFormTarget | null>(null);
 
-  // The open account's lists are read from the provider when it is opened, and again once it is reconnected.
-  const linked = selected?.linked ?? null;
-  const linkedId = linked?.id ?? null;
-  const linkedStatus = linked?.status ?? null;
-  const openAccount = React.useRef<() => void>(() => {});
+  // The open provider's accounts have their lists read when it is opened, and again once one is connected, reconnected or unlinked.
+  const linked = selected?.linked ?? [];
+  const linkedSignature = linked.map((entry) => `${entry.id}:${entry.status}`).join(",");
+  const openAccounts = React.useRef<() => void>(() => {});
   React.useEffect(() => {
-    openAccount.current = () => onManage(linked);
+    openAccounts.current = () => onManage(linked);
   });
   React.useEffect(() => {
-    openAccount.current();
-  }, [linkedId, linkedStatus]);
+    openAccounts.current();
+  }, [selected?.provider.providerType, linkedSignature]);
 
   const manifest = selected?.provider ?? null;
-  // The loaded account carries its lists; until it arrives the linked one stands in.
-  const account = linked && props.managedAccount?.id === linked.id ? props.managedAccount : linked;
+  const providerType = manifest?.providerType ?? "";
+  const memberKey = manifest?.memberKey ?? null;
   const items = manifest?.groups.flatMap((group) => group.items).filter((item) => item.personal) ?? [];
-  const choices = account ? [
-    ...account.ownedLists.map((list) => ({ key: `list:${list.id}`, label: list.name, sourceType: list.sourceType, params: list.params, kinds: list.kinds })),
-    ...account.statuses.map((status) => ({ key: `status:${status.key}`, label: status.label, sourceType: status.sourceType, params: status.params, kinds: status.kinds })),
-  ] : [];
+  // A loaded account carries its lists; until it arrives the linked one stands in.
+  const accounts = linked.map((entry) => props.managedAccounts.find((loaded) => loaded.id === entry.id) ?? entry);
+  const several = accounts.length > 1;
   const rows: CatalogListRow[] = [];
-  if (account && manifest) {
-    const followed = (sourceType: string, params: ListSourceDraft["params"]) =>
-      isListSourceFollowed(props.subscriptions, { provider: account.provider, sourceType, params, accountId: account.id });
-    const followId = (key: string) => `lists-account-follow-${account.id}-${key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
-    for (const item of items) {
-      if (choices.some((choice) => choice.sourceType === item.sourceType)) continue;
-      const source: ListSourceDraft = { provider: account.provider, sourceType: item.sourceType, params: [], url: null, credentialId: account.id };
-      rows.push({
-        key: `item:${item.id}`,
-        name: item.name,
-        description: item.description,
-        kinds: item.kinds,
-        account: listAccountLabel(account),
-        intervalSeconds: item.defaultIntervalSeconds,
-        followed: followed(item.sourceType, []),
-        followId: followId(item.id),
-        onFollow: () => props.onFollow(manifest, item, source, item.name),
-        // A list that needs a value has nothing to read until it is given one.
-        onPreview: item.params.some((param) => param.required) ? undefined : () => props.onPreviewSource(source),
-      });
-    }
-    for (const choice of choices) {
-      const item = items.find((entry) => entry.sourceType === choice.sourceType);
-      if (!item) continue;
-      const source: ListSourceDraft = { provider: account.provider, sourceType: choice.sourceType, params: choice.params, fixedParams: true, url: null, credentialId: account.id };
-      rows.push({
-        key: choice.key,
-        name: choice.label,
-        kinds: choice.kinds,
-        account: listAccountLabel(account),
-        intervalSeconds: item.defaultIntervalSeconds,
-        followed: followed(choice.sourceType, choice.params),
-        followId: followId(choice.key),
-        onFollow: () => props.onFollow(manifest, { ...item, kinds: choice.kinds }, source, choice.label),
-        onPreview: () => props.onPreviewSource(source),
-      });
+  if (manifest) {
+    for (const account of accounts) {
+      const choices = [
+        ...account.ownedLists.map((list) => ({ key: `list:${list.id}`, label: list.name, sourceType: list.sourceType, params: list.params, kinds: list.kinds })),
+        ...account.statuses.map((status) => ({ key: `status:${status.key}`, label: status.label, sourceType: status.sourceType, params: status.params, kinds: status.kinds })),
+      ];
+      const followed = (sourceType: string, params: ListSourceDraft["params"]) =>
+        isListSourceFollowed(props.subscriptions, { provider: account.provider, sourceType, params, accountId: account.id });
+      const followId = (key: string) => `lists-account-follow-${account.id}-${key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+      for (const item of items) {
+        if (choices.some((choice) => choice.sourceType === item.sourceType)) continue;
+        const source: ListSourceDraft = { provider: account.provider, sourceType: item.sourceType, params: [], url: null, credentialId: account.id };
+        rows.push({
+          key: `${account.id}:item:${item.id}`,
+          name: item.name,
+          description: item.description,
+          kinds: item.kinds,
+          account: listAccountLabel(account),
+          intervalSeconds: item.defaultIntervalSeconds,
+          followed: followed(item.sourceType, []),
+          followId: followId(item.id),
+          onFollow: () => props.onFollow(manifest, item, source, item.name),
+          // A list that needs a value has nothing to read until it is given one.
+          onPreview: item.params.some((param) => param.required) ? undefined : () => props.onPreviewSource(source),
+        });
+      }
+      for (const choice of choices) {
+        const item = items.find((entry) => entry.sourceType === choice.sourceType);
+        if (!item) continue;
+        const source: ListSourceDraft = { provider: account.provider, sourceType: choice.sourceType, params: choice.params, fixedParams: true, url: null, credentialId: account.id };
+        rows.push({
+          key: `${account.id}:${choice.key}`,
+          name: choice.label,
+          kinds: choice.kinds,
+          account: listAccountLabel(account),
+          intervalSeconds: item.defaultIntervalSeconds,
+          followed: followed(choice.sourceType, choice.params),
+          followId: followId(choice.key),
+          onFollow: () => props.onFollow(manifest, { ...item, kinds: choice.kinds }, source, choice.label),
+          onPreview: () => props.onPreviewSource(source),
+        });
+      }
     }
   }
-  const confirmingUnlink = !!account && unlinkingId === account.id;
-  // Connects a further account of the open provider, which opens once it arrives.
-  const linkAnother = (memberKey?: ListAccountMemberKey) => {
-    if (!selected) return;
-    const providerType = selected.provider.providerType;
-    setAdding({
-      providerType,
-      known: props.accounts.filter((entry) => entry.provider === providerType).map((entry) => entry.id),
-    });
-    props.onLink(providerType, memberKey);
+  // Starts a link with the open provider: a further account, or the one already there.
+  const link = (another: boolean, entered?: ListAccountMemberKey) => {
+    setLinkingAnother(another);
+    props.onLink(providerType, entered);
   };
+  const keyForm = (key: string, replacing: boolean) =>
+    memberKey && keyFormFor?.key === key && !props.linkingProvider ? (
+      <MemberKeyForm
+        id={`lists-account-key-${key}`}
+        memberKey={memberKey}
+        replacing={replacing}
+        onCancel={() => setKeyFormFor(null)}
+        onSubmit={(entered) => {
+          setKeyFormFor(null);
+          link(keyFormFor.another, entered);
+        }}
+      />
+    ) : null;
+  const connectAnother = (
+    <Button
+      id={`lists-account-add-${providerType}`}
+      size="sm"
+      variant="outline"
+      disabled={!!props.linkingProvider}
+      onClick={() => (memberKey ? setKeyFormFor({ key: providerType, another: true }) : link(true))}
+    >
+      {t("lists.accounts.connectAnother")}
+    </Button>
+  );
 
   return (
     <section id="lists-personal-accounts" className="space-y-3">
@@ -288,77 +305,95 @@ export function PersonalAccounts(props: Props) {
         </Button>
       </div>
       <p className="text-sm text-[var(--scry-muted)]">{t("lists.accounts.copy")}</p>
-      {catalog.length === 0 ? <ListProviderSetup /> : null}
+      {entries.length === 0 ? <ListProviderSetup /> : null}
       {selected ? (
         <div id="lists-accounts" className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
           <ProviderRail label={t("lists.catalog.providers")}>
             {entries.map((entry) => (
               <ProviderRailEntry
-                key={entry.key}
-                id={`lists-account-${entry.key}`}
-                active={entry.key === selected.key}
-                onSelect={() => {
-                  setAdding(null);
-                  setPicked({ key: entry.key, providerType: entry.provider.providerType });
-                }}
+                key={entry.provider.providerType}
+                id={`lists-account-${entry.provider.providerType}`}
+                active={entry === selected}
+                onSelect={() => setPicked(entry.provider.providerType)}
                 icon={<ProviderTile provider={entry.provider} size="sm" />}
                 name={entry.provider.name}
                 detail={
-                  entry.linked ? listAccountLabel(entry.linked) : t("lists.accounts.notConnected")
+                  entry.linked.length
+                    ? entry.linked.map(listAccountLabel).join(", ")
+                    : t("lists.accounts.notConnected")
                 }
               />
             ))}
           </ProviderRail>
 
-          <div id={`lists-account-panel-${selected.key}`} className="min-w-0 space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {account ? (
-                <Badge tone={account.status === "ACTIVE" ? "positive" : "warning"}>
-                  {t(account.status === "ACTIVE" ? "lists.accounts.connected" : "lists.accounts.needsReconnect")}
-                </Badge>
-              ) : null}
-              <Button
-                id={`lists-account-link-${selected.key}`}
-                size="sm"
-                variant={account?.status === "ACTIVE" ? "outline" : "primary"}
-                disabled={!!props.linkingProvider}
-                onClick={() => (selected.provider.memberKey ? setKeyFormFor({ key: selected.key, another: false }) : props.onLink(selected.provider.providerType))}
-              >
-                {t(account ? "lists.accounts.reconnect" : "lists.accounts.connect")}
-              </Button>
-              {account ? (
+          <div id={`lists-account-panel-${providerType}`} className="min-w-0 space-y-3">
+            {accounts.map((account) => {
+              const confirmingUnlink = unlinkingId === account.id;
+              return (
+                <div key={account.id} id={`lists-account-connection-${account.id}`} className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {several ? (
+                      <span data-ui="list-account-name" className="text-sm font-semibold text-[var(--scry-ink2)]">
+                        {listAccountLabel(account)}
+                      </span>
+                    ) : null}
+                    <Badge tone={account.status === "ACTIVE" ? "positive" : "warning"}>
+                      {t(account.status === "ACTIVE" ? "lists.accounts.connected" : "lists.accounts.needsReconnect")}
+                    </Badge>
+                    <Button
+                      id={`lists-account-link-${account.id}`}
+                      size="sm"
+                      variant={account.status === "ACTIVE" ? "outline" : "primary"}
+                      disabled={!!props.linkingProvider}
+                      onClick={() => (memberKey ? setKeyFormFor({ key: account.id, another: false }) : link(false))}
+                    >
+                      {t("lists.accounts.reconnect")}
+                    </Button>
+                    {several ? null : connectAnother}
+                    {confirmingUnlink ? null : (
+                      <Button id={`lists-account-unlink-${account.id}`} size="sm" variant="outline" onClick={() => setUnlinkingId(account.id)}>
+                        {t("lists.accounts.unlink")}
+                      </Button>
+                    )}
+                  </div>
+                  {account.errorMessage ? (
+                    <p className="text-sm text-[var(--scry-danger-text)]">{account.errorMessage}</p>
+                  ) : null}
+                  {keyForm(account.id, true)}
+                  {confirmingUnlink ? (
+                    <div className="space-y-2 rounded-[12px] border border-[var(--scry-border3)] p-3">
+                      <p className="text-sm text-[var(--scry-muted)]">{t("lists.accounts.unlinkHelp")}</p>
+                      <div className="flex gap-2">
+                        <Button
+                          id={`lists-account-unlink-confirm-${account.id}`}
+                          size="sm"
+                          disabled={props.busyIds.has(account.id)}
+                          onClick={() => void props.onUnlink(account).then(() => setUnlinkingId(null))}
+                        >
+                          {t("lists.accounts.confirmUnlink")}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => setUnlinkingId(null)}>{t("label.cancel")}</Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+            {accounts.length === 0 ? (
+              <div>
                 <Button
-                  id={`lists-account-add-${selected.key}`}
+                  id={`lists-account-link-${providerType}`}
                   size="sm"
-                  variant="outline"
+                  variant="primary"
                   disabled={!!props.linkingProvider}
-                  onClick={() => (selected.provider.memberKey ? setKeyFormFor({ key: selected.key, another: true }) : linkAnother())}
+                  onClick={() => (memberKey ? setKeyFormFor({ key: providerType, another: false }) : link(false))}
                 >
-                  {t("lists.accounts.connectAnother")}
+                  {t("lists.accounts.connect")}
                 </Button>
-              ) : null}
-              {account && !confirmingUnlink ? (
-                <Button id={`lists-account-unlink-${account.id}`} size="sm" variant="outline" onClick={() => setUnlinkingId(account.id)}>
-                  {t("lists.accounts.unlink")}
-                </Button>
-              ) : null}
-            </div>
-            {account?.errorMessage ? (
-              <p className="text-sm text-[var(--scry-danger-text)]">{account.errorMessage}</p>
+              </div>
             ) : null}
-            {selected.provider.memberKey && keyFormFor?.key === selected.key && !props.linkingProvider ? (
-              <MemberKeyForm
-                id={`lists-account-key-${selected.key}`}
-                memberKey={selected.provider.memberKey}
-                replacing={!!account && !keyFormFor.another}
-                onCancel={() => setKeyFormFor(null)}
-                onSubmit={(memberKey) => {
-                  setKeyFormFor(null);
-                  if (keyFormFor.another) linkAnother(memberKey);
-                  else props.onLink(selected.provider.providerType, memberKey);
-                }}
-              />
-            ) : null}
+            {several ? <div>{connectAnother}</div> : null}
+            {keyForm(providerType, false)}
             {props.linkError ? <p role="alert" className="text-sm text-[var(--scry-danger-text)]">{props.linkError}</p> : null}
             {props.linkingProvider ? (
               <div role="status" className="flex items-center gap-2 text-sm">
@@ -366,32 +401,16 @@ export function PersonalAccounts(props: Props) {
                 <Button size="sm" variant="outline" onClick={props.onCancelLink}>{t("label.cancel")}</Button>
               </div>
             ) : null}
-            {props.linkingProvider && adding && !props.checkingKey ? (
+            {props.linkingProvider && linkingAnother && !props.checkingKey ? (
               <p className="text-[12.5px] text-[var(--scry-muted)]">{t("lists.accounts.connectAnotherHint")}</p>
             ) : null}
-            {account && confirmingUnlink ? (
-              <div className="space-y-2 rounded-[12px] border border-[var(--scry-border3)] p-3">
-                <p className="text-sm text-[var(--scry-muted)]">{t("lists.accounts.unlinkHelp")}</p>
-                <div className="flex gap-2">
-                  <Button
-                    id={`lists-account-unlink-confirm-${account.id}`}
-                    size="sm"
-                    disabled={props.busyIds.has(account.id)}
-                    onClick={() => void props.onUnlink(account).then(() => setUnlinkingId(null))}
-                  >
-                    {t("lists.accounts.confirmUnlink")}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setUnlinkingId(null)}>{t("label.cancel")}</Button>
-                </div>
-              </div>
-            ) : null}
-            {!account ? null : props.accountLoading ? (
+            {accounts.length === 0 ? null : props.accountLoading ? (
               <p role="status" className="flex items-center gap-2 text-[12.5px] text-[var(--scry-muted)]">
                 <LoadingMark className="h-4 w-4" />
                 {t("label.loading")}
               </p>
             ) : rows.length > 0 ? (
-              <CatalogListTable id={`lists-account-lists-${account.id}`} rows={rows} />
+              <CatalogListTable key={providerType} id={`lists-account-lists-${providerType}`} rows={rows} />
             ) : null}
           </div>
         </div>

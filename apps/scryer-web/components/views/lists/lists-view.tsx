@@ -64,14 +64,14 @@ type ListsViewProps = {
   canManageProviderApps: boolean;
   onRefreshProviders: () => Promise<void>;
   accounts: ListAccount[];
-  managedAccount: ListAccount | null;
+  managedAccounts: ListAccount[];
   accountLoading: boolean;
   linkingProvider: string | null;
   checkingAccountKey: boolean;
   accountLinkError: string | null;
   onLinkAccount: (provider: string, memberKey?: ListAccountMemberKey) => void;
   onCancelLink: () => void;
-  onManageAccount: (account: ListAccount | null) => void;
+  onManageAccounts: (accounts: ListAccount[]) => void;
   onUnlinkAccount: (account: ListAccount) => Promise<boolean>;
   loading: boolean;
   loadError: string | null;
@@ -322,7 +322,7 @@ export function ListsView(props: ListsViewProps) {
             </section>
 
             {section === "personal" ? (
-              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccount={props.managedAccount} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} checkingKey={props.checkingAccountKey} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccount} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
+              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccounts={props.managedAccounts} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} checkingKey={props.checkingAccountKey} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccounts} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
             ) : null}
 
             {canManageLists && section === "public" ? (
