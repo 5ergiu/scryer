@@ -84,7 +84,7 @@ function ProviderAppForm({ app, onSaved }: { app: ListProviderApp; onSaved: (app
       {enabled ? (
         <div id={`provider-app-${app.provider}-fields`} className="space-y-3">
       <label className="block space-y-1"><span>{t("lists.providerApps.clientId")}</span><Input value={clientId} autoComplete="off" onChange={(event) => setClientId(event.target.value)} /></label>
-      <label className="block space-y-1"><span>{t("lists.providerApps.clientSecret")}</span><Input type="password" value={clientSecret} autoComplete="new-password" placeholder={app.clientSecretSet ? t("lists.providerSettings.secretPlaceholder") : undefined} onChange={(event) => setClientSecret(event.target.value)} />{app.provider === "trakt" ? <span className="block text-sm text-muted-foreground">{t("lists.providerApps.traktSecretHint")}</span> : null}</label>
+      <label className="block space-y-1"><span>{t("lists.providerApps.clientSecret")}</span><Input type="password" ignorePasswordManagers value={clientSecret} placeholder={app.clientSecretSet ? t("lists.providerSettings.secretPlaceholder") : undefined} onChange={(event) => setClientSecret(event.target.value)} />{app.provider === "trakt" ? <span className="block text-sm text-muted-foreground">{t("lists.providerApps.traktSecretHint")}</span> : null}</label>
       <label className="block space-y-1"><span>{t("lists.providerApps.redirectUri")}</span><Input value={redirectUri} inputMode="url" autoComplete="off" onChange={(event) => setRedirectUri(event.target.value)} /></label>
       <p className="text-sm text-muted-foreground">{t("lists.providerApps.redirectHelp")}</p>
       <code className="block select-all break-all text-sm">{callbackUri}</code>

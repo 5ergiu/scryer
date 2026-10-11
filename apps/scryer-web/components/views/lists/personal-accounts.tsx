@@ -85,7 +85,7 @@ function MemberKeyForm(props: {
         <Input
           id={`${props.id}-input`}
           type="password"
-          autoComplete="off"
+          ignorePasswordManagers
           value={typed}
           aria-invalid={missing || undefined}
           onChange={(event) => {
