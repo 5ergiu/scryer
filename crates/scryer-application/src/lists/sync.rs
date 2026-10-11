@@ -271,7 +271,7 @@ pub async fn sync_subscription(
             .await?;
         run.outcome = ListSyncRunOutcome::Skipped;
         run.counts = subscription.counts;
-        finish_run(context, run, now).await?;
+        finish_run(context, subscription, run, now).await?;
         return Ok(SubscriptionSyncOutcome::Off);
     }
 
@@ -638,7 +638,7 @@ pub async fn sync_subscription(
         .record_sync_outcome(&subscription.id, &subscription.sync, &status, &counts)
         .await?;
     run.counts = counts;
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Synced {
         acted: count_states(acted_states),
         departures_acted: leave.acted,
@@ -837,7 +837,7 @@ async fn record_unchanged(
         )
         .await?;
     run.counts = subscription.counts;
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Unchanged)
 }
 
@@ -871,7 +871,7 @@ async fn record_empty_fetch(
         .await?;
     run.counts = subscription.counts;
     run.error_message = Some(LIST_SYNC_EMPTY_FETCH_NOTE.to_string());
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Synced {
         acted: ListCounts::default(),
         departures_acted: 0,
@@ -915,7 +915,7 @@ async fn record_storage_failure(
     run.outcome = ListSyncRunOutcome::Failed;
     run.counts = subscription.counts;
     run.error_message = Some(LIST_SYNC_STORAGE_FAILURE_MESSAGE.to_string());
-    if let Err(error) = finish_run(context, run, now).await {
+    if let Err(error) = finish_run(context, subscription, run, now).await {
         tracing::warn!(
             subscription_id = %subscription.id,
             error = %error,
@@ -987,7 +987,7 @@ async fn record_failure(
     run.outcome = ListSyncRunOutcome::Failed;
     run.counts = subscription.counts;
     run.error_message = Some(failure.message.clone());
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
 
     // Record once per failure, not once per retry. Production routes
     // personal failures onto the owner's User stream.
@@ -1008,13 +1008,29 @@ async fn record_failure(
     Ok(SubscriptionSyncOutcome::Failed(failure))
 }
 
+/// Record the run, then say the sync ended. Every caller has already written
+/// the subscription's new sync status, so whoever reads the list on hearing of
+/// it sees this run's result.
 async fn finish_run(
     context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
     mut run: ListSyncRun,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
     run.finished_at = Some(now.max(Utc::now()));
+    let outcome = run.outcome;
     context.subscriptions.record_sync_run(run).await?;
+    if let Err(error) = context
+        .actions
+        .record_sync_finished(subscription, outcome)
+        .await
+    {
+        tracing::warn!(
+            subscription_id = %subscription.id,
+            error = %error,
+            "could not announce a finished list sync"
+        );
+    }
     Ok(())
 }
 

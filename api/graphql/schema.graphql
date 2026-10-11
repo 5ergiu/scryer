@@ -4882,6 +4882,14 @@ enum DomainEventTypeValue {
 	A public list was unfollowed.
 	"""
 	LIST_UNFOLLOWED
+	"""
+	A sync of a list ended and its run was recorded, whatever the outcome.
+	"""
+	LIST_SYNC_FINISHED
+	"""
+	A list was followed, changed, turned on or off, or unfollowed.
+	"""
+	LIST_SUBSCRIPTION_CHANGED
 }
 
 """

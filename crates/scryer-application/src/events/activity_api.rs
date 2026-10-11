@@ -261,6 +261,20 @@ async fn event_allowed(
         {
             Ok(true)
         }
+        // A followed public list is readable by every member, and these two
+        // say only that one changed or finished a sync.
+        DomainEventPayload::ListSyncFinished(_)
+        | DomainEventPayload::ListSubscriptionChanged(_) => Ok(true),
+        DomainEventPayload::ConfigurationChanged(data)
+            if data
+                .resource_type
+                .starts_with(crate::lists::public::LIST_CONFIGURATION_RESOURCE_PREFIX) =>
+        {
+            Ok(app
+                .has_app_permission(actor, AppPermission::ManageLists)
+                .await?
+                || actor_can_view_titleless_operational_event(app, actor).await?)
+        }
         DomainEventPayload::MediaRequestSubmitted(data) => {
             Ok(allowed_library_ids.contains(&data.library_id))
         }

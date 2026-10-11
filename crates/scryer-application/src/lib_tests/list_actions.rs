@@ -261,11 +261,90 @@ async fn unfollowing_a_public_list_is_announced() {
         .expect("unfollowed");
 
     let events = list_events(&harness).await;
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     let DomainEventPayload::ListUnfollowed(data) = &events[0].payload else {
         panic!("expected an unfollow, got {:?}", events[0].payload);
     };
     assert_eq!(data.list.list_name, "Fixture list public-list-one");
+    let DomainEventPayload::ListSubscriptionChanged(changed) = &events[1].payload else {
+        panic!("expected a list change, got {:?}", events[1].payload);
+    };
+    assert_eq!(changed.list.subscription_id, "public-list-one");
+    assert_eq!(
+        changed.action,
+        scryer_domain::ConfigurationChangeAction::Deleted
+    );
+}
+
+#[tokio::test]
+async fn turning_a_public_list_off_says_the_list_changed_once_it_is_stored() {
+    let harness = bootstrap_media_request_app();
+    super::list_experimental_gate::set_experimental_features(&harness, true).await;
+    *harness.lists.subscriptions.lock().unwrap() = vec![subscription("public-list-one")];
+    let mut manager = harness.manager.clone();
+    manager.authorization.app = AppPermissionMask::MANAGE_LISTS;
+
+    harness
+        .app
+        .set_public_list_enabled(&manager, "public-list-one", false)
+        .await
+        .expect("turned off");
+
+    let events = list_events(&harness).await;
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0].stream, DomainEventStream::Global));
+    let DomainEventPayload::ListSubscriptionChanged(changed) = &events[0].payload else {
+        panic!("expected a list change, got {:?}", events[0].payload);
+    };
+    assert_eq!(changed.list.subscription_id, "public-list-one");
+    assert_eq!(
+        changed.action,
+        scryer_domain::ConfigurationChangeAction::Updated
+    );
+    assert!(
+        !harness.lists.subscription("public-list-one").enabled,
+        "whoever reads the list on hearing of the change sees it turned off"
+    );
+}
+
+#[tokio::test]
+async fn a_finished_sync_of_a_personal_list_is_told_only_to_its_owner() {
+    let harness = bootstrap_media_request_app();
+    let mut personal = subscription("personal-list-one");
+    personal.scope = ListScope::Personal;
+    personal.owner_user_id = harness.user.id.clone();
+    let actions = AppListActions::new(&harness.app);
+
+    actions
+        .record_sync_finished(
+            &subscription("public-list-one"),
+            scryer_domain::ListSyncRunOutcome::Succeeded,
+        )
+        .await
+        .expect("public announced");
+    actions
+        .record_sync_finished(&personal, scryer_domain::ListSyncRunOutcome::Failed)
+        .await
+        .expect("personal announced");
+
+    let events = list_events(&harness).await;
+    assert_eq!(events.len(), 2);
+    assert!(matches!(events[0].stream, DomainEventStream::Global));
+    assert_eq!(
+        events[1].stream,
+        DomainEventStream::User {
+            user_id: harness.user.id.clone()
+        }
+    );
+    let DomainEventPayload::ListSyncFinished(data) = &events[1].payload else {
+        panic!("expected a finished sync, got {:?}", events[1].payload);
+    };
+    assert_eq!(data.outcome, scryer_domain::ListSyncRunOutcome::Failed);
+    assert_eq!(
+        crate::notifications::dispatcher::notification_event_type(&events[0].payload),
+        None,
+        "a finished sync is a refresh signal, never a notification"
+    );
 }
 
 #[tokio::test]

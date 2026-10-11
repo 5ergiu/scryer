@@ -746,6 +746,10 @@ pub enum DomainEventTypeValue {
     ListSyncFailed,
     /// A public list was unfollowed.
     ListUnfollowed,
+    /// A sync of a list ended and its run was recorded, whatever the outcome.
+    ListSyncFinished,
+    /// A list was followed, changed, turned on or off, or unfollowed.
+    ListSubscriptionChanged,
 }
 
 impl DomainEventTypeValue {
@@ -807,6 +811,8 @@ impl DomainEventTypeValue {
             DomainEventType::ListTitleLeft => Self::ListTitleLeft,
             DomainEventType::ListSyncFailed => Self::ListSyncFailed,
             DomainEventType::ListUnfollowed => Self::ListUnfollowed,
+            DomainEventType::ListSyncFinished => Self::ListSyncFinished,
+            DomainEventType::ListSubscriptionChanged => Self::ListSubscriptionChanged,
         }
     }
 
@@ -868,6 +874,8 @@ impl DomainEventTypeValue {
             Self::ListTitleLeft => DomainEventType::ListTitleLeft,
             Self::ListSyncFailed => DomainEventType::ListSyncFailed,
             Self::ListUnfollowed => DomainEventType::ListUnfollowed,
+            Self::ListSyncFinished => DomainEventType::ListSyncFinished,
+            Self::ListSubscriptionChanged => DomainEventType::ListSubscriptionChanged,
         }
     }
 }

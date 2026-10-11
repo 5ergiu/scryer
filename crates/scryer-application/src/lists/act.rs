@@ -8,7 +8,9 @@
 //! delete a title.
 
 use async_trait::async_trait;
-use scryer_domain::{ListMembershipState, ListMode, ListOnLeave, ListRoute, ListSubscription};
+use scryer_domain::{
+    ListMembershipState, ListMode, ListOnLeave, ListRoute, ListSubscription, ListSyncRunOutcome,
+};
 
 use super::fetch::ListFailure;
 use super::resolve::ResolvedItem;
@@ -118,6 +120,15 @@ pub trait ListActions: Send + Sync {
         &self,
         subscription: &ListSubscription,
         failure: &ListFailure,
+    ) -> AppResult<()>;
+
+    /// Say that a sync of the subscription ended and its run is recorded.
+    /// Called for every run, after its result is stored, so a page showing
+    /// the list can read it again.
+    async fn record_sync_finished(
+        &self,
+        subscription: &ListSubscription,
+        outcome: ListSyncRunOutcome,
     ) -> AppResult<()>;
 }
 

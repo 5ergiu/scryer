@@ -66,7 +66,9 @@ pub(crate) const fn retention_class_for_domain_event_type(
         | DomainEventType::JobRunFailed
         | DomainEventType::JobNextRunUpdated
         | DomainEventType::DownloadQueueItemUpserted
-        | DomainEventType::DownloadQueueItemRemoved => {
+        | DomainEventType::DownloadQueueItemRemoved
+        | DomainEventType::ListSyncFinished
+        | DomainEventType::ListSubscriptionChanged => {
             DomainEventRetentionClass::OperationalProjection
         }
         DomainEventType::DiscoverySearchCompleted

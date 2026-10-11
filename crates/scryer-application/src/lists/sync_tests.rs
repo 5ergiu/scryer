@@ -384,6 +384,30 @@ fn sync_failures(actions: &RecordingActions) -> Vec<RecordedAction> {
 }
 
 #[tokio::test]
+async fn every_run_that_ends_is_announced_once_with_its_outcome() {
+    let mut list = subscription("list-a");
+    list.interval_seconds = 60;
+    let harness = Harness::new(vec![list, subscription("list-b")]);
+    harness.lists.serve("list-a", &["alpha"]);
+    harness.lists.fail("list-b", rate_limited(None));
+
+    // A first read of one list, a failure of the other.
+    harness.sync_at(at(0)).await;
+    // The first list answers unchanged; the second is paused and is not run.
+    harness.sync_at(at(10)).await;
+
+    assert_eq!(
+        *harness.actions.finished_syncs.lock().unwrap(),
+        vec![
+            ("list-a".to_string(), ListSyncRunOutcome::Succeeded),
+            ("list-b".to_string(), ListSyncRunOutcome::Failed),
+            ("list-a".to_string(), ListSyncRunOutcome::Succeeded),
+        ],
+        "an unchanged list still says its sync ended, so its last-synced time is read again"
+    );
+}
+
+#[tokio::test]
 async fn a_public_failure_is_announced_once_until_it_changes() {
     let harness = Harness::new(vec![subscription("list-a")]);
     harness.lists.fail("list-a", rate_limited(None));

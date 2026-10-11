@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use scryer_domain::{
     ExternalId, ListCounts, ListExclusion, ListMembership, ListMode, ListOnLeave, ListRoute,
-    ListScope, ListSource, ListSourceOrigin, ListSubscription, ListSyncRun, ListSyncStatus,
-    MediaFacet, UserListAccount, UserListPolicy,
+    ListScope, ListSource, ListSourceOrigin, ListSubscription, ListSyncRun, ListSyncRunOutcome,
+    ListSyncStatus, MediaFacet, UserListAccount, UserListPolicy,
 };
 use scryer_plugin_sdk::{
     ListCredential, ListExternalId, ListMediaKind, ListPluginAccountResponse,
@@ -641,6 +641,8 @@ pub(crate) struct RecordingActions {
     pub missing_titles: Mutex<HashSet<String>>,
     /// How many times a title's existence was looked up.
     pub title_lookups: Mutex<u32>,
+    /// Every finished sync that was announced, in order.
+    pub finished_syncs: Mutex<Vec<(String, ListSyncRunOutcome)>>,
     pub owner_manages_titles: bool,
     /// Makes the owner's permission lookup fail instead of answering.
     pub owner_permission_unreadable: bool,
@@ -762,6 +764,18 @@ impl ListActions for RecordingActions {
                 subscription_id: subscription.id.clone(),
                 class: failure.class.as_str().to_string(),
             });
+        Ok(())
+    }
+
+    async fn record_sync_finished(
+        &self,
+        subscription: &ListSubscription,
+        outcome: ListSyncRunOutcome,
+    ) -> AppResult<()> {
+        self.finished_syncs
+            .lock()
+            .unwrap()
+            .push((subscription.id.clone(), outcome));
         Ok(())
     }
 }

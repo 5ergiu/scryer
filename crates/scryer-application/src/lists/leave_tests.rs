@@ -527,4 +527,12 @@ impl ListActions for FailingDepartureRecord {
     ) -> crate::AppResult<()> {
         self.0.record_sync_failure(subscription, failure).await
     }
+
+    async fn record_sync_finished(
+        &self,
+        subscription: &ListSubscription,
+        outcome: scryer_domain::ListSyncRunOutcome,
+    ) -> crate::AppResult<()> {
+        self.0.record_sync_finished(subscription, outcome).await
+    }
 }

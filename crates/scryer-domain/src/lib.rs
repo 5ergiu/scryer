@@ -4096,6 +4096,8 @@ pub enum DomainEventType {
     ListTitleLeft,
     ListSyncFailed,
     ListUnfollowed,
+    ListSyncFinished,
+    ListSubscriptionChanged,
 }
 
 impl DomainEventType {
@@ -4157,6 +4159,8 @@ impl DomainEventType {
             Self::ListTitleLeft => "list_title_left",
             Self::ListSyncFailed => "list_sync_failed",
             Self::ListUnfollowed => "list_unfollowed",
+            Self::ListSyncFinished => "list_sync_finished",
+            Self::ListSubscriptionChanged => "list_subscription_changed",
         }
     }
 
@@ -4218,6 +4222,8 @@ impl DomainEventType {
             "list_title_left" => Some(Self::ListTitleLeft),
             "list_sync_failed" => Some(Self::ListSyncFailed),
             "list_unfollowed" => Some(Self::ListUnfollowed),
+            "list_sync_finished" => Some(Self::ListSyncFinished),
+            "list_subscription_changed" => Some(Self::ListSubscriptionChanged),
             _ => None,
         }
     }
@@ -5061,6 +5067,8 @@ pub enum DomainEventPayload {
     ListTitleLeft(ListTitleLeftEventData),
     ListSyncFailed(ListSyncFailedEventData),
     ListUnfollowed(ListUnfollowedEventData),
+    ListSyncFinished(ListSyncFinishedEventData),
+    ListSubscriptionChanged(ListSubscriptionChangedEventData),
 }
 
 impl DomainEventPayload {
@@ -5124,6 +5132,8 @@ impl DomainEventPayload {
             Self::ListTitleLeft(_) => DomainEventType::ListTitleLeft,
             Self::ListSyncFailed(_) => DomainEventType::ListSyncFailed,
             Self::ListUnfollowed(_) => DomainEventType::ListUnfollowed,
+            Self::ListSyncFinished(_) => DomainEventType::ListSyncFinished,
+            Self::ListSubscriptionChanged(_) => DomainEventType::ListSubscriptionChanged,
         }
     }
 }

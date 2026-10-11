@@ -12,8 +12,8 @@ use chrono::Utc;
 use scryer_domain::{
     DomainEventPayload, ExternalId, LibraryPermission, ListEventSubject, ListOnLeave,
     ListRequestSubmittedEventData, ListRoute, ListSubscription, ListSyncFailedEventData,
-    ListTitleAddedEventData, ListTitleLeftEventData, MediaFacet, MediaRequest, MediaRequestOrigin,
-    NewDomainEvent, NewTitle, ReleaseNumbering, User,
+    ListSyncFinishedEventData, ListSyncRunOutcome, ListTitleAddedEventData, ListTitleLeftEventData,
+    MediaFacet, MediaRequest, MediaRequestOrigin, NewDomainEvent, NewTitle, ReleaseNumbering, User,
 };
 
 use super::act::{AddedTitle, ListActions};
@@ -645,6 +645,28 @@ impl ListActions for AppListActions<'_> {
             .await
             .map(|_| ())
     }
+
+    async fn record_sync_finished(
+        &self,
+        subscription: &ListSubscription,
+        outcome: ListSyncRunOutcome,
+    ) -> AppResult<()> {
+        let payload = DomainEventPayload::ListSyncFinished(ListSyncFinishedEventData {
+            list: ListEventSubject::of(subscription),
+            outcome,
+        });
+        let actor = User::system_execution_actor();
+        let event = if subscription.is_personal() {
+            crate::events::domain_events::new_user_domain_event(
+                &actor,
+                subscription.owner_user_id.clone(),
+                payload,
+            )
+        } else {
+            new_global_domain_event(&actor, payload)
+        };
+        self.app.append_domain_event(event).await.map(|_| ())
+    }
 }
 
 /// Library lookup for list items, across every library of the kind.
@@ -775,6 +797,33 @@ impl AppUseCase {
         if let Err(error) = self.append_domain_event(event).await {
             tracing::warn!(error = %error, "could not record a list event");
         }
+    }
+
+    /// Say that a followed list changed, so a page showing it reads it
+    /// again. A personal list is only told to its owner. Called once the
+    /// change is stored.
+    pub(crate) async fn emit_list_subscription_changed_event(
+        &self,
+        actor: &User,
+        subscription: &ListSubscription,
+        action: scryer_domain::ConfigurationChangeAction,
+    ) {
+        let payload = DomainEventPayload::ListSubscriptionChanged(
+            scryer_domain::ListSubscriptionChangedEventData {
+                list: ListEventSubject::of(subscription),
+                action,
+            },
+        );
+        let event = if subscription.is_personal() {
+            crate::events::domain_events::new_user_domain_event(
+                actor,
+                subscription.owner_user_id.clone(),
+                payload,
+            )
+        } else {
+            new_global_domain_event(actor, payload)
+        };
+        self.append_list_event(event).await;
     }
 
     /// Emit the event for an unfollowed public list. Personal lists are

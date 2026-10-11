@@ -323,6 +323,12 @@ impl AppUseCase {
             updated_at: now,
         };
         let created = self.services.lists.subscriptions.create(row).await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &created,
+            scryer_domain::ConfigurationChangeAction::Saved,
+        )
+        .await;
         self.queue_list_syncs(actor, vec![created.clone()]).await?;
         Ok(created)
     }
@@ -454,7 +460,14 @@ impl AppUseCase {
         )
         .await?;
         row.updated_at = Utc::now();
-        self.services.lists.subscriptions.update(row).await
+        let updated = self.services.lists.subscriptions.update(row).await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &updated,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
+        Ok(updated)
     }
     pub async fn set_visible_list_enabled(
         &self,
@@ -489,6 +502,12 @@ impl AppUseCase {
             .subscriptions
             .record_sync(id, &row.sync, &row.counts)
             .await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &row,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(row)
     }
     pub async fn unsubscribe_visible_list(&self, actor: &User, id: &str) -> AppResult<String> {
@@ -498,6 +517,12 @@ impl AppUseCase {
         let (_guard, row) = self.lock_personal_subscription(actor, id).await?;
         self.services.lists.subscriptions.delete(id).await?;
         self.emit_list_unfollowed_event(actor, &row).await;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &row,
+            scryer_domain::ConfigurationChangeAction::Deleted,
+        )
+        .await;
         Ok(id.into())
     }
     pub async fn sync_visible_list_now(&self, actor: &User, id: &str) -> AppResult<Vec<String>> {

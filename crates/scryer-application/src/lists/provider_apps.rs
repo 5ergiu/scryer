@@ -111,6 +111,13 @@ impl AppUseCase {
         };
         self.upsert_scoped_system_setting_json(KEY, provider, &app, Some(actor.id.clone()))
             .await?;
+        self.emit_configuration_changed_event(
+            actor,
+            "list_provider_app",
+            Some(provider.to_string()),
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(view(provider, app.as_ref()))
     }
 }

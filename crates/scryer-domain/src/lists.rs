@@ -880,6 +880,25 @@ pub struct ListUnfollowedEventData {
     pub list: ListEventSubject,
 }
 
+/// A sync of a list ended and its run was recorded, whatever the outcome.
+/// Written for every run so anything showing the list can read it again; it
+/// says nothing a reader of the list cannot already see.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListSyncFinishedEventData {
+    pub list: ListEventSubject,
+    pub outcome: ListSyncRunOutcome,
+}
+
+/// A list was followed, had its settings changed, was turned on or off, or
+/// was unfollowed. Written so anything showing the followed lists can read
+/// them again; like a finished sync, it says nothing a reader of the list
+/// cannot already see.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListSubscriptionChangedEventData {
+    pub list: ListEventSubject,
+    pub action: crate::ConfigurationChangeAction,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -48,6 +48,12 @@ pub const LIST_SYNC_RUNS_MAX: usize = 1000;
 pub const LIST_PREVIEW_WOULD_ADD_MAX: usize = 100;
 /// The window `list_requests_last_30d` counts over.
 const MEMBER_POLICY_WINDOW_DAYS: i64 = 30;
+/// Every configuration event a list setting writes names a resource with
+/// this prefix, which is how the event feed knows to show it to whoever
+/// manages lists.
+pub(crate) const LIST_CONFIGURATION_RESOURCE_PREFIX: &str = "list_";
+const LIST_EXCLUSION_RESOURCE: &str = "list_exclusion";
+const LIST_MEMBER_POLICY_RESOURCE: &str = "list_member_policy";
 
 /// What a new public follow says.
 #[derive(Clone, Debug, Default)]
@@ -985,6 +991,12 @@ impl AppUseCase {
         subscription.on_leave = input.on_leave;
         subscription.sync.next_at = Some(subscription.created_at);
         let created = lists.subscriptions.create(subscription).await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &created,
+            scryer_domain::ConfigurationChangeAction::Saved,
+        )
+        .await;
         // Start the first sync now, the way "sync now" does, instead of
         // waiting for the next scheduled pass. The follow already stands; if
         // the sync cannot start, the list is due and the next pass takes it.
@@ -1063,6 +1075,12 @@ impl AppUseCase {
             .subscriptions
             .update(subscription)
             .await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &updated,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(redact_for_viewer(updated, true))
     }
 
@@ -1100,6 +1118,12 @@ impl AppUseCase {
         subscriptions
             .record_sync(&updated.id, &updated.sync, &updated.counts)
             .await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &updated,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(redact_for_viewer(updated, true))
     }
 
@@ -1116,6 +1140,12 @@ impl AppUseCase {
             .delete(&subscription.id)
             .await?;
         self.emit_list_unfollowed_event(actor, &subscription).await;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &subscription,
+            scryer_domain::ConfigurationChangeAction::Deleted,
+        )
+        .await;
         Ok(subscription.id)
     }
 
@@ -1274,6 +1304,13 @@ impl AppUseCase {
         // fingerprint only costs a full read, so it goes first.
         self.forget_fingerprints_for_exclusion(&exclusion).await?;
         let exclusion = self.services.lists.exclusions.create(exclusion).await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_EXCLUSION_RESOURCE,
+            Some(exclusion.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Saved,
+        )
+        .await;
         Ok(ListExclusionView {
             exclusion,
             subscription_name,
@@ -1293,6 +1330,13 @@ impl AppUseCase {
         // failure leaves the exclusion standing rather than half-removed.
         self.forget_fingerprints_for_exclusion(&exclusion).await?;
         exclusions.delete(&exclusion.id).await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_EXCLUSION_RESOURCE,
+            Some(exclusion.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Deleted,
+        )
+        .await;
         Ok(exclusion.id)
     }
 
@@ -1394,6 +1438,31 @@ impl AppUseCase {
                 updated_at: Utc::now(),
             })
             .await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_MEMBER_POLICY_RESOURCE,
+            Some(user.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
+        // The member whose policy changed is told too: it decides what their
+        // own lists page offers.
+        if let Err(error) = self
+            .append_domain_event(crate::events::domain_events::new_user_domain_event(
+                actor,
+                user.id.clone(),
+                scryer_domain::DomainEventPayload::ConfigurationChanged(
+                    scryer_domain::ConfigurationChangedEventData {
+                        resource_type: LIST_MEMBER_POLICY_RESOURCE.into(),
+                        resource_id: Some(user.id.clone()),
+                        action: scryer_domain::ConfigurationChangeAction::Updated,
+                    },
+                ),
+            ))
+            .await
+        {
+            tracing::warn!(error = %error, "could not tell a member their list policy changed");
+        }
         let since = Utc::now() - Duration::days(MEMBER_POLICY_WINDOW_DAYS);
         let requests = self
             .services

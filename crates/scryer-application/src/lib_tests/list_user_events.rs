@@ -128,3 +128,85 @@ async fn list_user_events_private_append_never_wakes_global_notifications() {
         .unwrap();
     assert_eq!(receiver.try_recv().unwrap(), public.sequence);
 }
+
+/// A member who can view the movie library and holds the given app permissions.
+fn library_viewer(username: &str, app_permissions: AppPermissionMask) -> User {
+    let mut user = test_user_with_app_permissions(username, app_permissions);
+    user.authorization.libraries = [(
+        scryer_domain::default_library_id_for_facet(&MediaFacet::Movie),
+        scryer_domain::LibraryPermissionMask::VIEW.normalized_for_storage(),
+    )]
+    .into_iter()
+    .collect();
+    user
+}
+
+fn fixture_list() -> ListEventSubject {
+    ListEventSubject {
+        subscription_id: "public-subscription".into(),
+        list_name: "Public fixture list".into(),
+        provider: "imdb".into(),
+    }
+}
+
+fn configuration_changed(resource_type: &str) -> DomainEventPayload {
+    DomainEventPayload::ConfigurationChanged(scryer_domain::ConfigurationChangedEventData {
+        resource_type: resource_type.into(),
+        resource_id: Some("fixture".into()),
+        action: scryer_domain::ConfigurationChangeAction::Saved,
+    })
+}
+
+#[tokio::test]
+async fn public_list_refresh_events_reach_every_member_and_list_settings_reach_list_managers() {
+    let (app, admin) = bootstrap();
+    let member = library_viewer("member", AppPermissionMask::NONE);
+    let manager = library_viewer("list-manager", AppPermissionMask::MANAGE_LISTS);
+    let mut sequences = Vec::new();
+    for payload in [
+        DomainEventPayload::ListSyncFinished(scryer_domain::ListSyncFinishedEventData {
+            list: fixture_list(),
+            outcome: scryer_domain::ListSyncRunOutcome::Succeeded,
+        }),
+        DomainEventPayload::ListSubscriptionChanged(
+            scryer_domain::ListSubscriptionChangedEventData {
+                list: fixture_list(),
+                action: scryer_domain::ConfigurationChangeAction::Saved,
+            },
+        ),
+        configuration_changed("list_exclusion"),
+        configuration_changed("indexer"),
+    ] {
+        let stored = app
+            .append_domain_event(new_global_domain_event(&admin, payload))
+            .await
+            .unwrap();
+        sequences.push(stored.sequence);
+    }
+    let filter = DomainEventFilter {
+        after_sequence: Some(0),
+        limit: 10,
+        ..Default::default()
+    };
+    let seen = |events: Vec<DomainEvent>| {
+        events
+            .into_iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        seen(app.list_domain_events(&member, &filter).await.unwrap()),
+        sequences[..2],
+        "a member hears that a public list changed or synced, and nothing else"
+    );
+    assert_eq!(
+        seen(app.list_domain_events(&manager, &filter).await.unwrap()),
+        sequences[..3],
+        "whoever manages lists also hears of list settings, not of other settings"
+    );
+    assert_eq!(
+        seen(app.list_domain_events(&admin, &filter).await.unwrap()),
+        sequences
+    );
+}
