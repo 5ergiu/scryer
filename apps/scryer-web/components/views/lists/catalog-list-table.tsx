@@ -153,7 +153,7 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
                   </TableCell>
                 ) : null}
                 <TableCell className="hidden sm:table-cell">
-                  {row.kinds.length > 0 ? <FacetTags values={row.kinds} emptyLabel={null} /> : null}
+                  {row.kinds.length > 0 ? <FacetTags values={row.kinds} emptyLabel={null} className="flex-nowrap" /> : null}
                 </TableCell>
                 {showSchedule ? (
                   <TableCell className="hidden whitespace-nowrap text-[12px] text-[var(--scry-muted)] md:table-cell">
