@@ -26,7 +26,7 @@ import type {
   TitleListMembership,
 } from "../types/lists.ts";
 import type { ExternalId, Facet } from "../types/titles.ts";
-import { allOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
+import { allOf, anyOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
 import { selectorToken } from "./dom-ids.ts";
 import { facetById } from "../facets/registry.ts";
 import { metadataResultExternalIds, type MetadataResultIdentity } from "./metadata-result-external-ids.ts";
@@ -859,18 +859,6 @@ export function listMembershipRowId(subscriptionId: string, itemKey: string): st
   return `list-membership-${selectorToken(subscriptionId)}-${selectorToken(itemKey)}`;
 }
 
-/** What a "Sync now" click is waiting to see change. */
-export type ListSyncWatchSnapshot = {
-  lastAt: string | null;
-  state: ListSyncState | null;
-  /** Sync run ids the detail panel showed; null when the panel was not loaded. */
-  runIds: readonly string[] | null;
-};
-
-/**
- * Whether a requested sync has visibly finished: a run id the baseline did not
- * have, or a change to the subscription's last sync time or sync state.
- */
 /** How many syncs a list's history shows before the reader asks for the rest. */
 export const LIST_SYNC_RUNS_SHOWN = 20;
 /** The most syncs one read returns; the week of history the server keeps fits in it. */
@@ -883,56 +871,6 @@ export const LIST_SYNC_RUNS_MAX = 1000;
 export function shownListSyncRuns<T>(runs: readonly T[], expanded: boolean): { runs: T[]; more: boolean } {
   if (expanded) return { runs: [...runs], more: false };
   return { runs: runs.slice(0, LIST_SYNC_RUNS_SHOWN), more: runs.length > LIST_SYNC_RUNS_SHOWN };
-}
-
-export function listSyncWatchSettled(
-  baseline: ListSyncWatchSnapshot,
-  current: ListSyncWatchSnapshot,
-): boolean {
-  if (baseline.runIds && current.runIds) {
-    const known = new Set(baseline.runIds);
-    if (current.runIds.some((id) => !known.has(id))) return true;
-  }
-  if (current.lastAt !== null && current.lastAt !== baseline.lastAt) return true;
-  if (current.state !== null && baseline.state !== null && current.state !== baseline.state) return true;
-  return false;
-}
-
-const LIST_SYNC_POLL_DELAYS_MS = [1_000, 2_000, 3_000, 5_000, 8_000] as const;
-const LIST_SYNC_POLL_MAX_DELAY_MS = 10_000;
-/** How long a "Sync now" click keeps refreshing before leaving it to the next visit. */
-export const LIST_SYNC_POLL_BUDGET_MS = 180_000;
-
-/**
- * Delay before the next refresh after a "Sync now" click, backing off to a
- * ceiling. Returns null once the polling budget is spent.
- */
-export function listSyncPollDelayMs(attempt: number, elapsedMs: number): number | null {
-  const delay =
-    LIST_SYNC_POLL_DELAYS_MS[Math.max(0, attempt)] ?? LIST_SYNC_POLL_MAX_DELAY_MS;
-  if (elapsedMs + delay > LIST_SYNC_POLL_BUDGET_MS) return null;
-  return delay;
-}
-
-/**
- * The next refresh of the one poll that follows every queued sync, however
- * many lists were queued. Each watched list keeps its own budget, counted from
- * when its sync was queued; lists past it are dropped. Null once none is left.
- */
-export function listSyncWatchSchedule(
-  attempt: number,
-  startedAtById: ReadonlyMap<string, number>,
-  now: number,
-): { delay: number; keep: string[] } | null {
-  let delay: number | null = null;
-  const keep: string[] = [];
-  for (const [id, startedAt] of startedAtById) {
-    const next = listSyncPollDelayMs(attempt, now - startedAt);
-    if (next === null) continue;
-    delay = next;
-    keep.push(id);
-  }
-  return delay === null ? null : { delay, keep };
 }
 
 /** What the settings form holds for one field the user touched. */
@@ -989,6 +927,74 @@ export function listProviderSettingsMissing(
  */
 export function titleListMembershipChanged(titleId: string | null | undefined): DomainEventPredicate {
   return allOf(forTitle(titleId), forEventTypes("LIST_TITLE_ADDED", "LIST_TITLE_LEFT"));
+}
+
+/**
+ * A list setting of one of the given kinds was saved. Each list setting
+ * writes a configuration event naming what changed.
+ */
+function listSettingChanged(...resourceTypes: ReadonlyArray<string>): DomainEventPredicate {
+  const wanted = new Set(resourceTypes);
+  return (event) => {
+    if (event.eventType !== "CONFIGURATION_CHANGED") return false;
+    const payload = event.payloadJson as { data?: { resource_type?: unknown } } | null | undefined;
+    const resourceType = payload?.data?.resource_type;
+    return typeof resourceType === "string" && wanted.has(resourceType);
+  };
+}
+
+// The live events after which each part of a lists surface may read
+// differently, here or in another session. Every one is written once the
+// change it names is stored, so a read started on hearing it sees that change.
+
+/**
+ * The followed lists and their sync results: a sync ended, a list was
+ * followed, changed, turned on or off, or unfollowed, or something that turns
+ * a member's lists off happened (an account unlinked, a policy changed).
+ */
+export const followedListsChanged: DomainEventPredicate = anyOf(
+  forEventTypes("LIST_SYNC_FINISHED", "LIST_SUBSCRIPTION_CHANGED"),
+  listSettingChanged("list_account", "list_member_policy"),
+);
+/** The member's linked list accounts. */
+export const listAccountsChanged: DomainEventPredicate = listSettingChanged("list_account");
+export const listExclusionsChanged: DomainEventPredicate = listSettingChanged("list_exclusion");
+/** What the list providers offer and how they are set up. */
+export const listProvidersChanged: DomainEventPredicate = listSettingChanged(
+  "list_provider_settings",
+  "list_provider_app",
+);
+export const listProviderAppsChanged: DomainEventPredicate = listSettingChanged("list_provider_app");
+export const memberListPoliciesChanged: DomainEventPredicate = listSettingChanged("list_member_policy");
+/** The counts on the lists page's tabs. */
+export const listTabCountsChanged: DomainEventPredicate = anyOf(
+  followedListsChanged,
+  listExclusionsChanged,
+  listProviderAppsChanged,
+);
+
+/**
+ * Lets only the newest of a loader's reads land. A read takes a ticket when
+ * it starts and applies its answer only while the ticket is still the newest;
+ * `invalidate` turns every read in flight stale, for a local change they
+ * could not have seen.
+ */
+export type LatestRead = {
+  begin: () => () => boolean;
+  invalidate: () => void;
+};
+
+export function latestRead(): LatestRead {
+  let newest = 0;
+  return {
+    begin() {
+      const ticket = ++newest;
+      return () => ticket === newest;
+    },
+    invalidate() {
+      newest += 1;
+    },
+  };
 }
 
 export type TitleListProvenance = { kind: "added" | "left"; name: string };

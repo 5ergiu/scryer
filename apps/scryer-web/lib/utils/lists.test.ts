@@ -154,10 +154,6 @@ import {
   shownListSyncRuns,
   listSyncStateTone,
   listMembershipRowId,
-  listSyncPollDelayMs,
-  listSyncWatchSchedule,
-  listSyncWatchSettled,
-  LIST_SYNC_POLL_BUDGET_MS,
   listUrlPatternToRegExp,
   missingSourceParams,
   parseExternalIdList,
@@ -165,6 +161,14 @@ import {
   publicProviders,
   recognizeListUrl,
   titleListMembershipChanged,
+  latestRead,
+  followedListsChanged,
+  listAccountsChanged,
+  listExclusionsChanged,
+  listProviderAppsChanged,
+  listProvidersChanged,
+  listTabCountsChanged,
+  memberListPoliciesChanged,
   followListOfferedKinds,
   isListMediaParam,
   listKindsFromSourceParams,
@@ -583,63 +587,6 @@ test("a collapsed sync history shows its newest runs and knows when older ones e
   assert.deepEqual(shownListSyncRuns(runs, true), { runs, more: false });
 });
 
-test("a sync watch settles on a new run, a new sync time or a state change", () => {
-  const baseline = { lastAt: "2026-01-01T00:00:00Z", state: "OK" as const, runIds: ["run-1"] };
-  assert.equal(listSyncWatchSettled(baseline, { ...baseline }), false);
-  assert.equal(listSyncWatchSettled(baseline, { ...baseline, runIds: ["run-2", "run-1"] }), true);
-  assert.equal(listSyncWatchSettled(baseline, { ...baseline, lastAt: "2026-01-01T00:05:00Z" }), true);
-  assert.equal(listSyncWatchSettled(baseline, { ...baseline, state: "FAIL" }), true);
-  // Without panel data the run ids cannot decide either way.
-  assert.equal(listSyncWatchSettled({ ...baseline, runIds: null }, { ...baseline, runIds: ["run-9"] }), false);
-  // A first sync settles once the list has a sync time.
-  assert.equal(
-    listSyncWatchSettled(
-      { lastAt: null, state: "NEW", runIds: [] },
-      { lastAt: null, state: "NEW", runIds: [] },
-    ),
-    false,
-  );
-  assert.equal(
-    listSyncWatchSettled(
-      { lastAt: null, state: "NEW", runIds: null },
-      { lastAt: "2026-01-01T00:05:00Z", state: "NEW", runIds: null },
-    ),
-    true,
-  );
-});
-
-test("sync polling backs off to a ceiling and stops at its budget", () => {
-  assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 9].map((attempt) => listSyncPollDelayMs(attempt, 0)),
-    [1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 10_000],
-  );
-  assert.equal(listSyncPollDelayMs(6, LIST_SYNC_POLL_BUDGET_MS - 10_000), 10_000);
-  assert.equal(listSyncPollDelayMs(6, LIST_SYNC_POLL_BUDGET_MS - 9_999), null);
-});
-
-test("one sync poll follows every queued list and drops each at its own budget", () => {
-  const now = 1_000_000;
-  const many = new Map(Array.from({ length: 40 }, (_, index) => [`list-${index}`, now] as const));
-  const first = listSyncWatchSchedule(0, many, now);
-  assert.deepEqual(first && { delay: first.delay, kept: first.keep.length }, { delay: 1_000, kept: 40 });
-
-  const mixed = new Map([
-    ["queued-long-ago", now - (LIST_SYNC_POLL_BUDGET_MS - 5_000)],
-    ["queued-just-now", now],
-  ]);
-  assert.deepEqual(listSyncWatchSchedule(5, mixed, now), { delay: 10_000, keep: ["queued-just-now"] });
-  assert.deepEqual(listSyncWatchSchedule(0, mixed, now), {
-    delay: 1_000,
-    keep: ["queued-long-ago", "queued-just-now"],
-  });
-
-  assert.equal(listSyncWatchSchedule(0, new Map(), now), null);
-  assert.equal(
-    listSyncWatchSchedule(6, new Map([["spent", now - LIST_SYNC_POLL_BUDGET_MS]]), now),
-    null,
-  );
-});
-
 function settingField(overrides: Partial<ListProviderSettingField> = {}): ListProviderSettingField {
   return {
     key: "base_url",
@@ -925,6 +872,67 @@ test("a title's list line refreshes when a list adds or drops that title", () =>
   assert.equal(changed(event("TITLE_UPDATED", "title-7")), false);
   assert.equal(changed(event("LIST_TITLE_LEFT", null)), false);
   assert.equal(titleListMembershipChanged(null)(event("LIST_TITLE_ADDED", "title-7")), false);
+});
+
+test("each part of a lists surface reads again only for the changes it shows", () => {
+  const event = (eventType: string, payloadJson?: unknown) => ({
+    sequence: 1,
+    eventId: "event-1",
+    eventType,
+    titleId: null,
+    facet: null,
+    streamKind: null,
+    streamId: null,
+    payloadJson,
+  });
+  const setting = (resourceType: unknown) =>
+    event("CONFIGURATION_CHANGED", { type: "configuration_changed", data: { resource_type: resourceType } });
+
+  for (const changed of [event("LIST_SYNC_FINISHED"), event("LIST_SUBSCRIPTION_CHANGED")]) {
+    assert.equal(followedListsChanged(changed), true);
+    assert.equal(listTabCountsChanged(changed), true);
+    assert.equal(listExclusionsChanged(changed), false);
+    assert.equal(listProvidersChanged(changed), false);
+  }
+  // Unlinking an account or changing a policy turns a member's lists off.
+  assert.equal(followedListsChanged(setting("list_account")), true);
+  assert.equal(followedListsChanged(setting("list_member_policy")), true);
+  assert.equal(listAccountsChanged(setting("list_account")), true);
+  assert.equal(listAccountsChanged(setting("list_exclusion")), false);
+  assert.equal(memberListPoliciesChanged(setting("list_member_policy")), true);
+  assert.equal(listExclusionsChanged(setting("list_exclusion")), true);
+  assert.equal(followedListsChanged(setting("list_exclusion")), false);
+  assert.equal(listTabCountsChanged(setting("list_exclusion")), true);
+  assert.equal(listProvidersChanged(setting("list_provider_settings")), true);
+  assert.equal(listProvidersChanged(setting("list_provider_app")), true);
+  assert.equal(listProviderAppsChanged(setting("list_provider_settings")), false);
+  assert.equal(listTabCountsChanged(setting("list_provider_app")), true);
+
+  // Other settings, and a configuration event that names nothing, refresh no part.
+  for (const other of [
+    setting("indexer"),
+    setting(null),
+    event("CONFIGURATION_CHANGED"),
+    event("CONFIGURATION_CHANGED", "list_exclusion"),
+    event("TITLE_UPDATED"),
+  ]) {
+    assert.equal(listTabCountsChanged(other), false);
+    assert.equal(listProvidersChanged(other), false);
+    assert.equal(listAccountsChanged(other), false);
+    assert.equal(memberListPoliciesChanged(other), false);
+  }
+});
+
+test("only the newest read lands, and a local change turns reads in flight stale", () => {
+  const reads = latestRead();
+  const first = reads.begin();
+  assert.equal(first(), true);
+  const second = reads.begin();
+  assert.equal(first(), false, "an earlier read answering late is dropped");
+  assert.equal(second(), true);
+  reads.invalidate();
+  assert.equal(second(), false, "a read started before a local change cannot undo it");
+  assert.equal(reads.begin()(), true);
 });
 
 test("a failed policy change rolls back only that member's row", () => {

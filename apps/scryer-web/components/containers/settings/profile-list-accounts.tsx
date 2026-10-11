@@ -12,6 +12,8 @@ import { myListAccountsQuery } from "@/lib/graphql/list-accounts";
 import { listProvidersQuery } from "@/lib/graphql/queries";
 import { listErrorMessage } from "@/lib/utils/list-error-message";
 import { useListAccountLink } from "@/lib/hooks/use-list-account-link";
+import { useListsReactiveRefresh } from "@/lib/hooks/use-lists-reactive-refresh";
+import { latestRead, listAccountsChanged } from "@/lib/utils/lists";
 import { useSessionUser } from "@/lib/hooks/use-auth";
 import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
 import type { ListAccount, ListProviderManifest } from "@/lib/types/lists";
@@ -27,13 +29,23 @@ export function ProfileListAccounts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  // Only the newest read may land: a refresh started by a live event can race
+  // the first read or an earlier refresh.
+  const [accountReads] = useState(latestRead);
   const loadAccounts = useCallback(async (isCurrent: () => boolean) => {
+    const isNewest = accountReads.begin();
     const result = await client.query(myListAccountsQuery, {}, { requestPolicy: "network-only" }).toPromise();
-    if (!isCurrent()) return;
+    if (!isCurrent() || !isNewest()) return;
     if (result.error) throw result.error;
     setAccounts((result.data?.myListAccounts ?? []) as ListAccount[]);
-  }, [client]);
+  }, [accountReads, client]);
   const accountLink = useListAccountLink(loadAccounts);
+  // An account linked or unlinked in another session is read again here.
+  useListsReactiveRefresh(listAccountsChanged, () => {
+    void loadAccounts(() => true).catch(() => {
+      // A background read that fails leaves what is shown; the next change reads again.
+    });
+  });
   const refreshProviders = useCallback(async () => {
     const [result] = await Promise.all([
       client.query(listProvidersQuery, {}, { requestPolicy: "network-only" }).toPromise(),

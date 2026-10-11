@@ -8,7 +8,9 @@ import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
 import { listProviderAppsQuery, updateListProviderAppMutation } from "@/lib/graphql/list-accounts";
+import { useListsReactiveRefresh } from "@/lib/hooks/use-lists-reactive-refresh";
 import { listErrorMessage } from "@/lib/utils/list-error-message";
+import { listProviderAppsChanged } from "@/lib/utils/lists";
 import type { ListProviderApp } from "@/lib/types/lists";
 
 import { ProviderTile } from "./provider-tile";
@@ -28,6 +30,8 @@ export function ProviderAppsPanel({ onChanged }: { onChanged?: () => void }) {
     });
     return () => { cancelled = true; };
   }, [client, retry, t]);
+  // An app saved in another session is read again here.
+  useListsReactiveRefresh(listProviderAppsChanged, () => setRetry((value) => value + 1));
   return (
     <section id="lists-provider-apps" className="space-y-4">
       <div className="flex items-center gap-2.5">
@@ -39,7 +43,8 @@ export function ProviderAppsPanel({ onChanged }: { onChanged?: () => void }) {
       {error ? <div role="alert"><p>{error}</p><Button onClick={() => setRetry((value) => value + 1)}>{t("lists.action.retry")}</Button></div> : null}
       {apps === null && !error ? <p role="status">{t("label.loading")}</p> : null}
       {apps?.filter((app) => ["trakt", "anilist", "mal"].includes(app.provider)).map((app) => (
-        <ProviderAppForm key={app.provider} app={app} onSaved={(saved) => { setApps((current) => current?.map((entry) => entry.provider === saved.provider ? saved : entry) ?? null); onChanged?.(); }} />
+        // Keyed by what is saved, so a form shows an app changed elsewhere instead of saving over it.
+        <ProviderAppForm key={[app.provider, app.enabled, app.clientId, app.redirectUri].join("\n")} app={app} onSaved={(saved) => { setApps((current) => current?.map((entry) => entry.provider === saved.provider ? saved : entry) ?? null); onChanged?.(); }} />
       ))}
     </section>
   );

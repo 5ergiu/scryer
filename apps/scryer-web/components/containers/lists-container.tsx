@@ -59,25 +59,21 @@ import {
   draftToUpdateInput,
   listParamInput,
   listFilterInput,
-  listSyncWatchSchedule,
-  listSyncWatchSettled,
   LIST_SYNC_RUNS_MAX,
   LIST_SYNC_RUNS_SHOWN,
   shownListSyncRuns,
+  followedListsChanged,
+  latestRead,
+  listAccountsChanged,
+  listExclusionsChanged,
+  listProvidersChanged,
+  listTabCountsChanged,
   type AddListExclusionInput,
-  type ListSyncWatchSnapshot,
 } from "@/lib/utils/lists";
+import { useListsReactiveRefresh } from "@/lib/hooks/use-lists-reactive-refresh";
 import { buildListsPath, listsSectionFromPath } from "@/lib/utils/routing";
 
 const MEMBERSHIP_PAGE_SIZE = 50;
-
-/**
- * The runs a sync watch compares. Expanding the history mid-watch loads older
- * runs, which must not read as a new sync.
- */
-function newestRunIds(runs: readonly ListSyncRun[]): string[] {
-  return runs.slice(0, LIST_SYNC_RUNS_SHOWN).map((run) => run.id);
-}
 
 type ListsContainerProps = {
   canManageLists: boolean;
@@ -100,8 +96,9 @@ export function ListsContainer({ canManageLists }: ListsContainerProps) {
 
 /**
  * How many entries each section holds, for the tab strip. Counted again on
- * every section change, so the sections left behind stay current; the section
- * on screen is counted from what it has loaded.
+ * every section change and whenever a change to one of them is announced, so
+ * the sections left behind stay current; the section on screen is counted
+ * from what it has loaded.
  */
 function useListTabCounts(canManageLists: boolean, section: ListsSection): [ListTabCounts, () => void] {
   const client = useClient();
@@ -137,6 +134,7 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): [List
   }, [canManageLists, changes, client, experimentalFeaturesEnabled, providerApps, section, userId]);
 
   const reload = React.useCallback(() => setChanges((value) => value + 1), []);
+  useListsReactiveRefresh(listTabCountsChanged, reload);
   return [counts, reload];
 }
 
@@ -181,6 +179,16 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
   const [busyIds, setBusyIds] = React.useState<ReadonlySet<string>>(new Set());
   const [detail, setDetail] = React.useState<ListDetailState | null>(null);
 
+  // Only the newest read of each kind may land. A refresh started by a live
+  // event can race the first read, an earlier refresh, or a change made here.
+  const [reads] = React.useState(() => ({
+    subscriptions: latestRead(),
+    accounts: latestRead(),
+    exclusions: latestRead(),
+    providers: latestRead(),
+    providerSettings: latestRead(),
+  }));
+
   const markBusy = React.useCallback((id: string, busy: boolean) => {
     setBusyIds((current) => {
       const next = new Set(current);
@@ -190,24 +198,28 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
     });
   }, []);
 
-  const loadSubscriptions = React.useCallback(async (): Promise<ListSubscription[]> => {
+  /** Reads the followed lists. Null when a newer read replaced this one. */
+  const loadSubscriptions = React.useCallback(async (): Promise<ListSubscription[] | null> => {
+    const isNewest = reads.subscriptions.begin();
     const result = await client
       .query(personal ? myListSubscriptionsQuery : listSubscriptionsQuery, {}, { requestPolicy: "network-only" })
       .toPromise();
+    if (!isNewest()) return null;
     if (result.error) {
       throw result.error;
     }
     const loaded = (personal ? result.data?.myListSubscriptions : result.data?.listSubscriptions) ?? [];
     setSubscriptions(loaded);
     return loaded;
-  }, [client, personal, setSubscriptions]);
+  }, [client, personal, reads, setSubscriptions]);
 
   const loadAccounts = React.useCallback(async (isCurrent: () => boolean = () => true) => {
+    const isNewest = reads.accounts.begin();
     const result = await client.query(myListAccountsQuery, {}, { requestPolicy: "network-only" }).toPromise();
-    if (!isCurrent()) return;
+    if (!isCurrent() || !isNewest()) return;
     if (result.error) throw result.error;
     setAccounts((result.data?.myListAccounts ?? []) as ListAccount[]);
-  }, [client]);
+  }, [client, reads]);
   const accountLink = useListAccountLink(loadAccounts);
 
   const manageAccounts = async (open: ListAccount[]) => {
@@ -250,13 +262,16 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
     setLoading(true);
     setLoadError(null);
     try {
+      const providersNewest = reads.providers.begin();
       const [providersResult] = await Promise.all([
         client.query(listProvidersQuery, {}).toPromise(),
         loadSubscriptions(),
         ...(personal && experimentalFeaturesEnabled ? [loadAccounts()] : []),
       ]);
       if (providersResult.error) throw providersResult.error;
-      setProviders((providersResult.data?.listProviders ?? []) as ListProviderManifest[]);
+      if (providersNewest()) {
+        setProviders((providersResult.data?.listProviders ?? []) as ListProviderManifest[]);
+      }
       if (canManageLists || personal) {
         const [optionsResult, policiesResult] = await Promise.all([
           client.query(personal ? personalListRouteOptionsQuery : listRouteOptionsQuery, {}).toPromise(),
@@ -299,37 +314,42 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
     } finally {
       setLoading(false);
     }
-  }, [canManageLists, client, experimentalFeaturesEnabled, loadAccounts, loadSubscriptions, personal, setGlobalStatus, t]);
+  }, [canManageLists, client, experimentalFeaturesEnabled, loadAccounts, loadSubscriptions, personal, reads, setGlobalStatus, t]);
 
-  const loadExclusions = React.useCallback(async () => {
+  // A background read leaves the table on screen rather than showing it as loading.
+  const loadExclusions = React.useCallback(async ({ background = false }: { background?: boolean } = {}) => {
     if (!canManageLists) return;
-    setExclusionsLoading(true);
+    const isNewest = reads.exclusions.begin();
+    if (!background) setExclusionsLoading(true);
     try {
       const result = await client
         .query(listExclusionsQuery, {}, { requestPolicy: "network-only" })
         .toPromise();
+      if (!isNewest()) return;
       if (result.error) throw result.error;
       setExclusions((result.data?.listExclusions ?? []) as ListExclusion[]);
       setExclusionsLoaded(true);
     } catch (error) {
       setGlobalStatus(listErrorMessage(error, t, t("status.failedToLoad")), { level: "ERROR" });
     } finally {
-      setExclusionsLoading(false);
+      if (!background) setExclusionsLoading(false);
     }
-  }, [canManageLists, client, setGlobalStatus, t]);
+  }, [canManageLists, client, reads, setGlobalStatus, t]);
 
   const loadProviderSettings = React.useCallback(async () => {
     if (!canManageLists) return;
+    const isNewest = reads.providerSettings.begin();
     try {
       const result = await client
         .query(listProviderSettingsQuery, {}, { requestPolicy: "network-only" })
         .toPromise();
+      if (!isNewest()) return;
       if (result.error) throw result.error;
       setProviderSettings((result.data?.listProviderSettings ?? []) as ListProviderSettings[]);
     } catch (error) {
       setGlobalStatus(listErrorMessage(error, t, t("status.failedToLoad")), { level: "ERROR" });
     }
-  }, [canManageLists, client, setGlobalStatus, t]);
+  }, [canManageLists, client, reads, setGlobalStatus, t]);
 
   React.useEffect(() => {
     void loadPage();
@@ -340,11 +360,14 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
   }, [loadProviderSettings]);
 
   const refreshProviders = React.useCallback(async () => {
+    const isNewest = reads.providers.begin();
     const result = await client.query(listProvidersQuery, {}, { requestPolicy: "network-only" }).toPromise();
-    if (result.error) throw result.error;
-    setProviders((result.data?.listProviders ?? []) as ListProviderManifest[]);
+    if (isNewest()) {
+      if (result.error) throw result.error;
+      setProviders((result.data?.listProviders ?? []) as ListProviderManifest[]);
+    }
     await loadProviderSettings();
-  }, [client, loadProviderSettings]);
+  }, [client, loadProviderSettings, reads]);
 
   const saveProviderSettings = React.useCallback(
     async (provider: string, changes: ListProviderSettingChange[]): Promise<boolean> => {
@@ -355,6 +378,8 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
         if (result.error) throw result.error;
         const saved = result.data?.updateListProviderSettings as ListProviderSettings | undefined;
         if (saved) {
+          // A read still in flight predates this save and must not undo it.
+          reads.providerSettings.invalidate();
           setProviderSettings((current) => [
             ...(current ?? []).filter((entry) => entry.providerType !== saved.providerType),
             saved,
@@ -367,7 +392,7 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
         return false;
       }
     },
-    [client, setGlobalStatus, t],
+    [client, reads, setGlobalStatus, t],
   );
 
   React.useEffect(() => {
@@ -388,72 +413,92 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
   // any panel load (opening, paging) started while it was in flight.
   const detailRequestRef = React.useRef(0);
   const detailLoadingRef = React.useRef(false);
+  // Background refreshes are ordered among themselves too. One asked for
+  // while a panel load is in flight is owed: that load may have read before
+  // the change it was asked for, so the panel is read once more when it lands.
+  const detailBackgroundRef = React.useRef(0);
+  const detailRefreshOwedRef = React.useRef(false);
   // The list whose full sync history was asked for; every reload of that
   // panel keeps it expanded until the panel closes.
   const expandedRunsRef = React.useRef<string | null>(null);
 
   const loadDetail = React.useCallback(
-    async (
+    (
       id: string,
       membershipOffset = 0,
       { background = false }: { background?: boolean } = {},
     ): Promise<ListSyncRun[] | null> => {
-      // A background refresh only updates a panel that is still showing this
-      // list; it never opens the panel or shows it as loading.
-      const request = background ? detailRequestRef.current : ++detailRequestRef.current;
-      const isCurrent = () =>
-        request === detailRequestRef.current && (!background || !detailLoadingRef.current);
-      if (!background) {
-        detailLoadingRef.current = true;
-        setDetail((current) =>
-          current?.id === id
-            ? { ...current, loading: true }
-            : { id, loading: true, subscription: null, memberships: null, runs: [], moreRuns: false, membershipOffset: 0, error: null },
-        );
-      }
-      const expanded = expandedRunsRef.current === id;
-      try {
-        const result = await client
-          .query(
-            listSubscriptionDetailQuery,
-            {
-              id,
-              membershipLimit: MEMBERSHIP_PAGE_SIZE,
-              membershipOffset,
-              runLimit: expanded ? LIST_SYNC_RUNS_MAX : LIST_SYNC_RUNS_SHOWN + 1,
-            },
-            { requestPolicy: "network-only" },
-          )
-          .toPromise();
-        if (result.error) throw result.error;
-        const { runs, more: moreRuns } = shownListSyncRuns(
-          (result.data?.listSyncRuns ?? []) as ListSyncRun[],
-          expanded,
-        );
-        if (!isCurrent()) return runs;
-        if (!background) detailLoadingRef.current = false;
-        setDetail((current) =>
-          current?.id !== id
-            ? current
-            : {
+      const read = async (background: boolean): Promise<ListSyncRun[] | null> => {
+        // A background refresh only updates a panel that is still showing this
+        // list; it never opens the panel or shows it as loading.
+        if (background && detailLoadingRef.current) {
+          detailRefreshOwedRef.current = true;
+          return null;
+        }
+        const request = background ? detailRequestRef.current : ++detailRequestRef.current;
+        const backgroundRequest = background ? ++detailBackgroundRef.current : detailBackgroundRef.current;
+        const isCurrent = () =>
+          request === detailRequestRef.current &&
+          (!background || (!detailLoadingRef.current && backgroundRequest === detailBackgroundRef.current));
+        if (!background) {
+          detailLoadingRef.current = true;
+          // This load reads after every change heard so far.
+          detailRefreshOwedRef.current = false;
+          setDetail((current) =>
+            current?.id === id
+              ? { ...current, loading: true }
+              : { id, loading: true, subscription: null, memberships: null, runs: [], moreRuns: false, membershipOffset: 0, error: null },
+          );
+        }
+        const expanded = expandedRunsRef.current === id;
+        try {
+          const result = await client
+            .query(
+              listSubscriptionDetailQuery,
+              {
                 id,
-                loading: false,
-                subscription: (result.data?.listSubscription ?? null) as ListSubscription | null,
-                memberships: (result.data?.listSubscriptionMemberships ?? null) as ListMembershipPage | null,
-                runs,
-                moreRuns,
+                membershipLimit: MEMBERSHIP_PAGE_SIZE,
                 membershipOffset,
-                error: null,
+                runLimit: expanded ? LIST_SYNC_RUNS_MAX : LIST_SYNC_RUNS_SHOWN + 1,
               },
-        );
-        return runs;
-      } catch (error) {
-        if (background || !isCurrent()) return null;
-        detailLoadingRef.current = false;
-        const message = listErrorMessage(error, t, t("status.failedToLoad"));
-        setDetail((current) => (current?.id !== id ? current : { ...current, loading: false, error: message }));
-        return null;
-      }
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
+          if (result.error) throw result.error;
+          const { runs, more: moreRuns } = shownListSyncRuns(
+            (result.data?.listSyncRuns ?? []) as ListSyncRun[],
+            expanded,
+          );
+          if (!isCurrent()) return runs;
+          if (!background) detailLoadingRef.current = false;
+          setDetail((current) =>
+            current?.id !== id
+              ? current
+              : {
+                  id,
+                  loading: false,
+                  subscription: (result.data?.listSubscription ?? null) as ListSubscription | null,
+                  memberships: (result.data?.listSubscriptionMemberships ?? null) as ListMembershipPage | null,
+                  runs,
+                  moreRuns,
+                  membershipOffset,
+                  error: null,
+                },
+          );
+          if (!background && detailRefreshOwedRef.current) {
+            detailRefreshOwedRef.current = false;
+            void read(true);
+          }
+          return runs;
+        } catch (error) {
+          if (background || !isCurrent()) return null;
+          detailLoadingRef.current = false;
+          const message = listErrorMessage(error, t, t("status.failedToLoad"));
+          setDetail((current) => (current?.id !== id ? current : { ...current, loading: false, error: message }));
+          return null;
+        }
+      };
+      return read(background);
     },
     [client, t],
   );
@@ -575,6 +620,8 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
   const setEnabled = React.useCallback(
     async (subscription: ListSubscription, enabled: boolean) => {
       markBusy(subscription.id, true);
+      // A read still in flight predates this change and must not undo it.
+      reads.subscriptions.invalidate();
       setSubscriptions((current) =>
         current.map((entry) => (entry.id === subscription.id ? { ...entry, enabled } : entry)),
       );
@@ -591,114 +638,54 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
         if (detail?.id === subscription.id) void loadDetail(subscription.id, detail.membershipOffset);
       }
     },
-    [client, detail, loadDetail, markBusy, refreshAfterChange, setGlobalStatus, setSubscriptions, t],
+    [client, detail, loadDetail, markBusy, reads, refreshAfterChange, setGlobalStatus, setSubscriptions, t],
   );
 
-  // "Sync now" and "Sync all" only queue syncs, so the table and an open detail
-  // panel keep refreshing, backing off, until each queued sync visibly finishes
-  // or its budget runs out. One poll serves every watched list, so queuing many
-  // lists costs one table refresh per tick, not one per list. Detail refreshes
-  // stop as soon as the panel closes or shows a list no longer watched.
   const detailRef = React.useRef(detail);
   React.useEffect(() => {
     detailRef.current = detail;
   }, [detail]);
-  const syncWatchesRef = React.useRef(
-    new Map<string, { baseline: ListSyncWatchSnapshot; startedAt: number }>(),
-  );
-  const syncWatchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bumped whenever the poll restarts or the page unmounts; a tick that
-  // started under an older generation drops its result.
-  const syncWatchGenerationRef = React.useRef(0);
 
-  React.useEffect(() => {
-    const watches = syncWatchesRef.current;
-    return () => {
-      syncWatchGenerationRef.current += 1;
-      if (syncWatchTimerRef.current !== null) clearTimeout(syncWatchTimerRef.current);
-      syncWatchTimerRef.current = null;
-      watches.clear();
-    };
-  }, []);
-
-  const watchSync = React.useCallback(
-    (queued: readonly ListSubscription[]) => {
-      if (queued.length === 0) return;
-      const watches = syncWatchesRef.current;
-      const shownDetail = detailRef.current;
-      const now = Date.now();
-      for (const subscription of queued) {
-        watches.set(subscription.id, {
-          baseline: {
-            lastAt: subscription.sync.lastAt,
-            state: subscription.sync.state,
-            runIds:
-              shownDetail?.id === subscription.id && shownDetail.subscription
-                ? newestRunIds(shownDetail.runs)
-                : null,
-          },
-          startedAt: now,
-        });
-      }
-
-      // A newly queued sync restarts the poll at its quickest refresh.
-      const generation = ++syncWatchGenerationRef.current;
-      if (syncWatchTimerRef.current !== null) clearTimeout(syncWatchTimerRef.current);
-      syncWatchTimerRef.current = null;
-      let attempt = 0;
-
-      const schedule = () => {
-        const startedAtById = new Map(
-          [...watches].map(([id, watch]) => [id, watch.startedAt] as const),
-        );
-        const next = listSyncWatchSchedule(attempt, startedAtById, Date.now());
-        attempt += 1;
-        const keep = new Set(next?.keep ?? []);
-        for (const id of [...watches.keys()]) {
-          if (!keep.has(id)) watches.delete(id);
-        }
-        syncWatchTimerRef.current = next ? setTimeout(() => void tick(), next.delay) : null;
-      };
-
-      const tick = async () => {
-        syncWatchTimerRef.current = null;
-        let loaded: ListSubscription[] | null = null;
-        try {
-          loaded = await loadSubscriptions();
-        } catch {
-          // A failed refresh is retried on the next tick.
-        }
-        if (generation !== syncWatchGenerationRef.current) return;
-        if (!loaded) {
-          schedule();
-          return;
-        }
-        const shown = detailRef.current;
-        const runs =
-          shown && watches.has(shown.id)
-            ? await loadDetail(shown.id, shown.membershipOffset, { background: true })
-            : null;
-        if (generation !== syncWatchGenerationRef.current) return;
-        for (const [id, watch] of [...watches]) {
-          const current = loaded.find((entry) => entry.id === id);
-          if (
-            !current ||
-            listSyncWatchSettled(watch.baseline, {
-              lastAt: current.sync.lastAt,
-              state: current.sync.state,
-              runIds: runs && shown?.id === id ? newestRunIds(runs) : null,
-            })
-          ) {
-            watches.delete(id);
-          }
-        }
-        if (watches.size > 0) schedule();
-      };
-
-      schedule();
+  // Live refresh. What this page shows is read again whenever a change to it
+  // is announced, whoever made it: a sync ending (which "Sync now", "Sync
+  // all" and a new follow only queue), a list followed, edited, turned off
+  // or unfollowed in another session, an account linked or unlinked. Each
+  // announcement is written after its change is stored, and only the newest
+  // read lands, so the page cannot settle on something older than the server.
+  useListsReactiveRefresh(followedListsChanged, () => {
+    const shown = detailRef.current;
+    if (shown) void loadDetail(shown.id, shown.membershipOffset, { background: true });
+    void loadSubscriptions()
+      .then((loaded) => {
+        const open = detailRef.current;
+        if (!loaded || !open || loaded.some((entry) => entry.id === open.id)) return;
+        // The list on the panel was unfollowed elsewhere; nothing is left to show.
+        detailRequestRef.current += 1;
+        detailLoadingRef.current = false;
+        expandedRunsRef.current = null;
+        setDetail((current) => (current?.id === open.id ? null : current));
+      })
+      .catch(() => {
+        // A background read that fails leaves what is shown; the next change reads again.
+      });
+  });
+  useListsReactiveRefresh(
+    listAccountsChanged,
+    () => {
+      void loadAccounts().catch(() => {});
     },
-    [loadDetail, loadSubscriptions],
+    { pause: !(personal && experimentalFeaturesEnabled) },
   );
+  useListsReactiveRefresh(
+    listExclusionsChanged,
+    () => {
+      void loadExclusions({ background: true });
+    },
+    { pause: !canManageLists || !exclusionsLoaded },
+  );
+  useListsReactiveRefresh(listProvidersChanged, () => {
+    void refreshProviders().catch(() => {});
+  });
 
   const syncNow = React.useCallback(
     async (subscription: ListSubscription) => {
@@ -709,14 +696,13 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
           .toPromise();
         if (result.error) throw result.error;
         setGlobalStatus(t("lists.status.syncQueued", { name: subscription.name }));
-        watchSync([subscription]);
       } catch (error) {
         setGlobalStatus(listErrorMessage(error, t, t("status.failedToUpdate")), { level: "ERROR" });
       } finally {
         markBusy(subscription.id, false);
       }
     },
-    [client, markBusy, setGlobalStatus, t, watchSync],
+    [client, markBusy, setGlobalStatus, t],
   );
 
   const syncAll = React.useCallback(async () => {
@@ -724,12 +710,10 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
       const result = await client.mutation(syncAllListsMutation, { scope: personal ? "PERSONAL" : "PUBLIC" }).toPromise();
       if (result.error) throw result.error;
       setGlobalStatus(t("lists.status.syncAllQueued"));
-      const queuedIds = new Set<string>(result.data?.syncAllLists?.subscriptionIds ?? []);
-      watchSync(subscriptions.filter((subscription) => queuedIds.has(subscription.id)));
     } catch (error) {
       setGlobalStatus(listErrorMessage(error, t, t("status.failedToUpdate")), { level: "ERROR" });
     }
-  }, [client, personal, setGlobalStatus, subscriptions, t, watchSync]);
+  }, [client, personal, setGlobalStatus, t]);
 
   const unsubscribe = React.useCallback(
     async (subscription: ListSubscription): Promise<boolean> => {
@@ -778,6 +762,8 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
           .toPromise();
         if (result.error) throw result.error;
         setGlobalStatus(t("lists.exclusions.removed", { name: exclusion.displayTitle }));
+        // A read still in flight predates this removal and must not bring it back.
+        reads.exclusions.invalidate();
         setExclusions((current) => current.filter((entry) => entry.id !== exclusion.id));
         return true;
       } catch (error) {
@@ -787,7 +773,7 @@ function ListsContainerBody({ canManageLists, tabCounts, onTabCountsChanged }: L
         markBusy(exclusion.id, false);
       }
     },
-    [client, markBusy, setGlobalStatus, t],
+    [client, markBusy, reads, setGlobalStatus, t],
   );
 
   const changeSection = React.useCallback(
