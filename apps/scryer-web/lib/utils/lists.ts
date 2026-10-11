@@ -107,6 +107,19 @@ export function isListMediaParam(param: ListSourceParamDefinition): boolean {
     && param.options.every((option) => ["all", "movie", "movies", "series", "shows", "anime"].includes(option));
 }
 
+/** A source option that picks the order the list's titles are read in. */
+export function isListOrderParam(param: ListSourceParamDefinition): boolean {
+  return param.type === "ENUM" && param.key === "sort" && param.options.length > 0;
+}
+
+/** Wording for the orders providers offer; any other order shows as the provider names it. */
+export const LIST_ORDER_LABEL_KEYS: Readonly<Record<string, string>> = {
+  rank: "lists.follow.order.rank",
+  added: "lists.follow.order.added",
+  title: "label.title",
+  released: "lists.follow.order.released",
+};
+
 /** Preserve the effective scope of older follows that saved both selectors. */
 export function listKindsFromSourceParams(kinds: readonly Facet[], definitions: readonly ListSourceParamDefinition[], params: readonly ListParam[], legacy = false): Facet[] {
   const selector = definitions.find(isListMediaParam);

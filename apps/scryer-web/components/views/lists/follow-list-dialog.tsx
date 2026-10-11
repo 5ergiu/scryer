@@ -38,6 +38,8 @@ import {
   findProviderItem,
   followListOfferedKinds,
   isListMediaParam,
+  isListOrderParam,
+  LIST_ORDER_LABEL_KEYS,
   listKindsFromSourceParams,
   isListModeSelectable,
   LIST_KINDS,
@@ -244,14 +246,21 @@ function FollowListDialogBody({
                   setPreview(null);
                 };
                 const fieldId = `${ID}-param-${definition.key}`;
+                // The order is the same choice on every provider, so it reads the same way here.
+                const order = isListOrderParam(definition);
                 return definition.options.length > 0 ? (
                   <SingleSelectField
                     key={definition.key}
                     id={fieldId}
-                    label={definition.label}
+                    label={order ? t("lists.follow.order") : definition.label}
+                    description={order ? t("lists.follow.orderHint") : undefined}
+                    placeholder={order ? t("lists.follow.orderUnset") : undefined}
                     required={definition.required}
                     value={value}
-                    options={definition.options.map((option) => ({ value: option, label: option }))}
+                    options={definition.options.map((option) => ({
+                      value: option,
+                      label: order && LIST_ORDER_LABEL_KEYS[option] ? t(LIST_ORDER_LABEL_KEYS[option]) : option,
+                    }))}
                     onValueChange={onValue}
                   />
                 ) : (
