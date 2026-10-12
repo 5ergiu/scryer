@@ -799,9 +799,17 @@ export function exclusionInputFromTitle(title: {
   };
 }
 
-/** External ids as the exclusion form's field shows them: "tmdb:603, imdb:tt0133093". */
+/**
+ * External ids as the exclusion form's field shows them: "tmdb:movie:603,
+ * imdb:tt0133093". A kinded id keeps its kind as the middle part.
+ */
 export function formatExternalIdList(ids: readonly ExternalId[]): string {
-  return ids.map((id) => `${id.source}:${id.value}`).join(", ");
+  return ids
+    .map((id) => {
+      const kind = id.kind?.trim();
+      return kind ? `${id.source}:${kind}:${id.value}` : `${id.source}:${id.value}`;
+    })
+    .join(", ");
 }
 
 /**
@@ -819,16 +827,29 @@ export function exclusionFieldsFromMetadataResult(
   };
 }
 
-/** Parse "tmdb:603, imdb:tt0133093" into external ids; unknown shapes are skipped. */
+/**
+ * Parse "tmdb:movie:603, imdb:tt0133093" into external ids. A two-part token
+ * is kindless; a three-part token names the kind in the middle. Unknown shapes
+ * are skipped.
+ */
 export function parseExternalIdList(raw: string): ExternalId[] {
   return raw
     .split(/[\s,]+/)
     .map((token) => token.trim())
     .filter(Boolean)
-    .map((token) => {
-      const separator = token.indexOf(":");
-      if (separator <= 0 || separator === token.length - 1) return null;
-      return { source: token.slice(0, separator).toLowerCase(), value: token.slice(separator + 1) };
+    .map((token): ExternalId | null => {
+      const parts = token.split(":");
+      if (parts.length === 2) {
+        const [source, value] = parts;
+        if (!source || !value) return null;
+        return { source: source.toLowerCase(), value };
+      }
+      if (parts.length === 3) {
+        const [source, kind, value] = parts;
+        if (!source || !kind || !value) return null;
+        return { source: source.toLowerCase(), kind: kind.toLowerCase(), value };
+      }
+      return null;
     })
     .filter((entry): entry is ExternalId => entry !== null);
 }
