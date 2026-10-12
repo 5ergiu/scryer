@@ -91,6 +91,20 @@ pub fn user_facing_domain_event_types() -> Vec<DomainEventType> {
     domain_event_types_for_class(DomainEventRetentionClass::UserFacingHistory)
 }
 
+/// What the live feed carries to an open page: the history a member can read,
+/// and the list announcements a page waits on, which stay out of that history.
+pub fn live_feed_domain_event_types() -> Vec<DomainEventType> {
+    DomainEventType::variants()
+        .filter(|event_type| {
+            matches!(
+                event_type,
+                DomainEventType::ListSyncFinished | DomainEventType::ListSubscriptionChanged
+            ) || retention_class_for_domain_event_type(*event_type)
+                == DomainEventRetentionClass::UserFacingHistory
+        })
+        .collect()
+}
+
 pub(crate) fn operational_domain_event_types() -> Vec<DomainEventType> {
     domain_event_types_for_class(DomainEventRetentionClass::OperationalProjection)
 }

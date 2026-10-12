@@ -202,7 +202,7 @@ pub use api_keys::{
     CreatedApiKey, DevelopmentApiKeySeed, parse_api_key,
 };
 pub use events::metrics::describe_domain_event_metrics;
-pub use events::retention::user_facing_domain_event_types;
+pub use events::retention::live_feed_domain_event_types;
 pub use import::failed_download as failed_download_handler;
 pub use import::post_processing as app_usecase_post_processing;
 pub use import::srrdb::{SRRDB_API_BASE_URL, SrrdbHttpFilenameLookup};

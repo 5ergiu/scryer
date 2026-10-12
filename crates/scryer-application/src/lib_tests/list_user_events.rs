@@ -157,6 +157,54 @@ fn configuration_changed(resource_type: &str) -> DomainEventPayload {
     })
 }
 
+/// The read an open page's live feed makes for everything after `0`.
+fn live_feed_filter() -> DomainEventFilter {
+    DomainEventFilter {
+        after_sequence: Some(0),
+        event_types: Some(crate::live_feed_domain_event_types()),
+        limit: 100,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn live_feed_tells_only_the_owner_that_a_personal_list_changed_or_synced() {
+    let (app, admin) = bootstrap();
+    let mut owner = admin.clone();
+    owner.id = "member-owner".into();
+    let mut sequences = Vec::new();
+    for payload in [
+        DomainEventPayload::ListSubscriptionChanged(
+            scryer_domain::ListSubscriptionChangedEventData {
+                list: fixture_list(),
+                action: scryer_domain::ConfigurationChangeAction::Saved,
+            },
+        ),
+        DomainEventPayload::ListSyncFinished(scryer_domain::ListSyncFinishedEventData {
+            list: fixture_list(),
+            outcome: scryer_domain::ListSyncRunOutcome::Succeeded,
+        }),
+    ] {
+        let stored = app
+            .append_domain_event(new_user_domain_event(&admin, &owner.id, payload))
+            .await
+            .unwrap();
+        sequences.push(stored.sequence);
+    }
+    let filter = live_feed_filter();
+    let heard = app.list_domain_events(&owner, &filter).await.unwrap();
+    assert_eq!(
+        heard.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+        sequences
+    );
+    assert!(
+        app.list_domain_events(&admin, &filter)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn public_list_refresh_events_reach_every_member_and_list_settings_reach_list_managers() {
     let (app, admin) = bootstrap();
@@ -183,11 +231,7 @@ async fn public_list_refresh_events_reach_every_member_and_list_settings_reach_l
             .unwrap();
         sequences.push(stored.sequence);
     }
-    let filter = DomainEventFilter {
-        after_sequence: Some(0),
-        limit: 10,
-        ..Default::default()
-    };
+    let filter = live_feed_filter();
     let seen = |events: Vec<DomainEvent>| {
         events
             .into_iter()

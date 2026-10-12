@@ -5,7 +5,7 @@ use async_graphql::{
         stream::{self, BoxStream, unfold},
     },
 };
-use scryer_application::user_facing_domain_event_types;
+use scryer_application::live_feed_domain_event_types;
 use scryer_domain::{AppPermission, DomainEvent, DomainEventPayload, DownloadQueueItem};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
@@ -461,7 +461,7 @@ impl SubscriptionRoot {
                 return empty_box_stream();
             }
         };
-        let event_types = user_facing_domain_event_types();
+        let event_types = live_feed_domain_event_types();
         let stream = unfold(
             (receiver, initial_after, VecDeque::<DomainEvent>::new()),
             move |(mut receiver, mut cursor, mut pending)| {
