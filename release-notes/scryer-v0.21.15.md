@@ -89,7 +89,7 @@ These notes cover what's changed since **0.21.14**.
 - Single-title renames check destinations against other titles' folders. Rename failures to record a folder are reported as failures, and multi-episode files contribute only once to folder accounting.
 - A rename whose file operations are all no-ops can still repair a title incorrectly recorded at the library root.
 - Cropped-resolution classification and database ranking use the same tolerant ladder. Existing bare resolution labels are corrected from stored dimensions while compound and interlaced labels are preserved.
-- Episode metadata refresh follows upstream changes and configured skip policies. Untitled episodes retain episode-number history labels, and the displayed TBA placeholder is excluded from import searches.
+- Episode metadata refresh follows upstream changes and configured skip policies. Untitled episodes retain episode-number history labels, and the displayed TBA label is excluded from import searches.
 
 ### Search, parsing, and acquisition history
 
