@@ -45,7 +45,7 @@ impl ListSubscriptionRepository for ListStore {
         row.map(|row| {
             Ok(scryer_application::lists::vocabulary::VocabularySnapshot {
                 version: row.text("version")?,
-                entries: json_column(&row, "payload_json", "[]")?,
+                entries: super::jsonb_column(&row, "payload_json", "[]")?,
                 checked_at: row.timestamp("checked_at")?,
                 jitter_seconds: row.i64("jitter_seconds")?,
             })

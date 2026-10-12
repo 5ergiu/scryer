@@ -216,7 +216,7 @@ fn membership_args(membership: &ListMembership) -> AppResult<Vec<SqlArg>> {
 
 fn row_to_membership(row: &SqlRow) -> AppResult<ListMembership> {
     Ok(ListMembership {
-        series_movie: json_column(row, "series_movie_json", "null")?,
+        series_movie: super::jsonb_column(row, "series_movie_json", "null")?,
         subscription_id: row.text("subscription_id")?,
         item_key: row.text("item_key")?,
         rank: row.opt_i64("rank")?,

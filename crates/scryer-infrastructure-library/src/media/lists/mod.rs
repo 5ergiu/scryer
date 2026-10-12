@@ -58,6 +58,19 @@ pub(super) fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+pub(super) fn jsonb_column<T: DeserializeOwned>(
+    row: &SqlRow,
+    column: &str,
+    fallback: &str,
+) -> AppResult<T> {
+    let value = row.opt_json(column)?;
+    match value {
+        Some(value) => serde_json::from_value(value),
+        None => serde_json::from_str(fallback),
+    }
+    .map_err(|error| AppError::Repository(format!("invalid JSON in {column}: {error}")))
+}
+
 pub(super) fn json_column<T: DeserializeOwned>(
     row: &SqlRow,
     column: &str,
