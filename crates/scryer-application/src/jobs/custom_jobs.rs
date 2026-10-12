@@ -7,7 +7,10 @@
 
 use super::*;
 use crate::import::post_processing::{script_run_record, script_source};
-use crate::scripts::runner::{ScriptInvocation, ScriptOutcome, run_script_cancellable};
+use crate::scripts::runner::{
+    SCRIPT_TERMINATE_GRACE, ScriptExecution, ScriptInvocation, ScriptOutcome,
+    run_script_cancellable,
+};
 use crate::scripts::scheduler::{
     CustomJobDispatcher, CustomJobSource, DueCustomJob, run_custom_job_scheduler,
 };
@@ -385,15 +388,14 @@ impl AppUseCase {
             capture_output: true,
             interpreters: self.script_interpreter_config().await,
             materialize_root: scripts_dir,
+            terminate_grace: SCRIPT_TERMINATE_GRACE,
         };
         info!(script_id = %script.id, script_name = %script.name, trigger, "running scheduled script");
 
         let script_run_id = Id::new().0;
         match script.execution_mode {
             ExecutionMode::Blocking => {
-                let execution =
-                    run_script_cancellable(invocation, &self.runtime.jobs.custom_job_shutdown)
-                        .await;
+                let execution = self.run_script_until_shutdown(invocation).await;
                 let outcome = execution.outcome.clone();
                 let record =
                     script_run_record(&script, true, &env_json, script_run_id.clone(), execution);
@@ -443,11 +445,7 @@ impl AppUseCase {
                 let detached_run_id = script_run_id.clone();
                 tokio::spawn(
                     async move {
-                        let execution = run_script_cancellable(
-                            invocation,
-                            &app.runtime.jobs.custom_job_shutdown,
-                        )
-                        .await;
+                        let execution = app.run_script_until_shutdown(invocation).await;
                         let record = PostProcessingScriptRun {
                             started_at,
                             ..script_run_record(
@@ -514,7 +512,51 @@ pub async fn start_background_custom_job_scheduler(
 ) {
     let scheduler = app.runtime.jobs.custom_job_scheduler.clone();
     run_custom_job_scheduler(scheduler, &app, &app, token).await;
-    // The scheduler returns only once `token` is cancelled; stop every
-    // script it, or a manual run, started.
-    app.runtime.jobs.custom_job_shutdown.cancel();
+    // The scheduler returns only once `token` is cancelled; from here on no
+    // script may keep running. The server's shutdown waits for them through
+    // `shutdown_scripts`.
+    app.runtime.jobs.script_shutdown.cancel();
 }
+
+impl AppUseCase {
+    /// Run a script until it ends or shutdown cancels it, tracked so
+    /// [`Self::shutdown_scripts`] can wait for it.
+    pub(crate) async fn run_script_until_shutdown(
+        &self,
+        invocation: ScriptInvocation,
+    ) -> ScriptExecution {
+        let jobs = &self.runtime.jobs;
+        jobs.script_runs
+            .track_future(run_script_cancellable(invocation, &jobs.script_shutdown))
+            .await
+    }
+
+    /// Stop every running script and wait for the runs to end. Each run
+    /// sends SIGTERM, waits [`SCRIPT_TERMINATE_GRACE`] and then kills its
+    /// process group, so the wait is bounded a little beyond that grace.
+    /// Runs that still have not ended by then are reported and left.
+    pub async fn shutdown_scripts(&self) {
+        let jobs = &self.runtime.jobs;
+        jobs.script_shutdown.cancel();
+        jobs.script_runs.close();
+        let running = jobs.script_runs.len();
+        if running == 0 {
+            return;
+        }
+        info!(running, "waiting for running scripts to stop");
+        if tokio::time::timeout(SCRIPT_SHUTDOWN_WAIT, jobs.script_runs.wait())
+            .await
+            .is_err()
+        {
+            warn!(
+                still_running = jobs.script_runs.len(),
+                "scripts did not stop within the shutdown wait"
+            );
+        }
+    }
+}
+
+/// How long shutdown waits for script runs after cancelling them: the
+/// SIGTERM grace plus time for the kill and output drain to finish.
+const SCRIPT_SHUTDOWN_WAIT: Duration =
+    SCRIPT_TERMINATE_GRACE.saturating_add(Duration::from_secs(2));

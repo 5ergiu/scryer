@@ -1,6 +1,7 @@
 use crate::domain_events::DomainEventActor;
 use crate::scripts::runner::{
-    InterpreterConfig, ScriptExecution, ScriptInvocation, ScriptOutcome, ScriptSource, run_script,
+    InterpreterConfig, SCRIPT_TERMINATE_GRACE, ScriptExecution, ScriptInvocation, ScriptOutcome,
+    ScriptSource,
 };
 use crate::stored_paths::path_to_stored_string;
 use crate::{AppError, AppUseCase};
@@ -504,6 +505,7 @@ async fn execute_script(
         capture_output: script.debug,
         interpreters: interpreters.clone(),
         materialize_root: ctx.app.services.config.scripts_dir.clone(),
+        terminate_grace: SCRIPT_TERMINATE_GRACE,
     };
 
     tracing::info!(
@@ -514,7 +516,7 @@ async fn execute_script(
         "running post-processing script"
     );
 
-    let execution = run_script(invocation).await;
+    let execution = ctx.app.run_script_until_shutdown(invocation).await;
     if let ScriptOutcome::SpawnFailed { reason } = &execution.outcome {
         tracing::warn!(
             script = %script.name,

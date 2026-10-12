@@ -71,7 +71,14 @@ pub struct ScriptInvocation {
     pub interpreters: InterpreterConfig,
     /// Root directory for materialized inline scripts.
     pub materialize_root: PathBuf,
+    /// How long a cancelled script gets to exit after SIGTERM before its
+    /// process group is killed. [`SCRIPT_TERMINATE_GRACE`] outside tests.
+    pub terminate_grace: Duration,
 }
+
+/// How long a cancelled script gets to exit on its own after SIGTERM before
+/// its whole process group is killed.
+pub const SCRIPT_TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +194,7 @@ pub async fn run_script_cancellable(
                 ScriptOutcome::TimedOut
             }
             ChildEnd::Cancelled => {
-                kill_process_group(&mut child).await;
+                terminate_process_group(&mut child, invocation.terminate_grace).await;
                 ScriptOutcome::Cancelled
             }
         };
@@ -219,7 +226,7 @@ pub async fn run_script_cancellable(
             ScriptOutcome::TimedOut
         }
         ChildEnd::Cancelled => {
-            kill_process_group(&mut child).await;
+            terminate_process_group(&mut child, invocation.terminate_grace).await;
             ScriptOutcome::Cancelled
         }
     };
@@ -340,6 +347,24 @@ async fn kill_process_group(child: &mut tokio::process::Child) {
         }
     }
     let _ = child.kill().await;
+}
+
+/// Ask the script's process group to exit, then kill whatever is still
+/// running once `grace` has passed. On Windows there is no SIGTERM, so the
+/// process is killed at once.
+async fn terminate_process_group(child: &mut tokio::process::Child, grace: Duration) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+    kill_process_group(child).await;
 }
 
 fn plan_launch(invocation: &ScriptInvocation) -> Result<LaunchPlan, String> {
@@ -744,6 +769,7 @@ mod tests {
                 capture_output: true,
                 interpreters: InterpreterConfig::default(),
                 materialize_root: self.root.clone(),
+                terminate_grace: SCRIPT_TERMINATE_GRACE,
             }
         }
 
@@ -778,6 +804,94 @@ mod tests {
                 .await
                 .expect("a cancelled run ends without waiting for the script");
         assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
+    }
+
+    /// The script traps SIGTERM, reports it, and exits on its own: the
+    /// cancellation is graceful and the trap's output is captured.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_run_asks_the_script_to_exit_before_killing_it() {
+        let fixture = Fixture::new();
+        let armed = fixture.work.join("armed.flag");
+        let mut invocation = fixture.invocation(inline(
+            &format!(
+                "trap 'echo terminated; exit 0' TERM; : > '{}'; while :; do sleep 1; done",
+                armed.display()
+            ),
+            ScriptLanguage::Shell,
+        ));
+        invocation.timeout = Duration::from_secs(600);
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { run_script_cancellable(invocation, &cancel).await }
+        });
+        // Cancel only once the script has armed its trap, which it signals
+        // with the flag file.
+        tokio::time::timeout(RUN_BOUND, async {
+            while !tokio::fs::try_exists(&armed).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the script arms its trap within the bound");
+        cancel.cancel();
+
+        let execution = tokio::time::timeout(RUN_BOUND, run)
+            .await
+            .expect("a cancelled run ends within its bound")
+            .expect("run task joins");
+        assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
+        assert_eq!(
+            stdout_lines(&execution),
+            vec!["terminated".to_string()],
+            "the script exited through its SIGTERM trap"
+        );
+    }
+
+    /// A script that ignores SIGTERM is killed once the grace period passes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_run_kills_a_script_that_ignores_sigterm_after_the_grace() {
+        let fixture = Fixture::new();
+        let armed = fixture.work.join("armed.flag");
+        let grace = Duration::from_millis(200);
+        let mut invocation = fixture.invocation(inline(
+            &format!(
+                "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+                armed.display()
+            ),
+            ScriptLanguage::Shell,
+        ));
+        invocation.timeout = Duration::from_secs(600);
+        invocation.terminate_grace = grace;
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { run_script_cancellable(invocation, &cancel).await }
+        });
+        // Cancel only once the script ignores SIGTERM, which it signals with
+        // the flag file; cancelling earlier would end the shell on the
+        // signal before the trap is set.
+        tokio::time::timeout(RUN_BOUND, async {
+            while !tokio::fs::try_exists(&armed).await.unwrap_or(false) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the script arms its trap within the bound");
+        let cancelled_at = Instant::now();
+        cancel.cancel();
+
+        let execution = tokio::time::timeout(RUN_BOUND, run)
+            .await
+            .expect("a script ignoring SIGTERM is killed after the grace")
+            .expect("run task joins");
+        assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
+        assert!(
+            cancelled_at.elapsed() >= grace,
+            "the script outlived SIGTERM and was only killed once the grace passed"
+        );
     }
 
     fn stdout_lines(execution: &ScriptExecution) -> Vec<String> {
