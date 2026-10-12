@@ -3,7 +3,10 @@ use crate::lists::account_transport::*;
 use crate::lists::accounts::ListAccountPollStatus;
 use crate::lists::test_support::{MemoryListStore, subscription};
 use crate::lists::{ListPluginProvider, ListProviderClient, UserListAccountRepository};
-use scryer_domain::{ListAccountCredential, ListScope, UserListAccount, UserListAccountStatus};
+use scryer_domain::{
+    ListAccountCredential, ListPolicy, ListScope, UserListAccount, UserListAccountStatus,
+    UserListPolicy,
+};
 use scryer_plugin_sdk::{
     ListCredential, ListPluginAccountResponse, ListPluginFetchRequest, ListPluginFetchResponse,
     ListPluginHealthResponse, PluginDescriptor, PluginResult,
@@ -274,6 +277,21 @@ async fn harness(auth: Arc<Auth>) -> MediaRequestTestHarness {
     super::list_experimental_gate::set_experimental_features(&harness, true).await;
     harness
 }
+async fn set_member_list_policy(harness: &MediaRequestTestHarness, policy: ListPolicy) {
+    harness
+        .app
+        .services
+        .lists
+        .policies
+        .set(UserListPolicy {
+            user_id: harness.user.id.clone(),
+            policy,
+            updated_by_user_id: None,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+}
 async fn seed_expired(harness: &MediaRequestTestHarness) -> UserListAccount {
     let now = chrono::Utc::now();
     let account = UserListAccount {
@@ -528,17 +546,17 @@ async fn private_account_poll_ends_when_the_approved_link_can_never_be_recorded(
     })
     .await
     .expect("provider check entered");
-    // Lists are turned off while the provider is approving the link.
-    super::list_experimental_gate::set_experimental_features(&harness, false).await;
+    // The member's lists are turned off while the provider is approving the link.
+    set_member_list_policy(&harness, ListPolicy::None).await;
     auth.poll_release.notify_one();
-    let Err(AppError::Validation(message)) = timeout(Duration::from_secs(30), first)
+    let Err(AppError::Unauthorized(message)) = timeout(Duration::from_secs(30), first)
         .await
         .expect("first poll finished")
     else {
         panic!("a write that cannot succeed must end the link with its reason");
     };
-    assert!(message.contains("experimental"), "{message}");
-    super::list_experimental_gate::set_experimental_features(&harness, true).await;
+    assert!(message.contains("not allowed"), "{message}");
+    set_member_list_policy(&harness, ListPolicy::Approval).await;
     assert!(matches!(
         harness
             .app
@@ -834,7 +852,7 @@ async fn private_account_completion_is_single_use_and_gate_rechecked() {
         .start_list_account_link(&harness.user, "trakt", "https://instance.invalid")
         .await
         .unwrap();
-    super::list_experimental_gate::set_experimental_features(&harness, false).await;
+    set_member_list_policy(&harness, ListPolicy::None).await;
     assert!(
         harness
             .app

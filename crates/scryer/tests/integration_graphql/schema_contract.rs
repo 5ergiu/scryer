@@ -814,8 +814,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Rebased to the release tree, as with the query count above: 267->271.
     // Linking a list account with a key the member supplies adds
     // `linkListAccountWithKey`: 271->272.
+    // Abandoning an account link the member walked away from adds
+    // `cancelListAccountLink`: 272->273.
     assert_eq!(
-        mutation_field_count, 272,
+        mutation_field_count, 273,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title

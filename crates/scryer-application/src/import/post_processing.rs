@@ -147,14 +147,14 @@ impl AppUseCase {
             action,
         )
         .await;
-        if script.trigger == ScriptTrigger::Schedule {
-            if let Err(error) = self.reload_custom_job_schedule().await {
-                tracing::warn!(
-                    script_id = %script.id,
-                    error = %error,
-                    "failed to reload scheduled scripts; the scheduler retries the reload"
-                );
-            }
+        if script.trigger == ScriptTrigger::Schedule
+            && let Err(error) = self.reload_custom_job_schedule().await
+        {
+            tracing::warn!(
+                script_id = %script.id,
+                error = %error,
+                "failed to reload scheduled scripts; the scheduler retries the reload"
+            );
         }
     }
 
