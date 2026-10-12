@@ -86,21 +86,14 @@ fn custom_job_summary_text(outcome: &ScriptOutcome) -> String {
 
 impl AppUseCase {
     /// Reload the in-memory schedule from the script store. Called when a
-    /// scheduled script is created, updated, toggled or deleted.
-    pub(crate) async fn reload_custom_job_schedule(&self) {
-        // Held across the read and the apply: two overlapping reloads apply
-        // in the order they read.
-        let _reload = self.runtime.jobs.custom_job_reload_lock.lock().await;
-        match self
-            .services
-            .customization
-            .pp_scripts
-            .list_enabled_scheduled()
+    /// scheduled script is created, updated, toggled or deleted. A failed
+    /// reload leaves the scheduler retrying it.
+    pub(crate) async fn reload_custom_job_schedule(&self) -> AppResult<()> {
+        self.runtime
+            .jobs
+            .custom_job_scheduler
+            .reload_from(self)
             .await
-        {
-            Ok(scripts) => self.runtime.jobs.custom_job_scheduler.apply(scripts),
-            Err(error) => warn!(error = %error, "failed to reload scheduled scripts"),
-        }
     }
 
     /// Fail script runs a previous process left running, such as a
