@@ -324,6 +324,8 @@ fn normalize_script_trigger(
                 days.sort();
                 days.dedup();
             }
+            crate::scripts::schedule::normalize_schedule_time(schedule)
+                .map_err(crate::scripts::schedule::ScheduleError::into_app_error)?;
             crate::scripts::schedule::validate_schedule(schedule)
                 .map_err(crate::scripts::schedule::ScheduleError::into_app_error)?;
         }
