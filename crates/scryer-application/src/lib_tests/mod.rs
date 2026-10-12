@@ -19,6 +19,7 @@ mod acquisition_recovery;
 mod bridge_cour_titles;
 mod consolidation;
 mod cross_library_transfer;
+mod custom_job_shutdown;
 mod diacritic_release_matching;
 mod discovery_sync;
 mod downloads;

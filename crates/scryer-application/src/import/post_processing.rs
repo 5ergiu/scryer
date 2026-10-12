@@ -562,6 +562,13 @@ pub(crate) fn script_run_record(
             execution.stderr_tail,
             debug_env_payload(),
         ),
+        ScriptOutcome::Cancelled => (
+            ScriptRunStatus::Failed,
+            None,
+            execution.stdout_tail,
+            execution.stderr_tail,
+            debug_env_payload(),
+        ),
         ScriptOutcome::IoError { reason } => (
             ScriptRunStatus::Failed,
             None,
