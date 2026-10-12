@@ -210,7 +210,7 @@ fn membership_args(membership: &ListMembership) -> AppResult<Vec<SqlArg>> {
         SqlArg::Timestamp(membership.last_seen_at),
         SqlArg::OptTimestamp(membership.left_at),
         SqlArg::Bool(membership.left_handled),
-        json_arg(&membership.series_movie)?,
+        super::jsonb_arg(&membership.series_movie)?,
     ])
 }
 

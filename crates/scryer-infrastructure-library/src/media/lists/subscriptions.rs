@@ -71,7 +71,7 @@ impl ListSubscriptionRepository for ListStore {
                 "INSERT INTO canonical_tag_vocabulary_cache (id, version, payload_json, checked_at, jitter_seconds) VALUES ('canonical', {}, {}, {}, {}) ON CONFLICT (id) DO UPDATE SET version = excluded.version, payload_json = excluded.payload_json, checked_at = excluded.checked_at, jitter_seconds = excluded.jitter_seconds",
                 vec![
                     SqlArg::Text(snapshot.version.clone()),
-                    json_arg(&snapshot.entries)?,
+                    super::jsonb_arg(&snapshot.entries)?,
                     SqlArg::Timestamp(snapshot.checked_at),
                     SqlArg::I64(snapshot.jitter_seconds),
                 ],

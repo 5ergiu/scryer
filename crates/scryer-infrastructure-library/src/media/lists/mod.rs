@@ -79,6 +79,14 @@ pub(super) fn json_arg<T: serde::Serialize>(value: &T) -> AppResult<SqlArg> {
         .map_err(|error| AppError::Repository(format!("failed to encode JSON column: {error}")))
 }
 
+/// Native JSONB on PostgreSQL, serialized JSON text on SQLite. Older list
+/// columns remain text-backed on both engines and use `json_arg` instead.
+pub(super) fn jsonb_arg<T: serde::Serialize>(value: &T) -> AppResult<SqlArg> {
+    serde_json::to_value(value)
+        .map(SqlArg::Json)
+        .map_err(|error| AppError::Repository(format!("failed to encode JSON column: {error}")))
+}
+
 pub(super) fn parse_or_repo_err<T>(
     column: &str,
     raw: &str,
