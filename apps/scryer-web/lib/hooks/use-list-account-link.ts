@@ -4,7 +4,7 @@ import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { hasGraphQlErrorCode } from "@/lib/graphql/error-message";
 import { listErrorMessage } from "@/lib/utils/list-error-message";
-import { completeListAccountLinkMutation, linkListAccountWithKeyMutation, pollListAccountLinkMutation, startListAccountLinkMutation } from "@/lib/graphql/list-accounts";
+import { cancelListAccountLinkMutation, completeListAccountLinkMutation, linkListAccountWithKeyMutation, pollListAccountLinkMutation, startListAccountLinkMutation } from "@/lib/graphql/list-accounts";
 import type { ListAccountLinkSession } from "@/lib/types/lists";
 import {
   LIST_ACCOUNT_LINK_STORAGE_KEY,
@@ -41,6 +41,16 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
     setProvider(null);
     setCheckingKey(false);
   }, []);
+
+  // The member walked away from a link still in progress: the instance drops
+  // its session too, so the authorization can no longer complete.
+  const abandon = React.useCallback(() => {
+    const link = active.current;
+    if (link && !link.consumed) {
+      void client.mutation(cancelListAccountLinkMutation, { sessionId: link.pending.sessionId }).toPromise();
+    }
+    cancel();
+  }, [cancel, client]);
 
   React.useEffect(() => {
     const receive = async (event: MessageEvent) => {
@@ -81,7 +91,7 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
   }, [cancel, client, onLinked, t]);
 
   const start = React.useCallback(async (nextProvider: string, memberKey?: ListAccountMemberKey) => {
-    cancel();
+    abandon();
     setError(null);
     setProvider(nextProvider);
     const keyOnly = !!memberKey && !memberKey.approval;
@@ -207,7 +217,7 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
         : listErrorMessage(reason, t, t("lists.accounts.linkFailed")));
       cancel();
     }
-  }, [cancel, client, onLinked, t]);
+  }, [abandon, cancel, client, onLinked, t]);
 
-  return { provider, checkingKey, error, start, cancel };
+  return { provider, checkingKey, error, start, cancel: abandon };
 }

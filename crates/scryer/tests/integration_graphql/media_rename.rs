@@ -2789,19 +2789,36 @@ async fn seed_movie_in_folder(
 /// recorded at, even when that other title has nothing to move.
 #[tokio::test]
 async fn apply_media_rename_refuses_a_move_into_another_titles_recorded_folder() {
-    assert_move_beside_an_untouched_titles_record_is_refused("").await;
+    assert_move_beside_an_untouched_titles_record_is_refused("", RenameScope::Facet).await;
 }
 
 /// Nor may it make a folder around the one another title is recorded at.
 #[tokio::test]
 async fn apply_media_rename_refuses_a_move_around_another_titles_recorded_folder() {
-    assert_move_beside_an_untouched_titles_record_is_refused("Inner Cut").await;
+    assert_move_beside_an_untouched_titles_record_is_refused("Inner Cut", RenameScope::Facet).await;
+}
+
+/// A rename of the moving title alone is held to the same rule: the other
+/// title's folder is judged even though it is not part of the plan.
+#[tokio::test]
+async fn a_single_title_rename_refuses_a_move_around_another_titles_recorded_folder() {
+    assert_move_beside_an_untouched_titles_record_is_refused("Inner Cut", RenameScope::Title).await;
+}
+
+/// Whether a test renames the whole facet or only the moving title.
+#[derive(Clone, Copy)]
+enum RenameScope {
+    Facet,
+    Title,
 }
 
 /// An untouched title recorded at `Birch Quay (2024)/<inside>` (that folder
 /// itself when `inside` is empty), and a second title planned into
 /// `Birch Quay (2024)`: the rename is refused and nothing moves.
-async fn assert_move_beside_an_untouched_titles_record_is_refused(inside: &str) {
+async fn assert_move_beside_an_untouched_titles_record_is_refused(
+    inside: &str,
+    scope: RenameScope,
+) {
     let mut ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
     set_folder_template(&ctx, "MOVIE", "{title} ({year})").await;
@@ -2831,21 +2848,37 @@ async fn assert_move_beside_an_untouched_titles_record_is_refused(inside: &str) 
     set_title_folder_path(&ctx, &idle.id, &taken).await;
     let (moving, source) = seed_movie_in_folder(&ctx, &movie_root, "Birch Quay", "94114").await;
 
-    let preview = ctx
-        .app
-        .preview_rename_for_facet(&actor, MediaFacet::Movie)
-        .await
-        .expect("preview rename plan");
+    let preview = match scope {
+        RenameScope::Facet => {
+            ctx.app
+                .preview_rename_for_facet(&actor, MediaFacet::Movie)
+                .await
+        }
+        RenameScope::Title => {
+            ctx.app
+                .preview_rename_for_title(&actor, &moving.id, MediaFacet::Movie)
+                .await
+        }
+    }
+    .expect("preview rename plan");
     assert_eq!(
         preview.renamable, 1,
         "only one title moves: {:?}",
         preview.items
     );
-    let error = ctx
-        .app
-        .apply_rename_for_facet(&actor, MediaFacet::Movie, &preview.fingerprint)
-        .await
-        .expect_err("a move into another title's folder is refused");
+    let applied = match scope {
+        RenameScope::Facet => {
+            ctx.app
+                .apply_rename_for_facet(&actor, MediaFacet::Movie, &preview.fingerprint)
+                .await
+        }
+        RenameScope::Title => {
+            ctx.app
+                .apply_rename_for_title(&actor, &moving.id, MediaFacet::Movie, &preview.fingerprint)
+                .await
+        }
+    };
+    let error = applied.expect_err("a move into another title's folder is refused");
     assert!(
         matches!(error, scryer_application::AppError::Validation(_)),
         "unexpected error: {error}"

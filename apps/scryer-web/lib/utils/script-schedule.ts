@@ -5,9 +5,14 @@ import type {
 } from "../types/scripts.ts";
 import { SCHEDULE_WEEKDAYS } from "../types/scripts.ts";
 
-export type IntervalUnit = "minutes" | "hours" | "days";
+/**
+ * `seconds` only reads back a stored interval that is not a whole number of
+ * minutes, so editing it keeps its cadence; new intervals use the others.
+ */
+export type IntervalUnit = "seconds" | "minutes" | "hours" | "days";
 
 export const INTERVAL_UNIT_SECONDS: Record<IntervalUnit, number> = {
+  seconds: 1,
   minutes: 60,
   hours: 60 * 60,
   days: 24 * 60 * 60,
@@ -36,7 +41,10 @@ export function splitIntervalSeconds(
       return { amount: value / INTERVAL_UNIT_SECONDS[unit], unit };
     }
   }
-  return { amount: Math.max(1, Math.round(value / INTERVAL_UNIT_SECONDS.minutes)), unit: "minutes" };
+  if (value % INTERVAL_UNIT_SECONDS.minutes !== 0) {
+    return { amount: Math.floor(value), unit: "seconds" };
+  }
+  return { amount: value / INTERVAL_UNIT_SECONDS.minutes, unit: "minutes" };
 }
 
 /** Days in Monday-first week order without repeats. */

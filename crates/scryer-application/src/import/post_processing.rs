@@ -148,7 +148,13 @@ impl AppUseCase {
         )
         .await;
         if script.trigger == ScriptTrigger::Schedule {
-            self.reload_custom_job_schedule().await;
+            if let Err(error) = self.reload_custom_job_schedule().await {
+                tracing::warn!(
+                    script_id = %script.id,
+                    error = %error,
+                    "failed to reload scheduled scripts; the scheduler retries the reload"
+                );
+            }
         }
     }
 
@@ -318,6 +324,8 @@ fn normalize_script_trigger(
                 days.sort();
                 days.dedup();
             }
+            crate::scripts::schedule::normalize_schedule_time(schedule)
+                .map_err(crate::scripts::schedule::ScheduleError::into_app_error)?;
             crate::scripts::schedule::validate_schedule(schedule)
                 .map_err(crate::scripts::schedule::ScheduleError::into_app_error)?;
         }
@@ -549,6 +557,13 @@ pub(crate) fn script_run_record(
         ),
         ScriptOutcome::TimedOut => (
             ScriptRunStatus::Timeout,
+            None,
+            execution.stdout_tail,
+            execution.stderr_tail,
+            debug_env_payload(),
+        ),
+        ScriptOutcome::Cancelled => (
+            ScriptRunStatus::Failed,
             None,
             execution.stdout_tail,
             execution.stderr_tail,

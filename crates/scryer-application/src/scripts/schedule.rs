@@ -228,6 +228,18 @@ pub fn describe_schedule(schedule: &ScriptSchedule) -> String {
     }
 }
 
+/// Rewrites a daily or weekly schedule's time to the zero-padded `HH:MM`
+/// it is stored and edited as.
+pub(crate) fn normalize_schedule_time(schedule: &mut ScriptSchedule) -> Result<(), ScheduleError> {
+    if let ScriptSchedule::Daily { time_local } | ScriptSchedule::Weekly { time_local, .. } =
+        schedule
+    {
+        let (hour, minute) = parse_local_time_of_day(time_local)?;
+        *time_local = format!("{hour:02}:{minute:02}");
+    }
+    Ok(())
+}
+
 /// Parses a 24-hour `HH:MM` local time of day.
 pub(crate) fn parse_local_time_of_day(value: &str) -> Result<(u32, u32), ScheduleError> {
     let (hour, minute) = value
@@ -385,6 +397,34 @@ mod tests {
     use chrono::{Duration, NaiveDate, Timelike};
 
     use super::*;
+
+    #[test]
+    fn schedule_times_are_stored_zero_padded() {
+        let mut daily = ScriptSchedule::Daily {
+            time_local: " 3:5 ".to_string(),
+        };
+        normalize_schedule_time(&mut daily).unwrap();
+        assert_eq!(
+            daily,
+            ScriptSchedule::Daily {
+                time_local: "03:05".to_string()
+            }
+        );
+
+        let mut weekly = ScriptSchedule::Weekly {
+            days: vec![],
+            time_local: "23:59".to_string(),
+        };
+        normalize_schedule_time(&mut weekly).unwrap();
+        assert!(
+            matches!(weekly, ScriptSchedule::Weekly { ref time_local, .. } if time_local == "23:59")
+        );
+
+        let mut invalid = ScriptSchedule::Daily {
+            time_local: "24:00".to_string(),
+        };
+        assert!(normalize_schedule_time(&mut invalid).is_err());
+    }
 
     /// A UTC instant for a host-local wall-clock time. Mid-January dates
     /// keep these clear of daylight-saving transitions.

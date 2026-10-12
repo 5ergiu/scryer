@@ -900,6 +900,12 @@ impl SearchDiagnosticsContext {
             })
             .flatten();
         let (completion_state, incomplete_reason, retry_after) = match response.completion {
+            // A replay leaves out the password-hinted results (see
+            // `candidate_reusable_until`), so it would not be the whole
+            // answer; recording the run as partial has it asked live again.
+            IndexerSearchCompletion::Complete if response.results.iter().any(has_password_hint) => {
+                ("received_partial", None, None)
+            }
             IndexerSearchCompletion::Complete => ("received_complete", None, None),
             IndexerSearchCompletion::Partial {
                 reason,
@@ -924,7 +930,7 @@ impl SearchDiagnosticsContext {
                     now,
                 ),
                 created_at: now,
-                reusable_until: now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS),
+                reusable_until: candidate_reusable_until(candidate, now),
                 expires_at: now + Duration::days(SEARCH_CANDIDATE_RETENTION_DAYS),
             })
             .collect::<Vec<_>>();
@@ -1296,6 +1302,25 @@ fn candidate_extra_bool(candidate: &IndexerSearchResult, key: &str) -> Option<bo
         .extra
         .get(key)
         .and_then(serde_json::Value::as_bool)
+}
+
+/// Until when a stored candidate may stand in for a live search. The stored
+/// row does not keep a result's password hint, so a replay would hand back
+/// the release without it; such a result is stored already past reuse and is
+/// only ever taken from a live search.
+fn candidate_reusable_until(candidate: &IndexerSearchResult, now: DateTime<Utc>) -> DateTime<Utc> {
+    if has_password_hint(candidate) {
+        now - Duration::seconds(1)
+    } else {
+        now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS)
+    }
+}
+
+fn has_password_hint(candidate: &IndexerSearchResult) -> bool {
+    candidate
+        .password_hint
+        .as_deref()
+        .is_some_and(|hint| !hint.is_empty())
 }
 
 fn normalized_candidate(
@@ -9946,6 +9971,66 @@ mod tests {
             auto_decision_summary: None,
             release_listing_json: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_response_with_a_password_hinted_result_is_recorded_for_a_live_retry() {
+        let repo_impl = InMemorySearchLearningRepository::default();
+        let diagnostics = repo_impl.diagnostics.clone();
+        let context = SearchDiagnosticsContext {
+            repository: StdArc::new(repo_impl),
+            indexer_id: "indexer-alpha".into(),
+            provider_type: "synthetic".into(),
+            search_session_id: "session-alpha".into(),
+            scope_key: "scope-alpha".into(),
+            indexer_fingerprint: "fingerprint-alpha".into(),
+            background: false,
+        };
+        let plain = search_result("Synthetic.Release.2024.1080p.WEB-DL-GRP");
+        let mut hinted = search_result("Synthetic.Release.2024.2160p.WEB-DL-GRP");
+        hinted.password_hint = Some("synthetic-hint".into());
+        let response = IndexerSearchResponse {
+            results: vec![plain, hinted],
+            completion: IndexerSearchCompletion::Complete,
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+            indexer_outcomes: Vec::new(),
+            next_cursor: None,
+        };
+
+        context
+            .persist_response("signature-alpha", "primary", 2, &response, None, None)
+            .await
+            .expect("the response is recorded");
+
+        let recorded = diagnostics.lock().expect("search diagnostics mutex");
+        let (run, candidates) = &recorded[0];
+        assert_eq!(
+            run.completion_state, "received_partial",
+            "a replay would leave out the hinted result, so the run is asked live again"
+        );
+        assert_eq!(run.error_summary, None);
+        let reusable = candidates
+            .iter()
+            .map(|candidate| candidate.reusable_until > candidate.created_at)
+            .collect::<Vec<_>>();
+        assert_eq!(reusable, vec![true, false]);
+    }
+
+    #[test]
+    fn a_result_with_a_password_hint_is_never_reusable() {
+        let now = Utc::now();
+        let plain = search_result("Synthetic.Release.2024.1080p.WEB-DL-GRP");
+        assert!(candidate_reusable_until(&plain, now) > now);
+
+        let mut hinted = plain.clone();
+        hinted.password_hint = Some("synthetic-hint".into());
+        assert!(
+            candidate_reusable_until(&hinted, now) < now,
+            "a replay would drop the hint, so the result is stored past reuse"
+        );
     }
 
     #[test]

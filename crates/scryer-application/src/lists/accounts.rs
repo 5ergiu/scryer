@@ -721,6 +721,17 @@ impl ListAccountRuntime {
         }
         sessions.remove(id).ok_or_else(missing)
     }
+    /// Removes a waiting session the owner abandoned. A session that is
+    /// unknown, someone else's, being checked or already linked stays.
+    fn cancel(&self, id: &str, owner: &str, now: DateTime<Utc>) -> Option<LinkSession> {
+        let mut sessions = self.sessions();
+        prune_expired(&mut sessions, now);
+        let session = sessions.get(id)?;
+        if session.owner != owner || session.phase != LinkPhase::Waiting {
+            return None;
+        }
+        sessions.remove(id)
+    }
     /// Claims a polled session for one provider check, leaving it in place so
     /// concurrent polls see it in progress rather than gone.
     fn claim_poll(&self, id: &str, owner: &str, now: DateTime<Utc>) -> AppResult<PollClaim> {
@@ -1083,17 +1094,73 @@ impl AppUseCase {
                 poll_token: session.poll_token,
             })
             .await?;
-        if session.expires_at <= Utc::now() {
-            return Err(missing());
+        // The session is spent, so a grant that is not stored here can never
+        // be stored: hand it back to the provider rather than strand it.
+        let issued = credential.clone();
+        let app = session.app.clone();
+        let outcome = if session.expires_at <= Utc::now() {
+            Err(missing())
+        } else {
+            self.finish_list_account_link(
+                actor,
+                &session.provider,
+                credential,
+                session.app,
+                session.expires_at,
+            )
+            .await
+        };
+        if let Err(error) = &outcome {
+            let revoked = tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                self.services
+                    .lists
+                    .auth
+                    .revoke(&session.provider, &issued, app.as_ref()),
+            )
+            .await;
+            if !matches!(revoked, Ok(Ok(()))) {
+                tracing::warn!(
+                    provider = %session.provider,
+                    error = %error,
+                    "a list account grant that could not be linked was not revoked"
+                );
+            }
         }
-        self.finish_list_account_link(
-            actor,
-            &session.provider,
-            credential,
-            session.app,
-            session.expires_at,
-        )
-        .await
+        outcome
+    }
+    /// Abandons an account link the member started, so it can no longer be
+    /// polled or completed. A grant an earlier poll already obtained for it
+    /// is handed back to the provider. The answer is the same whether or not
+    /// there was a session to cancel.
+    pub async fn cancel_list_account_link(&self, actor: &User, id: &str) -> AppResult<()> {
+        self.require_personal_lists_allowed(actor).await?;
+        let Some(session) = self
+            .services
+            .lists
+            .account_runtime
+            .cancel(id, &actor.id, Utc::now())
+        else {
+            return Ok(());
+        };
+        if let Some(credential) = session.credential {
+            let revoked = tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                self.services.lists.auth.revoke(
+                    &session.provider,
+                    &credential,
+                    session.app.as_ref(),
+                ),
+            )
+            .await;
+            if !matches!(revoked, Ok(Ok(()))) {
+                tracing::warn!(
+                    provider = %session.provider,
+                    "the grant of a cancelled list account link was not revoked"
+                );
+            }
+        }
+        Ok(())
     }
     pub async fn poll_list_account_link(
         &self,

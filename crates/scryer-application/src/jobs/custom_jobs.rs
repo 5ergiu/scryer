@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::import::post_processing::{script_run_record, script_source};
-use crate::scripts::runner::{ScriptInvocation, ScriptOutcome, run_script};
+use crate::scripts::runner::{ScriptInvocation, ScriptOutcome, run_script_cancellable};
 use crate::scripts::scheduler::{
     CustomJobDispatcher, CustomJobSource, DueCustomJob, run_custom_job_scheduler,
 };
@@ -79,6 +79,7 @@ fn custom_job_summary_text(outcome: &ScriptOutcome) -> String {
         } => format!("Exited with code {code}"),
         ScriptOutcome::Exited { code: None, .. } => "Exited without a code".to_string(),
         ScriptOutcome::TimedOut => "Timed out".to_string(),
+        ScriptOutcome::Cancelled => "Stopped at shutdown".to_string(),
         ScriptOutcome::SpawnFailed { reason } => format!("Failed to start: {reason}"),
         ScriptOutcome::IoError { reason } => format!("I/O error: {reason}"),
     }
@@ -86,21 +87,14 @@ fn custom_job_summary_text(outcome: &ScriptOutcome) -> String {
 
 impl AppUseCase {
     /// Reload the in-memory schedule from the script store. Called when a
-    /// scheduled script is created, updated, toggled or deleted.
-    pub(crate) async fn reload_custom_job_schedule(&self) {
-        // Held across the read and the apply: two overlapping reloads apply
-        // in the order they read.
-        let _reload = self.runtime.jobs.custom_job_reload_lock.lock().await;
-        match self
-            .services
-            .customization
-            .pp_scripts
-            .list_enabled_scheduled()
+    /// scheduled script is created, updated, toggled or deleted. A failed
+    /// reload leaves the scheduler retrying it.
+    pub(crate) async fn reload_custom_job_schedule(&self) -> AppResult<()> {
+        self.runtime
+            .jobs
+            .custom_job_scheduler
+            .reload_from(self)
             .await
-        {
-            Ok(scripts) => self.runtime.jobs.custom_job_scheduler.apply(scripts),
-            Err(error) => warn!(error = %error, "failed to reload scheduled scripts"),
-        }
     }
 
     /// Fail script runs a previous process left running, such as a
@@ -397,7 +391,9 @@ impl AppUseCase {
         let script_run_id = Id::new().0;
         match script.execution_mode {
             ExecutionMode::Blocking => {
-                let execution = run_script(invocation).await;
+                let execution =
+                    run_script_cancellable(invocation, &self.runtime.jobs.custom_job_shutdown)
+                        .await;
                 let outcome = execution.outcome.clone();
                 let record =
                     script_run_record(&script, true, &env_json, script_run_id.clone(), execution);
@@ -447,7 +443,11 @@ impl AppUseCase {
                 let detached_run_id = script_run_id.clone();
                 tokio::spawn(
                     async move {
-                        let execution = run_script(invocation).await;
+                        let execution = run_script_cancellable(
+                            invocation,
+                            &app.runtime.jobs.custom_job_shutdown,
+                        )
+                        .await;
                         let record = PostProcessingScriptRun {
                             started_at,
                             ..script_run_record(
@@ -514,4 +514,7 @@ pub async fn start_background_custom_job_scheduler(
 ) {
     let scheduler = app.runtime.jobs.custom_job_scheduler.clone();
     run_custom_job_scheduler(scheduler, &app, &app, token).await;
+    // The scheduler returns only once `token` is cancelled; stop every
+    // script it, or a manual run, started.
+    app.runtime.jobs.custom_job_shutdown.cancel();
 }

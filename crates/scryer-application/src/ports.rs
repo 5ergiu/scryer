@@ -6722,6 +6722,15 @@ pub trait ImportRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Every import attached to `canonical_download_id`, whatever client
+    /// locator each was recorded under.
+    async fn list_imports_for_canonical_download(
+        &self,
+        _canonical_download_id: &DownloadId,
+    ) -> AppResult<Vec<ImportRecord>> {
+        Ok(Vec::new())
+    }
+
     /// Atomically reserve an eligible attempt and its canonical download against cleanup.
     async fn claim_import_retry(
         &self,

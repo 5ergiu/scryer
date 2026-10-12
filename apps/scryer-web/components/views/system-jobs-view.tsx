@@ -49,7 +49,12 @@ import type {
 } from "@/lib/types";
 import type { UiDateTimeFormat } from "@/lib/types/settings";
 import { formatUiDate, formatUiDateTime, formatUiTime } from "@/lib/utils/date-format";
-import { describeScriptSchedule, documentUiLanguage } from "@/lib/utils/cron-description";
+import {
+  describeScriptSchedule,
+  documentUiLanguage,
+  isCronDescriptionLocaleLoaded,
+  loadCronDescriptionLocale,
+} from "@/lib/utils/cron-description";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
   isTerminalJobRunStatus,
@@ -549,6 +554,19 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
   const { getActiveSession } = useLibraryScanProgress();
+  const uiLanguage = documentUiLanguage();
+  // Schedule descriptions read the cron locale; rerender once it has loaded.
+  const [, setLoadedCronLanguage] = useState<string | null>(null);
+  useEffect(() => {
+    if (isCronDescriptionLocaleLoaded(uiLanguage)) return;
+    let cancelled = false;
+    void loadCronDescriptionLocale(uiLanguage).then(() => {
+      if (!cancelled) setLoadedCronLanguage(uiLanguage);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [uiLanguage]);
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const {
@@ -863,7 +881,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
     describeScriptSchedule(
       script.schedule,
       script.scheduleDescription || job.schedule.description,
-      documentUiLanguage(),
+      uiLanguage,
       { use24HourTimeFormat: dateTimeFormat === "ISO24H" ? true : undefined },
     ) ?? "--";
 

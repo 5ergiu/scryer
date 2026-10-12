@@ -156,6 +156,7 @@ import {
   listMembershipRowId,
   listUrlPatternToRegExp,
   missingSourceParams,
+  formatExternalIdList,
   parseExternalIdList,
   PUBLIC_LIST_MODES,
   publicProviders,
@@ -516,10 +517,15 @@ test("a picked search result fills the exclusion form with its name, year and id
     },
     "MOVIE",
   );
-  assert.deepEqual(fields, { title: "Sample Film", year: "2031", ids: "tmdb:9001, smg:41, imdb:tt0000041" });
+  assert.deepEqual(fields, {
+    title: "Sample Film",
+    year: "2031",
+    ids: "tmdb:movie:9001, smg:title:41, imdb:tt0000041",
+  });
+  // The kinds survive the round trip through the form field.
   assert.deepEqual(parseExternalIdList(fields.ids), [
-    { source: "tmdb", value: "9001" },
-    { source: "smg", value: "41" },
+    { source: "tmdb", kind: "movie", value: "9001" },
+    { source: "smg", kind: "title", value: "41" },
     { source: "imdb", value: "tt0000041" },
   ]);
   assert.equal(
@@ -556,6 +562,20 @@ test("typed external ids parse as source:value pairs", () => {
     { source: "tmdb", value: "101" },
     { source: "imdb", value: "tt0000001" },
   ]);
+});
+
+test("typed external ids with a kind parse as source:kind:value", () => {
+  assert.deepEqual(parseExternalIdList("TMDB:TV:202, tmdb:movie:303 tvdb::404 a:b:c:d"), [
+    { source: "tmdb", kind: "tv", value: "202" },
+    { source: "tmdb", kind: "movie", value: "303" },
+  ]);
+  assert.equal(
+    formatExternalIdList([
+      { source: "tmdb", kind: "series", value: "505" },
+      { source: "tvdb", kind: null, value: "606" },
+    ]),
+    "tmdb:series:505, tvdb:606",
+  );
 });
 
 test("filters are replaced by kind and removed with null", () => {

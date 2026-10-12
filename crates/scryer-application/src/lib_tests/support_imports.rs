@@ -1584,6 +1584,21 @@ impl ImportRepository for TrackingImportRepo {
         Ok(self.canonical_ids.lock().await.get(id).copied())
     }
 
+    async fn list_imports_for_canonical_download(
+        &self,
+        canonical_download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Vec<ImportRecord>> {
+        let canonical_ids = self.canonical_ids.lock().await;
+        Ok(self
+            .records
+            .lock()
+            .await
+            .iter()
+            .filter(|record| canonical_ids.get(&record.id) == Some(canonical_download_id))
+            .cloned()
+            .collect())
+    }
+
     async fn get_manual_import_selection(
         &self,
         selection_id: &str,

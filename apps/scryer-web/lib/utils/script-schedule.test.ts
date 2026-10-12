@@ -26,6 +26,12 @@ test("a stored interval reads back in the largest whole unit", () => {
   assert.deepEqual(splitIntervalSeconds(7_200), { amount: 2, unit: "hours" });
 });
 
+test("a stored interval that is not whole minutes reads back in seconds", () => {
+  assert.deepEqual(splitIntervalSeconds(90), { amount: 90, unit: "seconds" });
+  assert.equal(intervalToSeconds(90, "seconds"), 90);
+  assert.equal(intervalToSeconds(30, "seconds"), 60);
+});
+
 test("weekly days toggle on and off and stay in week order", () => {
   let days = toggleWeekday([], "FRIDAY");
   days = toggleWeekday(days, "MONDAY");

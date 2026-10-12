@@ -103,6 +103,20 @@ impl ListMutations {
             account: poll.account.map(ListAccountPayload::from_view),
         })
     }
+    /// Abandon an account authorization session owned by the current member.
+    /// Answers true whether or not the session still existed.
+    async fn cancel_list_account_link(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Opaque session returned when linking started.")] session_id: ID,
+    ) -> GqlResult<bool> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        app.cancel_list_account_link(&actor, session_id.as_str())
+            .await
+            .map_err(to_gql_error)?;
+        Ok(true)
+    }
     /// Consume an owned authorization session and link the verified provider identity.
     async fn complete_list_account_link(
         &self,

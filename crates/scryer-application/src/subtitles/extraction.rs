@@ -101,6 +101,9 @@ fn redact_subtitle_archive_error(error: AppError) -> AppError {
     match error {
         AppError::Repository(message) => AppError::Repository(redact_archive_diagnostic(&message)),
         AppError::Validation(message) => AppError::Validation(redact_archive_diagnostic(&message)),
+        AppError::ArchiveExtractionFailed { message } => AppError::ArchiveExtractionFailed {
+            message: redact_archive_diagnostic(&message),
+        },
         other => other,
     }
 }
@@ -347,7 +350,11 @@ fn handle_subtitle_archive_plugin_response(
                 .message
                 .or(response.error_code)
                 .unwrap_or_else(|| "archive plugin subtitle extraction failed".to_string());
-            Err(redact_subtitle_archive_error(AppError::Repository(message)))
+            // The plugin read the archive and rejected it: a malformed
+            // archive, not a host I/O failure.
+            Err(redact_subtitle_archive_error(
+                AppError::ArchiveExtractionFailed { message },
+            ))
         }
     }
 }
@@ -436,7 +443,10 @@ fn candidate_rank(
     (episode_score, language_score, format_score, size_score)
 }
 
+/// The tar is read from memory, so every read failure means a malformed
+/// archive rather than a host I/O failure.
 fn extract_tar_candidates(content: Vec<u8>) -> AppResult<Vec<ArchiveCandidate>> {
+    let malformed = |message: String| AppError::ArchiveExtractionFailed { message };
     let mut archive = tar::Archive::new(Cursor::new(content));
     let mut candidates = Vec::new();
     let mut expanded_bytes = 0usize;
@@ -444,7 +454,7 @@ fn extract_tar_candidates(content: Vec<u8>) -> AppResult<Vec<ArchiveCandidate>> 
 
     for entry in archive
         .entries()
-        .map_err(|error| AppError::Repository(format!("invalid tar subtitle archive: {error}")))?
+        .map_err(|error| malformed(format!("invalid tar subtitle archive: {error}")))?
     {
         entry_count += 1;
         if entry_count > MAX_ARCHIVE_FILES {
@@ -452,17 +462,16 @@ fn extract_tar_candidates(content: Vec<u8>) -> AppResult<Vec<ArchiveCandidate>> 
                 "subtitle archive contains too many files".to_string(),
             ));
         }
-        let mut entry = entry.map_err(|error| {
-            AppError::Repository(format!("failed to read tar subtitle entry: {error}"))
-        })?;
+        let mut entry = entry
+            .map_err(|error| malformed(format!("failed to read tar subtitle entry: {error}")))?;
         let path = entry.path().map_err(|error| {
-            AppError::Repository(format!("failed to read tar subtitle entry path: {error}"))
+            malformed(format!("failed to read tar subtitle entry path: {error}"))
         })?;
         let name = path.to_string_lossy().to_string();
         if !is_safe_relative_path(&name) || !is_extractable_subtitle_artifact(&name) {
             continue;
         }
-        let content = read_limited(&mut entry)?;
+        let content = read_limited_memory(&mut entry)?;
         expanded_bytes = checked_expanded_size(expanded_bytes, content.len())?;
         candidates.push(candidate(name, content));
     }
@@ -871,6 +880,21 @@ mod tests {
             .to_string();
         assert!(!error.contains("synthetic-secret"));
         assert!(error.contains("member[redacted].srt"));
+        let failed = handle_subtitle_archive_plugin_response(ArchivePluginProcessResponse {
+            status: ArchivePluginStatus::Failed,
+            files: vec![],
+            replaced_source_paths: vec![],
+            processed_recovery_paths: vec![],
+            expanded_bytes: None,
+            copied_bytes: None,
+            staged_bytes: None,
+            error_code: Some("corrupt_archive".into()),
+            message: None,
+        });
+        assert!(
+            matches!(failed, Err(AppError::ArchiveExtractionFailed { .. })),
+            "a plugin that rejects an archive reports a malformed archive"
+        );
         let error = redact_subtitle_archive_error(AppError::Validation(
             "unsupported release password=synthetic-secret".into(),
         ))
@@ -1390,6 +1414,38 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(normalized.content, SRT_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn malformed_nested_tar_does_not_hide_supported_sibling() {
+        let broken = vec![0xFF_u8; 1024];
+        let mut outer = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut outer);
+            for (name, content) in [
+                ("broken.tar", broken.as_slice()),
+                ("Show.S01E17.eng.srt", SRT_CONTENT),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, name, content).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let normalized =
+            normalize_downloaded_subtitle(subtitle_file("release.tar", outer), context())
+                .await
+                .unwrap();
+        assert_eq!(normalized.content, SRT_CONTENT);
+
+        let alone = normalize_downloaded_subtitle(subtitle_file("broken.tar", broken), context())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(alone, AppError::ArchiveExtractionFailed { .. }),
+            "a malformed archive with nothing usable is still an error: {alone}"
+        );
     }
 
     #[tokio::test]

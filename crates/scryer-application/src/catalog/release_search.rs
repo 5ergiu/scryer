@@ -2112,12 +2112,12 @@ impl AppUseCase {
                     listing_keys
                         .insert((candidate.indexer_id.clone(), release_search_key(candidate)))
                 }));
-            outcome
-                .complete_indexer_ids
-                .retain(|id| next.complete_indexer_ids.contains(id));
-            outcome
-                .unsupported_indexer_ids
-                .retain(|id| next.unsupported_indexer_ids.contains(id));
+            merge_localized_round_coverage(
+                &mut outcome.complete_indexer_ids,
+                &mut outcome.unsupported_indexer_ids,
+                &next.complete_indexer_ids,
+                &next.unsupported_indexer_ids,
+            );
             outcome
                 .incomplete_indexer_reasons
                 .extend(next.incomplete_indexer_reasons);
@@ -3362,9 +3362,47 @@ mod season_multi_episode_filter_tests {
     }
 }
 
+/// Narrows coverage after a localized alias round. An indexer stays
+/// complete when the round covered it too, or when the round could not
+/// apply to it at all: the alias query carries no external ids, so an
+/// id-only indexer that covered the primary round is unsupported there,
+/// which says nothing against the primary coverage. An indexer stays
+/// unsupported only when every round left it unsupported.
+fn merge_localized_round_coverage(
+    complete: &mut Vec<String>,
+    unsupported: &mut Vec<String>,
+    round_complete: &[String],
+    round_unsupported: &[String],
+) {
+    complete.retain(|id| round_complete.contains(id) || round_unsupported.contains(id));
+    unsupported.retain(|id| round_unsupported.contains(id));
+}
+
 #[cfg(test)]
 mod localized_query_tests {
     use super::*;
+
+    #[test]
+    fn an_id_only_indexer_keeps_its_primary_coverage_through_an_alias_round() {
+        let ids = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut complete = ids(&["id-only", "text", "dropped"]);
+        let mut unsupported = ids(&["never"]);
+
+        merge_localized_round_coverage(
+            &mut complete,
+            &mut unsupported,
+            &ids(&["text"]),
+            &ids(&["id-only", "never"]),
+        );
+
+        assert_eq!(complete, ids(&["id-only", "text"]));
+        assert_eq!(unsupported, ids(&["never"]));
+    }
 
     #[test]
     fn localized_queries_preserve_episode_and_year_boundaries() {

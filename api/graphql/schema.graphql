@@ -10751,6 +10751,10 @@ One title on a followed list.
 """
 type ListMembershipPayload {
 	"""
+	Movie entry within the parent library title, when hydrated.
+	"""
+	seriesMovieLinkId: ID
+	"""
 	The provider's own key for the title.
 	"""
 	itemKey: String!
@@ -10979,6 +10983,14 @@ enum ListPolicy {
 One title the next sync would act on.
 """
 type ListPreviewItemPayload {
+	"""
+	Canonical identity of the listed title, independent of its destination.
+	"""
+	canonicalSmgId: Int
+	"""
+	Parent series for an associated movie, or null for a standalone title.
+	"""
+	seriesMovieParentSmgId: Int
 	"""
 	Provider-attributed ratings for the preview flyout.
 	"""
@@ -20631,6 +20643,16 @@ type MutationRoot {
 		"""
 		sessionId: ID!
 	): ListAccountPollPayload!
+	"""
+	Abandon an account authorization session owned by the current member.
+	Answers true whether or not the session still existed.
+	"""
+	cancelListAccountLink(
+		"""
+		Opaque session returned when linking started.
+		"""
+		sessionId: ID!
+	): Boolean!
 	"""
 	Consume an owned authorization session and link the verified provider identity.
 	"""

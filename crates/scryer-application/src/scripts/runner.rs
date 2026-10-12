@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 /// How much of each captured stream a run keeps. The store compresses the
 /// tails (zstd) so a larger window costs little at rest.
@@ -79,6 +80,9 @@ pub enum ScriptOutcome {
     Exited { code: Option<i32>, success: bool },
     /// The process outlived its timeout and its process group was killed.
     TimedOut,
+    /// The run was cancelled, for example at shutdown, and its process group
+    /// was killed.
+    Cancelled,
     /// The process could not be started.
     SpawnFailed { reason: String },
     /// Waiting for the process failed.
@@ -109,6 +113,15 @@ struct LaunchPlan {
 /// Run a script to completion, timeout, or launch failure. Never panics on a
 /// failed launch; every failure is reported through [`ScriptOutcome`].
 pub async fn run_script(invocation: ScriptInvocation) -> ScriptExecution {
+    run_script_cancellable(invocation, &CancellationToken::new()).await
+}
+
+/// [`run_script`], but cancelling `cancel` kills the script's process group
+/// and ends the run with [`ScriptOutcome::Cancelled`].
+pub async fn run_script_cancellable(
+    invocation: ScriptInvocation,
+    cancel: &CancellationToken,
+) -> ScriptExecution {
     let started_at = Utc::now();
     let start_instant = Instant::now();
 
@@ -161,17 +174,21 @@ pub async fn run_script(invocation: ScriptInvocation) -> ScriptExecution {
     };
 
     if !invocation.capture_output {
-        let outcome = match tokio::time::timeout(invocation.timeout, child.wait()).await {
-            Ok(Ok(status)) => ScriptOutcome::Exited {
+        let outcome = match wait_for_child(&mut child, invocation.timeout, cancel).await {
+            ChildEnd::Exited(Ok(status)) => ScriptOutcome::Exited {
                 code: status.code(),
                 success: status.success(),
             },
-            Ok(Err(err)) => ScriptOutcome::IoError {
+            ChildEnd::Exited(Err(err)) => ScriptOutcome::IoError {
                 reason: err.to_string(),
             },
-            Err(_elapsed) => {
+            ChildEnd::TimedOut => {
                 kill_process_group(&mut child).await;
                 ScriptOutcome::TimedOut
+            }
+            ChildEnd::Cancelled => {
+                kill_process_group(&mut child).await;
+                ScriptOutcome::Cancelled
             }
         };
         return finished(outcome, started_at, start_instant);
@@ -181,12 +198,12 @@ pub async fn run_script(invocation: ScriptInvocation) -> ScriptExecution {
     let stdout_drain = OutputDrain::spawn(child.stdout.take());
     let stderr_drain = OutputDrain::spawn(child.stderr.take());
 
-    let outcome = match tokio::time::timeout(invocation.timeout, child.wait()).await {
-        Ok(Ok(status)) => ScriptOutcome::Exited {
+    let outcome = match wait_for_child(&mut child, invocation.timeout, cancel).await {
+        ChildEnd::Exited(Ok(status)) => ScriptOutcome::Exited {
             code: status.code(),
             success: status.success(),
         },
-        Ok(Err(err)) => {
+        ChildEnd::Exited(Err(err)) => {
             stdout_drain.abort();
             stderr_drain.abort();
             return finished(
@@ -197,9 +214,13 @@ pub async fn run_script(invocation: ScriptInvocation) -> ScriptExecution {
                 start_instant,
             );
         }
-        Err(_elapsed) => {
+        ChildEnd::TimedOut => {
             kill_process_group(&mut child).await;
             ScriptOutcome::TimedOut
+        }
+        ChildEnd::Cancelled => {
+            kill_process_group(&mut child).await;
+            ScriptOutcome::Cancelled
         }
     };
     let duration_ms = start_instant.elapsed().as_millis() as i64;
@@ -213,6 +234,30 @@ pub async fn run_script(invocation: ScriptInvocation) -> ScriptExecution {
         duration_ms,
         started_at,
         completed_at,
+    }
+}
+
+/// How waiting on a running script ended.
+enum ChildEnd {
+    Exited(io::Result<std::process::ExitStatus>),
+    TimedOut,
+    Cancelled,
+}
+
+/// Wait for `child` to exit, its timeout to pass, or `cancel` to fire,
+/// whichever comes first. Cancellation wins a tie.
+async fn wait_for_child(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> ChildEnd {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => ChildEnd::Cancelled,
+        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
+            Ok(status) => ChildEnd::Exited(status),
+            Err(_elapsed) => ChildEnd::TimedOut,
+        },
     }
 }
 
@@ -718,6 +763,21 @@ mod tests {
         tokio::time::timeout(RUN_BOUND, run_script(invocation))
             .await
             .expect("script run finished within its bound")
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_kills_the_script_and_reports_cancelled() {
+        let fixture = Fixture::new();
+        let mut invocation = fixture.invocation(inline("sleep 300", ScriptLanguage::Shell));
+        invocation.timeout = Duration::from_secs(600);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let execution =
+            tokio::time::timeout(RUN_BOUND, run_script_cancellable(invocation, &cancel))
+                .await
+                .expect("a cancelled run ends without waiting for the script");
+        assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
     }
 
     fn stdout_lines(execution: &ScriptExecution) -> Vec<String> {

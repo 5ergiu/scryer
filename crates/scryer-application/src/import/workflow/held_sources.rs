@@ -647,9 +647,27 @@ pub async fn release_held_import_sources(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("import {import_id}")))?;
     let source = held_import_source(&record);
-    let source_imports = imports
+    // The cleanup claim and the release serialize on the canonical download.
+    // Without one there is nothing to serialize on, so the sources stay held.
+    let Some(canonical_download_id) = imports.canonical_download_id_for_import(&record.id).await?
+    else {
+        return Err(AppError::Validation(
+            "this download has no stable identity yet; its sources stay held".into(),
+        ));
+    };
+    // The release covers every import of the download, including those a
+    // different client locator recorded, as the store's release does.
+    let mut source_imports = imports
         .list_imports_for_identities(std::slice::from_ref(&source))
         .await?;
+    for other in imports
+        .list_imports_for_canonical_download(&canonical_download_id)
+        .await?
+    {
+        if !source_imports.iter().any(|known| known.id == other.id) {
+            source_imports.push(other);
+        }
+    }
     if source_imports.iter().any(|other| other.status.is_active()) {
         return Err(AppError::Validation(
             "this download is still being imported; release its sources once that finishes".into(),
@@ -665,14 +683,6 @@ pub async fn release_held_import_sources(
         )));
     }
     let titles = authorized_release_titles(app, actor, &pending).await?;
-    // The cleanup claim and the release serialize on the canonical download.
-    // Without one there is nothing to serialize on, so the sources stay held.
-    let Some(canonical_download_id) = imports.canonical_download_id_for_import(&record.id).await?
-    else {
-        return Err(AppError::Validation(
-            "this download has no stable identity yet; its sources stay held".into(),
-        ));
-    };
     let canonical_download_id = Some(canonical_download_id);
     let client_policy =
         held_download_client_policy(app, &source, canonical_download_id.as_ref()).await?;

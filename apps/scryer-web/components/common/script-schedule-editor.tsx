@@ -210,6 +210,15 @@ function IntervalFields({
   const t = useTranslate();
   const [initial] = useState(() => splitIntervalSeconds(everySeconds));
   const [unit, setUnit] = useState<IntervalUnit>(initial.unit);
+  // Seconds are offered only to keep a stored interval that is not a whole
+  // number of minutes.
+  const units: readonly IntervalUnit[] =
+    initial.unit === "seconds" ? ["seconds", ...INTERVAL_UNITS] : INTERVAL_UNITS;
+  const unitLabel = (candidate: IntervalUnit) => {
+    if (candidate !== "seconds") return t(`script.schedule.unit.${candidate}`);
+    const label = t("unit.seconds");
+    return label.charAt(0).toLocaleUpperCase() + label.slice(1);
+  };
   const [amountText, setAmountText] = useState(String(initial.amount));
 
   const commit = (text: string, nextUnit: IntervalUnit) => {
@@ -256,10 +265,10 @@ function IntervalFields({
             setUnit(nextUnit);
             commit(amountText || "1", nextUnit);
           }}
-          options={INTERVAL_UNITS.map((candidate) => ({
+          options={units.map((candidate) => ({
             value: candidate,
             dataValue: candidate.toUpperCase(),
-            label: t(`script.schedule.unit.${candidate}`),
+            label: unitLabel(candidate),
           }))}
         />
       </div>

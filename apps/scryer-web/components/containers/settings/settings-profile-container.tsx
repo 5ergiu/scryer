@@ -23,7 +23,6 @@ import {
   linkPlexAccountMutation,
   mfaVerifyStepUpMutation,
   revokeMyOauthAppMutation,
-  setMyUiSettingsMutation,
   setUserPasswordMutation,
   totpDisableMutation,
   totpEnrollmentCompleteMutation,
@@ -62,7 +61,6 @@ import type {
   TotpEnrollmentComplete,
   TotpEnrollmentStart,
   TotpStatus,
-  SetMyUiSettingsInput,
   UiSettings,
 } from "@/lib/types/settings";
 import type { UserAccountKind } from "@/lib/types/users";
@@ -166,7 +164,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     effectiveFormLoginEnabled,
     passkeyEnabled,
   } = useAuth();
-  const { uiSettings, setUiSettings, uiSettingsLoaded, uiSettingsLoading } =
+  const { uiSettings, setUiSettings, saveUiSettings, uiSettingsLoaded, uiSettingsLoading } =
     useUiSettings();
   const [savingHighlightColor, setSavingHighlightColor] = useState<string | null>(
     null,
@@ -421,12 +419,9 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       // Apply the accent live while the mutation persists through the interface.
       setUiSettings(next);
       try {
-        const result = await client
-          .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
-            setMyUiSettingsMutation,
-            { input: uiSettingsInputFromSettings(next) },
-          )
-          .toPromise();
+        const result = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, highlightColor }),
+        );
         if (result.error || !result.data?.setMyUiSettings) {
           setUiSettings(previous);
           setGlobalStatus(
@@ -450,7 +445,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       }
     },
     [
-      client,
+      saveUiSettings,
       savingHighlightColor,
       setGlobalStatus,
       setUiSettings,
@@ -477,12 +472,9 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setSavingSponsorPreference(true);
       setUiSettings(next);
       try {
-        const result = await client
-          .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
-            setMyUiSettingsMutation,
-            { input: uiSettingsInputFromSettings(next) },
-          )
-          .toPromise();
+        const result = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, hideSponsorButton }),
+        );
         if (result.error || !result.data?.setMyUiSettings) {
           setUiSettings(previous);
           setGlobalStatus(result.error?.message ?? "Failed to update Sponsor preference.", { level: "ERROR" });
@@ -503,7 +495,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       }
     },
     [
-      client,
+      saveUiSettings,
       savingSponsorPreference,
       setGlobalStatus,
       setUiSettings,

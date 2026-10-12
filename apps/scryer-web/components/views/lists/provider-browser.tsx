@@ -133,6 +133,9 @@ export function ProviderBrowser({
                 </Badge>
               ) : null}
               <CatalogListTable
+                // Previews are kept per row key; a new provider or group starts
+                // with none, even when its row keys repeat.
+                key={`lists-catalog-${shown.providerType}-${group.items[0]?.id ?? "group"}`}
                 id={`lists-catalog-${shown.providerType}-${group.items[0]?.id ?? "group"}`}
                 rows={group.items.map((item) => ({
                   key: item.id,

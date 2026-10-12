@@ -18504,6 +18504,36 @@ mod held_sources {
     }
 
     #[tokio::test]
+    async fn release_covers_holds_recorded_under_another_locator_of_the_same_download() {
+        let held = held_import().await;
+        held.push_co_held_import(
+            "held-import-relocated",
+            &held.fixture.title.id,
+            Some("subtitles_pending"),
+        )
+        .await;
+        {
+            let mut records = held.fixture.import_repo.records.lock().await;
+            let relocated = records
+                .iter_mut()
+                .find(|record| record.id == "held-import-relocated")
+                .unwrap();
+            relocated.source_ref = "synthetic-relocated-item".to_string();
+        }
+
+        let released = release(&held, &held.fixture.user).await.unwrap();
+
+        let mut ids = released.released_import_ids.clone();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![held.import_id.clone(), "held-import-relocated".to_string()]
+        );
+        assert!(!held.import_holds(&held.import_id).await);
+        assert!(!held.import_holds("held-import-relocated").await);
+    }
+
+    #[tokio::test]
     async fn release_that_fails_before_changing_anything_keeps_every_hold_and_can_be_retried() {
         let held = held_import().await;
         held.push_co_held_import(

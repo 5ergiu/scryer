@@ -478,7 +478,7 @@ impl TitleMutations {
         } = input;
         let title_id = title_id.to_string();
         let facet = facet.map(MediaFacetValue::into_domain);
-        let mut tags = tags.map(normalize_title_tags);
+        let mut tags = tags.map(normalize_title_tags).transpose()?;
         let mut root_folder_id = None;
         let mut metadata_language_override = None;
         let mut monitor_selection_update = None;

@@ -36,6 +36,10 @@ export const pollListAccountLinkMutation = `mutation PollListAccountLink($sessio
   }
 }`;
 
+export const cancelListAccountLinkMutation = `mutation CancelListAccountLink($sessionId: ID!) {
+  cancelListAccountLink(sessionId: $sessionId)
+}`;
+
 export const completeListAccountLinkMutation = `mutation CompleteListAccountLink($sessionId: ID!, $state: String!, $provider: String!, $code: String!, $issuer: String) {
   completeListAccountLink(sessionId: $sessionId, state: $state, provider: $provider, code: $code, issuer: $issuer) {${ACCOUNT_FIELDS}}
 }`;

@@ -879,6 +879,9 @@ pub(crate) struct ScriptedLists {
     pub fetched: Mutex<Vec<ListPluginFetchRequest>>,
     /// The server-wide values each client was built with, in order.
     pub configs: Mutex<Vec<BTreeMap<String, String>>>,
+    /// Answer "unchanged" without repeating the fingerprint, as a provider
+    /// may.
+    pub unchanged_omits_fingerprint: std::sync::atomic::AtomicBool,
 }
 
 impl ScriptedLists {
@@ -895,6 +898,7 @@ impl ScriptedLists {
             pages: Mutex::new(HashMap::new()),
             fetched: Mutex::new(Vec::new()),
             configs: Mutex::new(Vec::new()),
+            unchanged_omits_fingerprint: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -958,9 +962,12 @@ impl ListProviderClient for ScriptedLists {
             && request.since_fingerprint.is_some()
             && request.since_fingerprint == response.fingerprint
         {
+            let omit = self
+                .unchanged_omits_fingerprint
+                .load(std::sync::atomic::Ordering::SeqCst);
             return Ok(PluginResult::Ok(ListPluginFetchResponse {
                 unchanged: true,
-                fingerprint: response.fingerprint.clone(),
+                fingerprint: response.fingerprint.clone().filter(|_| !omit),
                 ..ListPluginFetchResponse::default()
             }));
         }

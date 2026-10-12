@@ -350,6 +350,19 @@ impl ImportRepository for ImportStore {
             .and_then(scryer_domain::download_identity::DownloadId::parse))
     }
 
+    async fn list_imports_for_canonical_download(
+        &self,
+        canonical_download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<Vec<ImportRecord>> {
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!("SELECT {IMPORT_COLUMNS} FROM imports WHERE canonical_download_id = {{}}"),
+            &[SqlArg::Text(canonical_download_id.to_string())],
+        )
+        .await?;
+        rows.iter().map(import_record_from_row).collect()
+    }
+
     async fn claim_import_retry(
         &self,
         claim: &scryer_application::ImportRetryClaim,

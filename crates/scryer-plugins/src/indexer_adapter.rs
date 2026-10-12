@@ -1639,12 +1639,19 @@ async fn forward_component_strategy_event(
 /// provider position; anything longer is treated as malformed.
 const MAX_PAGE_CURSOR_BYTES: usize = 4096;
 
+/// Pages one read follows when the caller set no page budget. A provider
+/// whose cursors never run out cannot hold a search open past it.
+const MAX_UNBUDGETED_PAGES: u32 = 100;
+
 /// One paged search in progress: the pages read so far and where the next
 /// one starts.
 struct PagedRead {
     limit: usize,
     page_budget: Option<u32>,
     cursor: Option<String>,
+    /// Every cursor this read started a page from; bounded by the page
+    /// budget or [`MAX_UNBUDGETED_PAGES`].
+    visited: std::collections::HashSet<String>,
     pages: u32,
     unattested: bool,
     merged: Option<PluginSearchResponse>,
@@ -1664,6 +1671,7 @@ impl PagedRead {
             limit: request.limit,
             page_budget,
             cursor: request.page_cursor.clone(),
+            visited: request.page_cursor.iter().cloned().collect(),
             pages: 0,
             unattested: false,
             merged: None,
@@ -1676,10 +1684,12 @@ impl PagedRead {
         next_cursor: Option<String>,
     ) -> PluginSearchCallResponse {
         let mut response = self.merged.take().unwrap_or_default();
-        response.next_cursor = next_cursor;
-        if self.limit > 0 {
+        // A resume cursor points past every page read, so cutting results
+        // back to the limit would lose the ones it skips over.
+        if self.limit > 0 && next_cursor.is_none() {
             response.results.truncate(self.limit);
         }
+        response.next_cursor = next_cursor;
         PluginSearchCallResponse {
             response,
             completion,
@@ -1742,10 +1752,7 @@ impl PagedRead {
             };
             return PagedStep::Done(self.finish(completion, None));
         };
-        if next.is_empty()
-            || next.len() > MAX_PAGE_CURSOR_BYTES
-            || self.cursor.as_deref() == Some(next.as_str())
-        {
+        if next.is_empty() || next.len() > MAX_PAGE_CURSOR_BYTES || self.visited.contains(&next) {
             // A cursor that does not move the read forward cannot be
             // followed: the search is as complete as the provider lets it be.
             let completion = self.stopped(Some(HostIncompleteReason::PageCeilingReached));
@@ -1763,6 +1770,11 @@ impl PagedRead {
             let completion = self.stopped(None);
             return PagedStep::Done(self.finish(completion, Some(next)));
         }
+        if self.page_budget.is_none() && self.pages >= MAX_UNBUDGETED_PAGES {
+            let completion = self.stopped(Some(HostIncompleteReason::PageCeilingReached));
+            return PagedStep::Done(self.finish(completion, Some(next)));
+        }
+        self.visited.insert(next.clone());
         self.cursor = Some(next.clone());
         PagedStep::Next(next)
     }
@@ -2250,8 +2262,10 @@ mod tests {
     fn a_paged_read_stops_at_the_limit_and_keeps_the_cursor() {
         let mut read = paged_read(3, None, None);
         assert_eq!(next(read.absorb(page(&["A", "B"], Some("p2")))), "p2");
+        // The limit is crossed mid-page; the cursor resumes after the whole
+        // page, so the page is kept whole rather than losing "D".
         let response = done(read.absorb(page(&["C", "D"], Some("p3"))));
-        assert_eq!(titles(&response), vec!["A", "B", "C"]);
+        assert_eq!(titles(&response), vec!["A", "B", "C", "D"]);
         assert_eq!(response.response.next_cursor.as_deref(), Some("p3"));
         assert_eq!(
             response.completion,
@@ -2295,6 +2309,45 @@ mod tests {
             assert_eq!(response.completion, ceiling);
             assert_eq!(response.response.next_cursor, None);
         }
+    }
+
+    #[test]
+    fn a_cursor_that_returns_to_an_earlier_page_ends_the_read_at_the_ceiling() {
+        let mut read = paged_read(1000, Some("p1"), None);
+        assert_eq!(next(read.absorb(page(&["A"], Some("p2")))), "p2");
+        assert_eq!(next(read.absorb(page(&["B"], Some("p3")))), "p3");
+        let response = done(read.absorb(page(&["C"], Some("p1"))));
+        assert_eq!(titles(&response), vec!["A", "B", "C"]);
+        assert_eq!(response.response.next_cursor, None);
+        assert_eq!(
+            response.completion,
+            IndexerSearchCompletion::Partial {
+                reason: Some(HostIncompleteReason::PageCeilingReached),
+                retry_after: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unbudgeted_read_stops_at_the_page_ceiling_with_the_resume_cursor() {
+        let mut read = paged_read(0, None, None);
+        for page_number in 1..MAX_UNBUDGETED_PAGES {
+            let cursor = format!("p{}", page_number + 1);
+            assert_eq!(next(read.absorb(page(&["A"], Some(&cursor)))), cursor);
+        }
+        let response = done(read.absorb(page(&["A"], Some("beyond"))));
+        assert_eq!(
+            response.response.results.len(),
+            MAX_UNBUDGETED_PAGES as usize
+        );
+        assert_eq!(response.response.next_cursor.as_deref(), Some("beyond"));
+        assert_eq!(
+            response.completion,
+            IndexerSearchCompletion::Partial {
+                reason: Some(HostIncompleteReason::PageCeilingReached),
+                retry_after: None,
+            }
+        );
     }
 
     #[test]
