@@ -761,6 +761,7 @@ enum RenameFault {
     /// The rename happens, then the renamed file is moved aside and the
     /// destination path comes to name an unrelated file before it is checked.
     DestinationReplacedAfterRename,
+    DestinationReplacedWithSameSizeAfterRename,
 }
 
 #[cfg(test)]
@@ -819,6 +820,12 @@ fn rename_archive_output(
             std::fs::rename(source, dest)?;
             std::fs::rename(dest, dest.with_extension("moved-aside"))?;
             std::fs::write(dest, b"unrelated file")
+        }
+        RenameFault::DestinationReplacedWithSameSizeAfterRename => {
+            let size = std::fs::metadata(source)?.len() as usize;
+            std::fs::rename(source, dest)?;
+            std::fs::rename(dest, dest.with_extension("moved-aside"))?;
+            std::fs::write(dest, vec![b'x'; size])
         }
         RenameFault::None => std::fs::rename(source, dest),
     }
@@ -2082,7 +2089,10 @@ fn try_fast_import_placement_blocking(
 /// Once the rename has happened the destination holds the only copy of the
 /// output, so nothing here removes or moves it again.
 fn rename_archive_workspace_output(prepared: &PreparedImportPlacement) -> AppResult<bool> {
-    ensure_same_source(&prepared.source, &prepared.source_fingerprint)?;
+    // Capture the same content proof used by the copy/cleanup lanes before
+    // rename removes the source path. Inodes may change on path-hashed mounts.
+    let source =
+        stable_import_source_snapshot(&prepared.source, Some(&prepared.source_fingerprint))?;
     // Reserve the name so a file that appeared since the destination was
     // checked is never replaced by the rename.
     let reservation = match std::fs::OpenOptions::new()
@@ -2108,18 +2118,18 @@ fn rename_archive_workspace_output(prepared: &PreparedImportPlacement) -> AppRes
 
     let placed = validate_import_destination_parent(&prepared.destination_guard, &prepared.dest)
         .and_then(|()| {
-            let metadata = std::fs::metadata(&prepared.dest).map_err(|error| {
-                AppError::Repository(format!(
-                    "failed to inspect renamed import destination {}: {error}",
-                    prepared.dest.display()
-                ))
-            })?;
-            if !metadata.is_file() || metadata.len() != prepared.size {
+            let fingerprint = fingerprint_import_source(&prepared.dest)?;
+            if !matches!(fingerprint.kind, ImportSourceKind::Regular) {
                 return Err(AppError::Repository(format!(
-                    "renamed import destination {} is {} bytes, expected {}",
-                    prepared.dest.display(),
-                    metadata.len(),
-                    prepared.size
+                    "renamed import destination is not a regular file: {}",
+                    prepared.dest.display()
+                )));
+            }
+            let destination = stable_import_source_snapshot(&prepared.dest, Some(&fingerprint))?;
+            if destination.proof != source.proof {
+                return Err(AppError::Repository(format!(
+                    "renamed import destination content does not match the source: {}",
+                    prepared.dest.display()
                 )));
             }
             Ok(())
@@ -4426,6 +4436,37 @@ mod tests {
             std::fs::read(dest.with_extension("moved-aside")).expect("read renamed output"),
             SYNTHETIC_PAYLOAD
         );
+    }
+
+    #[test]
+    fn renamed_archive_output_replaced_with_same_size_requires_reconciliation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source, dest) = archive_workspace_fixture(temp.path());
+        let attempts_before = hard_link_attempts();
+        let error = rename_lane_error(
+            &source,
+            &dest,
+            RenameFault::DestinationReplacedWithSameSizeAfterRename,
+        );
+
+        assert!(
+            matches!(error, AppError::ManualReconciliationRequired(_)),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("content does not match"),
+            "{error}"
+        );
+        assert_eq!(hard_link_attempts(), attempts_before);
+        assert_eq!(
+            std::fs::read(&dest).expect("replacement preserved"),
+            vec![b'x'; SYNTHETIC_PAYLOAD.len()]
+        );
+        assert_eq!(
+            std::fs::read(dest.with_extension("moved-aside")).expect("output preserved"),
+            SYNTHETIC_PAYLOAD
+        );
+        assert!(!source.exists(), "no file is moved back into the workspace");
     }
 
     #[test]

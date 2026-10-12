@@ -398,8 +398,11 @@ async fn terminate_process_group(child: &mut tokio::process::Child, grace: Durat
         unsafe {
             libc::kill(-(pid as i32), libc::SIGTERM);
         }
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-            return;
+        let _ = tokio::time::timeout(grace, child.wait()).await;
+        // Reaping the leader clears child.id(), but descendants may still
+        // hold this process group alive after ignoring SIGTERM.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
@@ -912,6 +915,51 @@ mod tests {
             .expect("a script ignoring SIGTERM is killed after the grace")
             .expect("run task joins");
         assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_descendants_after_the_leader_exits() {
+        use tokio::io::AsyncReadExt;
+
+        let fixture = Fixture::new();
+        let armed = fixture.work.join("armed.fifo");
+        let ready = readiness_pipe(&armed);
+        let gate = fixture.work.join("gate.fifo");
+        let _gate = readiness_pipe(&gate);
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap 'exit 0' TERM; sh -c 'trap \"\" TERM; printf r > \"$1\"; read ignored < \"$2\"' sh \"$1\" \"$2\" & wait")
+            .arg("sh")
+            .arg(&armed)
+            .arg(&gate)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn process group");
+        struct GroupGuard(u32);
+        impl Drop for GroupGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(-(self.0 as i32), libc::SIGKILL);
+                }
+            }
+        }
+        let _group = GroupGuard(child.id().expect("leader PID"));
+        let mut output = child.stdout.take().expect("group output pipe");
+        wait_until_armed(&ready).await;
+        tokio::time::timeout(
+            RUN_BOUND,
+            terminate_process_group(&mut child, Duration::from_secs(600)),
+        )
+        .await
+        .expect("leader exits through its TERM trap");
+        assert!(child.id().is_none(), "leader has been reaped");
+        let mut bytes = Vec::new();
+        tokio::time::timeout(RUN_BOUND, output.read_to_end(&mut bytes))
+            .await
+            .expect("the TERM-ignoring descendant releases its output pipe")
+            .expect("read group output");
     }
 
     fn readiness_pipe(path: &Path) -> tokio::io::unix::AsyncFd<std::fs::File> {

@@ -42,14 +42,18 @@ pub fn is_credential_parameter_name(name: &str) -> bool {
 fn query_param_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        // The whole parameter name is captured and checked against the list,
-        // so a name that only ends in a credential word is kept. An
-        // already-redacted value is matched first so redaction is idempotent
-        // instead of growing a stray `]` on each pass.
-        Regex::new(
-            r#"(?P<prefix>\b(?P<name>[A-Za-z0-9_-]+)=)(?P<value>\[redacted\]|[^&#;\s"'<>),\]}]+)"#,
-        )
-        .expect("query parameter regex should compile")
+        // Only consume the name so nested assignments can be scanned once,
+        // without recursively rescanning their entire remaining value.
+        Regex::new(r#"\b(?P<name>[A-Za-z0-9_-]+)="#).expect("query parameter regex should compile")
+    })
+}
+
+fn query_value_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        // Match an already-redacted value first to preserve idempotence.
+        Regex::new(r#"^(?:\[redacted\]|[^&#;\s"'<>),\]}]+)"#)
+            .expect("query value regex should compile")
     })
 }
 
@@ -100,21 +104,23 @@ pub fn redact_url_credentials(raw: &str) -> String {
 }
 
 fn redact_plain_query_params(raw: &str) -> String {
-    query_param_regex()
-        .replace_all(raw, |captures: &Captures<'_>| {
-            if is_credential_parameter_name(&captures["name"]) {
-                format!("{}{REDACTED_SECRET}", &captures["prefix"])
-            } else {
-                // A kept value can itself be a URL with credentials, such as
-                // a magnet's unencoded `tr=` announce URL.
-                format!(
-                    "{}{}",
-                    &captures["prefix"],
-                    redact_plain_query_params(&captures["value"])
-                )
-            }
-        })
-        .into_owned()
+    let mut output = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(captures) = query_param_regex().captures(rest) {
+        let prefix = captures.get(0).expect("matched parameter");
+        output.push_str(&rest[..prefix.end()]);
+        rest = &rest[prefix.end()..];
+        if is_credential_parameter_name(&captures["name"])
+            && let Some(value) = query_value_regex().find(rest)
+        {
+            output.push_str(REDACTED_SECRET);
+            rest = &rest[value.end()..];
+        }
+        // Kept values can contain nested URLs or assignments. Continue from
+        // their start using the same loop, with constant stack usage.
+    }
+    output.push_str(rest);
+    output
 }
 
 /// Remove credentials from a domain event before it is stored, so the event
@@ -391,6 +397,17 @@ mod tests {
                 Some("https://indexer.invalid/api?t=get&id=9&apikey=[redacted]")
             );
         }
+    }
+
+    #[test]
+    fn deeply_nested_assignments_redact_without_recursion() {
+        let prefix = "x=".repeat(100_000);
+        let raw = format!("{prefix}apikey=secret&token=other&id=42");
+        let expected = format!("{prefix}apikey=[redacted]&token=[redacted]&id=42");
+        assert_eq!(redact_url_credentials(&raw), expected);
+        assert_eq!(redact_url_credentials(&expected), expected);
+        let plain = format!("{prefix}value");
+        assert_eq!(redact_url_credentials(&plain), plain);
     }
 
     #[test]
