@@ -30,6 +30,8 @@ type Props = {
   /** The open provider's accounts as read from the provider, each carrying its lists. */
   managedAccounts: ListAccount[];
   accountLoading: boolean;
+  /** Why an account's lists could not be read just now, by account id. */
+  accountReadErrors: Readonly<Record<string, string>>;
   busyIds: ReadonlySet<string>;
   linkingProvider: string | null;
   /** The link in progress is a key being checked, with no provider window to finish in. */
@@ -348,6 +350,11 @@ export function PersonalAccounts(props: Props) {
                   </div>
                   {account.errorMessage ? (
                     <p className="text-sm text-[var(--scry-danger-text)]">{account.errorMessage}</p>
+                  ) : null}
+                  {props.accountReadErrors[account.id] ? (
+                    <p data-ui="list-account-read-error" className="text-[12.5px] text-[var(--scry-muted)]">
+                      {props.accountReadErrors[account.id]}
+                    </p>
                   ) : null}
                   {keyForm(account.id, true)}
                   {confirmingUnlink ? (

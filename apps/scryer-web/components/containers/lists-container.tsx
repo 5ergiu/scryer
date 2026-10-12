@@ -16,7 +16,8 @@ import { useSessionUser } from "@/lib/hooks/use-auth";
 import { useListAccountLink } from "@/lib/hooks/use-list-account-link";
 import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
 import { listAccountQuery, listTabCountsQuery, myListAccountsQuery, myListSubscriptionsQuery, personalListRouteOptionsQuery, unlinkListAccountMutation } from "@/lib/graphql/list-accounts";
-import { listErrorMessage } from "@/lib/utils/list-error-message";
+import { hasGraphQlErrorCode } from "@/lib/graphql/error-message";
+import { listErrorMessage, listRefusalKey } from "@/lib/utils/list-error-message";
 import {
   addListExclusionMutation,
   removeListExclusionMutation,
@@ -158,6 +159,7 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
   // The latest read of an open provider's accounts; an earlier one still in flight is dropped.
   const manageRun = React.useRef(0);
   const [accountLoading, setAccountLoading] = React.useState(false);
+  const [accountReadErrors, setAccountReadErrors] = React.useState<Readonly<Record<string, string>>>({});
   const [providerSettings, setProviderSettings] = React.useState<ListProviderSettings[] | null>(null);
   const [publicSubscriptions, setPublicSubscriptions] = React.useState<ListSubscription[]>([]);
   const [personalSubscriptions, setPersonalSubscriptions] = React.useState<ListSubscription[]>([]);
@@ -221,21 +223,31 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
   const manageAccounts = async (open: ListAccount[]) => {
     const run = ++manageRun.current;
     setManagedAccounts([]);
+    setAccountReadErrors({});
     setAccountLoading(open.length > 0);
     if (open.length === 0) return;
     // An account that cannot be read keeps its place without lists, and the others still load.
+    // Nobody asked for this read, so why it failed is said beside the account rather than announced.
+    const failed: Record<string, string> = {};
     const loaded = await Promise.all(open.map(async (account): Promise<ListAccount | null> => {
       try {
         const result = await client.query(listAccountQuery, { id: account.id }, { requestPolicy: "network-only" }).toPromise();
         if (result.error) throw result.error;
         return result.data?.listAccount ?? null;
       } catch (error) {
-        if (run === manageRun.current) setGlobalStatus(listErrorMessage(error, t, t("status.failedToLoad")), { level: "ERROR" });
+        const refusal = listRefusalKey(error);
+        failed[account.id] = t(
+          refusal ??
+            (hasGraphQlErrorCode(error, "TEMPORARY_UNAVAILABLE")
+              ? "lists.refusal.accountAuthProviderUnavailable"
+              : "status.failedToLoad"),
+        );
         return null;
       }
     }));
     if (run !== manageRun.current) return;
     setManagedAccounts(loaded.filter((account): account is ListAccount => account !== null));
+    setAccountReadErrors(failed);
     setAccountLoading(false);
   };
 
@@ -797,6 +809,7 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
       accounts={accounts}
       managedAccounts={managedAccounts}
       accountLoading={accountLoading}
+      accountReadErrors={accountReadErrors}
       linkingProvider={accountLink.provider}
       checkingAccountKey={accountLink.checkingKey}
       accountLinkError={accountLink.error}

@@ -65,6 +65,7 @@ type ListsViewProps = {
   accounts: ListAccount[];
   managedAccounts: ListAccount[];
   accountLoading: boolean;
+  accountReadErrors: Readonly<Record<string, string>>;
   linkingProvider: string | null;
   checkingAccountKey: boolean;
   accountLinkError: string | null;
@@ -320,7 +321,7 @@ export function ListsView(props: ListsViewProps) {
             </section>
 
             {section === "personal" ? (
-              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccounts={props.managedAccounts} accountLoading={props.accountLoading} busyIds={busyIds} linkingProvider={props.linkingProvider} checkingKey={props.checkingAccountKey} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccounts} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
+              <PersonalAccounts providers={providers} accounts={props.accounts} subscriptions={subscriptions} managedAccounts={props.managedAccounts} accountLoading={props.accountLoading} accountReadErrors={props.accountReadErrors} busyIds={busyIds} linkingProvider={props.linkingProvider} checkingKey={props.checkingAccountKey} linkError={props.accountLinkError} onLink={props.onLinkAccount} onCancelLink={props.onCancelLink} onManage={props.onManageAccounts} onUnlink={props.onUnlinkAccount} onPreviewSource={props.onPreviewSource} onFollow={(manifest, item, source, name) => setFollowTarget({ kind: "new", source, manifest, item, name, kinds: item.kinds, preview: null })} />
             ) : null}
 
             {canManageLists && section === "public" ? (
