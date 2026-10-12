@@ -1084,17 +1084,40 @@ impl AppUseCase {
                 poll_token: session.poll_token,
             })
             .await?;
-        if session.expires_at <= Utc::now() {
-            return Err(missing());
+        // The session is spent, so a grant that is not stored here can never
+        // be stored: hand it back to the provider rather than strand it.
+        let issued = credential.clone();
+        let app = session.app.clone();
+        let outcome = if session.expires_at <= Utc::now() {
+            Err(missing())
+        } else {
+            self.finish_list_account_link(
+                actor,
+                &session.provider,
+                credential,
+                session.app,
+                session.expires_at,
+            )
+            .await
+        };
+        if let Err(error) = &outcome {
+            let revoked = tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                self.services
+                    .lists
+                    .auth
+                    .revoke(&session.provider, &issued, app.as_ref()),
+            )
+            .await;
+            if !matches!(revoked, Ok(Ok(()))) {
+                tracing::warn!(
+                    provider = %session.provider,
+                    error = %error,
+                    "a list account grant that could not be linked was not revoked"
+                );
+            }
         }
-        self.finish_list_account_link(
-            actor,
-            &session.provider,
-            credential,
-            session.app,
-            session.expires_at,
-        )
-        .await
+        outcome
     }
     pub async fn poll_list_account_link(
         &self,
