@@ -1186,6 +1186,7 @@ async fn create_custom_job(
 }
 
 /// Waits for the job run `run_id` of `script_id` to reach a terminal state.
+#[cfg(unix)]
 async fn wait_for_custom_job_run(
     ctx: &TestContext,
     script_id: &str,
@@ -1216,10 +1217,12 @@ async fn wait_for_custom_job_run(
     found.lock().unwrap().take().expect("terminal run")
 }
 
+#[cfg(unix)]
 fn summary(run: &scryer_application::JobRun) -> serde_json::Value {
     serde_json::from_str(run.summary_json.as_deref().expect("summary json")).expect("summary")
 }
 
+#[cfg(unix)]
 async fn script_run(
     ctx: &TestContext,
     script_id: &str,

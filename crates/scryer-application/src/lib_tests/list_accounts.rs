@@ -667,20 +667,24 @@ async fn private_account_linked_replays_are_bounded_per_member_and_do_not_block_
 #[tokio::test]
 async fn private_account_poll_retries_a_failed_account_write_without_asking_the_provider_again() {
     let auth = Arc::new(Auth::default());
-    let harness = harness(auth.clone()).await;
+    let mut harness = harness(auth.clone()).await;
     let session = start_plex(&harness).await;
-    harness
-        .domain_events
-        .fail_append
-        .store(true, Ordering::SeqCst);
+    harness.app.services.lists.accounts = Arc::new(FailRotatedWrite {
+        store: harness.lists.clone(),
+        failing_active_writes: AtomicUsize::new(1),
+    });
     assert_eq!(
         poll_status(&harness, &session).await,
         ListAccountPollStatus::Unavailable
     );
-    harness
-        .domain_events
-        .fail_append
-        .store(false, Ordering::SeqCst);
+    assert!(
+        harness
+            .app
+            .my_list_accounts(&harness.user)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let view = harness
         .app
         .poll_list_account_link(&harness.user, &session)
@@ -977,12 +981,8 @@ struct FailRotatedWrite {
     /// Writes of an Active account that fail before writes succeed again.
     failing_active_writes: AtomicUsize,
 }
-#[async_trait]
-impl UserListAccountRepository for FailRotatedWrite {
-    async fn create(&self, account: UserListAccount) -> AppResult<UserListAccount> {
-        UserListAccountRepository::create(self.store.as_ref(), account).await
-    }
-    async fn update(&self, account: UserListAccount) -> AppResult<UserListAccount> {
+impl FailRotatedWrite {
+    fn check_write(&self, account: &UserListAccount) -> AppResult<()> {
         if account.status == UserListAccountStatus::Active
             && self
                 .failing_active_writes
@@ -995,8 +995,19 @@ impl UserListAccountRepository for FailRotatedWrite {
                 "injected rotated write failure".into(),
             ))
         } else {
-            UserListAccountRepository::update(self.store.as_ref(), account).await
+            Ok(())
         }
+    }
+}
+#[async_trait]
+impl UserListAccountRepository for FailRotatedWrite {
+    async fn create(&self, account: UserListAccount) -> AppResult<UserListAccount> {
+        self.check_write(&account)?;
+        UserListAccountRepository::create(self.store.as_ref(), account).await
+    }
+    async fn update(&self, account: UserListAccount) -> AppResult<UserListAccount> {
+        self.check_write(&account)?;
+        UserListAccountRepository::update(self.store.as_ref(), account).await
     }
     async fn get_by_id(&self, id: &str) -> AppResult<Option<UserListAccount>> {
         UserListAccountRepository::get_by_id(self.store.as_ref(), id).await
@@ -1834,12 +1845,13 @@ async fn private_account_unlink_revokes_even_when_event_write_fails_and_gate_is_
         .domain_events
         .fail_append
         .store(true, Ordering::SeqCst);
-    assert!(
+    assert_eq!(
         harness
             .app
             .unlink_list_account(&harness.user, &account.id)
             .await
-            .is_err()
+            .unwrap(),
+        account.id
     );
     assert_eq!(auth.revocations.load(Ordering::SeqCst), 1);
     assert!(
