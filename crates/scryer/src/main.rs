@@ -984,6 +984,8 @@ async fn run_application() {
     // Spawn the full application bootstrap in the background.
     let bootstrap_shutdown = shutdown_token.clone();
     let bootstrap_indexer_accounting_shutdown = indexer_accounting_shutdown.clone();
+    let script_shutdown = ScriptShutdown::default();
+    let bootstrap_script_shutdown = script_shutdown.clone();
     let bootstrap_bind = bind.clone();
     let bootstrap_development_mode = development_mode;
     let runtime_handle = tokio::runtime::Handle::current();
@@ -1001,6 +1003,7 @@ async fn run_application() {
                     cors,
                     bootstrap_shutdown,
                     bootstrap_indexer_accounting_shutdown,
+                    bootstrap_script_shutdown,
                     log_ring_buffer,
                     metrics_handle,
                     data_dir,
@@ -1083,8 +1086,18 @@ async fn run_application() {
     // Close any SSH tunnels a proxy configuration brought up, so their sessions
     // do not outlive the server that needed them.
     scryer_application::tunnel_proxy::stop_all_tunnels();
+    // Running scripts were asked to exit when the shutdown token fired; wait
+    // for them to end (or be killed) before the runtime is dropped, which
+    // would otherwise leave them running unattended.
+    if let Some(app) = script_shutdown.get() {
+        app.shutdown_scripts().await;
+    }
     drain_indexer_accounting_on_shutdown(&indexer_accounting_shutdown).await;
 }
+
+/// The bootstrapped application, handed back so shutdown can stop running
+/// scripts and wait for them before the runtime goes away.
+type ScriptShutdown = Arc<std::sync::OnceLock<AppUseCase>>;
 
 type IndexerAccountingShutdown = Arc<
     std::sync::OnceLock<
@@ -1132,6 +1145,7 @@ async fn bootstrap_application(
     cors: CorsConfig,
     shutdown_token: CancellationToken,
     indexer_accounting_shutdown: IndexerAccountingShutdown,
+    script_shutdown: ScriptShutdown,
     log_ring_buffer: log_buffer::LogRingBuffer,
     metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     data_dir: PathBuf,
@@ -1699,6 +1713,7 @@ async fn bootstrap_application(
         facet_registry,
         webauthn,
     );
+    let _ = script_shutdown.set(app_use_case.clone());
     {
         use scryer_application::public_url::{ConfigValueSource, InstanceAddressing};
         let env_source = |configured: bool| {
