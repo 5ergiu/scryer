@@ -18,6 +18,10 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+#[path = "windows_process_group.rs"]
+mod windows_process_group;
+
 /// How much of each captured stream a run keeps. The store compresses the
 /// tails (zstd) so a larger window costs little at rest.
 pub const OUTPUT_TAIL_BYTES: usize = 32 * 1024;
@@ -167,6 +171,23 @@ pub async fn run_script_cancellable(
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
+    #[cfg(windows)]
+    let process_group = match windows_process_group::ProcessGroup::new() {
+        Ok(group) => group,
+        Err(error) => {
+            return finished(
+                ScriptOutcome::SpawnFailed {
+                    reason: error.to_string(),
+                },
+                started_at,
+                start_instant,
+            );
+        }
+    };
+    #[cfg(windows)]
+    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED)
+        .kill_on_drop(true);
+
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -180,8 +201,23 @@ pub async fn run_script_cancellable(
         }
     };
 
+    #[cfg(windows)]
+    if let Err(error) = process_group.attach_and_resume(&child) {
+        let _ = child.start_kill();
+        return finished(
+            ScriptOutcome::SpawnFailed {
+                reason: error.to_string(),
+            },
+            started_at,
+            start_instant,
+        );
+    }
+
     if !invocation.capture_output {
-        let outcome = match wait_for_child(&mut child, invocation.timeout, cancel).await {
+        let end = wait_for_child(&mut child, invocation.timeout, cancel).await;
+        #[cfg(windows)]
+        drop(process_group);
+        let outcome = match end {
             ChildEnd::Exited(Ok(status)) => ScriptOutcome::Exited {
                 code: status.code(),
                 success: status.success(),
@@ -205,7 +241,11 @@ pub async fn run_script_cancellable(
     let stdout_drain = OutputDrain::spawn(child.stdout.take());
     let stderr_drain = OutputDrain::spawn(child.stderr.take());
 
-    let outcome = match wait_for_child(&mut child, invocation.timeout, cancel).await {
+    let end = wait_for_child(&mut child, invocation.timeout, cancel).await;
+    // Closing the job also terminates descendants which still hold output pipes.
+    #[cfg(windows)]
+    drop(process_group);
+    let outcome = match end {
         ChildEnd::Exited(Ok(status)) => ScriptOutcome::Exited {
             code: status.code(),
             success: status.success(),
