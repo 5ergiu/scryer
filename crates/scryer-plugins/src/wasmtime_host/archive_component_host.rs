@@ -469,11 +469,7 @@ async fn instrumented_archive_component(
             )
         })?
         .map_err(|_| AppError::Repository("archive output write failed".into()))?;
-    if store.data().filesystem_limits.denied {
-        return Err(AppError::Repository(
-            "archive extraction filesystem limit exceeded".into(),
-        ));
-    }
+    filesystem_limit_outcome(store.data().filesystem_limits.denied)?;
     let denied = store.data().limits.memory_denied;
     let stderr_tail = tail_of(&stderr);
 
@@ -615,6 +611,18 @@ fn stderr_suffix(stderr_tail: &str) -> String {
 }
 
 /// Size-capped, lossy tail of a captured output pipe.
+/// An archive whose output outgrows the extraction quota fails the same way
+/// on every attempt, so a denial is an extraction failure, never a retryable
+/// repository error.
+fn filesystem_limit_outcome(denied: bool) -> AppResult<()> {
+    if denied {
+        return Err(AppError::ArchiveExtractionFailed {
+            message: "archive output exceeded the extraction filesystem limit".into(),
+        });
+    }
+    Ok(())
+}
+
 fn tail_of(pipe: &MemoryOutputPipe) -> String {
     let bytes = pipe.contents();
     diagnostic_tail(&bytes)
@@ -635,6 +643,15 @@ mod tests {
     use scryer_plugin_sdk::{
         ArchivePluginOperation, ArchivePluginProcessRequest, ArchivePluginStatus,
     };
+
+    #[test]
+    fn a_filesystem_quota_denial_is_an_extraction_failure() {
+        assert!(filesystem_limit_outcome(false).is_ok());
+        assert!(matches!(
+            filesystem_limit_outcome(true),
+            Err(AppError::ArchiveExtractionFailed { .. })
+        ));
+    }
 
     #[test]
     fn diagnostic_tail_redacts_before_truncating_password_annotations() {
