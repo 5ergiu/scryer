@@ -1209,6 +1209,8 @@ const ALTERNATE_CUT_EDITIONS: &[&str] = &[
     "Redux",
     "Alternate Ending",
     "Alternate Cut",
+    "Fan Edit",
+    "Assembly Cut",
 ];
 
 /// Whether a parsed `edition` names an alternate cut of a movie.

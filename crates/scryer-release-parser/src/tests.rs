@@ -3631,6 +3631,8 @@ fn alternate_cut_editions_are_recognised_after_the_title_and_year() {
         ("Ultimate.Cut", "Ultimate Cut"),
         ("Ultimate.Edition", "Ultimate Edition"),
         ("Redux", "Redux"),
+        ("Fan.Edit", "Fan Edit"),
+        ("Assembly.Cut", "Assembly Cut"),
     ] {
         let raw = format!("Fixture.Picture.2024.{marker}.1080p.BluRay.x264-GRP");
         let edition = movie_file_edition(&raw, "Fixture Picture");
