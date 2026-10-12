@@ -142,11 +142,9 @@ fn upsert_indexer_routing_entry(
     indexer_id: &str,
     categories: Vec<String>,
 ) {
-    if let Some(entry) = entries
-        .iter_mut()
-        .find(|entry| entry.indexer_id == indexer_id)
-    {
-        entry.categories = categories;
+    // Capabilities seed new routes; existing categories (including an empty
+    // selection), enabled state and priority belong to the operator.
+    if entries.iter().any(|entry| entry.indexer_id == indexer_id) {
         return;
     }
 
@@ -1554,6 +1552,7 @@ impl AppUseCase {
             })
             .collect::<HashMap<_, _>>();
         let mut routing_by_scope = try_sync_step!(self.load_indexer_routing_by_scope(actor).await);
+        let previous_routing_by_scope = routing_by_scope.clone();
         let mut result = IndexerConfigSyncResult {
             parent_config_id: parent.id.clone(),
             ..Default::default()
@@ -1688,6 +1687,8 @@ impl AppUseCase {
             result.deleted_ids.push(obsolete.id);
         }
 
+        routing_by_scope
+            .retain(|scope, entries| previous_routing_by_scope.get(scope) != Some(entries));
         try_sync_step!(
             self.save_indexer_routing_by_scope(actor, routing_by_scope)
                 .await
@@ -1859,7 +1860,9 @@ impl AppUseCase {
         mut routing_by_scope: HashMap<String, Vec<IndexerRoutingSettingsEntry>>,
     ) -> AppResult<()> {
         for scope_id in MANAGED_INDEXER_SCOPE_IDS {
-            let entries = routing_by_scope.remove(*scope_id).unwrap_or_default();
+            let Some(entries) = routing_by_scope.remove(*scope_id) else {
+                continue;
+            };
             self.update_indexer_routing_without_sync_lock(actor, scope_id, entries)
                 .await?;
         }

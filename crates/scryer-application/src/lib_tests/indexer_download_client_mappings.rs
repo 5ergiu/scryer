@@ -372,6 +372,81 @@ async fn managed_child_mapping_survives_sync_and_foreign_client_id_stays_opaque(
     assert_eq!(metadata["downloadClientId"], 91);
 }
 
+#[tokio::test]
+async fn managed_child_routing_categories_survive_sync_without_rewriting_settings() {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let parent = synthetic_direct_nab_indexer_config("prowlarr-parent", "prowlarr");
+    let management = Arc::new(FixedIndexerManagementClient {
+        plan: IndexerSyncPlan {
+            children: vec![ManagedIndexerChildPlan {
+                child_key: "prowlarr-indexer-7".into(),
+                name: "Synced Child".into(),
+                provider_type: "nzbgeek".into(),
+                config_json: serde_json::json!({
+                    "base_url": "https://child.example.invalid/api",
+                    "api_key": "synthetic-key"
+                })
+                .to_string(),
+                is_enabled: true,
+                enable_interactive_search: true,
+                enable_auto_search: true,
+                managed_metadata_json: None,
+                caps_snapshot_json: None,
+                routing_scopes: vec![ManagedIndexerRoutingScope {
+                    scope_id: "movie".into(),
+                    categories: vec!["2000".into(), "2040".into()],
+                }],
+            }],
+        },
+    });
+    let (app, admin) = bootstrap_with_search_settings_indexer_configs_and_management(
+        settings.clone(),
+        Arc::new(MockIndexerClient),
+        vec![parent],
+        Some(management),
+    );
+    let first = app
+        .sync_indexer_config(&admin, "prowlarr-parent")
+        .await
+        .unwrap();
+    let child_id = &first.created_ids[0];
+    let seeded = app.get_indexer_routing(&admin, "movie").await.unwrap();
+    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded[0].indexer_id, *child_id);
+    assert_eq!(seeded[0].categories, vec!["2000", "2040"]);
+    assert_eq!(
+        settings
+            .write_log()
+            .iter()
+            .filter(|key| key.as_str() == INDEXER_ROUTING_SETTINGS_KEY)
+            .count(),
+        1
+    );
+
+    for (enabled, categories) in [(true, vec!["2040".into()]), (false, vec![])] {
+        let local = vec![IndexerRoutingSettingsEntry {
+            indexer_id: child_id.clone(),
+            enabled,
+            categories,
+            priority: 7,
+        }];
+        app.update_indexer_routing(&admin, "movie", local.clone())
+            .await
+            .unwrap();
+        let writes = settings.write_log();
+        for _ in 0..2 {
+            app.sync_indexer_config(&admin, "prowlarr-parent")
+                .await
+                .unwrap();
+            assert_eq!(
+                app.get_indexer_routing(&admin, "movie").await.unwrap(),
+                local
+            );
+            assert_eq!(settings.write_log(), writes);
+        }
+    }
+}
+
 fn managed_child_fixture() -> (
     Vec<scryer_domain::IndexerConfig>,
     Arc<dyn IndexerManagementClient>,
