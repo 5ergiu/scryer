@@ -490,7 +490,13 @@ async fn fetch_media_partitions(
         {
             return Err(failure());
         }
-        fingerprints.insert(value, fetched.fingerprint);
+        // An unchanged partition that does not repeat its fingerprint keeps
+        // the one it was asked about.
+        let fingerprint = match fetched.fingerprint {
+            None if fetched.unchanged => previous.get(&value).cloned().flatten(),
+            fingerprint => fingerprint,
+        };
+        fingerprints.insert(value, fingerprint);
         out.items.extend(fetched.items);
     }
     out.fingerprint = Some(format!(
@@ -630,6 +636,58 @@ mod tests {
                 .unwrap()
                 .since_fingerprint,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_partitions_without_a_fingerprint_keep_the_previous_one() {
+        use scryer_domain::MediaFacet::{Movie, Series};
+        let lists = ScriptedLists::new();
+        lists.serve("list-a", &["alpha", "beta"]);
+        let provider = ScriptedProvider(lists);
+        let mut list = subscription("list-a");
+        list.kinds = vec![Movie, Series];
+        let selector = media_selector("kind", &["movies", "shows"]);
+        let first = fetch_media_partitions(
+            &list,
+            provider.0.as_ref(),
+            None,
+            FetchLimits::DEFAULT,
+            &selector,
+        )
+        .await
+        .unwrap();
+        list.sync.fetch_fingerprint = first.fingerprint.clone();
+        provider
+            .0
+            .unchanged_omits_fingerprint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let second = fetch_media_partitions(
+            &list,
+            provider.0.as_ref(),
+            None,
+            FetchLimits::DEFAULT,
+            &selector,
+        )
+        .await
+        .unwrap();
+
+        assert!(second.unchanged);
+        assert_eq!(second.fingerprint, first.fingerprint);
+        list.sync.fetch_fingerprint = second.fingerprint;
+        let third = fetch_media_partitions(
+            &list,
+            provider.0.as_ref(),
+            None,
+            FetchLimits::DEFAULT,
+            &selector,
+        )
+        .await
+        .unwrap();
+        assert!(
+            third.unchanged,
+            "the next sync still asks with a fingerprint"
         );
     }
 
