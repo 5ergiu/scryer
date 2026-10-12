@@ -610,7 +610,6 @@ fn stderr_suffix(stderr_tail: &str) -> String {
     }
 }
 
-/// Size-capped, lossy tail of a captured output pipe.
 /// An archive whose output outgrows the extraction quota fails the same way
 /// on every attempt, so a denial is an extraction failure, never a retryable
 /// repository error.
@@ -623,6 +622,7 @@ fn filesystem_limit_outcome(denied: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Size-capped, lossy tail of a captured output pipe.
 fn tail_of(pipe: &MemoryOutputPipe) -> String {
     let bytes = pipe.contents();
     diagnostic_tail(&bytes)
