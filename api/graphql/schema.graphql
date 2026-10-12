@@ -20632,6 +20632,16 @@ type MutationRoot {
 		sessionId: ID!
 	): ListAccountPollPayload!
 	"""
+	Abandon an account authorization session owned by the current member.
+	Answers true whether or not the session still existed.
+	"""
+	cancelListAccountLink(
+		"""
+		Opaque session returned when linking started.
+		"""
+		sessionId: ID!
+	): Boolean!
+	"""
 	Consume an owned authorization session and link the verified provider identity.
 	"""
 	completeListAccountLink(

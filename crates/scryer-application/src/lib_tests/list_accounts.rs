@@ -2008,6 +2008,46 @@ async fn a_grant_that_cannot_be_linked_after_the_exchange_is_revoked() {
 }
 
 #[tokio::test]
+async fn a_cancelled_link_can_no_longer_be_completed() {
+    let auth = Arc::new(Auth::default());
+    let harness = harness(auth.clone()).await;
+    let start = harness
+        .app
+        .start_list_account_link(&harness.user, "trakt", "https://instance.invalid")
+        .await
+        .unwrap();
+
+    harness
+        .app
+        .cancel_list_account_link(&harness.user, &start.session_id)
+        .await
+        .expect("the owner cancels the link");
+    // Cancelling again, or a session that never existed, answers the same.
+    harness
+        .app
+        .cancel_list_account_link(&harness.user, &start.session_id)
+        .await
+        .expect("a second cancel is not an error");
+
+    assert!(
+        harness
+            .app
+            .complete_list_account_link(
+                &harness.user,
+                &start.session_id,
+                &start.state,
+                "trakt",
+                "fixture-code",
+                None,
+            )
+            .await
+            .is_err(),
+        "a cancelled link is gone"
+    );
+    assert_eq!(auth.exchanges.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn private_account_reconnect_different_identity_does_not_rebind_existing_follow() {
     let auth = Arc::new(Auth {
         identity: Some("external-two".into()),
