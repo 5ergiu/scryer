@@ -6201,8 +6201,11 @@ async fn migration_0278_rekeys_search_terms_by_language_and_forces_reprojection(
     .expect("seed title");
     sqlx::query(
         "INSERT INTO title_search_terms (title_id, facet, term_kind, raw_term, normalized_term,
-                                         weight, literal_term)
-         VALUES ('title-0278', 'series', 'name', 'Stale Row', 'stale row', 1, 'stale row')",
+                                         weight, literal_term, language_tag)
+         VALUES ('title-0278', 'series', 'name', 'Stale Row', 'stale row', 1, 'stale row', NULL),
+                ('title-0278', 'series', 'name', 'Stale Row', 'old folded row', 1, 'stale row', ''),
+                ('title-0278', 'series', 'alias', 'Stale Row', 'stale row', 1, 'stale row', 'eng'),
+                ('title-0278', 'series', 'alias', 'Stale Row', 'old folded row', 1, 'stale row', 'eng')",
     )
     .execute(&pool)
     .await
@@ -6212,6 +6215,19 @@ async fn migration_0278_rekeys_search_terms_by_language_and_forces_reprojection(
         .execute(&pool)
         .await
         .expect("stamp the projection as current");
+
+    let mut transaction = pool.begin().await.expect("begin original migration probe");
+    let original = sqlx::raw_sql(include_str!(
+        "../../../scryer/src/db/migrations/0278_title_search_language_variants.sql"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("the original migration must reproduce the upgrade collision");
+    assert!(original.to_string().contains("UNIQUE constraint failed"));
+    transaction
+        .rollback()
+        .await
+        .expect("restore pre-upgrade fixture");
 
     crate::migrations::run_migrations(&pool, crate::types::MigrationMode::Apply)
         .await
@@ -6285,6 +6301,34 @@ async fn migration_0278_rekeys_search_terms_by_language_and_forces_reprojection(
 }
 
 #[tokio::test]
+async fn migration_0278_already_applied_accepts_repair_and_restart() {
+    let directory = tempfile::tempdir().expect("synthetic schema fixture");
+    let db = directory.path().join("already-upgraded.db");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&sqlite_url_with_create(db.to_string_lossy().as_ref()))
+        .await
+        .expect("open fixture");
+    crate::migrations::replay_source_catalog_for_fresh_install(&pool, Some(286), true)
+        .await
+        .expect("replay existing migration ledger");
+    // The executor records 0278's original checksum. Execute its original SQL
+    // here to model a database that successfully upgraded before the repair.
+    sqlx::raw_sql(include_str!(
+        "../../../scryer/src/db/migrations/0278_title_search_language_variants.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("apply original index to the empty projection");
+    crate::migrations::run_migrations(&pool, crate::types::MigrationMode::Apply)
+        .await
+        .expect("repair an already-applied migration without checksum drift");
+    crate::migrations::run_migrations(&pool, crate::types::MigrationMode::Apply)
+        .await
+        .expect("restart accepts the repaired ledger");
+}
+
+#[tokio::test]
 async fn migration_0278_postgres_rekeys_search_terms_by_language() -> AppResult<()> {
     let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
         .ok()
@@ -6339,7 +6383,8 @@ async fn migration_0278_postgres_rekeys_search_terms_by_language() -> AppResult<
         sqlx::query(
             "INSERT INTO title_search_terms (title_id, facet, term_kind, raw_term,
                                              normalized_term, weight, literal_term)
-             VALUES ('title-0278', 'series', 'name', 'Stale Row', 'stale row', 1, 'stale row')",
+             VALUES ('title-0278', 'series', 'name', 'Stale Row', 'stale row', 1, 'stale row'),
+                    ('title-0278', 'series', 'name', 'Stale Row', 'old folded row', 1, 'stale row')",
         )
         .execute(&pool)
         .await

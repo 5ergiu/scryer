@@ -3,7 +3,7 @@
 //! Migration history is immutable: a shipped version keeps its manifest entry,
 //! source, and checksum forever, because every database that already ran it
 //! validates that checksum on boot. When a shipped migration turns out to be
-//! destructive, the only forward-compatible fix is therefore an executor-side
+//! destructive or unable to upgrade valid existing data, the fix is an executor-side
 //! exception: the version is *recorded as applied* — same version, same
 //! description, same checksum, so history stays byte-for-byte consistent — but
 //! none of its steps run. A later, non-destructive migration then performs the
@@ -11,7 +11,7 @@
 //! version or already did.
 //!
 //! Every entry here is a documented, one-time exception. Add to it only when a
-//! shipped migration is known to destroy or corrupt data.
+//! migration is known to destroy or corrupt data, or block a valid upgrade.
 
 /// A shipped migration whose steps must not execute on any database that has
 /// not applied it yet.
@@ -26,15 +26,24 @@ pub struct KnownBadMigration {
 }
 
 /// Every quarantined migration, oldest first.
-pub const KNOWN_BAD_MIGRATIONS: &[KnownBadMigration] = &[KnownBadMigration {
-    version: 157,
-    replacement_version: 160,
-    reason: "0157 'single title folder ownership' deleted media_files rows for every \
+pub const KNOWN_BAD_MIGRATIONS: &[KnownBadMigration] = &[
+    KnownBadMigration {
+        version: 157,
+        replacement_version: 160,
+        reason: "0157 'single title folder ownership' deleted media_files rows for every \
              file outside the folder it elected (majority folder, random tie-break) \
              and did so in one long transaction; a database that has not run it \
              must never run it. 0160 performs the non-destructive folder assignment \
              instead.",
-}];
+    },
+    KnownBadMigration {
+        version: 278,
+        replacement_version: 287,
+        reason: "0278 creates a unique literal/language index over stale search projection \
+             rows that may collide under the new identity. 0287 clears the derived \
+             projection before replacing the index and requests startup reprojection.",
+    },
+];
 
 /// The ledger entry for `version`, if it is quarantined.
 pub fn known_bad_migration(version: i64) -> Option<&'static KnownBadMigration> {

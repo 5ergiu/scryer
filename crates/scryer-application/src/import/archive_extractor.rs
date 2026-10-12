@@ -1188,12 +1188,14 @@ impl ArchiveExtractionWorkspace {
                 "{ARCHIVE_STAGING_PREFIX}{}",
                 short_staging_suffix()
             ));
-            let mut directory = std::fs::DirBuilder::new();
+            let directory = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let directory = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut directory = directory;
                 directory.mode(0o700);
-            }
+                directory
+            };
             match directory.create(&root) {
                 Ok(()) => {
                     // This guard also runs when an abandoned spawn_blocking
