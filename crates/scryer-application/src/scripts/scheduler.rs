@@ -42,6 +42,14 @@ pub const CUSTOM_JOB_LOAD_RETRY_INITIAL: std::time::Duration = std::time::Durati
 /// Longest wait between retries of a failed load.
 pub const CUSTOM_JOB_LOAD_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Longest single sleep the worker takes toward a deadline. The sleep runs on
+/// the monotonic clock, which on some hosts does not advance while the host
+/// is suspended, so after a resume a long sleep would still wait out its
+/// pre-suspend remainder and a daily or weekly script would fire hours late.
+/// Capping it bounds that lateness: at the cap the worker only re-arms from
+/// the wall clock, and anything that came due meanwhile fires then.
+pub const CUSTOM_JOB_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Wall-clock source the schedule evaluates against.
 #[derive(Clone, Copy, Debug)]
 pub enum SchedulerClock {
@@ -53,6 +61,14 @@ pub enum SchedulerClock {
     Tokio {
         base_utc: DateTime<Utc>,
         base_instant: tokio::time::Instant,
+    },
+    /// The tokio-derived wall time shifted by `jump_seconds`, so a test can
+    /// move the wall clock without the monotonic clock, as a suspend does.
+    #[cfg(test)]
+    Jumpable {
+        base_utc: DateTime<Utc>,
+        base_instant: tokio::time::Instant,
+        jump_seconds: &'static std::sync::atomic::AtomicI64,
     },
 }
 
@@ -75,6 +91,19 @@ impl SchedulerClock {
                 *base_utc
                     + chrono::Duration::from_std(elapsed)
                         .unwrap_or_else(|_| chrono::Duration::zero())
+            }
+            #[cfg(test)]
+            Self::Jumpable {
+                base_utc,
+                base_instant,
+                jump_seconds,
+            } => {
+                Self::Tokio {
+                    base_utc: *base_utc,
+                    base_instant: *base_instant,
+                }
+                .now()
+                    + chrono::Duration::seconds(jump_seconds.load(Ordering::SeqCst))
             }
         }
     }
@@ -409,7 +438,8 @@ pub trait CustomJobDispatcher: Send + Sync {
 
 /// The scheduler worker. Loads the schedule set once, then sleeps until the
 /// earliest deadline (or parks when there is none), waking only for that
-/// deadline, a reload, or shutdown.
+/// deadline, at most `CUSTOM_JOB_MAX_SLEEP` on the way to it, a reload, or
+/// shutdown.
 pub async fn run_custom_job_scheduler(
     scheduler: CustomJobScheduler,
     source: &dyn CustomJobSource,
@@ -442,16 +472,23 @@ pub async fn run_custom_job_scheduler(
                 return;
             }
             _ = reload => {}
-            _ = async {
+            reached = async {
                 match deadline {
                     Some(deadline) => {
-                        tokio::time::sleep_until(scheduler.clock.instant_for(deadline)).await
+                        let at = scheduler.clock.instant_for(deadline);
+                        let cap = tokio::time::Instant::now() + CUSTOM_JOB_MAX_SLEEP;
+                        tokio::time::sleep_until(at.min(cap)).await;
+                        at <= cap
                     }
                     None => std::future::pending().await,
                 }
             } => {
-                for due in scheduler.take_due(scheduler.clock.now()) {
-                    dispatcher.dispatch(due).await;
+                // At the cap, only re-arm: the next pass recomputes the
+                // delay from the wall clock.
+                if reached {
+                    for due in scheduler.take_due(scheduler.clock.now()) {
+                        dispatcher.dispatch(due).await;
+                    }
                 }
             }
         }
@@ -652,6 +689,74 @@ mod tests {
 
     const WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+    fn jumpable_clock() -> (SchedulerClock, &'static std::sync::atomic::AtomicI64) {
+        let jump_seconds = Box::leak(Box::new(std::sync::atomic::AtomicI64::new(0)));
+        (
+            SchedulerClock::Jumpable {
+                base_utc: base(),
+                base_instant: tokio::time::Instant::now(),
+                jump_seconds,
+            },
+            jump_seconds,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wall_clock_jump_past_the_deadline_fires_once_at_the_next_sleep_cap() {
+        let (clock, jump_seconds) = jumpable_clock();
+        let scheduler = CustomJobScheduler::new(clock);
+        let source = Arc::new(CountingSource::default());
+        *source.scripts.lock().unwrap() = vec![script("a", every(7200))];
+        let (mut fires, token, handle) = spawn_worker(&scheduler, source.clone());
+        settle().await;
+        assert_eq!(
+            scheduler.next_run_at("a"),
+            Some(base() + chrono::Duration::seconds(7200))
+        );
+
+        // The host sleeps through the deadline: wall time moves on while the
+        // monotonic clock does not.
+        jump_seconds.store(7200, Ordering::SeqCst);
+
+        let (at, due) = next_fire_event(&mut fires).await;
+        let cap = CUSTOM_JOB_MAX_SLEEP.as_secs() as i64;
+        assert_eq!(due.script_id, "a");
+        assert_eq!(at, base() + chrono::Duration::seconds(cap + 7200));
+        settle().await;
+        assert!(fires.try_recv().is_err(), "the missed fire runs once");
+        assert_eq!(
+            scheduler.next_run_at("a"),
+            Some(base() + chrono::Duration::seconds(2 * 7200)),
+            "the next fire is the next occurrence after the late one"
+        );
+
+        token.cancel();
+        handle.await.expect("worker exits");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sleep_cap_with_an_unchanged_wall_clock_only_re_arms() {
+        let (clock, _) = jumpable_clock();
+        let scheduler = CustomJobScheduler::new(clock);
+        let source = Arc::new(CountingSource::default());
+        *source.scripts.lock().unwrap() = vec![script("a", every(7200))];
+        let (mut fires, token, handle) = spawn_worker(&scheduler, source.clone());
+        settle().await;
+        let next = scheduler.next_run_at("a");
+        let wakes = scheduler.wake_count();
+
+        tokio::time::advance(CUSTOM_JOB_MAX_SLEEP).await;
+        settle().await;
+
+        assert_eq!(scheduler.wake_count(), wakes + 1, "one re-arm at the cap");
+        assert!(fires.try_recv().is_err(), "nothing is due at the cap");
+        assert_eq!(scheduler.next_run_at("a"), next);
+        assert_eq!(source.loads.load(Ordering::SeqCst), 1);
+
+        token.cancel();
+        handle.await.expect("worker exits");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_reload_during_the_startup_load_is_applied_after_it() {
         let scheduler = CustomJobScheduler::new(SchedulerClock::tokio_at(base()));
@@ -830,10 +935,19 @@ mod tests {
         settle().await;
         let wakes = scheduler.wake_count();
         let tasks = alive_tasks();
-        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        // Up to the deadline in sleep-cap steps, then to just before it.
+        for _ in 0..3 {
+            tokio::time::advance(CUSTOM_JOB_MAX_SLEEP).await;
+            settle().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(3599) - 3 * CUSTOM_JOB_MAX_SLEEP).await;
         settle().await;
         assert_eq!(source.loads.load(Ordering::SeqCst), 1);
-        assert_eq!(scheduler.wake_count(), wakes, "no wake before the deadline");
+        assert_eq!(
+            scheduler.wake_count(),
+            wakes + 3,
+            "before the deadline, only the re-arms at each sleep cap"
+        );
         assert_eq!(alive_tasks(), tasks, "still the one worker task");
         assert!(
             fires.try_recv().is_err(),
