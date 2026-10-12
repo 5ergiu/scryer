@@ -13,8 +13,13 @@ use crate::queries::sql_runtime::{SqlArg, SqlExec, SqlRow, SqlRuntime, StoreData
 
 include!("import_retry.rs");
 
+fn import_payload_json(row: &SqlRow) -> AppResult<String> {
+    json_text_from_row(row, "payload_json")?
+        .ok_or_else(|| AppError::Repository("import preservation metadata is unavailable".into()))
+}
+
 pub(super) fn archive_import_has_pending_sources(row: &SqlRow) -> AppResult<bool> {
-    let payload: serde_json::Value = serde_json::from_str(&row.text("payload_json")?)
+    let payload: serde_json::Value = serde_json::from_str(&import_payload_json(row)?)
         .map_err(|_| AppError::Repository("import preservation metadata is unavailable".into()))?;
     Ok(payload["archive_processing_pending"].as_bool() == Some(true))
 }
@@ -85,7 +90,7 @@ impl ImportRepository for ImportStore {
                         return Err(AppError::Validation("source cleanup already owns this download".into()));
                     }
                 }
-                let mut payload: serde_json::Value = serde_json::from_str(&row.text("payload_json")?)
+                let mut payload: serde_json::Value = serde_json::from_str(&import_payload_json(&row)?)
                     .map_err(|_| AppError::Repository("import payload is unavailable".into()))?;
                 let object = payload.as_object_mut().ok_or_else(|| AppError::Repository("invalid import payload".into()))?;
                 if pending {
@@ -122,7 +127,7 @@ impl ImportRepository for ImportStore {
                     return Ok(());
                 };
                 let mut payload: serde_json::Value =
-                    serde_json::from_str(&row.text("payload_json")?).map_err(|_| {
+                    serde_json::from_str(&import_payload_json(&row)?).map_err(|_| {
                         AppError::Repository("import payload is unavailable".into())
                     })?;
                 // Annotates an existing hold only; never creates one.
@@ -220,7 +225,7 @@ impl ImportRepository for ImportStore {
                 for id in releasable {
                     let row = rows.iter().find(|row| row.text("id").is_ok_and(|row_id| row_id == id))
                         .ok_or_else(|| AppError::Repository("released import disappeared".into()))?;
-                    let mut payload: serde_json::Value = serde_json::from_str(&row.text("payload_json")?)
+                    let mut payload: serde_json::Value = serde_json::from_str(&import_payload_json(row)?)
                         .map_err(|_| AppError::Repository("import payload is unavailable".into()))?;
                     let object = payload.as_object_mut().ok_or_else(|| AppError::Repository("invalid import payload".into()))?;
                     object.remove("archive_processing_pending");

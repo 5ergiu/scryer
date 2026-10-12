@@ -1,6 +1,61 @@
 use scryer_application::{DownloadCleanupClaim, DownloadSubmissionRepository};
 use scryer_domain::{TrackedDownloadState, download_identity::DownloadId};
 
+async fn assert_preservation_payload_decoding(datastore: StoreDatastore) {
+    for (payload, expected) in [
+        (Some("{}"), Some(false)),
+        (Some(r#"{"archive_processing_pending":false}"#), Some(false)),
+        (
+            Some(r#"{"archive_processing_pending":true,"archive_hold_reason":"unverified"}"#),
+            Some(true),
+        ),
+        (None, None),
+        (Some("unreadable preservation metadata"), None),
+    ] {
+        let row = SqlRuntime::fetch_optional(
+            datastore.read_exec(),
+            "SELECT {} AS payload_json",
+            &[json_arg_for_datastore(&datastore, payload).unwrap()],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        match expected {
+            Some(pending) => {
+                assert_eq!(archive_import_has_pending_sources(&row).unwrap(), pending);
+                let decoded: serde_json::Value =
+                    serde_json::from_str(&import_payload_json(&row).unwrap()).unwrap();
+                assert_eq!(
+                    decoded,
+                    serde_json::from_str::<serde_json::Value>(payload.unwrap()).unwrap()
+                );
+            }
+            None => assert!(
+                archive_import_has_pending_sources(&row).is_err(),
+                "unavailable preservation metadata must not permit cleanup"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn sqlite_preservation_payload_decoding() {
+    assert_preservation_payload_decoding(store().await.datastore).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SCRYER_TEST_POSTGRES_URL pointing to an isolated fixture database"]
+async fn postgres_preservation_payload_decoding() {
+    let url = std::env::var("SCRYER_TEST_POSTGRES_URL").expect("isolated fixture database URL");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    assert_preservation_payload_decoding(StoreDatastore::Postgres { pool: pool.clone() }).await;
+    pool.close().await;
+}
+
 async fn retry_fixture() -> (
     ImportStore,
     super::super::download_submission_store::DownloadSubmissionStore,

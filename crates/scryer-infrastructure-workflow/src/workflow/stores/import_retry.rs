@@ -125,7 +125,7 @@ impl ImportStore {
                     // still told why the sources are kept.
                     let previous_reason = previous
                         .as_ref()
-                        .map(|row| row.text("payload_json"))
+                        .map(import_payload_json)
                         .transpose()?
                         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
                         .and_then(|previous| {
