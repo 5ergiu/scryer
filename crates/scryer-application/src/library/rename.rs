@@ -1124,14 +1124,11 @@ impl AppUseCase {
     /// leaves alone are recorded at; two untouched titles that already overlap
     /// are not this rename's doing and do not hold it back.
     async fn preflight_rename_title_folder_overlap(&self, preview: &RenamePlan) -> AppResult<()> {
-        let title_ids = preview
-            .title_folders
-            .iter()
-            .map(|folder| folder.title_id.as_str())
-            .collect::<HashSet<_>>();
-        if title_ids.len() < 2 {
+        if preview.title_folders.is_empty() {
             return Ok(());
         }
+        // Every title of the facet, not only those in the plan: a rename of a
+        // single title can still land in or around another title's folder.
         let titles = self
             .services
             .catalog
@@ -1139,7 +1136,6 @@ impl AppUseCase {
             .list(Some(preview.facet.clone()), None)
             .await?
             .into_iter()
-            .filter(|title| title_ids.contains(title.id.as_str()))
             .map(|title| (title.id.clone(), title))
             .collect::<HashMap<_, _>>();
         let recorded_folders = |include: &dyn Fn(&str) -> bool| {
