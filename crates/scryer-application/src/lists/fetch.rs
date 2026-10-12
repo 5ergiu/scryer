@@ -359,7 +359,11 @@ fn selected_media_values(
         .options
         .iter()
         .filter(|value| match value.as_str() {
-            "movie" | "movies" => kinds.contains(&MediaFacet::Movie),
+            "movie" | "movies" => {
+                kinds.contains(&MediaFacet::Movie)
+                    || (kinds.contains(&MediaFacet::Anime)
+                        && !param.options.iter().any(|option| option == "anime"))
+            }
             "shows" | "series" => {
                 kinds.contains(&MediaFacet::Series)
                     || (kinds.contains(&MediaFacet::Anime)
@@ -562,6 +566,8 @@ mod tests {
             ["movie", "series"]
         );
         let trakt = media_selector("kind", &["movies", "shows"]);
+        assert_eq!(selected_media_values(&tmdb, &[Anime]), ["movie", "series"]);
+        assert_eq!(selected_media_values(&trakt, &[Anime]), ["movies", "shows"]);
         assert_eq!(
             selected_media_values(&trakt, &[Movie, Series]),
             ["movies", "shows"]

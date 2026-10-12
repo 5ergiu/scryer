@@ -1392,22 +1392,28 @@ impl AppUseCase {
             .lists
             .account_runtime
             .remember_account_sources(&account.id, &sources, now);
-        self.append_domain_event(crate::events::domain_events::new_user_domain_event(
-            actor,
-            actor.id.clone(),
-            scryer_domain::DomainEventPayload::ConfigurationChanged(
-                scryer_domain::ConfigurationChangedEventData {
-                    resource_type: "list_account".into(),
-                    resource_id: Some(account.id.clone()),
-                    action: if existing.is_some() {
-                        scryer_domain::ConfigurationChangeAction::Updated
-                    } else {
-                        scryer_domain::ConfigurationChangeAction::Saved
+        // The credential is committed: an event failure must not revoke it.
+        if self
+            .append_domain_event(crate::events::domain_events::new_user_domain_event(
+                actor,
+                actor.id.clone(),
+                scryer_domain::DomainEventPayload::ConfigurationChanged(
+                    scryer_domain::ConfigurationChangedEventData {
+                        resource_type: "list_account".into(),
+                        resource_id: Some(account.id.clone()),
+                        action: if existing.is_some() {
+                            scryer_domain::ConfigurationChangeAction::Updated
+                        } else {
+                            scryer_domain::ConfigurationChangeAction::Saved
+                        },
                     },
-                },
-            ),
-        ))
-        .await?;
+                ),
+            ))
+            .await
+            .is_err()
+        {
+            tracing::warn!("could not record the committed list account event");
+        }
         Ok(ListAccountView { account, sources })
     }
     async fn list_account_identity(
@@ -1735,7 +1741,9 @@ impl AppUseCase {
                 gateway.revoke(&account.provider, &credential, None),
             )
             .await;
-            app.append_domain_event(event).await?;
+            if app.append_domain_event(event).await.is_err() {
+                tracing::warn!("could not record the committed list account unlink event");
+            }
             Ok::<String, AppError>(id)
         })
         .await

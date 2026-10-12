@@ -191,7 +191,7 @@ async fn relay_exchange_uses_receipt_and_keeps_refresh_handle_separate() {
 }
 
 #[tokio::test]
-async fn relay_renew_and_simkl_revoke_send_only_refresh_handle() {
+async fn relay_renew_and_revoke_send_only_refresh_handle() {
     let server = MockServer::start().await;
     let transport = transport(&server).await;
     for provider in ["trakt", "simkl"] {
@@ -208,16 +208,14 @@ async fn relay_renew_and_simkl_revoke_send_only_refresh_handle() {
             ..Default::default()
         };
         transport.renew(provider, &credential, None).await.unwrap();
-        if provider == "simkl" {
-            Mock::given(method("POST"))
-                .and(path("/auth/v1/simkl/revoke"))
-                .and(body_json(json!({"refresh_handle":"fixture-handle"})))
-                .respond_with(ResponseTemplate::new(204))
-                .expect(1)
-                .mount(&server)
-                .await;
-            transport.revoke(provider, &credential, None).await.unwrap();
-        }
+        Mock::given(method("POST"))
+            .and(path(format!("/auth/v1/{provider}/revoke")))
+            .and(body_json(json!({"refresh_handle":"fixture-handle"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        transport.revoke(provider, &credential, None).await.unwrap();
     }
 }
 

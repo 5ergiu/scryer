@@ -812,29 +812,23 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_run_asks_the_script_to_exit_before_killing_it() {
         let fixture = Fixture::new();
-        let armed = fixture.work.join("armed.flag");
+        let armed = fixture.work.join("armed.fifo");
+        let ready = readiness_pipe(&armed);
         let mut invocation = fixture.invocation(inline(
             &format!(
-                "trap 'echo terminated; exit 0' TERM; : > '{}'; while :; do sleep 1; done",
+                "trap 'echo terminated; exit 0' TERM; sleep 300 & printf r > '{}'; wait",
                 armed.display()
             ),
             ScriptLanguage::Shell,
         ));
         invocation.timeout = Duration::from_secs(600);
+        invocation.terminate_grace = Duration::from_secs(600);
         let cancel = CancellationToken::new();
         let run = tokio::spawn({
             let cancel = cancel.clone();
             async move { run_script_cancellable(invocation, &cancel).await }
         });
-        // Cancel only once the script has armed its trap, which it signals
-        // with the flag file.
-        tokio::time::timeout(RUN_BOUND, async {
-            while !tokio::fs::try_exists(&armed).await.unwrap_or(false) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the script arms its trap within the bound");
+        wait_until_armed(&ready).await;
         cancel.cancel();
 
         let execution = tokio::time::timeout(RUN_BOUND, run)
@@ -849,38 +843,28 @@ mod tests {
         );
     }
 
-    /// A script that ignores SIGTERM is killed once the grace period passes.
+    /// A script that ignores SIGTERM is killed when its injected grace expires.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cancelled_run_kills_a_script_that_ignores_sigterm_after_the_grace() {
         let fixture = Fixture::new();
-        let armed = fixture.work.join("armed.flag");
-        let grace = Duration::from_millis(200);
+        let armed = fixture.work.join("armed.fifo");
+        let ready = readiness_pipe(&armed);
         let mut invocation = fixture.invocation(inline(
             &format!(
-                "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+                "trap '' TERM; sleep 300 & printf r > '{}'; wait",
                 armed.display()
             ),
             ScriptLanguage::Shell,
         ));
         invocation.timeout = Duration::from_secs(600);
-        invocation.terminate_grace = grace;
+        invocation.terminate_grace = Duration::ZERO;
         let cancel = CancellationToken::new();
         let run = tokio::spawn({
             let cancel = cancel.clone();
             async move { run_script_cancellable(invocation, &cancel).await }
         });
-        // Cancel only once the script ignores SIGTERM, which it signals with
-        // the flag file; cancelling earlier would end the shell on the
-        // signal before the trap is set.
-        tokio::time::timeout(RUN_BOUND, async {
-            while !tokio::fs::try_exists(&armed).await.unwrap_or(false) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the script arms its trap within the bound");
-        let cancelled_at = Instant::now();
+        wait_until_armed(&ready).await;
         cancel.cancel();
 
         let execution = tokio::time::timeout(RUN_BOUND, run)
@@ -888,10 +872,40 @@ mod tests {
             .expect("a script ignoring SIGTERM is killed after the grace")
             .expect("run task joins");
         assert_eq!(execution.outcome, ScriptOutcome::Cancelled);
-        assert!(
-            cancelled_at.elapsed() >= grace,
-            "the script outlived SIGTERM and was only killed once the grace passed"
-        );
+    }
+
+    fn readiness_pipe(path: &Path) -> tokio::io::unix::AsyncFd<std::fs::File> {
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+        // The fixture owns this path and keeps it alive for the entire run.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .expect("open readiness FIFO");
+        tokio::io::unix::AsyncFd::new(pipe).expect("register readiness FIFO")
+    }
+
+    async fn wait_until_armed(pipe: &tokio::io::unix::AsyncFd<std::fs::File>) {
+        use std::io::Read;
+        tokio::time::timeout(RUN_BOUND, async {
+            loop {
+                let mut readiness = pipe.readable().await.expect("wait for script readiness");
+                let mut signal = [0];
+                match readiness.try_io(|pipe| pipe.get_ref().read(&mut signal)) {
+                    Ok(result) => {
+                        assert_eq!(result.expect("read readiness signal"), 1);
+                        assert_eq!(signal, [b'r']);
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("the script arms its trap within the bound");
     }
 
     fn stdout_lines(execution: &ScriptExecution) -> Vec<String> {

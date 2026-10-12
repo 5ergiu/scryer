@@ -329,6 +329,67 @@ async fn seed_expired(harness: &MediaRequestTestHarness) -> UserListAccount {
     account
 }
 #[tokio::test]
+async fn a_committed_account_is_not_revoked_when_its_event_fails() {
+    let auth = Arc::new(Auth::default());
+    let harness = harness(auth.clone()).await;
+    harness
+        .domain_events
+        .fail_append
+        .store(true, Ordering::SeqCst);
+    // Cover both a new account and replacing its credential.
+    for _ in 0..2 {
+        let start = harness
+            .app
+            .start_list_account_link(&harness.user, "trakt", "https://instance.invalid")
+            .await
+            .unwrap();
+        let view = harness
+            .app
+            .complete_list_account_link(
+                &harness.user,
+                &start.session_id,
+                &start.state,
+                "trakt",
+                "fixture-code",
+                None,
+            )
+            .await
+            .expect("the committed account remains linked despite the event failure");
+        let stored = UserListAccountRepository::get_by_id(harness.lists.as_ref(), &view.account.id)
+            .await
+            .unwrap()
+            .expect("account is stored");
+        assert_eq!(stored.status, UserListAccountStatus::Active);
+        assert_eq!(stored.credential.access_token, "fixture-access");
+        assert_eq!(auth.revocations.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_committed_unlink_succeeds_when_its_event_fails() {
+    let auth = Arc::new(Auth::default());
+    let harness = harness(auth.clone()).await;
+    let account = seed_expired(&harness).await;
+    harness
+        .domain_events
+        .fail_append
+        .store(true, Ordering::SeqCst);
+    let id = harness
+        .app
+        .unlink_list_account(&harness.user, &account.id)
+        .await
+        .expect("committed unlink succeeds despite the event failure");
+    assert_eq!(id, account.id);
+    assert!(
+        UserListAccountRepository::get_by_id(harness.lists.as_ref(), &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(auth.revocations_completed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn private_account_start_complete_and_poll_store_verified_owner_accounts() {
     let auth = Arc::new(Auth::default());
     let harness = harness(auth.clone()).await;

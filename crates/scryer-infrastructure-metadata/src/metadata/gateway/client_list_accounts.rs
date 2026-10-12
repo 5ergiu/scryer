@@ -587,7 +587,7 @@ impl ListAccountAuthGateway for HttpListAccountAuthGateway {
         credential: &ListAccountCredential,
         _app: Option<&ListProviderAppConfig>,
     ) -> AppResult<()> {
-        if provider == "simkl" && !credential.direct {
+        if matches!(provider, "trakt" | "simkl") && !credential.direct {
             let handle = credential
                 .refresh_handle
                 .as_deref()

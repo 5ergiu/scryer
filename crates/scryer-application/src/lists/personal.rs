@@ -329,7 +329,13 @@ impl AppUseCase {
             scryer_domain::ConfigurationChangeAction::Saved,
         )
         .await;
-        self.queue_list_syncs(actor, vec![created.clone()]).await?;
+        if self
+            .queue_list_syncs(actor, vec![created.clone()])
+            .await
+            .is_err()
+        {
+            tracing::warn!("could not queue the committed personal list; it remains due for sync");
+        }
         Ok(created)
     }
     pub async fn preview_personal_source(

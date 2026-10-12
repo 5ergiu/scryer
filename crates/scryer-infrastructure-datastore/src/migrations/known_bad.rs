@@ -37,6 +37,12 @@ pub const KNOWN_BAD_MIGRATIONS: &[KnownBadMigration] = &[
              instead.",
     },
     KnownBadMigration {
+        version: 274,
+        replacement_version: 288,
+        reason: "0274 deletes retired IMDb follows and their configuration. 0288 disables \
+                 the unsupported follows while preserving their configuration and history.",
+    },
+    KnownBadMigration {
         version: 278,
         replacement_version: 287,
         reason: "0278 creates a unique literal/language index over stale search projection \

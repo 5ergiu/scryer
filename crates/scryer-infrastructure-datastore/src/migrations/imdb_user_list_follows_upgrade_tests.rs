@@ -1,21 +1,12 @@
-//! Upgrade coverage for migration 0268.
-//!
-//! IMDb user-list follows are removed the way an unfollow removes a follow:
-//! the follow and everything that hangs off it go, while every other follow
-//! (IMDb charts included), the instance-wide exclusions, and the titles and
-//! requests a follow touched stay.
-//! The migration deletes the dependent rows itself, so the outcome must be the
-//! same whether or not the connection enforces foreign keys.
-//!
-//! The scenario drives the real migration runner over a database built at the
-//! pre-0268 state by the real catalog.
+//! Retired IMDb follows remain disabled with their configuration and history.
+//! Exercise the real upgrade runner with and without foreign-key enforcement.
 
 use sqlx::SqlitePool;
 
 const SQLITE: &str =
-    include_str!("../../../scryer/src/db/migrations/0274_delete_imdb_user_list_follows.sql");
+    include_str!("../../../scryer/src/db/migrations/0288_preserve_retired_imdb_follows.sql");
 const POSTGRES: &str = include_str!(
-    "../../../scryer/src/db/postgres/migrations/0274_delete_imdb_user_list_follows.sql"
+    "../../../scryer/src/db/postgres/migrations/0288_preserve_retired_imdb_follows.sql"
 );
 
 /// Version the catalog is replayed to before 0268 is applied.
@@ -259,10 +250,18 @@ async fn run_upgrade(foreign_keys: bool) {
     assert_follow_rows(
         &pool,
         IMDB_LIST,
-        [0; 6],
-        "an IMDb user-list follow is gone with its rows",
+        [1, 1, 2, 1, 1, 1],
+        "an IMDb user-list follow retains all its rows",
     )
     .await;
+    let state: (bool, String, String) = sqlx::query_as(
+        "SELECT enabled, source_origin, sync_state FROM list_subscriptions WHERE id = ?1",
+    )
+    .bind(IMDB_LIST)
+    .fetch_one(&pool)
+    .await
+    .expect("retired follow is retained");
+    assert_eq!(state, (false, "provider_fetch".into(), "off".into()));
     for (id, provider, source_type) in [
         (IMDB_CHART, "imdb", "smg_chart:imdb.fixture.movies:global"),
         (TMDB_CHART, "tmdb", "smg_chart:tmdb.fixture.movies:global"),
@@ -328,8 +327,8 @@ async fn run_upgrade(foreign_keys: bool) {
 }
 
 #[tokio::test]
-async fn the_upgrade_deletes_imdb_user_list_follows_and_keeps_everything_else() {
-    assert_eq!(SQLITE, POSTGRES, "both engines delete the same follows");
+async fn the_upgrade_disables_imdb_user_list_follows_and_preserves_every_row() {
+    assert_eq!(SQLITE.replace("enabled = 0", "enabled = FALSE"), POSTGRES);
     run_upgrade(true).await;
 }
 
@@ -339,7 +338,7 @@ async fn the_upgrade_does_not_rely_on_foreign_key_cascades() {
 }
 
 #[tokio::test]
-async fn postgres_imdb_user_list_cleanup_deletes_only_those_rows() {
+async fn postgres_imdb_user_list_retirement_preserves_every_row() {
     let Ok(url) = std::env::var("SCRYER_TEST_POSTGRES_URL") else {
         eprintln!("skipped: SCRYER_TEST_POSTGRES_URL must name an isolated test database");
         return;
@@ -350,17 +349,17 @@ async fn postgres_imdb_user_list_cleanup_deletes_only_those_rows() {
         .await
         .unwrap();
     // Temporary tables shadow persistent names and disappear with this
-    // connection. They carry no foreign keys, so only the explicit deletes
-    // can remove a dependent row.
+    // connection. No persisted application data is touched.
     sqlx::raw_sql(
         "CREATE TEMP TABLE list_subscriptions (id text PRIMARY KEY, provider text NOT NULL,
-             source_origin text NOT NULL);
+             source_origin text NOT NULL, enabled boolean NOT NULL DEFAULT TRUE,
+             sync_state text NOT NULL DEFAULT 'idle', next_sync_at timestamptz);
          CREATE TEMP TABLE list_subscription_routes (subscription_id text NOT NULL);
          CREATE TEMP TABLE list_memberships (subscription_id text NOT NULL);
          CREATE TEMP TABLE list_sync_runs (subscription_id text NOT NULL);
          CREATE TEMP TABLE list_exclusions (id text PRIMARY KEY, subscription_id text);
          CREATE TEMP TABLE list_exclusion_external_ids (exclusion_id text NOT NULL);
-         INSERT INTO list_subscriptions VALUES
+         INSERT INTO list_subscriptions (id, provider, source_origin) VALUES
              ('follow-imdb-chart', 'imdb', 'smg_chart'),
              ('follow-imdb-list', ' IMDb ', 'smg_imdb_list'),
              ('follow-tmdb-chart', 'tmdb', 'smg_chart');
@@ -374,10 +373,11 @@ async fn postgres_imdb_user_list_cleanup_deletes_only_those_rows() {
     .execute(&pool)
     .await
     .unwrap();
-    const CHART_FOLLOWS: [&str; 2] = ["follow-imdb-chart", "follow-tmdb-chart"];
-    const KEPT_EXCLUSIONS: [&str; 3] = [
+    const CHART_FOLLOWS: [&str; 3] = ["follow-imdb-chart", "follow-imdb-list", "follow-tmdb-chart"];
+    const KEPT_EXCLUSIONS: [&str; 4] = [
         "exclusion-all-lists",
         "exclusion-follow-imdb-chart",
+        "exclusion-follow-imdb-list",
         "exclusion-follow-tmdb-chart",
     ];
     let mut tx = pool.begin().await.unwrap();

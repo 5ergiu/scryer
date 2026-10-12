@@ -84,6 +84,10 @@ export function useListAccountLink(onLinked: (isCurrent: () => boolean) => Promi
     window.addEventListener("message", listener);
     return () => {
       window.removeEventListener("message", listener);
+      const link = active.current;
+      if (link && !link.consumed) {
+        void client.mutation(cancelListAccountLinkMutation, { sessionId: link.pending.sessionId }).toPromise();
+      }
       generation.current += 1;
       active.current?.popup?.close();
       active.current = null;

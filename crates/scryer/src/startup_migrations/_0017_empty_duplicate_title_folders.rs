@@ -10,22 +10,9 @@ pub(crate) fn applies_to_upgrade_from(previous_version: Option<&str>) -> bool {
     previous_version.is_some_and(|previous| is_release_before(previous, 0, 21, 14))
 }
 
-/// Remove the empty title folders an old rename left beside the folder it
-/// moved the title into.
-///
-/// One attempt only. The runner records this migration before it starts, so a
-/// failure or an interrupted run is never retried and nothing is resumed.
-pub(crate) async fn run(app: &AppUseCase) {
-    match app.remove_empty_duplicate_title_folders().await {
-        Ok(report) => tracing::info!(
-            removed = report.removed.len(),
-            not_removed = report.kept.len(),
-            failed = report.failed.len(),
-            "one-time cleanup of empty title folders left by an old rename finished"
-        ),
-        Err(error) => tracing::warn!(
-            error = %error,
-            "one-time cleanup of empty title folders left by an old rename failed and will not be retried"
-        ),
-    }
+/// Retire automatic cleanup while preserving its migration identity.
+/// Path-based removal cannot guarantee that a concurrently replaced directory
+/// is the one whose contents and ownership were checked. Preserve the folders.
+pub(crate) async fn run(_app: &AppUseCase) {
+    tracing::info!("automatic leftover title folder cleanup retired; folders preserved");
 }
