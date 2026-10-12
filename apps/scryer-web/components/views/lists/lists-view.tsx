@@ -4,6 +4,7 @@ import { ListPlus, Puzzle, RefreshCw } from "lucide-react";
 import { LoadingMark } from "@/components/common/loading-mark";
 import { UnderlineFilterButton } from "@/components/common/underline-filter-button";
 import type { ListsSection } from "@/components/root/types";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
@@ -59,7 +60,6 @@ type ListsViewProps = {
   /** How many entries each section holds; a section not counted yet is absent. */
   tabCounts: ListTabCounts;
   canManageLists: boolean;
-  experimentalFeaturesEnabled: boolean;
   canManageProviderApps: boolean;
   onRefreshProviders: () => Promise<void>;
   accounts: ListAccount[];
@@ -121,7 +121,7 @@ export function ListsView(props: ListsViewProps) {
   } = props;
   const t = useTranslate();
   const [followTarget, setFollowTarget] = React.useState<FollowListTarget | null>(null);
-  const canManageSubscriptions = canManageLists || (section === "personal" && props.experimentalFeaturesEnabled);
+  const canManageSubscriptions = canManageLists || section === "personal";
   const providerByType = React.useMemo(
     () => new Map(providers.map((provider) => [provider.providerType, provider])),
     [providers],
@@ -162,7 +162,7 @@ export function ListsView(props: ListsViewProps) {
 
   const detailFallback = detail ? (subscriptions.find((entry) => entry.id === detail.id) ?? null) : null;
   const detailSubscription = detail?.subscription ?? detailFallback;
-  const showPlugins = props.canManageProviderApps && (section === "public" || (section === "personal" && props.experimentalFeaturesEnabled));
+  const showPlugins = props.canManageProviderApps && (section === "public" || section === "personal");
   const contentRef = React.useRef<HTMLDivElement>(null);
   const [pluginsDocked, setPluginsDocked] = React.useState(false);
   const [pluginsOpen, setPluginsOpen] = React.useState(false);
@@ -198,8 +198,11 @@ export function ListsView(props: ListsViewProps) {
             <ListPlus className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
-            <h1 className="font-display text-[25px] font-bold leading-tight text-[var(--scry-ink)]">
+            <h1 className="flex flex-wrap items-center gap-2.5 font-display text-[25px] font-bold leading-tight text-[var(--scry-ink)]">
               {t("nav.lists")}
+              <Badge id="lists-beta" tone="warning" className="text-[11px]">
+                {t("settings.pluginBeta")}
+              </Badge>
             </h1>
           </div>
           {showPlugins && !pluginsDocked ? (
@@ -222,18 +225,16 @@ export function ListsView(props: ListsViewProps) {
               count={tabCounts.public}
               onClick={() => onSectionChange("public")}
             />
-            {props.experimentalFeaturesEnabled ? (
-              <UnderlineFilterButton
-                id="lists-tab-personal"
-                role="tab"
-                size="lg"
-                aria-selected={section === "personal"}
-                selected={section === "personal"}
-                label={t("lists.tab.personal")}
-                count={tabCounts.personal}
-                onClick={() => onSectionChange("personal")}
-              />
-            ) : null}
+            <UnderlineFilterButton
+              id="lists-tab-personal"
+              role="tab"
+              size="lg"
+              aria-selected={section === "personal"}
+              selected={section === "personal"}
+              label={t("lists.tab.personal")}
+              count={tabCounts.personal}
+              onClick={() => onSectionChange("personal")}
+            />
             {canManageLists ? (
               <UnderlineFilterButton
                 id="lists-tab-exclusions"
@@ -246,7 +247,7 @@ export function ListsView(props: ListsViewProps) {
                 onClick={() => onSectionChange("exclusions")}
               />
             ) : null}
-            {props.experimentalFeaturesEnabled && props.canManageProviderApps ? (
+            {props.canManageProviderApps ? (
               <UnderlineFilterButton
                 id="lists-tab-provider-apps"
                 role="tab"
@@ -261,9 +262,9 @@ export function ListsView(props: ListsViewProps) {
           </div>
         </div>
 
-        {section === "providerApps" && props.canManageProviderApps && props.experimentalFeaturesEnabled ? (
+        {section === "providerApps" && props.canManageProviderApps ? (
           <ProviderAppsPanel />
-        ) : (section === "providerApps" || (section === "personal" && !props.experimentalFeaturesEnabled)) ? (
+        ) : section === "providerApps" ? (
           <p role="status" className="py-6 text-sm">{t("status.permissionDenied")}</p>
         ) : loading ? (
           <div className="flex items-center gap-2 py-8 text-sm text-[var(--scry-muted)]">

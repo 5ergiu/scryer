@@ -821,7 +821,6 @@ function AuthenticatedHomePage({
   // The palette must not offer a page the sidebar is hiding, so the same
   // instance-wide switch decides both.
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
-  const instanceFeaturesLoaded = useInstanceFeaturesLoaded();
   const { canPrompt, isInstalled, isIosSafari, promptInstall } =
     useInstallPrompt();
 
@@ -1638,7 +1637,7 @@ function AuthenticatedHomePage({
     if (
       !routeIsCanonical ||
       view !== "lists" ||
-      !shouldLeaveListsPage(canAccessLists, instanceFeaturesLoaded)
+      !shouldLeaveListsPage(canAccessLists)
     ) {
       return;
     }
@@ -1646,7 +1645,6 @@ function AuthenticatedHomePage({
     navigateToAccessibleDefault();
   }, [
     canAccessLists,
-    instanceFeaturesLoaded,
     navigateToAccessibleDefault,
     routeIsCanonical,
     view,

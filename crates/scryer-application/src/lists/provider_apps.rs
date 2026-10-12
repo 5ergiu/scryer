@@ -38,7 +38,6 @@ impl AppUseCase {
     pub async fn list_provider_apps(&self, actor: &User) -> AppResult<Vec<ListProviderAppView>> {
         self.require_app_permission(actor, AppPermission::ManageSystemSettings)
             .await?;
-        self.require_lists_enabled().await?;
         let mut result = Vec::new();
         for provider in PROVIDERS {
             result.push(view(
@@ -59,7 +58,6 @@ impl AppUseCase {
     ) -> AppResult<ListProviderAppView> {
         self.require_app_permission(actor, AppPermission::ManageSystemSettings)
             .await?;
-        self.require_lists_enabled().await?;
         if !PROVIDERS.contains(&provider) {
             return Err(refused(
                 refusal::PROVIDER_APP_UNSUPPORTED,

@@ -615,7 +615,6 @@ impl AppUseCase {
         } else {
             self.require_app_permission(actor, scryer_domain::AppPermission::ManageLists)
                 .await?;
-            self.require_lists_enabled().await?;
         }
         if let Some(cap) = max_per_sync {
             row.max_per_sync = cap;

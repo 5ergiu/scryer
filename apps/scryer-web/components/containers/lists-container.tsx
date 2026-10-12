@@ -11,7 +11,6 @@ import {
 } from "@/components/views/lists/lists-view";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
-import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { useSessionUser } from "@/lib/hooks/use-auth";
 import { useListAccountLink } from "@/lib/hooks/use-list-account-link";
 import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
@@ -104,7 +103,6 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): ListT
   const client = useClient();
   const user = useSessionUser();
   const userId = user?.id;
-  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const [counts, setCounts] = React.useState<ListTabCounts>({});
   const [changes, setChanges] = React.useState(0);
 
@@ -113,7 +111,7 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): ListT
     void client
       .query(
         listTabCountsQuery,
-        { personal: experimentalFeaturesEnabled, exclusions: canManageLists },
+        { personal: true, exclusions: canManageLists },
         { requestPolicy: "network-only" },
       )
       .toPromise()
@@ -129,7 +127,7 @@ function useListTabCounts(canManageLists: boolean, section: ListsSection): ListT
     return () => {
       active = false;
     };
-  }, [canManageLists, changes, client, experimentalFeaturesEnabled, section, userId]);
+  }, [canManageLists, changes, client, section, userId]);
 
   const reload = React.useCallback(() => setChanges((value) => value + 1), []);
   useListsReactiveRefresh(listTabCountsChanged, reload);
@@ -148,7 +146,6 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
   const navigate = useNavigate();
   const requestedSection = listsSectionFromPath(location.pathname);
   const section: ListsSection = requestedSection;
-  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const user = useSessionUser();
   const canManageProviderApps = hasAppPermission(user, APP_PERMISSIONS.manageSystemSettings);
   const personal = section === "personal";
@@ -274,7 +271,7 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
       const [providersResult] = await Promise.all([
         client.query(listProvidersQuery, {}).toPromise(),
         loadSubscriptions(),
-        ...(personal && experimentalFeaturesEnabled ? [loadAccounts()] : []),
+        ...(personal ? [loadAccounts()] : []),
       ]);
       if (providersResult.error) throw providersResult.error;
       if (providersNewest()) {
@@ -322,7 +319,7 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
     } finally {
       setLoading(false);
     }
-  }, [canManageLists, client, experimentalFeaturesEnabled, loadAccounts, loadSubscriptions, personal, reads, setGlobalStatus, t]);
+  }, [canManageLists, client, loadAccounts, loadSubscriptions, personal, reads, setGlobalStatus, t]);
 
   // A background read leaves the table on screen rather than showing it as loading.
   const loadExclusions = React.useCallback(async ({ background = false }: { background?: boolean } = {}) => {
@@ -682,7 +679,7 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
     () => {
       void loadAccounts().catch(() => {});
     },
-    { pause: !(personal && experimentalFeaturesEnabled) },
+    { pause: !personal },
   );
   useListsReactiveRefresh(
     listExclusionsChanged,
@@ -803,7 +800,6 @@ function ListsContainerBody({ canManageLists, tabCounts }: ListsContainerBodyPro
       onSectionChange={changeSection}
       tabCounts={shownTabCounts}
       canManageLists={canManageLists}
-      experimentalFeaturesEnabled={experimentalFeaturesEnabled}
       canManageProviderApps={canManageProviderApps}
       onRefreshProviders={refreshProviders}
       accounts={accounts}

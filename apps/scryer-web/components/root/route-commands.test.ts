@@ -210,11 +210,11 @@ test("lists command reaches catalog viewers and list managers", () => {
       .some((command) => command.id === "lists"),
     false,
   );
-  // Lists are experimental: the palette never offers them while the switch is off.
+  // Lists remain available without the experimental switch.
   assert.equal(
     buildRouteCommands({ t, user: listManager, onNavigate: () => {} })
       .some((command) => command.id === "lists" || command.id === "lists-exclusions"),
-    false,
+    true,
   );
 });
 
