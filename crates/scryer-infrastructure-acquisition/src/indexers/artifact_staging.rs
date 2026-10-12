@@ -263,28 +263,13 @@ impl NzbCompression {
 }
 
 /// Leading-byte signatures, longest first where one could prefix another.
-/// Archive containers (xz, zip, 7z, RAR) and bzip2 are recognised only to
+/// zlib has no fixed magic and is recognised by its header check instead
+/// (`is_zlib_header`). Archive containers (xz, zip, 7z, RAR) and bzip2 are recognised only to
 /// refuse them with a clear message.
 const NZB_PACKAGING_SIGNATURES: &[(&[u8], NzbPackaging)] = &[
     (
         &[0x1f, 0x8b],
         NzbPackaging::Compressed(NzbCompression::Gzip),
-    ),
-    (
-        &[0x78, 0x01],
-        NzbPackaging::Compressed(NzbCompression::Zlib),
-    ),
-    (
-        &[0x78, 0x5e],
-        NzbPackaging::Compressed(NzbCompression::Zlib),
-    ),
-    (
-        &[0x78, 0x9c],
-        NzbPackaging::Compressed(NzbCompression::Zlib),
-    ),
-    (
-        &[0x78, 0xda],
-        NzbPackaging::Compressed(NzbCompression::Zlib),
     ),
     (
         &[0x28, 0xb5, 0x2f, 0xfd],
@@ -312,14 +297,32 @@ fn sniff_nzb_packaging(prefix: &[u8], complete: bool) -> Option<NzbPackaging> {
     {
         return Some(*packaging);
     }
+    if let [cmf, flg, ..] = prefix
+        && is_zlib_header(*cmf, *flg)
+    {
+        return Some(NzbPackaging::Compressed(NzbCompression::Zlib));
+    }
     if !complete
-        && NZB_PACKAGING_SIGNATURES
+        && (NZB_PACKAGING_SIGNATURES
             .iter()
             .any(|(signature, _)| signature.starts_with(prefix))
+            || matches!(prefix, [cmf] if is_zlib_cmf(*cmf)))
     {
         return None;
     }
     Some(NzbPackaging::Plain)
+}
+
+/// RFC 1950 compression method and info byte: deflate (CM 8) with a window
+/// no larger than 32 KiB (CINFO at most 7).
+fn is_zlib_cmf(cmf: u8) -> bool {
+    cmf & 0x0f == 8 && cmf >> 4 <= 7
+}
+
+/// RFC 1950 header: a deflate CMF whose two header bytes, read big-endian,
+/// are a multiple of 31.
+fn is_zlib_header(cmf: u8, flg: u8) -> bool {
+    is_zlib_cmf(cmf) && (u16::from(cmf) * 256 + u16::from(flg)) % 31 == 0
 }
 
 /// Read just enough of `stream` to classify its packaging, keeping the
@@ -1160,6 +1163,41 @@ mod tests {
             .unwrap_or_else(|error| panic!("{compression:?} stream must stage: {error}"));
             assert_eq!(staged_bytes(&lease), valid_nzb(), "{compression:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn zlib_streams_with_a_small_window_header_are_inflated() {
+        let mut compressed = compress(super::NzbCompression::Zlib, &valid_nzb()).await;
+        // CINFO 5 (8 KiB window); 0x5885 is a multiple of 31.
+        compressed[0] = 0x58;
+        compressed[1] = 0x85;
+        assert_eq!(
+            super::sniff_nzb_packaging(&compressed[..1], false),
+            None,
+            "one possible CMF byte waits for the FLG byte"
+        );
+        assert_eq!(
+            super::sniff_nzb_packaging(&compressed, true),
+            Some(super::NzbPackaging::Compressed(super::NzbCompression::Zlib))
+        );
+        assert_eq!(
+            super::sniff_nzb_packaging(b"<?xml", true),
+            Some(super::NzbPackaging::Plain)
+        );
+        let tempdir = TempDir::new().unwrap();
+        let store = store(&tempdir).await;
+        let lease = stage_nzb_from_bytes(
+            &store,
+            &Arc::new(Semaphore::new(1)),
+            "zlib-small-window",
+            None,
+            Some(&scryer_domain::MediaFacet::Series),
+            &CancellationToken::new(),
+            compressed,
+        )
+        .await
+        .expect("small-window zlib must stage");
+        assert_eq!(staged_bytes(&lease), valid_nzb());
     }
 
     #[tokio::test]
