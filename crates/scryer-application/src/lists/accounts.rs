@@ -458,7 +458,7 @@ pub enum ListAccountPollStatus {
     RateLimited,
 }
 enum PollClaim {
-    Check(LinkSession),
+    Check(Box<LinkSession>),
     Answer(ListAccountPollStatus),
     Linked(String),
 }
@@ -741,7 +741,7 @@ impl ListAccountRuntime {
             }
             LinkPhase::Waiting => {
                 session.phase = LinkPhase::Checking;
-                PollClaim::Check(session.clone())
+                PollClaim::Check(Box::new(session.clone()))
             }
         })
     }
@@ -1126,7 +1126,7 @@ impl AppUseCase {
                     account: Some(ListAccountView { account, sources }),
                 });
             }
-            PollClaim::Check(session) => session,
+            PollClaim::Check(session) => *session,
         };
         let claim = PollClaimGuard {
             runtime,

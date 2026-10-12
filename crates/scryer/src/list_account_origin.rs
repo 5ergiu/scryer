@@ -170,9 +170,11 @@ fn push_origin(origins: &mut Vec<String>, value: &str) {
 #[derive(Clone)]
 pub(crate) struct InterfaceAddresses(InterfaceSource);
 
+type InterfaceAddressCache = Arc<Mutex<Option<(Instant, Arc<[IpAddr]>)>>>;
+
 #[derive(Clone)]
 enum InterfaceSource {
-    System(Arc<Mutex<Option<(Instant, Arc<[IpAddr]>)>>>),
+    System(InterfaceAddressCache),
     #[cfg(test)]
     Fixed(Arc<[IpAddr]>),
 }

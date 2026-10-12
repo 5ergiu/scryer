@@ -649,7 +649,7 @@ async fn hold_release_without_a_canonical_download_is_refused_and_changes_nothin
     complete_held(&store, &claim.import_id, "subtitles_pending").await;
 
     let error = store
-        .release_archive_holds(&claim.source, None, &[claim.import_id.clone()])
+        .release_archive_holds(&claim.source, None, std::slice::from_ref(&claim.import_id))
         .await
         .expect_err("nothing serializes the release against the cleanup claim");
 
@@ -728,7 +728,7 @@ async fn hold_release_refused_for_an_unlisted_held_import_changes_nothing() {
             .release_archive_holds(
                 &claim.source,
                 Some(&claim.download_id),
-                &[claim.import_id.clone()]
+                std::slice::from_ref(&claim.import_id)
             )
             .await
             .is_err()
@@ -758,7 +758,7 @@ async fn hold_release_refused_while_an_import_of_the_download_is_pending() {
             .release_archive_holds(
                 &claim.source,
                 Some(&claim.download_id),
-                &[claim.import_id.clone()]
+                std::slice::from_ref(&claim.import_id)
             )
             .await
             .is_err()

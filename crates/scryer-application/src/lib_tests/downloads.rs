@@ -5030,6 +5030,24 @@ async fn failed_tracked_cleanup_uses_facet_routing_and_exact_client_id() {
         .expect("create monitored movie title");
 
     let item_id = "failed-cleanup-1";
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let source_root = tempfile::tempdir().expect("source root");
+    let absent_payload = source_root.path().join("Failed.Cleanup");
+    let mut completed = completed_download_fixture_item(
+        item_id,
+        &title.id,
+        "Failed.Cleanup",
+        &absent_payload.to_string_lossy(),
+    );
+    completed.client_id = config.id.clone();
+    completed.download_id = Some(download_id.to_string());
+    download_client.cleanup_payloads.lock().await.insert(
+        item_id.to_string(),
+        crate::DownloadCleanupPayload {
+            download: completed,
+            native_delete_paths: vec![absent_payload.to_string_lossy().into_owned()],
+        },
+    );
     let mut history_item = queue_history_fixture_item(item_id, DownloadQueueState::Failed, 40);
     history_item.client_id = config.id.clone();
     history_item.client_name = config.name.clone();
@@ -5037,7 +5055,7 @@ async fn failed_tracked_cleanup_uses_facet_routing_and_exact_client_id() {
     history_item.title_name = title.name.clone();
     history_item.facet = Some("movie".to_string());
     let tracked = crate::tracked_downloads::TrackedDownload {
-        download_id: scryer_domain::download_identity::DownloadId::new(),
+        download_id,
         id: crate::tracked_downloads::tracked_download_id(
             Some(config.id.as_str()),
             "nzbget",
@@ -5609,6 +5627,21 @@ fn write_pack_video(dir: &Path, file_name: &str) -> std::path::PathBuf {
         .expect("open source video fixture")
         .set_len(PACK_VIDEO_SIZE_BYTES)
         .expect("size source video above the import sample threshold");
+    path
+}
+
+fn write_hd_pack_video(dir: &Path, file_name: &str, resolution: u32) -> std::path::PathBuf {
+    let path = dir.join(file_name);
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/import")
+        .join(format!("h264_{resolution}p_aac.mkv"));
+    std::fs::copy(fixture, &path).expect("copy HD source video fixture");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open HD source video fixture")
+        .set_len(PACK_VIDEO_SIZE_BYTES)
+        .expect("size HD source video above the import sample threshold");
     path
 }
 
@@ -7111,18 +7144,25 @@ async fn manual_import_of_a_file_already_in_place_is_satisfied_not_failed() {
     // same way. The identical file being in place IS the import: the mapping
     // is satisfied, recorded as `already_present` like the automatic path, and
     // the manual import completes.
-    let FailClosedPackFixture {
-        app,
-        user,
-        title,
-        episode,
-        import_artifacts,
-        ..
-    } = fail_closed_pack_fixture().await;
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode,
+            import_artifacts,
+            ..
+        },
+        _,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        series_root_at_library_dir: true,
+        ..Default::default()
+    })
+    .await;
 
     let source_dir = tempfile::tempdir().expect("source tempdir");
     let release_name = "Fail.Closed.Pack.S01E01.1080p.WEB-DL";
-    let source_file = write_pack_video(source_dir.path(), &format!("{release_name}.mkv"));
+    let source_file = write_hd_pack_video(source_dir.path(), &format!("{release_name}.mkv"), 1080);
     let completed = series_pack_completed_download(
         "pack-already-in-place",
         &title.id,
@@ -7503,8 +7543,12 @@ async fn manual_import_upgrade_reports_transfer_progress_on_its_record() {
         Some(std::fs::canonicalize(source_dir.path()).expect("canonical source root"));
     let source_identity =
         ClientJobLocator::new(Some("weaver-client"), "weaver", "pack-upgrade-progress");
-    let manual_import = |release_name: &str| {
-        let source_file = write_pack_video(source_dir.path(), &format!("{release_name}.mkv"));
+    let manual_import = |release_name: &str, resolution| {
+        let source_file = write_hd_pack_video(
+            source_dir.path(),
+            &format!("{release_name}.mkv"),
+            resolution,
+        );
         let completed = series_pack_completed_download(
             "pack-upgrade-progress",
             &title.id,
@@ -7524,7 +7568,7 @@ async fn manual_import_upgrade_reports_transfer_progress_on_its_record() {
     };
 
     // First import lands a 720p file.
-    let (completed, mappings) = manual_import("Fail.Closed.Pack.S01E01.720p.WEB-DL");
+    let (completed, mappings) = manual_import("Fail.Closed.Pack.S01E01.720p.WEB-DL", 720);
     let first_id = app
         .services
         .workflow
@@ -7550,7 +7594,7 @@ async fn manual_import_upgrade_reports_transfer_progress_on_its_record() {
     assert!(first.iter().all(|result| result.success), "{first:?}");
 
     // Second import of a better release replaces it (the upgrade path).
-    let (completed, mappings) = manual_import("Fail.Closed.Pack.S01E01.1080p.WEB-DL");
+    let (completed, mappings) = manual_import("Fail.Closed.Pack.S01E01.1080p.WEB-DL", 1080);
     let second_id = app
         .services
         .workflow
@@ -7651,7 +7695,8 @@ async fn scryer_manual_import_defaults_to_grabbed_scope_but_accepts_same_title_o
         .await
         .expect("create selected episode");
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    let source_file = write_pack_video(source_dir.path(), "Tokan — S01E03 2160p WEB-DL.mkv");
+    let source_file =
+        write_hd_pack_video(source_dir.path(), "Tokan — S01E03 2160p WEB-DL.mkv", 1080);
     let evidence = crate::import_workflow::ReleaseEvidence::ScryerSubmission {
         title_id: title.id.clone(),
         facet: "series".to_string(),
@@ -18501,7 +18546,7 @@ mod held_sources {
         // pending warning was cleared.
         held.fixture
             .import_repo
-            .release_archive_holds(&held.source(), None, &[held.import_id.clone()])
+            .release_archive_holds(&held.source(), None, std::slice::from_ref(&held.import_id))
             .await
             .unwrap();
         assert!(!held.holds_sources().await);

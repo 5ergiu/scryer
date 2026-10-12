@@ -833,20 +833,16 @@ impl AppUseCase {
             Err(failure) => {
                 if subscription.is_personal()
                     && matches!(failure.class, super::fetch::ListFailureClass::Unauthorized)
+                    && let Some(id) = subscription.credential_id.as_deref()
+                    && let Some(mut account) = lists.accounts.get_by_id(id).await?
+                    && account.user_id == subscription.owner_user_id
+                    && account.provider == subscription.source.provider
                 {
-                    if let Some(id) = subscription.credential_id.as_deref() {
-                        if let Some(mut account) = lists.accounts.get_by_id(id).await? {
-                            if account.user_id == subscription.owner_user_id
-                                && account.provider == subscription.source.provider
-                            {
-                                account.status = scryer_domain::UserListAccountStatus::Expired;
-                                account.error_message =
-                                    Some("Reconnect this list account to resume syncing.".into());
-                                account.updated_at = Utc::now();
-                                lists.accounts.update(account).await?;
-                            }
-                        }
-                    }
+                    account.status = scryer_domain::UserListAccountStatus::Expired;
+                    account.error_message =
+                        Some("Reconnect this list account to resume syncing.".into());
+                    account.updated_at = Utc::now();
+                    lists.accounts.update(account).await?;
                 }
                 return Err(AppError::Validation(failure.message));
             }

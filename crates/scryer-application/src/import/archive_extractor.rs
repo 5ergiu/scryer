@@ -2380,7 +2380,7 @@ mod tests {
             impl tracing::field::Visit for Fields<'_> {
                 fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                     use std::fmt::Write;
-                    write!(self.0, "{value:?}\n").unwrap();
+                    writeln!(self.0, "{value:?}").unwrap();
                 }
             }
             event.record(&mut Fields(&mut self.0.lock().unwrap()));

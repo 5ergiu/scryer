@@ -950,21 +950,21 @@ async fn reconcile_terminal_download_cleanup(
             && (!host_managed_payload
                 || (client_type == "sabnzbd"
                     && payload_disposition == Some(HostPayloadDisposition::Removed)));
-        if let Some(payload) = nzbget_payload.as_ref() {
-            if let Err(error) = verify_nzbget_entry_cleanup(payload).await {
-                if nzbget_retention_log_due(record) {
-                    tracing::warn!(client_id, download_client_item_id, error = %error,
-                        "retaining NZBGet history because native deletion could bypass payload preservation");
-                } else {
-                    tracing::debug!(client_id, download_client_item_id, error = %error,
-                        "retaining NZBGet history because native deletion could bypass payload preservation");
-                }
-                return TerminalDownloadCleanup {
-                    outcome: TerminalDownloadCleanupOutcome::RetryableFailure,
-                    seeding: seeding_report,
-                    payload: payload_disposition,
-                };
+        if let Some(payload) = nzbget_payload.as_ref()
+            && let Err(error) = verify_nzbget_entry_cleanup(payload).await
+        {
+            if nzbget_retention_log_due(record) {
+                tracing::warn!(client_id, download_client_item_id, error = %error,
+                    "retaining NZBGet history because native deletion could bypass payload preservation");
+            } else {
+                tracing::debug!(client_id, download_client_item_id, error = %error,
+                    "retaining NZBGet history because native deletion could bypass payload preservation");
             }
+            return TerminalDownloadCleanup {
+                outcome: TerminalDownloadCleanupOutcome::RetryableFailure,
+                seeding: seeding_report,
+                payload: payload_disposition,
+            };
         }
         if (client_remove_data || !remove_data)
             && !host_managed_payload

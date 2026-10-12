@@ -404,10 +404,9 @@ async fn fetch_media_partitions(
         .and_then(|value| value.strip_prefix(&prefix))
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default();
-    let same_selection = previous.keys().eq(values
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter());
+    let same_selection = previous
+        .keys()
+        .eq(values.iter().collect::<std::collections::BTreeSet<_>>());
     let mut partitions = Vec::new();
     let mut collected_items = 0usize;
     let mut collected_bytes = 0usize;

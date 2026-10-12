@@ -624,10 +624,10 @@ impl TrackedDownloadService {
         item: DownloadQueueItem,
     ) {
         let id = tracked_download_id_for_item(&item);
-        if !self.cache.contains_key(&download_id) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.cache.entry(download_id) {
             let tracked =
                 Self::build_new_tracked_download(app, download_id, id.clone(), item).await;
-            self.cache.insert(download_id, tracked);
+            entry.insert(tracked);
         }
         let tracked = self
             .cache
@@ -662,17 +662,16 @@ impl TrackedDownloadService {
                     .password_retry_observation(&id)
                     .await,
                 Ok(None)
-            ) {
-                if let Some(held) = self.cache.get(&id) {
-                    let refreshed = Self::build_new_tracked_download(
-                        app,
-                        id,
-                        held.id.clone(),
-                        held.client_item.clone(),
-                    )
-                    .await;
-                    self.cache.insert(id, refreshed);
-                }
+            ) && let Some(held) = self.cache.get(&id)
+            {
+                let refreshed = Self::build_new_tracked_download(
+                    app,
+                    id,
+                    held.id.clone(),
+                    held.client_item.clone(),
+                )
+                .await;
+                self.cache.insert(id, refreshed);
             }
         }
     }
@@ -1323,28 +1322,28 @@ impl TrackedDownloadService {
         state: TrackedDownloadState,
     ) -> bool {
         let password_failure = td.client_item.password_failure();
-        let (reason, detail) =
-            if state == TrackedDownloadState::Failed && password_failure.is_some() {
-                let failure = password_failure.expect("checked password failure");
-                (Some(failure.code()), Some(failure.message()))
-            } else if state == TrackedDownloadState::Failed && td.burned_by_import_gate {
-                let warning_timeout = td
-                    .status_messages
-                    .iter()
-                    .find(|message| message.starts_with(WARNING_TIMEOUT_STATUS_MESSAGE_PREFIX));
-                (
-                    Some(if warning_timeout.is_some() {
-                        WARNING_TIMEOUT_TRACKED_STATE_REASON
-                    } else {
-                        IMPORT_GATE_REJECTED_TRACKED_STATE_REASON
-                    }),
-                    warning_timeout
-                        .map(String::as_str)
-                        .or_else(|| td.status_messages.first().map(String::as_str)),
-                )
-            } else {
-                (None, None)
-            };
+        let (reason, detail) = if state == TrackedDownloadState::Failed
+            && let Some(failure) = password_failure
+        {
+            (Some(failure.code()), Some(failure.message()))
+        } else if state == TrackedDownloadState::Failed && td.burned_by_import_gate {
+            let warning_timeout = td
+                .status_messages
+                .iter()
+                .find(|message| message.starts_with(WARNING_TIMEOUT_STATUS_MESSAGE_PREFIX));
+            (
+                Some(if warning_timeout.is_some() {
+                    WARNING_TIMEOUT_TRACKED_STATE_REASON
+                } else {
+                    IMPORT_GATE_REJECTED_TRACKED_STATE_REASON
+                }),
+                warning_timeout
+                    .map(String::as_str)
+                    .or_else(|| td.status_messages.first().map(String::as_str)),
+            )
+        } else {
+            (None, None)
+        };
         persist_tracked_download_state_marker(app, td, state, reason, detail).await
     }
 

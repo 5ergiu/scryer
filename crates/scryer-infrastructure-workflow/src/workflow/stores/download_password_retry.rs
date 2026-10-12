@@ -118,7 +118,6 @@ impl DownloadSubmissionStore {
         let observation = observation.clone();
         SqlRuntime::run_in_transaction(&self.datastore, "confirm_download_password_retry", move |tx| {
             let observation = observation.clone();
-            let state = state.clone();
             Box::pin(async move {
                 let id = observation.claim.download_id.to_string();
                 super::import_store::lock_retry_download(tx, &id).await?;

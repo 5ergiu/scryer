@@ -590,15 +590,14 @@ mod tests {
         }
     }
 
-    /// Spawn the worker over `source`; returns its fire stream and handles.
-    fn spawn_worker(
-        scheduler: &CustomJobScheduler,
-        source: Arc<CountingSource>,
-    ) -> (
+    type WorkerHandles = (
         tokio::sync::mpsc::UnboundedReceiver<(DateTime<Utc>, DueCustomJob)>,
         tokio_util::sync::CancellationToken,
         tokio::task::JoinHandle<()>,
-    ) {
+    );
+
+    /// Spawn the worker over `source`; returns its fire stream and handles.
+    fn spawn_worker(scheduler: &CustomJobScheduler, source: Arc<CountingSource>) -> WorkerHandles {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
         let dispatcher = RecordingDispatcher {

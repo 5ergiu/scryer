@@ -30,6 +30,12 @@
       "MinPostTime": 1706659200,
       "MaxPostTime": 1706745600,
       "HistoryTime": 1706832000,
+      "ParStatus": "SUCCESS",
+      "UnpackStatus": "SUCCESS",
+      "MoveStatus": "SUCCESS",
+      "ScriptStatus": "NONE",
+      "DeleteStatus": "NONE",
+      "UrlStatus": "NONE",
       "MarkStatus": "NONE",
       "Parameters": [
         {"Name": "*scryer_title_id", "Value": "test-title-id"},
@@ -64,6 +70,12 @@
       "MinPostTime": 1706659200,
       "MaxPostTime": 1706745600,
       "HistoryTime": 1706745600,
+      "ParStatus": "NONE",
+      "UnpackStatus": "NONE",
+      "MoveStatus": "NONE",
+      "ScriptStatus": "NONE",
+      "DeleteStatus": "HEALTH",
+      "UrlStatus": "NONE",
       "MarkStatus": "NONE",
       "Parameters": []
     }

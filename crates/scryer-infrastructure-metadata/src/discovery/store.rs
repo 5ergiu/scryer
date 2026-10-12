@@ -9520,6 +9520,12 @@ mod tests {
             .execute(&services.pool)
             .await
             .expect("index drop should succeed");
+        // Migration 0276 also indexes recommendation_score. Rewind that
+        // dependent index before restoring the pre-0238 column layout.
+        sqlx::query("DROP INDEX IF EXISTS idx_discovery_items_generation_relevance")
+            .execute(&services.pool)
+            .await
+            .expect("dependent index drop should succeed");
         for statement in [
             "ALTER TABLE discovery_items DROP COLUMN recommendation_score",
             "ALTER TABLE discovery_items DROP COLUMN base_rank",
@@ -9529,7 +9535,7 @@ mod tests {
                 .await
                 .expect("column drop should succeed");
         }
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 238")
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (238, 276)")
             .execute(&services.pool)
             .await
             .expect("ledger rewind should succeed");
@@ -9551,6 +9557,18 @@ mod tests {
                 .any(|column| column == "recommendation_score")
                 && columns.iter().any(|column| column == "base_rank"),
             "0238 must restore both columns on an existing database: {columns:?}"
+        );
+        let restored_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN \
+             ('idx_discovery_items_generation_recommendation', \
+              'idx_discovery_items_generation_relevance')",
+        )
+        .fetch_one(&services.pool)
+        .await
+        .expect("restored index lookup should succeed");
+        assert_eq!(
+            restored_indexes, 2,
+            "both dependent indexes must be restored"
         );
 
         let _ = std::fs::remove_file(db);

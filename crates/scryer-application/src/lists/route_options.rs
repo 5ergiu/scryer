@@ -18,62 +18,6 @@ use crate::media_requests::{
 
 const SEASON_FOLDER_TAG_PREFIX: &str = "scryer:season-folder:";
 
-#[cfg(test)]
-mod episode_policy_tests {
-    use super::*;
-
-    #[test]
-    fn list_episode_policies_reuse_title_overrides_and_keep_facets_isolated() {
-        let filters = vec![
-            ListFilter::MonitorSpecials {
-                facet: MediaFacet::Series,
-                enabled: false,
-            },
-            ListFilter::MonitorSpecials {
-                facet: MediaFacet::Anime,
-                enabled: true,
-            },
-            ListFilter::FillerPolicy {
-                facet: MediaFacet::Anime,
-                skip: true,
-            },
-            ListFilter::RecapPolicy {
-                facet: MediaFacet::Anime,
-                skip: false,
-            },
-        ];
-        assert_eq!(
-            episode_policy_tags(&filters, &MediaFacet::Series),
-            vec!["scryer:monitor-specials:false"]
-        );
-        assert_eq!(
-            episode_policy_tags(&filters, &MediaFacet::Anime),
-            vec![
-                "scryer:filler-policy:skip_filler",
-                "scryer:monitor-specials:true",
-                "scryer:recap-policy:download_all",
-            ]
-        );
-        assert!(episode_policy_tags(&filters, &MediaFacet::Movie).is_empty());
-        assert!(episode_policy_tags(&[], &MediaFacet::Anime).is_empty());
-    }
-
-    #[test]
-    fn list_episode_policy_json_round_trip_preserves_explicit_download_all() {
-        let filters = vec![ListFilter::FillerPolicy {
-            facet: MediaFacet::Anime,
-            skip: false,
-        }];
-        let json = serde_json::to_string(&filters).unwrap();
-        let restored: Vec<ListFilter> = serde_json::from_str(&json).unwrap();
-        assert_eq!(filters, restored);
-        assert_eq!(
-            episode_policy_tags(&restored, &MediaFacet::Anime),
-            vec!["scryer:filler-policy:download_all"]
-        );
-    }
-}
-
 /// Reuse the title overrides consumed by the ordinary metadata hydration and
 /// wanted policies. Absence preserves library inheritance.
 pub(crate) fn episode_policy_tags(filters: &[ListFilter], facet: &MediaFacet) -> Vec<String> {
@@ -303,5 +247,61 @@ impl AppUseCase {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod episode_policy_tests {
+    use super::*;
+
+    #[test]
+    fn list_episode_policies_reuse_title_overrides_and_keep_facets_isolated() {
+        let filters = vec![
+            ListFilter::MonitorSpecials {
+                facet: MediaFacet::Series,
+                enabled: false,
+            },
+            ListFilter::MonitorSpecials {
+                facet: MediaFacet::Anime,
+                enabled: true,
+            },
+            ListFilter::FillerPolicy {
+                facet: MediaFacet::Anime,
+                skip: true,
+            },
+            ListFilter::RecapPolicy {
+                facet: MediaFacet::Anime,
+                skip: false,
+            },
+        ];
+        assert_eq!(
+            episode_policy_tags(&filters, &MediaFacet::Series),
+            vec!["scryer:monitor-specials:false"]
+        );
+        assert_eq!(
+            episode_policy_tags(&filters, &MediaFacet::Anime),
+            vec![
+                "scryer:filler-policy:skip_filler",
+                "scryer:monitor-specials:true",
+                "scryer:recap-policy:download_all",
+            ]
+        );
+        assert!(episode_policy_tags(&filters, &MediaFacet::Movie).is_empty());
+        assert!(episode_policy_tags(&[], &MediaFacet::Anime).is_empty());
+    }
+
+    #[test]
+    fn list_episode_policy_json_round_trip_preserves_explicit_download_all() {
+        let filters = vec![ListFilter::FillerPolicy {
+            facet: MediaFacet::Anime,
+            skip: false,
+        }];
+        let json = serde_json::to_string(&filters).unwrap();
+        let restored: Vec<ListFilter> = serde_json::from_str(&json).unwrap();
+        assert_eq!(filters, restored);
+        assert_eq!(
+            episode_policy_tags(&restored, &MediaFacet::Anime),
+            vec!["scryer:filler-policy:download_all"]
+        );
     }
 }

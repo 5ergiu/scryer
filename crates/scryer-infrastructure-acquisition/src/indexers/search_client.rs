@@ -844,9 +844,7 @@ impl SearchDiagnosticsContext {
         config: &IndexerConfig,
         search_semantics_version: Option<u32>,
         learning_context: Option<&IndexerSearchLearningContext>,
-        season: Option<u32>,
-        episode: Option<u32>,
-        absolute_episode: Option<u32>,
+        (season, episode, absolute_episode): (Option<u32>, Option<u32>, Option<u32>),
         background: bool,
     ) -> Option<Self> {
         let learning_context = learning_context?;
@@ -6029,9 +6027,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                 self.plugin_provider
                     .search_semantics_version_for_provider(&config.provider_type),
                 learning_context.as_ref(),
-                season,
-                episode,
-                absolute_episode,
+                (season, episode, absolute_episode),
                 candidate_reuse_permitted(mode, learning_context.as_ref()),
             );
             // Corpus reuse is opt-in per pass: only the background convergence
@@ -7205,9 +7201,16 @@ response.next_cursor.is_some(),
             .iter()
             .filter_map(|config| config.proxy_config_id.clone())
         {
-            if !proxy_configs_by_id.contains_key(&proxy_id) {
-                let proxy = self.proxy_configs.get_by_id(&proxy_id).await.ok().flatten();
-                proxy_configs_by_id.insert(proxy_id, proxy);
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                proxy_configs_by_id.entry(proxy_id)
+            {
+                let proxy = self
+                    .proxy_configs
+                    .get_by_id(entry.key())
+                    .await
+                    .ok()
+                    .flatten();
+                entry.insert(proxy);
             }
         }
         let request = RawTextSearchRequest {
@@ -15890,11 +15893,11 @@ mod tests {
                     retry_at: run.retry_at,
                     created_at: run.created_at,
                     page_cursor: run.page_cursor.clone(),
-                    chain_run_ids: run
-                        .cursor_chain_id
-                        .is_some()
-                        .then(|| vec![run.id.clone()])
-                        .unwrap_or_default(),
+                    chain_run_ids: if run.cursor_chain_id.is_some() {
+                        vec![run.id.clone()]
+                    } else {
+                        Vec::new()
+                    },
                     cursor_chain_id: run.cursor_chain_id.clone(),
                     branch: run.branch.clone(),
                 });

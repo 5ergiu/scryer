@@ -404,10 +404,10 @@ impl AppUseCase {
         }
         self.require_personal_lists_allowed(actor).await?;
         let (_guard, mut row) = self.lock_personal_subscription(actor, id).await?;
-        if let Some(name) = patch.name {
-            if !name.trim().is_empty() {
-                row.name = name;
-            }
+        if let Some(name) = patch.name
+            && !name.trim().is_empty()
+        {
+            row.name = name;
         }
         if let Some(kinds) = patch.kinds {
             row.kinds = kinds;

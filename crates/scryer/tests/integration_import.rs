@@ -395,6 +395,18 @@ fn copy_fixture(dest_dir: &Path, fixture_name: &str, dest_name: &str) -> PathBuf
     dest
 }
 
+// Committed one-second black H.264/AAC clips with actual HD dimensions.
+// Generated with FFmpeg color/anullsrc, libx264 (ultrafast, CRF 28), yuv420p,
+// 24 fps and stereo AAC at 48 kHz; tests do not invoke FFmpeg.
+fn copy_import_fixture(dest_dir: &Path, resolution: u32, dest_name: &str) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/import")
+        .join(format!("h264_{resolution}p_aac.mkv"));
+    let dest = dest_dir.join(dest_name);
+    std::fs::copy(source, &dest).expect("copy HD import fixture");
+    dest
+}
+
 async fn seed_movie_wanted_item(
     ctx: &TestContext,
     title_id: &str,
@@ -761,9 +773,9 @@ async fn run_completed_download_series_import_stack_probe() {
     let user = ctx.app.find_or_create_default_user().await.unwrap();
 
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    let source_video = copy_fixture(
+    let source_video = copy_import_fixture(
         source_dir.path(),
-        "h264_aac.mkv",
+        720,
         "Bluey.S01E01.720p.WEB-DL.H264.AAC2.0.mkv",
     );
     pad_file_past_series_sample_threshold(&source_video);
@@ -1071,7 +1083,7 @@ async fn import_movie_decypharr_symlink_release_folder_succeeds() {
     let file_name = format!("{release_name}.mkv");
 
     let backing_dir = tempfile::tempdir().expect("backing tempdir");
-    let backing_video = copy_fixture(backing_dir.path(), "h264_aac.mkv", &file_name);
+    let backing_video = copy_import_fixture(backing_dir.path(), 1080, &file_name);
 
     let symlink_root = tempfile::tempdir().expect("symlink root tempdir");
     let release_dir = symlink_root.path().join("radarr").join(release_name);
@@ -1135,7 +1147,7 @@ async fn import_movie_decypharr_symlink_release_folder_uses_remote_path_mapping(
     let file_name = format!("{release_name}.mkv");
 
     let backing_dir = tempfile::tempdir().expect("backing tempdir");
-    let backing_video = copy_fixture(backing_dir.path(), "h264_aac.mkv", &file_name);
+    let backing_video = copy_import_fixture(backing_dir.path(), 1080, &file_name);
 
     let local_symlink_root = tempfile::tempdir().expect("local symlink root tempdir");
     let local_category_root = local_symlink_root.path().join("radarr");
@@ -1225,9 +1237,9 @@ async fn import_movie_succeeds_and_copies_file() {
 
     // Source: a temp dir containing a plausible movie .mkv file.
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    copy_fixture(
+    copy_import_fixture(
         source_dir.path(),
-        "h264_aac.mkv",
+        1080,
         "Test.Movie.2024.1080p.WEB-DL.H264.mkv",
     );
 
@@ -1284,9 +1296,8 @@ async fn import_movie_second_attempt_is_deduped() {
     let user = ctx.app.find_or_create_default_user().await.unwrap();
 
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    // The one-second 128x72 fixture makes no HD claim: this test exercises
-    // import idempotency, not rejection of implausibly small 1080p payloads.
-    copy_fixture(source_dir.path(), "h264_aac.mkv", "Movie.2024.mkv");
+    // Keep release and probed quality consistent so this exercises deduplication.
+    copy_import_fixture(source_dir.path(), 1080, "Movie.2024.1080p.WEB-DL.H264.mkv");
 
     let dest_root = tempfile::tempdir().expect("dest tempdir");
     let title = add_movie_title(
@@ -1536,14 +1547,14 @@ async fn automatic_import_series_pack_imports_every_episode_from_the_bounded_dir
     let app = app_with_real_imports(&ctx).await;
     let user = ctx.app.find_or_create_default_user().await.unwrap();
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    let source_file_1 = copy_fixture(
+    let source_file_1 = copy_import_fixture(
         source_dir.path(),
-        "h264_aac.mkv",
+        1080,
         "Pack.Show.S01E01.1080p.WEB-DL.H264.mkv",
     );
-    let source_file_2 = copy_fixture(
+    let source_file_2 = copy_import_fixture(
         source_dir.path(),
-        "h264_aac.mkv",
+        1080,
         "Pack.Show.S01E02.1080p.WEB-DL.H264.mkv",
     );
     pad_file_past_series_sample_threshold(&source_file_1);
@@ -2392,7 +2403,11 @@ async fn import_upgrade_event_carries_the_import_identity_of_its_import_complete
         .join("Upgrade Identity Movie (2024)")
         .join("Upgrade.Identity.Movie.2024.720p.WEB-DL.H264.mkv");
     std::fs::create_dir_all(old_path.parent().expect("old path parent")).expect("create old dir");
-    std::fs::copy(mediainfo_fixture("h264_aac.mkv"), &old_path).expect("seed old movie file");
+    copy_import_fixture(
+        old_path.parent().expect("old path parent"),
+        720,
+        old_path.file_name().unwrap().to_str().unwrap(),
+    );
     ctx.media_files
         .insert_media_file(&scryer_application::InsertMediaFileInput {
             title_id: title.id.clone(),
@@ -2406,9 +2421,9 @@ async fn import_upgrade_event_carries_the_import_identity_of_its_import_complete
         .expect("insert old media file");
 
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    copy_fixture(
+    copy_import_fixture(
         source_dir.path(),
-        "h264_aac.mkv",
+        1080,
         "Upgrade.Identity.Movie.2024.1080p.WEB-DL.H264.mkv",
     );
     let completed = scryer_completed(
@@ -3064,7 +3079,7 @@ async fn automatic_import_places_a_fully_obfuscated_pack_from_srrdb_recovered_na
         .iter()
         .enumerate()
         .map(|(index, member)| {
-            let path = copy_fixture(&source_dir, "h264_aac.mkv", member);
+            let path = copy_import_fixture(&source_dir, 1080, member);
             pad_file_to(&path, (52 + index as u64) * 1024 * 1024)
         })
         .collect();
@@ -3154,7 +3169,7 @@ async fn automatic_import_places_an_obfuscated_pack_under_a_properly_named_relea
     std::fs::create_dir(&source_dir).expect("create named release folder");
     let members: Vec<PathBuf> = OBFUSCATED_PACK
         .iter()
-        .map(|member| copy_fixture(&source_dir, "h264_aac.mkv", member))
+        .map(|member| copy_import_fixture(&source_dir, 1080, member))
         .collect();
     let sizes: Vec<u64> = members
         .iter()
@@ -3253,7 +3268,7 @@ async fn automatic_import_parks_the_pack_member_srrdb_cannot_recover() {
         .iter()
         .enumerate()
         .map(|(index, member)| {
-            let path = copy_fixture(&source_dir, "h264_aac.mkv", member);
+            let path = copy_import_fixture(&source_dir, 1080, member);
             pad_file_to(&path, (55 + index as u64) * 1024 * 1024)
         })
         .collect();
@@ -3402,7 +3417,7 @@ async fn a_titleless_obfuscated_download_matches_and_imports_on_its_recovered_na
     let source_root = tempfile::tempdir().expect("source tempdir");
     let source_dir = source_root.path().join("a7b8c9d0e1f2a3b4c5d6");
     std::fs::create_dir(&source_dir).expect("create obfuscated release folder");
-    let source_file = copy_fixture(&source_dir, "h264_aac.mkv", OBFUSCATED_PACK[0]);
+    let source_file = copy_import_fixture(&source_dir, 1080, OBFUSCATED_PACK[0]);
     let size = pad_file_to(&source_file, 61 * 1024 * 1024);
     let lookup = RecordingSrrdbLookup::new(&[(
         size,

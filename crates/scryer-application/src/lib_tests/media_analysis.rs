@@ -291,7 +291,7 @@ async fn grab_compares_an_incoming_release_against_a_file_awaiting_review() {
         &policy,
     );
     assert!(better.is_admitted());
-    assert_eq!(better.superseded(), [id.clone()]);
+    assert_eq!(better.superseded(), std::slice::from_ref(&id));
 
     let worse = crate::admission::evaluate_admission(
         &subject,

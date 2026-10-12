@@ -691,7 +691,7 @@ pub async fn release_held_import_sources(
     let settlement = settle_tracked_download(
         app,
         &record,
-        canonical_download_id.clone(),
+        canonical_download_id,
         held_release_verification(&pending),
     )
     .await;

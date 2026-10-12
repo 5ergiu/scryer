@@ -677,15 +677,14 @@ impl NzbgetDownloadClient {
             }
             if extract_i64_value(group.get("MaxPriority").or_else(|| group.get("Priority")))
                 .is_some_and(|priority| priority >= 900)
-            {
-                if let Some(id) = extract_i64_value(
+                && let Some(id) = extract_i64_value(
                     group
                         .get("NZBID")
                         .or_else(|| group.get("nzbId"))
                         .or_else(|| group.get("ID")),
-                ) {
-                    forced_ids.insert(id.to_string());
-                }
+                )
+            {
+                forced_ids.insert(id.to_string());
             }
         }
 
@@ -2503,16 +2502,15 @@ fn validate_nzbget_state_alias(
     upper: &str,
     lower: &str,
 ) -> AppResult<()> {
-    if let (Some(a), Some(b)) = (entry.get(upper), entry.get(lower)) {
-        if !a
+    if let (Some(a), Some(b)) = (entry.get(upper), entry.get(lower))
+        && !a
             .as_str()
             .zip(b.as_str())
             .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
-        {
-            return Err(AppError::Repository(format!(
-                "conflicting NZBGet {upper} fields"
-            )));
-        }
+    {
+        return Err(AppError::Repository(format!(
+            "conflicting NZBGet {upper} fields"
+        )));
     }
     Ok(())
 }

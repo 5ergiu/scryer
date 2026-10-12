@@ -5443,7 +5443,10 @@ mod tests {
                 set_provider_type(&mut second.descriptor, "other-archive-type");
             }
             let provider = DynamicArchiveExtractorPluginProvider::new(
-                build_archive_extractor_plugin_provider_from_runtime_plugins(&[first.clone()], &[]),
+                build_archive_extractor_plugin_provider_from_runtime_plugins(
+                    std::slice::from_ref(&first),
+                    &[],
+                ),
             );
             provider
                 .select_for_format(ArchivePluginFormat::Rar)

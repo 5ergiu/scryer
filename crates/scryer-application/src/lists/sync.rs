@@ -337,16 +337,13 @@ pub async fn sync_subscription(
     let mut config = context
         .provider_configs
         .for_provider(context.plugins, &subscription.source.provider);
-    if let Some(id) = subscription.credential_id.as_deref() {
-        if let Some(account) = context.accounts.get_by_id(id).await? {
-            if account.user_id == subscription.owner_user_id
-                && account.provider == subscription.source.provider
-            {
-                if let Some(id) = account.credential.client_id {
-                    config.insert("client_id".into(), id);
-                }
-            }
-        }
+    if let Some(id) = subscription.credential_id.as_deref()
+        && let Some(account) = context.accounts.get_by_id(id).await?
+        && account.user_id == subscription.owner_user_id
+        && account.provider == subscription.source.provider
+        && let Some(id) = account.credential.client_id
+    {
+        config.insert("client_id".into(), id);
     }
     let mut fetched = match fetch_list(
         subscription,
@@ -937,20 +934,17 @@ async fn record_failure(
     now: DateTime<Utc>,
     failure: ListFailure,
 ) -> AppResult<SubscriptionSyncOutcome> {
-    if subscription.is_personal() && matches!(failure.class, ListFailureClass::Unauthorized) {
-        if let Some(id) = subscription.credential_id.as_deref() {
-            if let Some(mut account) = context.accounts.get_by_id(id).await? {
-                if account.user_id == subscription.owner_user_id
-                    && account.provider == subscription.source.provider
-                {
-                    account.status = scryer_domain::UserListAccountStatus::Expired;
-                    account.error_message =
-                        Some("Reconnect this list account to resume syncing.".into());
-                    account.updated_at = now;
-                    context.accounts.update(account).await?;
-                }
-            }
-        }
+    if subscription.is_personal()
+        && matches!(failure.class, ListFailureClass::Unauthorized)
+        && let Some(id) = subscription.credential_id.as_deref()
+        && let Some(mut account) = context.accounts.get_by_id(id).await?
+        && account.user_id == subscription.owner_user_id
+        && account.provider == subscription.source.provider
+    {
+        account.status = scryer_domain::UserListAccountStatus::Expired;
+        account.error_message = Some("Reconnect this list account to resume syncing.".into());
+        account.updated_at = now;
+        context.accounts.update(account).await?;
     }
     let next_at = next_sync_at(subscription, now);
     let paused_until = match failure.class {
