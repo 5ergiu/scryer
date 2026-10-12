@@ -10,7 +10,6 @@ import {
 import {
   clearTitleImageCacheMutation,
   rehydrateAllMetadataMutation,
-  setMyUiSettingsMutation,
   updateGeneralSettingsMutation,
   updateVerificationSettingsMutation,
 } from "@/lib/graphql/mutations";
@@ -67,6 +66,7 @@ export function SettingsOverviewContainer({
     uiSettingsLoaded,
     uiSettingsLoading,
     setUiSettings,
+    saveUiSettings,
   } = useUiSettings();
   const refreshInstanceFeatures = useRefreshInstanceFeatures();
   const [pendingLanguage, setPendingLanguage] = React.useState<string | null>(null);
@@ -224,11 +224,9 @@ export function SettingsOverviewContainer({
       };
       setUiSettingsSaving(true);
       try {
-        const { data, error } = await client
-          .mutation<{ setMyUiSettings: UiSettings }>(setMyUiSettingsMutation, {
-            input: uiSettingsInputFromSettings(nextSettings),
-          })
-          .toPromise();
+        const { data, error } = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, dateTimeFormat }),
+        );
         if (error) throw error;
         setUiSettings(data?.setMyUiSettings ?? nextSettings);
         setGlobalStatus(t("settings.uiSaved"), { level: "SUCCESS" });
@@ -242,7 +240,7 @@ export function SettingsOverviewContainer({
       }
     },
     [
-      client,
+      saveUiSettings,
       setGlobalStatus,
       setUiSettings,
       t,

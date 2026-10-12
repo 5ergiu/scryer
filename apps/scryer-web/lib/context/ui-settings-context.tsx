@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useTheme } from "next-themes";
-import { useClient } from "urql";
+import { useClient, type OperationResult } from "urql";
+import { setMyUiSettingsMutation } from "@/lib/graphql/mutations";
 import { myUiSettingsQuery } from "@/lib/graphql/queries";
 import { AUTH_SESSION_CHANGED_EVENT, getAuthToken } from "@/lib/hooks/use-auth";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
@@ -30,7 +31,13 @@ type UiSettingsContextValue = {
   uiSettingsLoadError: string | null;
   setUiSettings: (settings: UiSettings) => void;
   refreshUiSettings: () => Promise<void>;
+  saveUiSettings: (build: (latest: UiSettings) => SetMyUiSettingsInput) => Promise<UiSettingsSaveResult>;
 };
+
+export type UiSettingsSaveResult = OperationResult<
+  { setMyUiSettings?: UiSettings },
+  { input: SetMyUiSettingsInput }
+>;
 
 export const UiSettingsContext = React.createContext<UiSettingsContextValue | null>(null);
 
@@ -89,7 +96,15 @@ export function uiSettingsInputFromSettings(
 export function UiSettingsProvider({ children }: { children: React.ReactNode }) {
   const client = useClient();
   const { resolvedTheme, theme } = useTheme();
-  const [uiSettings, setUiSettings] = React.useState<UiSettings>(DEFAULT_UI_SETTINGS);
+  const [uiSettings, setUiSettingsState] = React.useState<UiSettings>(DEFAULT_UI_SETTINGS);
+  // The settings as last set, ahead of the render that shows them, so a
+  // queued save builds its input from every change made before it ran.
+  const latestUiSettingsRef = React.useRef<UiSettings>(DEFAULT_UI_SETTINGS);
+  const setUiSettings = React.useCallback((settings: UiSettings) => {
+    latestUiSettingsRef.current = settings;
+    setUiSettingsState(settings);
+  }, []);
+  const saveQueueRef = React.useRef<Promise<void> | null>(null);
   const [uiSettingsLoading, setUiSettingsLoading] = React.useState(true);
   const [uiSettingsLoaded, setUiSettingsLoaded] = React.useState(false);
   const [uiSettingsLoadError, setUiSettingsLoadError] = React.useState<string | null>(null);
@@ -133,11 +148,40 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
         setUiSettingsLoading(false);
       }
     }
-  }, [client]);
+  }, [client, setUiSettings]);
 
   const refreshUiSettings = React.useCallback(
     () => loadUiSettings(),
     [loadUiSettings],
+  );
+
+  // setMyUiSettings replaces every field it is given, so saves go out one
+  // at a time and each builds its input once the saves before it settled:
+  // a later save never resends a field an earlier one is still changing.
+  const saveUiSettings = React.useCallback(
+    (build: (latest: UiSettings) => SetMyUiSettingsInput): Promise<UiSettingsSaveResult> => {
+      const send = () =>
+        client
+          .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
+            setMyUiSettingsMutation,
+            { input: build(latestUiSettingsRef.current) },
+          )
+          .toPromise();
+      const previous = saveQueueRef.current;
+      const run = previous ? previous.then(send) : send();
+      const tail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      saveQueueRef.current = tail;
+      void tail.then(() => {
+        if (saveQueueRef.current === tail) {
+          saveQueueRef.current = null;
+        }
+      });
+      return run;
+    },
+    [client],
   );
 
   React.useEffect(() => {
@@ -178,9 +222,12 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
       uiSettingsLoadError,
       setUiSettings,
       refreshUiSettings,
+      saveUiSettings,
     }),
     [
       refreshUiSettings,
+      saveUiSettings,
+      setUiSettings,
       uiSettings,
       uiSettingsLoaded,
       uiSettingsLoadError,

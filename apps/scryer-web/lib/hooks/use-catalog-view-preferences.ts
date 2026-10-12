@@ -52,6 +52,9 @@ export function useCatalogViewPreferences(
     Record<string, TitleTableVisibleColumns>
   >({});
   const saveSequenceRef = React.useRef(0);
+  // Saves run one at a time so the newest choice is the last write the
+  // server commits.
+  const saveChainRef = React.useRef<Promise<void>>(Promise.resolve());
 
   const isSupported = React.useCallback(
     (key: TitleTableColumnKey) => isTitleTableColumnSupportedForView(key, view),
@@ -107,21 +110,22 @@ export function useCatalogViewPreferences(
         return;
       }
       const sequence = ++saveSequenceRef.current;
-      void client
-        .mutation<{ setMyCatalogView?: UiSettings }, { input: SetMyCatalogViewInput }>(
-          setMyCatalogViewMutation,
-          { input },
-        )
-        .toPromise()
-        .then((result) => {
-          if (result.error || !result.data?.setMyCatalogView) {
-            toast.error(t("status.catalogViewSaveFailed"));
-            return;
-          }
-          if (sequence === saveSequenceRef.current) {
-            setUiSettings(result.data.setMyCatalogView);
-          }
-        });
+      saveChainRef.current = saveChainRef.current.then(async () => {
+        const result = await client
+          .mutation<{ setMyCatalogView?: UiSettings }, { input: SetMyCatalogViewInput }>(
+            setMyCatalogViewMutation,
+            { input },
+          )
+          .toPromise()
+          .catch(() => null);
+        if (!result || result.error || !result.data?.setMyCatalogView) {
+          toast.error(t("status.catalogViewSaveFailed"));
+          return;
+        }
+        if (sequence === saveSequenceRef.current) {
+          setUiSettings(result.data.setMyCatalogView);
+        }
+      });
     },
     [client, setUiSettings, t, uiSettingsLoaded],
   );

@@ -228,6 +228,23 @@ function openTab(options: {
     return module.exports;
   }
 
+  // Stands in for the context's queued save: the input is built from the
+  // profile as it stands when the save goes out.
+  const saveUiSettings = (build: (latest: Settings) => { language?: string }) => {
+    let resolve: (result: SaveResult) => void = () => {};
+    const done = new Promise<SaveResult>((settle) => {
+      resolve = settle;
+    });
+    saves.push({
+      language: build(profile.uiSettings).language,
+      settle: (result) => {
+        resolve(result);
+        return done;
+      },
+    });
+    return done;
+  };
+
   const i18n = load(path.join(webRoot, "lib/i18n/index.ts"), {});
   const overrides: Record<string, unknown> = {
     "@/lib/i18n": {
@@ -255,31 +272,12 @@ function openTab(options: {
       uiSettingsInputFromSettings: (_settings: Settings, language?: string) => ({ language }),
       useUiSettings: () => ({
         ...profile,
+        saveUiSettings,
         setUiSettings: (settings: Settings) => {
           profile = { ...profile, uiSettings: settings };
           markAllDirty();
           scheduleFlush();
         },
-      }),
-    },
-    urql: {
-      useClient: () => ({
-        mutation: (_query: string, variables: { input: { language?: string } }) => ({
-          toPromise: () => {
-            let resolve: (result: SaveResult) => void = () => {};
-            const done = new Promise<SaveResult>((settle) => {
-              resolve = settle;
-            });
-            saves.push({
-              language: variables.input.language,
-              settle: (result) => {
-                resolve(result);
-                return done;
-              },
-            });
-            return done;
-          },
-        }),
       }),
     },
     sonner: { toast: { error: (message: string) => toasts.push(message) } },

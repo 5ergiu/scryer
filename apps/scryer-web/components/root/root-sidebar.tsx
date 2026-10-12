@@ -1,6 +1,5 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { useClient } from "urql";
 import type {
   ActivitySection,
   ContentSettingsSection,
@@ -72,7 +71,6 @@ import { getRuntimeBasePath } from "@/lib/runtime-config";
 import { cn } from "@/lib/utils";
 import type { PendingImportCounts } from "@/lib/types";
 import { pendingImportCountForView } from "@/lib/types";
-import { setMyUiSettingsMutation } from "@/lib/graphql/mutations";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useExperimentalFeaturesEnabled, useInstanceFeatures } from "@/lib/context/instance-features-context";
 import {
@@ -80,7 +78,7 @@ import {
   uiSettingsInputFromSettings,
 } from "@/lib/context/ui-settings-context";
 import type { AuthUser } from "@/lib/hooks/use-auth";
-import type { SetMyUiSettingsInput, UiSettings } from "@/lib/types/settings";
+import type { UiSettings } from "@/lib/types/settings";
 import {
   APP_PERMISSIONS,
   LIBRARY_PERMISSIONS,
@@ -670,7 +668,6 @@ function RootSidebarContent({
   children,
   onNavigate,
 }: RootSidebarProps) {
-  const client = useClient();
   const t = useTranslate();
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const { apiExplorerEnabled } = useInstanceFeatures();
@@ -682,6 +679,7 @@ function RootSidebarContent({
     uiSettingsLoaded,
     uiSettingsLoading,
     setUiSettings,
+    saveUiSettings,
   } = useUiSettings();
   const themeSaveSequenceRef = React.useRef(0);
   const [themeMounted, setThemeMounted] = React.useState(false);
@@ -722,12 +720,7 @@ function RootSidebarContent({
     const previous = uiSettings;
     const next: UiSettings = { ...uiSettings, theme: toUiThemeValue(nextTheme) };
     setUiSettings(next);
-    void client
-      .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
-        setMyUiSettingsMutation,
-        { input: uiSettingsInputFromSettings(next) },
-      )
-      .toPromise()
+    void saveUiSettings((latest) => uiSettingsInputFromSettings({ ...latest, theme: next.theme }))
       .then((result) => {
         if (themeSaveSequenceRef.current !== requestId) return;
         if (result.error || !result.data?.setMyUiSettings) {
@@ -748,7 +741,7 @@ function RootSidebarContent({
         );
       });
   }, [
-    client,
+    saveUiSettings,
     setGlobalStatus,
     setTheme,
     setUiSettings,

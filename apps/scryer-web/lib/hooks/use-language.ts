@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useClient } from "urql";
 import {
   AVAILABLE_LANGUAGES,
   DEFAULT_LANGUAGE,
@@ -17,8 +16,6 @@ import {
   uiSettingsInputFromSettings,
   useUiSettings,
 } from "@/lib/context/ui-settings-context";
-import { setMyUiSettingsMutation } from "@/lib/graphql/mutations";
-import type { SetMyUiSettingsInput, UiSettings } from "@/lib/types/settings";
 import { parseLanguageFromParam } from "@/lib/utils/routing";
 import { toast } from "sonner";
 
@@ -122,8 +119,8 @@ type UseLanguageOptions = {
 
 export function useLanguage(searchParams: URLSearchParams, options: UseLanguageOptions = {}) {
   const onLanguageSet = options.onLanguageSet;
-  const client = useClient();
-  const { uiSettings, uiSettingsLoaded, uiSettingsLoadError, setUiSettings } = useUiSettings();
+  const { uiSettings, uiSettingsLoaded, uiSettingsLoadError, setUiSettings, saveUiSettings } =
+    useUiSettings();
   // Undefined while the signed-in profile is loading. A failed load has no
   // profile language to wait for, so the last one this browser saw stops
   // standing in for it.
@@ -163,12 +160,9 @@ export function useLanguage(searchParams: URLSearchParams, options: UseLanguageO
       const saveSequence = ++profileLanguageSaveSequence;
       writeStorageItem("local", UI_LANGUAGE_PROFILE_HINT_KEY, code);
       setUiSettings({ ...uiSettings, language: code });
-      void client
-        .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
-          setMyUiSettingsMutation,
-          { input: uiSettingsInputFromSettings(uiSettings, code) },
-        )
-        .toPromise()
+      // The other fields come from the settings as they stand when the save
+      // runs, so a theme or density save still in flight is not undone.
+      void saveUiSettings((latest) => uiSettingsInputFromSettings(latest, code))
         .then((result) => {
           if (saveSequence !== profileLanguageSaveSequence) {
             return;
@@ -182,7 +176,7 @@ export function useLanguage(searchParams: URLSearchParams, options: UseLanguageO
           setUiSettings(result.data.setMyUiSettings);
         });
     },
-    [client, setUiSettings, uiSettings],
+    [saveUiSettings, setUiSettings, uiSettings],
   );
 
   // An explicit choice ends any `?lang=` override for the tab, is kept for
