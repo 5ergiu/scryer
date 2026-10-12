@@ -1543,6 +1543,16 @@ fn host_search_response(
         response,
         completion,
     } = response;
+    // A successful page is not a completed search. This boundary also handles
+    // strategy-plan events from artifacts whose embedded capability was lost.
+    let completion = if response.next_cursor.is_some() && completion.is_complete() {
+        IndexerSearchCompletion::Partial {
+            reason: None,
+            retry_after: None,
+        }
+    } else {
+        completion
+    };
     let source = format!(
         "{} ({})",
         client.indexer_name,
@@ -1917,9 +1927,8 @@ impl WasmIndexerClient {
             }
             Err(error) => return Err(error),
         };
-        let mut response = response;
-        // Only a paged plugin's cursor is followed.
-        response.response.next_cursor = None;
+        // Preserve unexpected cursors too: the boundary below must not mistake
+        // a successful page from a misdeclared plugin for an exhausted search.
         Ok(host_search_response(self, response))
     }
 }

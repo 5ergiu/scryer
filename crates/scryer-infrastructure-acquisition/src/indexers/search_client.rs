@@ -499,7 +499,11 @@ async fn select_reusable_strategies(
                 .map_err(|_| AppError::canceled("indexer scoring pipeline closed"))?;
         }
 
-        if state.completion_state == "complete" {
+        let unfinished = state
+            .background
+            .as_ref()
+            .is_some_and(|state| state.page_cursor.is_some());
+        if state.completion_state == "complete" && !unfinished {
             selection.complete_count += 1;
             continue;
         }
@@ -10499,6 +10503,57 @@ mod tests {
         // ceiling.
         let mut background = ContainedStrategyTracker::new(true, &HashMap::new());
         assert!(background.observe("ids", &stopped, false).is_some());
+    }
+
+    #[tokio::test]
+    async fn contradictory_complete_cursor_is_never_reused_as_exhausted() {
+        for stale in [false, true] {
+            for budget in [None, Some(BACKGROUND_PAGES_PER_PASS)] {
+                let mut reusable = HashMap::from([(
+                    "resumed".to_string(),
+                    ReusableStrategyState {
+                        completion_state: "complete".into(),
+                        retry_at: None,
+                        candidates: vec![],
+                        background: Some(BackgroundIndexerSearchStrategyState {
+                            query_signature: String::new(),
+                            strategy_state: SEARCH_STRATEGY_CONVERGED.into(),
+                            retry_at: None,
+                            created_at: Utc::now() - Duration::hours(if stale { 30 } else { 0 }),
+                            page_cursor: Some("offset:100".into()),
+                            cursor_chain_id: Some("chain".into()),
+                            chain_run_ids: vec![],
+                            branch: "ids".into(),
+                        }),
+                    },
+                )]);
+                let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+                let sink = IndexerSearchPageSink::new(sender, 1);
+                let selection = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    select_reusable_strategies(
+                        vec![prepared_strategy("resumed")],
+                        &mut reusable,
+                        "idx",
+                        &sink,
+                        budget,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(selection.complete_count, 0);
+                assert_eq!(selection.live.len(), 1);
+                assert_eq!(
+                    selection.live[0].request.page_cursor.as_deref(),
+                    if !stale && budget.is_some() {
+                        Some("offset:100")
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
     }
 
     #[tokio::test]
