@@ -1,9 +1,12 @@
 use async_graphql::Result as GqlResult;
 use scryer_domain::{ExternalId, NewTitle};
 
+use crate::context::to_gql_error;
 use crate::types::{AddTitleInput, DownloadSourceKindValue, IntoApplication};
 
 pub(crate) struct ResolvedTitleOptionsInput {
+    pub search_languages: Option<Option<Vec<String>>>,
+    pub search_aliases: Option<Option<Vec<String>>>,
     /// `None` preserves the stored value; `Some(None)` clears it; `Some(Some(_))` sets it.
     pub quality_profile_id: Option<Option<String>>,
     pub root_folder_id: Option<Option<String>>,
@@ -21,6 +24,8 @@ pub(crate) struct ResolvedTitleOptionsInput {
 impl ResolvedTitleOptionsInput {
     pub(crate) fn to_application_patch(&self) -> scryer_application::TitleOptionsPatch {
         scryer_application::TitleOptionsPatch {
+            search_languages: self.search_languages.clone(),
+            search_aliases: self.search_aliases.clone(),
             quality_profile_id: self.quality_profile_id.clone(),
             root_folder_id: self.root_folder_id.clone(),
             monitor_type: self.monitor_type.clone(),
@@ -64,11 +69,41 @@ fn normalize_title_tag(tag: String) -> Option<String> {
     })
 }
 
-pub(crate) fn normalize_title_tags(tags: Vec<String>) -> Vec<String> {
-    tags.into_iter().filter_map(normalize_title_tag).collect()
+/// Search languages and aliases are bounded title options; the raw `tags`
+/// field must not carry them past the option validation.
+const OPTION_ONLY_TAG_PREFIXES: [&str; 2] = [
+    scryer_domain::SEARCH_LANGUAGES_TAG_PREFIX,
+    scryer_domain::SEARCH_ALIASES_TAG_PREFIX,
+];
+
+pub(crate) fn normalize_title_tags(tags: Vec<String>) -> GqlResult<Vec<String>> {
+    let tags: Vec<String> = tags.into_iter().filter_map(normalize_title_tag).collect();
+    if let Some(prefix) = OPTION_ONLY_TAG_PREFIXES
+        .into_iter()
+        .find(|prefix| tags.iter().any(|tag| tag.starts_with(prefix)))
+    {
+        return Err(to_gql_error(scryer_application::AppError::Validation(
+            format!("tags cannot set {prefix}*; use the title options instead"),
+        )));
+    }
+    Ok(tags)
 }
 
 pub(crate) fn apply_title_options(tags: &mut Vec<String>, options: ResolvedTitleOptionsInput) {
+    for (prefix, patch) in [
+        (
+            scryer_domain::SEARCH_LANGUAGES_TAG_PREFIX,
+            options.search_languages,
+        ),
+        (
+            scryer_domain::SEARCH_ALIASES_TAG_PREFIX,
+            options.search_aliases,
+        ),
+    ] {
+        if let Some(value) = patch {
+            scryer_domain::set_title_search_option(tags, prefix, value);
+        }
+    }
     if let Some(value) = options.quality_profile_id {
         set_structured_tag(tags, "scryer:quality-profile:", value);
     }
@@ -159,7 +194,7 @@ pub(crate) fn map_add_input(
     } = input;
 
     let parsed_facet = facet.into_domain();
-    tags = normalize_title_tags(tags);
+    tags = normalize_title_tags(tags)?;
     let root_folder_id = resolved_options
         .as_ref()
         .and_then(|options| options.root_folder_id.clone().flatten());
@@ -295,6 +330,23 @@ mod tests {
         .expect("mapped title");
 
         assert_eq!(title.external_ids[0].kind, None);
+    }
+
+    #[test]
+    fn map_add_input_rejects_search_option_tags_in_raw_tags() {
+        for tag in [
+            "scryer:search-aliases:Fixture Alias",
+            " scryer:search-languages:deu ",
+        ] {
+            let mut input = add_input(MediaFacetValue::Movie, Vec::new());
+            input.tags = vec!["keep".to_string(), tag.to_string()];
+            assert!(map_add_input(input, None).is_err(), "{tag}");
+        }
+
+        let mut input = add_input(MediaFacetValue::Movie, Vec::new());
+        input.tags = vec!["Keep".to_string(), "scryer:monitor-type:all".to_string()];
+        let title = map_add_input(input, None).expect("ordinary tags map");
+        assert_eq!(title.tags, ["keep", "scryer:monitor-type:all"]);
     }
 
     #[test]

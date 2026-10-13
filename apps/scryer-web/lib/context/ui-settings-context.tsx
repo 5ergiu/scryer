@@ -1,11 +1,12 @@
 import * as React from "react";
 import { useTheme } from "next-themes";
-import { useClient } from "urql";
+import { useClient, type OperationResult } from "urql";
+import { setMyUiSettingsMutation } from "@/lib/graphql/mutations";
 import { myUiSettingsQuery } from "@/lib/graphql/queries";
 import { AUTH_SESSION_CHANGED_EVENT, getAuthToken } from "@/lib/hooks/use-auth";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
 import { applyHighlightColor, fromUiThemeValue, isDarkTheme, toUiThemeValue } from "@/lib/theme";
-import type { UiSettings } from "@/lib/types/settings";
+import type { SetMyUiSettingsInput, UiSettings } from "@/lib/types/settings";
 
 export const DEFAULT_UI_SETTINGS: UiSettings = {
   theme: "DARK",
@@ -18,7 +19,9 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   density: "COMFORTABLE",
   sidebarMode: "EXPANDED",
   defaultLandingView: "MOVIES",
+  language: null,
   tableColumns: [],
+  catalogViews: [],
 };
 
 type UiSettingsContextValue = {
@@ -28,7 +31,13 @@ type UiSettingsContextValue = {
   uiSettingsLoadError: string | null;
   setUiSettings: (settings: UiSettings) => void;
   refreshUiSettings: () => Promise<void>;
+  saveUiSettings: (build: (latest: UiSettings) => SetMyUiSettingsInput) => Promise<UiSettingsSaveResult>;
 };
+
+export type UiSettingsSaveResult = OperationResult<
+  { setMyUiSettings?: UiSettings },
+  { input: SetMyUiSettingsInput }
+>;
 
 export const UiSettingsContext = React.createContext<UiSettingsContextValue | null>(null);
 
@@ -37,16 +46,40 @@ function normalizeUiSettings(settings: Partial<UiSettings> | null | undefined): 
     ...DEFAULT_UI_SETTINGS,
     ...settings,
     theme: toUiThemeValue(fromUiThemeValue(settings?.theme)),
+    language: settings?.language ?? null,
     tableColumns: settings?.tableColumns ?? [],
+    catalogViews: settings?.catalogViews ?? [],
   };
+}
+
+/**
+ * The login page before sign-in has no profile to read: user-scoped settings
+ * are not requested there and their defaults are authoritative.
+ */
+export function isSignedOutLoginSurface(): boolean {
+  if (typeof window === "undefined" || getAuthToken() !== null) {
+    return false;
+  }
+  const basePath = getRuntimeBasePath();
+  const loginPath = basePath === "/" ? "/login" : `${basePath}/login`;
+  return window.location.pathname.startsWith(loginPath);
 }
 
 function uiSettingsErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Failed to load UI settings";
 }
 
-export function uiSettingsInputFromSettings(settings: UiSettings): UiSettings {
+/**
+ * Builds the whole-settings save. The language is sent only when `language`
+ * is given, and table columns never are: catalog layouts save through
+ * setMyCatalogView, one device class and facet at a time.
+ */
+export function uiSettingsInputFromSettings(
+  settings: UiSettings,
+  language?: string,
+): SetMyUiSettingsInput {
   return {
+    ...(language === undefined ? {} : { language }),
     theme: toUiThemeValue(fromUiThemeValue(settings.theme)),
     dateTimeFormat: settings.dateTimeFormat,
     highlightColor: settings.highlightColor,
@@ -57,20 +90,21 @@ export function uiSettingsInputFromSettings(settings: UiSettings): UiSettings {
     density: settings.density,
     sidebarMode: settings.sidebarMode,
     defaultLandingView: settings.defaultLandingView,
-    tableColumns: settings.tableColumns.map((column) => ({
-      facet: column.facet,
-      tableViewMode: column.tableViewMode,
-      columnId: column.columnId,
-      columnOrder: column.columnOrder,
-      visible: column.visible,
-    })),
   };
 }
 
 export function UiSettingsProvider({ children }: { children: React.ReactNode }) {
   const client = useClient();
   const { resolvedTheme, theme } = useTheme();
-  const [uiSettings, setUiSettings] = React.useState<UiSettings>(DEFAULT_UI_SETTINGS);
+  const [uiSettings, setUiSettingsState] = React.useState<UiSettings>(DEFAULT_UI_SETTINGS);
+  // The settings as last set, ahead of the render that shows them, so a
+  // queued save builds its input from every change made before it ran.
+  const latestUiSettingsRef = React.useRef<UiSettings>(DEFAULT_UI_SETTINGS);
+  const setUiSettings = React.useCallback((settings: UiSettings) => {
+    latestUiSettingsRef.current = settings;
+    setUiSettingsState(settings);
+  }, []);
+  const saveQueueRef = React.useRef<Promise<void> | null>(null);
   const [uiSettingsLoading, setUiSettingsLoading] = React.useState(true);
   const [uiSettingsLoaded, setUiSettingsLoaded] = React.useState(false);
   const [uiSettingsLoadError, setUiSettingsLoadError] = React.useState<string | null>(null);
@@ -87,15 +121,11 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
     // firing the user-scoped query there turns every auth-session flap into a
     // rejected-request storm that can exhaust the origin connection pool and
     // starve the login page's own bootstrap queries.
-    if (typeof window !== "undefined" && getAuthToken() === null) {
-      const basePath = getRuntimeBasePath();
-      const loginPath = basePath === "/" ? "/login" : `${basePath}/login`;
-      if (window.location.pathname.startsWith(loginPath)) {
-        setUiSettingsLoading(false);
-        setUiSettingsLoaded(false);
-        setUiSettingsLoadError(null);
-        return;
-      }
+    if (isSignedOutLoginSurface()) {
+      setUiSettingsLoading(false);
+      setUiSettingsLoaded(false);
+      setUiSettingsLoadError(null);
+      return;
     }
     setUiSettingsLoading(true);
     setUiSettingsLoaded(false);
@@ -118,11 +148,40 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
         setUiSettingsLoading(false);
       }
     }
-  }, [client]);
+  }, [client, setUiSettings]);
 
   const refreshUiSettings = React.useCallback(
     () => loadUiSettings(),
     [loadUiSettings],
+  );
+
+  // setMyUiSettings replaces every field it is given, so saves go out one
+  // at a time and each builds its input once the saves before it settled:
+  // a later save never resends a field an earlier one is still changing.
+  const saveUiSettings = React.useCallback(
+    (build: (latest: UiSettings) => SetMyUiSettingsInput): Promise<UiSettingsSaveResult> => {
+      const send = () =>
+        client
+          .mutation<{ setMyUiSettings?: UiSettings }, { input: SetMyUiSettingsInput }>(
+            setMyUiSettingsMutation,
+            { input: build(latestUiSettingsRef.current) },
+          )
+          .toPromise();
+      const previous = saveQueueRef.current;
+      const run = previous ? previous.then(send) : send();
+      const tail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      saveQueueRef.current = tail;
+      void tail.then(() => {
+        if (saveQueueRef.current === tail) {
+          saveQueueRef.current = null;
+        }
+      });
+      return run;
+    },
+    [client],
   );
 
   React.useEffect(() => {
@@ -163,9 +222,12 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
       uiSettingsLoadError,
       setUiSettings,
       refreshUiSettings,
+      saveUiSettings,
     }),
     [
       refreshUiSettings,
+      saveUiSettings,
+      setUiSettings,
       uiSettings,
       uiSettingsLoaded,
       uiSettingsLoadError,

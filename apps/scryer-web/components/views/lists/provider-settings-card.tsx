@@ -129,7 +129,7 @@ export function ProviderSettingsCard({ providerType, fields, onSave }: ProviderS
                   className="min-w-0 flex-1"
                   type={field.secret || field.type === "PASSWORD" ? "password" : "text"}
                   inputMode={field.type === "NUMBER" ? "decimal" : undefined}
-                  autoComplete={field.secret ? "new-password" : "off"}
+                  ignorePasswordManagers
                   placeholder={
                     field.secret && field.isSet && !cleared ? t("lists.providerSettings.secretPlaceholder") : undefined
                   }
