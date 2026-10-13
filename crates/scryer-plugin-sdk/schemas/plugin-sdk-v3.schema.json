@@ -2154,12 +2154,12 @@
         {
           "type": "object",
           "properties": {
-            "config_field": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "server_api_key"
+            },
+            "config_field": {
+              "type": "string"
             }
           },
           "required": [
@@ -2170,6 +2170,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "member_account"
+            },
             "flow": {
               "$ref": "#/$defs/ListAccountFlow"
             },
@@ -2185,10 +2189,6 @@
               "items": {
                 "type": "string"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "member_account"
             }
           },
           "required": [
@@ -2204,13 +2204,13 @@
         {
           "type": "object",
           "properties": {
-            "pkce": {
-              "type": "boolean",
-              "default": false
-            },
             "type": {
               "type": "string",
               "const": "authorization_code"
+            },
+            "pkce": {
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -5328,12 +5328,12 @@
         {
           "type": "object",
           "properties": {
-            "request": {
-              "$ref": "#/$defs/SubtitleSyncCommandAlignRequest"
-            },
             "kind": {
               "type": "string",
               "const": "align"
+            },
+            "request": {
+              "$ref": "#/$defs/SubtitleSyncCommandAlignRequest"
             }
           },
           "required": [
@@ -5344,12 +5344,12 @@
         {
           "type": "object",
           "properties": {
-            "request": {
-              "$ref": "#/$defs/SubtitleSyncProbeRequest"
-            },
             "kind": {
               "type": "string",
               "const": "probe"
+            },
+            "request": {
+              "$ref": "#/$defs/SubtitleSyncProbeRequest"
             }
           },
           "required": [
@@ -5360,12 +5360,12 @@
         {
           "type": "object",
           "properties": {
-            "request": {
-              "$ref": "#/$defs/SubtitleSyncDecodeWindowRequest"
-            },
             "kind": {
               "type": "string",
               "const": "decode_window"
+            },
+            "request": {
+              "$ref": "#/$defs/SubtitleSyncDecodeWindowRequest"
             }
           },
           "required": [
@@ -5804,14 +5804,14 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stream_index"
+            },
             "index": {
               "type": "integer",
               "format": "uint32",
               "minimum": 0
-            },
-            "kind": {
-              "type": "string",
-              "const": "stream_index"
             }
           },
           "required": [
@@ -5822,12 +5822,12 @@
         {
           "type": "object",
           "properties": {
-            "language": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "language"
+            },
+            "language": {
+              "type": "string"
             }
           },
           "required": [
@@ -6612,6 +6612,10 @@
         {
           "type": "object",
           "properties": {
+            "code": {
+              "type": "string",
+              "const": "partial_results"
+            },
             "response": {
               "$ref": "#/$defs/PluginSearchResponse"
             },
@@ -6624,10 +6628,6 @@
                 "null"
               ],
               "format": "int64"
-            },
-            "code": {
-              "type": "string",
-              "const": "partial_results"
             }
           },
           "required": [
@@ -6639,6 +6639,10 @@
         {
           "type": "object",
           "properties": {
+            "code": {
+              "type": "string",
+              "const": "deferred"
+            },
             "reason": {
               "$ref": "#/$defs/IndexerSearchIncompleteReason"
             },
@@ -6648,10 +6652,6 @@
                 "null"
               ],
               "format": "int64"
-            },
-            "code": {
-              "type": "string",
-              "const": "deferred"
             }
           },
           "required": [
@@ -6662,12 +6662,12 @@
         {
           "type": "object",
           "properties": {
-            "kind": {
-              "$ref": "#/$defs/IndexerSearchInvalidResponseKind"
-            },
             "code": {
               "type": "string",
               "const": "invalid_response"
+            },
+            "kind": {
+              "$ref": "#/$defs/IndexerSearchInvalidResponseKind"
             }
           },
           "required": [
@@ -8279,12 +8279,12 @@
         {
           "type": "object",
           "properties": {
-            "response": {
-              "$ref": "#/$defs/SubtitleSyncCommandAlignResponse"
-            },
             "kind": {
               "type": "string",
               "const": "align"
+            },
+            "response": {
+              "$ref": "#/$defs/SubtitleSyncCommandAlignResponse"
             }
           },
           "required": [
@@ -8295,12 +8295,12 @@
         {
           "type": "object",
           "properties": {
-            "response": {
-              "$ref": "#/$defs/SubtitleSyncProbeResponse"
-            },
             "kind": {
               "type": "string",
               "const": "probe"
+            },
+            "response": {
+              "$ref": "#/$defs/SubtitleSyncProbeResponse"
             }
           },
           "required": [
@@ -8311,12 +8311,12 @@
         {
           "type": "object",
           "properties": {
-            "response": {
-              "$ref": "#/$defs/SubtitleSyncDecodeWindowResponse"
-            },
             "kind": {
               "type": "string",
               "const": "decode_window"
+            },
+            "response": {
+              "$ref": "#/$defs/SubtitleSyncDecodeWindowResponse"
             }
           },
           "required": [
@@ -10416,6 +10416,10 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "inspect"
+            },
             "source_dir": {
               "type": "string"
             },
@@ -10424,10 +10428,6 @@
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "inspect"
             }
           },
           "required": [
@@ -10438,6 +10438,10 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "extract_archive"
+            },
             "archive_path": {
               "type": "string"
             },
@@ -10452,10 +10456,6 @@
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "extract_archive"
             }
           },
           "required": [
