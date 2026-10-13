@@ -145,6 +145,7 @@ export function AssignTrackedDownloadTitleDialog({
       title={t("queue.assignTitleTitle")}
       description={t("queue.assignTitleDescription")}
       className="sm:max-w-2xl"
+      shouldFilter={false}
     >
       <div id="activity-assign-title-dialog">
       <CommandInput
