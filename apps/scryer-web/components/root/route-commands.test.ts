@@ -117,6 +117,21 @@ test("post-processing is grouped with Automation", () => {
   assert.equal(command?.groupLabel, "nav.group.automation");
 });
 
+test("scripts is grouped with Settings for system-settings managers only", () => {
+  const find = (appPermissions: AuthUser["appPermissions"]) =>
+    buildRouteCommands({
+      t,
+      user: user({ appPermissions }),
+      onNavigate: () => {},
+    }).find((candidate) => candidate.id === "settings-scripts");
+
+  assert.equal(
+    find([APP_PERMISSIONS.manageSystemSettings])?.groupLabel,
+    "nav.settings",
+  );
+  assert.equal(find([APP_PERMISSIONS.manageCatalogSettings]), undefined);
+});
+
 test("maintenance-rules command appears only when experimental features are on", () => {
   const catalogManager = user({
     appPermissions: [APP_PERMISSIONS.manageCatalogSettings],
@@ -195,11 +210,11 @@ test("lists command reaches catalog viewers and list managers", () => {
       .some((command) => command.id === "lists"),
     false,
   );
-  // Lists are experimental: the palette never offers them while the switch is off.
+  // Lists remain available without the experimental switch.
   assert.equal(
     buildRouteCommands({ t, user: listManager, onNavigate: () => {} })
       .some((command) => command.id === "lists" || command.id === "lists-exclusions"),
-    false,
+    true,
   );
 });
 

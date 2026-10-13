@@ -87,8 +87,7 @@ pub enum SubscriptionSyncOutcome {
     Failed(ListFailure),
 }
 
-/// Aggregate outcome of one job run. Personal failures are named by owner,
-/// provider and error class only.
+/// Aggregate outcome of one job run. Personal failures expose error class only.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct ListSyncReport {
     pub considered: u64,
@@ -219,6 +218,26 @@ pub async fn sync_subscription(
     now: DateTime<Utc>,
     job_run_id: Option<String>,
 ) -> AppResult<SubscriptionSyncOutcome> {
+    let mut account_guard = context.actions.lock_account(subscription).await;
+    // Due-job snapshots can wait behind owner edits or unlink. Read the
+    // authoritative row under the same account guard before any effects.
+    let current;
+    let subscription = if subscription.is_personal() {
+        current = context.subscriptions.get_by_id(&subscription.id).await?;
+        match current.as_ref() {
+            Some(row)
+                if row.is_personal()
+                    && row.enabled
+                    && row.owner_user_id == subscription.owner_user_id
+                    && row.credential_id == subscription.credential_id =>
+            {
+                row
+            }
+            _ => return Ok(SubscriptionSyncOutcome::Off),
+        }
+    } else {
+        subscription
+    };
     let mut run = ListSyncRun::started(subscription.id.clone(), job_run_id);
     run.started_at = now;
 
@@ -233,7 +252,9 @@ pub async fn sync_subscription(
         ),
         ListScope::Public => None,
     };
-    if owner_policy == Some(ListPolicy::None) {
+    if owner_policy == Some(ListPolicy::None)
+        || (subscription.is_personal() && !context.actions.owner_is_enabled(subscription).await?)
+    {
         let status = ListSyncStatus {
             state: ListSyncState::Off,
             next_at: Some(next_sync_at(subscription, now)),
@@ -250,7 +271,7 @@ pub async fn sync_subscription(
             .await?;
         run.outcome = ListSyncRunOutcome::Skipped;
         run.counts = subscription.counts;
-        finish_run(context, run, now).await?;
+        finish_run(context, subscription, run, now).await?;
         return Ok(SubscriptionSyncOutcome::Off);
     }
 
@@ -259,6 +280,49 @@ pub async fn sync_subscription(
             let account = match &subscription.credential_id {
                 Some(account_id) => context.accounts.get_by_id(account_id).await?,
                 None => None,
+            };
+            let account = match account {
+                Some(account)
+                    if account.user_id == subscription.owner_user_id
+                        && account.provider == subscription.source.provider =>
+                {
+                    match context
+                        .actions
+                        .prepare_account(account, &mut account_guard)
+                        .await
+                    {
+                        Ok(account) => Some(account),
+                        Err(error) => {
+                            // Only a refusal of the grant expires the account;
+                            // a transient refresh failure is retried next sync.
+                            let rate_limited =
+                                crate::lists::account_transport::auth_failure_code(&error)
+                                    == Some(crate::lists::account_transport::RATE_LIMITED);
+                            let class = match error {
+                                crate::AppError::TemporaryUnavailable { retry_after, .. }
+                                    if rate_limited =>
+                                {
+                                    ListFailureClass::RateLimited {
+                                        retry_after_seconds: retry_after
+                                            .map(|delay| delay.as_secs()),
+                                    }
+                                }
+                                crate::AppError::TemporaryUnavailable { .. }
+                                | crate::AppError::Repository(_) => ListFailureClass::Unavailable,
+                                _ => ListFailureClass::Unauthorized,
+                            };
+                            return record_failure(
+                                context,
+                                subscription,
+                                run,
+                                now,
+                                ListFailure::new(class, &subscription.source.provider),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                other => other,
             };
             match credential_for(subscription, account.as_ref()) {
                 Ok(credential) => Some(credential),
@@ -270,9 +334,17 @@ pub async fn sync_subscription(
         ListScope::Public => None,
     };
 
-    let config = context
+    let mut config = context
         .provider_configs
         .for_provider(context.plugins, &subscription.source.provider);
+    if let Some(id) = subscription.credential_id.as_deref()
+        && let Some(account) = context.accounts.get_by_id(id).await?
+        && account.user_id == subscription.owner_user_id
+        && account.provider == subscription.source.provider
+        && let Some(id) = account.credential.client_id
+    {
+        config.insert("client_id".into(), id);
+    }
     let mut fetched = match fetch_list(
         subscription,
         context.plugins,
@@ -286,8 +358,84 @@ pub async fn sync_subscription(
         Err(failure) => return record_failure(context, subscription, run, now, failure).await,
     };
 
+    if fetched.unchanged
+        && super::resolve::requires_metadata(&subscription.filters)
+        && !subscription
+            .filters
+            .iter()
+            .any(|filter| matches!(filter, scryer_domain::ListFilter::Format { .. }))
+    {
+        let mut stored = context
+            .memberships
+            .list_by_subscription(&subscription.id)
+            .await?;
+        stored.retain(|row| row.left_at.is_none());
+        // Unresolved rows can carry a storage fallback kind rather than the
+        // provider's original hint. Recover the provider item before routing it.
+        if stored
+            .iter()
+            .all(|row| row.state != ListMembershipState::Unresolved)
+        {
+            stored.sort_by(|a, b| {
+                a.rank
+                    .cmp(&b.rank)
+                    .then_with(|| a.item_key.cmp(&b.item_key))
+            });
+            fetched.items = stored
+                .into_iter()
+                .map(|row| {
+                    let mut external_ids = row
+                        .external_ids
+                        .into_iter()
+                        .map(|id| scryer_plugin_sdk::ListExternalId {
+                            source: id.source,
+                            kind: id.kind,
+                            id: id.value,
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(id) = row.smg_title_id {
+                        external_ids.push(scryer_plugin_sdk::ListExternalId {
+                            source: "smg".into(),
+                            kind: None,
+                            id: id.to_string(),
+                        });
+                    }
+                    scryer_plugin_sdk::ListPluginItem {
+                        item_key: row.item_key,
+                        rank: row.rank.and_then(|rank| u32::try_from(rank).ok()),
+                        season: row.season,
+                        title: row.display_title,
+                        year: row.year,
+                        external_ids,
+                        kind_hint: Some(
+                            match if row.series_movie.is_some() {
+                                scryer_domain::MediaFacet::Movie
+                            } else {
+                                row.kind
+                            } {
+                                scryer_domain::MediaFacet::Movie => {
+                                    scryer_plugin_sdk::ListMediaKind::Movie
+                                }
+                                scryer_domain::MediaFacet::Series => {
+                                    scryer_plugin_sdk::ListMediaKind::Series
+                                }
+                                scryer_domain::MediaFacet::Anime => {
+                                    scryer_plugin_sdk::ListMediaKind::Anime
+                                }
+                            },
+                        ),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            fetched.unchanged = false;
+        }
+    }
+
     if fetched.unchanged {
-        if !has_unfinished_work(context, subscription).await? {
+        if !super::resolve::requires_metadata(&subscription.filters)
+            && !has_unfinished_work(context, subscription).await?
+        {
             return record_unchanged(context, subscription, run, now, fetched.fingerprint).await;
         }
         // The provider's "unchanged" carries no items. Work is still left, so
@@ -311,6 +459,14 @@ pub async fn sync_subscription(
     if fetched.items.is_empty() {
         return record_empty_fetch(context, subscription, run, now, fetched.fingerprint).await;
     }
+    let normalized = match context.resolver.normalize_filters(subscription).await {
+        Ok(subscription) => subscription,
+        Err(_) => {
+            let failure = ListFailure::new(ListFailureClass::Unavailable, "The metadata service");
+            return record_failure(context, subscription, run, now, failure).await;
+        }
+    };
+    let subscription = &normalized;
     let resolved = match resolve_items(subscription, fetched.items, context.resolver).await {
         Ok(resolved) => resolved,
         Err(_) => {
@@ -371,7 +527,10 @@ pub async fn sync_subscription(
                 // rejected request.
                 row.state_reason = previous.and_then(|row| row.state_reason.clone());
             }
-            ItemDecision::Unresolved => row.state = ListMembershipState::Unresolved,
+            ItemDecision::Unresolved => {
+                row.state = ListMembershipState::Unresolved;
+                row.state_reason = evaluated.item.resolution_reason.clone();
+            }
             ItemDecision::Deferred => row.state = ListMembershipState::Pending,
             ItemDecision::Candidate => {
                 if !stopped {
@@ -416,6 +575,23 @@ pub async fn sync_subscription(
         rows.push(row);
     }
 
+    // Include narrows future additions. A category we did not request supplies
+    // no evidence of departures, so retain its existing membership unchanged.
+    if subscription.source.params.iter().any(|(key, value)| {
+        matches!(key.as_str(), "kind" | "type") && value == super::catalog::INCLUDE_MEDIA_PARAM
+    }) {
+        let seen: HashSet<_> = rows.iter().map(|row| row.item_key.clone()).collect();
+        for previous in existing.values() {
+            if previous.left_at.is_none()
+                && !subscription.kinds.contains(&previous.kind)
+                && !seen.contains(&previous.item_key)
+            {
+                let mut retained = previous.clone();
+                retained.last_seen_at = now;
+                rows.push(retained);
+            }
+        }
+    }
     if !rows.is_empty() {
         context.memberships.upsert_many(&rows).await?;
     }
@@ -459,7 +635,7 @@ pub async fn sync_subscription(
         .record_sync_outcome(&subscription.id, &subscription.sync, &status, &counts)
         .await?;
     run.counts = counts;
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Synced {
         acted: count_states(acted_states),
         departures_acted: leave.acted,
@@ -539,26 +715,36 @@ fn membership_row(
     // A row that left and came back starts over: its earlier outcome belonged
     // to the earlier appearance.
     let carried = previous.filter(|row| row.left_at.is_none());
+    let bound = carried.filter(|row| row.title_id.is_some());
+    let series_movie = if let Some(bound) = bound {
+        bound.series_movie.clone().map(|mut target| {
+            if item.library_title_id == bound.title_id
+                && let Some(current) = &item.series_movie
+                && current.parent_smg_id == target.parent_smg_id
+                && current.link_id.is_some()
+            {
+                target.link_id = current.link_id.clone();
+            }
+            target
+        })
+    } else {
+        item.series_movie.clone()
+    };
     ListMembership {
+        series_movie,
         subscription_id: subscription.id.clone(),
         item_key: item.item.item_key.clone(),
         rank: item.item.rank.map(i64::from),
         season: item.item.season,
-        display_title: item
-            .item
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_string),
+        display_title: item.display_title(),
         year: item.item.year,
         external_ids: item.external_ids.clone(),
         smg_title_id: item.smg_title_id,
         title_id: carried.and_then(|row| row.title_id.clone()),
         request_id: carried.and_then(|row| row.request_id.clone()),
-        kind: item
-            .kind
-            .clone()
+        kind: bound
+            .map(|row| row.kind.clone())
+            .or_else(|| item.kind.clone())
             .or_else(|| subscription.kinds.first().cloned())
             .unwrap_or_default(),
         state: ListMembershipState::Unresolved,
@@ -591,10 +777,13 @@ async fn has_unfinished_work(
         .memberships
         .list_by_subscription(&subscription.id)
         .await?;
-    if rows
-        .iter()
-        .any(|row| row.left_at.is_none() && row.state == ListMembershipState::Pending)
-    {
+    if rows.iter().any(|row| {
+        row.left_at.is_none()
+            && matches!(
+                row.state,
+                ListMembershipState::Pending | ListMembershipState::Unresolved
+            )
+    }) {
         return Ok(true);
     }
     // A title the list added was deleted from the library: the next sync
@@ -645,7 +834,7 @@ async fn record_unchanged(
         )
         .await?;
     run.counts = subscription.counts;
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Unchanged)
 }
 
@@ -679,7 +868,7 @@ async fn record_empty_fetch(
         .await?;
     run.counts = subscription.counts;
     run.error_message = Some(LIST_SYNC_EMPTY_FETCH_NOTE.to_string());
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
     Ok(SubscriptionSyncOutcome::Synced {
         acted: ListCounts::default(),
         departures_acted: 0,
@@ -723,7 +912,7 @@ async fn record_storage_failure(
     run.outcome = ListSyncRunOutcome::Failed;
     run.counts = subscription.counts;
     run.error_message = Some(LIST_SYNC_STORAGE_FAILURE_MESSAGE.to_string());
-    if let Err(error) = finish_run(context, run, now).await {
+    if let Err(error) = finish_run(context, subscription, run, now).await {
         tracing::warn!(
             subscription_id = %subscription.id,
             error = %error,
@@ -745,6 +934,18 @@ async fn record_failure(
     now: DateTime<Utc>,
     failure: ListFailure,
 ) -> AppResult<SubscriptionSyncOutcome> {
+    if subscription.is_personal()
+        && matches!(failure.class, ListFailureClass::Unauthorized)
+        && let Some(id) = subscription.credential_id.as_deref()
+        && let Some(mut account) = context.accounts.get_by_id(id).await?
+        && account.user_id == subscription.owner_user_id
+        && account.provider == subscription.source.provider
+    {
+        account.status = scryer_domain::UserListAccountStatus::Expired;
+        account.error_message = Some("Reconnect this list account to resume syncing.".into());
+        account.updated_at = now;
+        context.accounts.update(account).await?;
+    }
     let next_at = next_sync_at(subscription, now);
     let paused_until = match failure.class {
         ListFailureClass::RateLimited {
@@ -780,14 +981,13 @@ async fn record_failure(
     run.outcome = ListSyncRunOutcome::Failed;
     run.counts = subscription.counts;
     run.error_message = Some(failure.message.clone());
-    finish_run(context, run, now).await?;
+    finish_run(context, subscription, run, now).await?;
 
-    // Tell the operator once per failure, not once per retry. Personal
-    // failures surface only in the member's own view.
+    // Record once per failure, not once per retry. Production routes
+    // personal failures onto the owner's User stream.
     let newly_failing = subscription.sync.state != ListSyncState::Fail
         || subscription.sync.error_message.as_deref() != Some(failure.message.as_str());
     if newly_failing
-        && !subscription.is_personal()
         && let Err(error) = context
             .actions
             .record_sync_failure(subscription, &failure)
@@ -802,13 +1002,29 @@ async fn record_failure(
     Ok(SubscriptionSyncOutcome::Failed(failure))
 }
 
+/// Record the run, then say the sync ended. Every caller has already written
+/// the subscription's new sync status, so whoever reads the list on hearing of
+/// it sees this run's result.
 async fn finish_run(
     context: &ListSyncContext<'_>,
+    subscription: &ListSubscription,
     mut run: ListSyncRun,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
     run.finished_at = Some(now.max(Utc::now()));
+    let outcome = run.outcome;
     context.subscriptions.record_sync_run(run).await?;
+    if let Err(error) = context
+        .actions
+        .record_sync_finished(subscription, outcome)
+        .await
+    {
+        tracing::warn!(
+            subscription_id = %subscription.id,
+            error = %error,
+            "could not announce a finished list sync"
+        );
+    }
     Ok(())
 }
 
