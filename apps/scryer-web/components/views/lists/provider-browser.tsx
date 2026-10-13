@@ -137,6 +137,7 @@ export function ProviderBrowser({
                 // with none, even when its row keys repeat.
                 key={`lists-catalog-${shown.providerType}-${group.items[0]?.id ?? "group"}`}
                 id={`lists-catalog-${shown.providerType}-${group.items[0]?.id ?? "group"}`}
+                providerType={shown.providerType}
                 rows={group.items.map((item) => ({
                   key: item.id,
                   name: item.name,

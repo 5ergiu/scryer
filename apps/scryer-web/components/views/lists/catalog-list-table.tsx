@@ -18,6 +18,7 @@ import type { Facet } from "@/lib/types/titles";
 import { listIntervalParts, listKindLabelKey } from "@/lib/utils/lists";
 
 import { ListPreviewPoster } from "./list-preview-summary";
+import { SimklAttribution } from "./simkl-attribution";
 import { SortableHead } from "./sortable-head";
 
 /** How many of a list's titles its row previews. */
@@ -54,7 +55,15 @@ type RowPreview = { titles: ListPreviewItem[] | null };
  * preview of its first titles. Until a column is picked the rows keep the
  * order the provider gives them.
  */
-export function CatalogListTable({ id, rows }: { id: string; rows: readonly CatalogListRow[] }) {
+export function CatalogListTable({
+  id,
+  providerType,
+  rows,
+}: {
+  id: string;
+  providerType: string;
+  rows: readonly CatalogListRow[];
+}) {
   const t = useTranslate();
   const [sort, setSort] = React.useState<CatalogSort | null>(null);
   const [previews, setPreviews] = React.useState<Readonly<Record<string, RowPreview>>>({});
@@ -203,13 +212,17 @@ export function CatalogListTable({ id, rows }: { id: string; rows: readonly Cata
                     ) : preview.titles.length === 0 ? (
                       <p className="text-[12.5px] text-[var(--scry-muted)]">{t("lists.preview.nothingToAdd")}</p>
                     ) : (
-                      <ul className="grid max-w-[560px] grid-cols-5 gap-2">
-                        {preview.titles.map((title) => (
-                          <li key={title.itemKey} className="min-w-0">
-                            <ListPreviewPoster item={title} />
-                          </li>
-                        ))}
-                      </ul>
+                      <div className="space-y-2">
+                        {providerType === "simkl" ? <SimklAttribution /> : null}
+                        <ul className="grid max-w-[560px] grid-cols-5 gap-2">
+                          {preview.titles.map((title) => (
+                            <li key={title.itemKey} className="min-w-0">
+                              <ListPreviewPoster item={title} />
+                              {providerType === "simkl" ? <SimklAttribution itemKey={title.itemKey} /> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                   </TableCell>
                 </TableRow>
