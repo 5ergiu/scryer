@@ -70,6 +70,18 @@ type ApproveRequestValues = {
   tags?: string[];
 };
 
+/// A manager-queue row may stand for several overlapping requests of one
+/// status; this lists every one of them, earliest first. Rows that were never
+/// collapsed (the requester's own list) leave it unset.
+type CollapsedMediaRequestRecord = MediaRequestRecord & {
+  collapsedRequestIds?: string[];
+};
+
+function collapsedRequestIds(request: MediaRequestRecord): string[] {
+  const ids = (request as CollapsedMediaRequestRecord).collapsedRequestIds;
+  return ids && ids.length > 0 ? ids : [request.id];
+}
+
 function sameStringArray(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -93,7 +105,7 @@ function requestsOverlap(left: MediaRequestRecord, right: MediaRequestRecord): b
   );
 }
 
-function collapseRequestGroup(group: MediaRequestRecord[]): MediaRequestRecord {
+function collapseRequestGroup(group: MediaRequestRecord[]): CollapsedMediaRequestRecord {
   const sorted = [...group].sort(
     (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
   );
@@ -126,6 +138,7 @@ function collapseRequestGroup(group: MediaRequestRecord[]): MediaRequestRecord {
       (a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt),
     ),
     updatedAt,
+    collapsedRequestIds: sorted.map((request) => request.id),
   };
 }
 
@@ -252,6 +265,10 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
     loadedLibrariesKeyRef.current = null;
     setRequests([]);
     setRequesterOptions([]);
+    // Filters belong to the account that chose them; a requester id from the
+    // previous account would leave the next account's queue empty.
+    setSelectedLibraryIds([]);
+    setSelectedRequesterId(null);
   }, [canManageAnyTitle, facet, user?.id]);
 
   const markRecentlyActed = React.useCallback((requestId: string) => {
@@ -568,15 +585,24 @@ export function RequestsContainer({ facet }: RequestsContainerProps) {
       }
 
       setActionRequestId(request.id);
-      markRecentlyActed(request.id);
       try {
-        const { error } = await client
-          .mutation(reopenMediaRequestMutation, { requestId: request.id })
-          .toPromise();
-        if (error) throw error;
-        setGlobalStatus(t("status.requestReopened", { name: request.title }));
+        // The server approves and dismisses a request's whole overlap group,
+        // but reopens exactly one request, so a collapsed row reopens each of
+        // the requests it stands for.
+        let firstError: unknown = null;
+        for (const requestId of collapsedRequestIds(request)) {
+          markRecentlyActed(requestId);
+          const { error } = await client
+            .mutation(reopenMediaRequestMutation, { requestId })
+            .toPromise();
+          if (error && firstError === null) {
+            firstError = error;
+          }
+        }
         dispatchNavigationBadgesRefresh();
         await refresh();
+        if (firstError !== null) throw firstError;
+        setGlobalStatus(t("status.requestReopened", { name: request.title }));
       } catch (error) {
         setGlobalStatus(error instanceof Error ? error.message : t("status.apiError"), { level: "ERROR" });
       } finally {
