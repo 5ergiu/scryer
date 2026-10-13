@@ -5234,6 +5234,7 @@ async fn import_series_duplicate_destination_requires_catalog_for_already_import
     });
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Series, library_dir.path()).await;
     let title_folder = library_dir.path().join("Import Series Skip");
     let title = app
         .add_title(
@@ -5442,6 +5443,31 @@ fn library_video_file_names(root: &Path) -> Vec<String> {
     names
 }
 
+async fn register_import_fixture_root(app: &AppUseCase, facet: MediaFacet, root: &std::path::Path) {
+    let library = app
+        .services
+        .catalog
+        .libraries
+        .default_for_facet(facet)
+        .await
+        .expect("library lookup")
+        .expect("fixture library exists");
+    app.services
+        .catalog
+        .libraries
+        .update(
+            &library.id,
+            library.name.clone(),
+            library.slug.clone(),
+            vec![LibraryRootDraft {
+                path: root.to_string_lossy().into_owned(),
+                is_default: true,
+            }],
+        )
+        .await
+        .expect("register import fixture root");
+}
+
 struct FailClosedPackFixture {
     app: AppUseCase,
     user: User,
@@ -5517,22 +5543,30 @@ async fn build_fail_closed_pack_fixture(
         .expect("seed import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
-    if options.series_root_at_library_dir || options.anime_root_at_library_dir {
+    {
         let current_paths = app.get_library_paths(&user).await.expect("library paths");
         app.update_library_paths(
             &user,
             UpdateLibraryPaths {
-                movie_path: current_paths.movie_path,
-                series_path: if options.series_root_at_library_dir {
+                movie_path: if options.facet == MediaFacet::Movie {
+                    library_dir.path().to_string_lossy().into_owned()
+                } else {
+                    current_paths.movie_path
+                },
+                series_path: if options.series_root_at_library_dir
+                    || options.facet == MediaFacet::Series
+                {
                     library_dir.path().to_string_lossy().into_owned()
                 } else {
                     current_paths.series_path
                 },
-                anime_path: Some(if options.anime_root_at_library_dir {
-                    library_dir.path().to_string_lossy().into_owned()
-                } else {
-                    current_paths.anime_path
-                }),
+                anime_path: Some(
+                    if options.anime_root_at_library_dir || options.facet == MediaFacet::Anime {
+                        library_dir.path().to_string_lossy().into_owned()
+                    } else {
+                        current_paths.anime_path
+                    },
+                ),
             },
         )
         .await
@@ -10029,6 +10063,7 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Additional Series Movie Import");
     let title = app
         .add_title(
@@ -10241,6 +10276,7 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Movie, library_dir.path()).await;
     let title_folder = library_dir.path().join("Additional Movie Retry (2026)");
     let title = app
         .add_title(
@@ -10627,6 +10663,7 @@ async fn path_manual_import_can_target_series_movie_link() {
         .expect("seed manual import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Manual Series Movie Import");
     let title = app
         .add_title(
@@ -13755,6 +13792,7 @@ async fn a_grabbed_series_movie_link_import_keeps_the_listing_snapshot() {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Listing Snapshot Link");
     let title = app
         .add_title(
@@ -14150,6 +14188,7 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
         .expect("seed manual import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Manual Link Verdict Bypass");
     let title = app
         .add_title(
@@ -14298,6 +14337,7 @@ score_entry["operator_refuses_this_file"] := -10000 if {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Refused Link Import");
     let title = app
         .add_title(
