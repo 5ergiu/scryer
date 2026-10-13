@@ -2752,12 +2752,49 @@ fn anime_release_group_keeps_the_whole_hyphenated_suffix() {
             "Show A S01E01 1080p WEB-DL AAC2.0 H.264-Group-Raws",
             "Group-Raws",
         ),
+        ("Show A S01E01 1080p WEB-DL AAC2.0 H.264-Foo-Bar", "Foo-Bar"),
     ] {
         let analysis = analyze_release_for_target(release, &target);
         let candidate = analysis.best_candidate().expect("best candidate");
         assert_eq!(
             candidate.projected.release_group.as_deref(),
             Some(expected),
+            "{release}"
+        );
+    }
+}
+
+#[test]
+fn episode_titles_and_edition_tags_do_not_invent_release_groups() {
+    let target = context(ContextFacetHint::Series, "Show C");
+    let mut unexpected_groups = Vec::new();
+    for release in [
+        "Show C (2005) - S02E01 - The Episode Name [WEBDL-1080p][EAC3 2.0][x264]",
+        "Show C (2005) - S02E01 - Pilot [WEBDL-1080p][EAC3 2.0][x264]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264][CAST]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264] {Diamond Edition}",
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        let candidate = analysis.best_candidate().expect("best candidate");
+        if let Some(group) = &candidate.projected.release_group {
+            unexpected_groups.push((release, group.clone()));
+        }
+    }
+    assert!(unexpected_groups.is_empty(), "{unexpected_groups:?}");
+    for release in [
+        "Show C (2005) - S02E01 - The Episode Name [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup [CAST]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup {Diamond Edition}",
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        assert_eq!(
+            analysis
+                .best_candidate()
+                .expect("best candidate")
+                .projected
+                .release_group
+                .as_deref(),
+            Some("ValidGroup"),
             "{release}"
         );
     }

@@ -3422,7 +3422,9 @@ fn release_group_suffix_range_allowed(
     range: TokenRange,
     title_zones: &[TokenRange],
 ) -> bool {
-    if range.start_token >= range.end_token {
+    if range.start_token >= range.end_token
+        || range_follows_episode_title_separator(state, tokens, range)
+    {
         return false;
     }
     if (range.start_token..range.end_token).any(|index| state.identity_token_mask.contains(index)) {
@@ -3453,6 +3455,9 @@ fn infer_state_release_group(
 ) -> Option<String> {
     let release_group = state.release_group.as_deref()?;
     let range = find_phrase_span(tokens, release_group)?;
+    if range_follows_episode_title_separator(state, tokens, range) {
+        return None;
+    }
     if (range.start_token..range.end_token).any(|index| state.identity_token_mask.contains(index)) {
         return None;
     }
@@ -3512,13 +3517,32 @@ fn range_is_embedded_in_larger_group(tokens: &[Token], range: TokenRange) -> boo
     group_start != range.start_token || group_end != range.end_token
 }
 
+fn range_follows_episode_title_separator(
+    state: &ParseState,
+    tokens: &[Token],
+    range: TokenRange,
+) -> bool {
+    let Some(previous_index) = range.start_token.checked_sub(1) else {
+        return false;
+    };
+    let previous = &tokens[previous_index];
+    let first = &tokens[range.start_token];
+    // A spaced separator after the episode identity introduces the episode
+    // title; it is not the attached suffix used for a release group.
+    state.identity_token_mask.contains(previous_index)
+        && first.group_id.is_none()
+        && first.separator_before == SeparatorKind::Hyphen
+        && first.span.start.saturating_sub(previous.span.end) > 1
+}
+
 fn range_is_metadata_marker(tokens: &[Token], range: TokenRange) -> bool {
     let range_len = range.end_token.saturating_sub(range.start_token);
     (range.start_token..range.end_token).any(|index| {
         tokens.get(index).is_some_and(|token| {
             let normalized = token.normalized.as_str();
-            !(release_group_part_is_valid(token, index > range.start_token)
-                || (range_len == 1 && numeric_release_group_suffix(token)))
+            (token.group_id.is_some() && matches!(normalized, "CAST" | "EDITION"))
+                || !(release_group_part_is_valid(token, index > range.start_token)
+                    || (range_len == 1 && numeric_release_group_suffix(token)))
                 || is_explicit_language_metadata_token(normalized)
                 || is_release_flag_metadata_token(normalized)
                 || (range_len == 1 && normalize_standalone_streaming_service(normalized).is_some())
