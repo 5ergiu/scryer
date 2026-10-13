@@ -143,6 +143,8 @@ struct ReleaseArgs {
     dry_run: bool,
     #[arg(long)]
     allow_graphql_dangerous: bool,
+    #[arg(long)]
+    allow_breaking_api: bool,
     version: Option<String>,
 }
 
@@ -355,8 +357,8 @@ fn delegate_release(ctx: &TaskContext, args: &ReleaseArgs) -> Result<()> {
     if args.dry_run {
         forwarded.push("--dry-run".to_string());
     }
-    if args.allow_graphql_dangerous {
-        forwarded.push("--allow-graphql-dangerous".to_string());
+    if args.allow_graphql_dangerous || args.allow_breaking_api {
+        forwarded.push("--allow-breaking-api".to_string());
     }
     if let Some(version) = &args.version {
         forwarded.push(version.clone());
