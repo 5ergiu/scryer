@@ -490,7 +490,7 @@ impl TitleMutations {
             tags = Some(merge_title_option_tags(base_tags, resolved_options));
         }
 
-        let title = app
+        let mut title = app
             .update_title_metadata_with_root_folder_id(
                 &actor,
                 &title_id,
@@ -512,7 +512,8 @@ impl TitleMutations {
                 .map_err(to_gql_error)?;
         }
         if let Some(min_availability) = min_availability_override {
-            app.update_title_min_availability(&actor, &title.id, min_availability)
+            title = app
+                .update_title_min_availability(&actor, &title.id, min_availability)
                 .await
                 .map_err(to_gql_error)?;
         }

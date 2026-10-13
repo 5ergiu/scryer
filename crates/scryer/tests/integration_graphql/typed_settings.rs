@@ -1,6 +1,43 @@
 use super::*;
 
 #[tokio::test]
+async fn graphql_movie_availability_update_returns_persisted_setting() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Availability Fixture",
+        MediaFacet::Movie,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+    let mutation = r#"mutation Update($input: UpdateTitleInput!) {
+        updateTitle(input: $input) { id minAvailability }
+    }"#;
+    for value in [json!("released"), json!(null), json!("in_cinemas")] {
+        let response = gql(
+            &ctx,
+            mutation,
+            json!({"input": {
+                "titleId": title.id, "options": {"minAvailability": value}
+            }}),
+        )
+        .await;
+        assert_no_errors(&response);
+        assert_eq!(response["data"]["updateTitle"]["minAvailability"], value);
+        let stored = TitleRepository::get_by_id(&ctx.titles, &title.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(stored.min_availability).unwrap(),
+            value
+        );
+    }
+}
+
+#[tokio::test]
 async fn graphql_trusted_proxies_requires_system_settings_permission() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
