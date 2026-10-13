@@ -1,4 +1,4 @@
-# Scryer v0.21.16
+# Scryer 0.21.16 release notes
 
 This patch release fixes search stalls and lost results during large paginated searches, preserves managed indexer routing settings, and improves imports, Lists, requests, script settings, and Windows upgrades. These changes are relative to v0.21.15.
 
