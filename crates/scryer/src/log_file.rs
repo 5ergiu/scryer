@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LogFilePolicy {
@@ -62,7 +62,6 @@ struct Active {
     file: Option<File>,
     bytes: u64,
     permissions: fs::Permissions,
-    day: NaiveDate,
     policy: LogFilePolicy,
     clock: Clock,
     work: Arc<Work>,
@@ -198,11 +197,6 @@ fn open_with_clock(
     fs::create_dir_all(path.parent().unwrap())?;
     let file = open_active(&path)?;
     let metadata = file.metadata()?;
-    let day = metadata
-        .modified()
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(|_| clock())
-        .date_naive();
     let sealed = managed_files(&path, "sealed")?;
     let archives = managed_files(&path, "gz")?;
     let next_sequence = sealed
@@ -242,7 +236,6 @@ fn open_with_clock(
         bytes: metadata.len(),
         permissions: metadata.permissions(),
         file: Some(file),
-        day,
         policy,
         clock,
         work: work.clone(),
@@ -441,7 +434,6 @@ impl Active {
         });
         work.changed.notify_all();
         self.bytes = 0;
-        self.day = now.date_naive();
         let reopened = work
             .faults
             .check("reopen")
@@ -464,19 +456,14 @@ impl Active {
         {
             return;
         }
-        let now = (self.clock)();
         let result = (|| {
             if self.file.is_none() {
                 let file = open_active_with_permissions(&self.path, Some(&self.permissions))?;
                 self.bytes = file.metadata()?.len();
                 self.file = Some(file);
             }
-            if self.bytes > 0
-                && (self.bytes >= self.policy.max_bytes || now.date_naive() != self.day)
-            {
-                self.rotate(now)?;
-            } else if self.bytes == 0 {
-                self.day = now.date_naive();
+            if self.bytes >= self.policy.max_bytes {
+                self.rotate((self.clock)())?;
             }
             Ok(())
         })();
