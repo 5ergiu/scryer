@@ -2141,6 +2141,7 @@ const en: LocaleDictionary = {
   "settings.refStereoSampling": "half or full for side-by-side or top/bottom; null when unknown",
   "settings.refStereoEncoding": "mvc when explicitly corroborated by a 3D marker; null when unknown",
   "settings.refReleaseStereoscopyTokens": "Canonical stereo tokens: stereo:two_d, stereo:three_d, stereo:mixed_2d_3d, stereo:has_3d, stereo:layout:<layout>, stereo:sampling:half/full, stereo:encoding:mvc, and stereo:<field>_conflict. Empty means unknown. Raw normalized_tokens retain their original meaning.",
+  "settings.refReleaseRevision": "Numeric release revision: 0 for original, 1 for PROPER/REPACK/RERIP, 2 for REPACK2, and so on",
   "settings.refReleaseIsProper": "True when the release is tagged as Proper",
   "settings.refReleaseIsRepack": "True when the release is tagged as Repack",
   "settings.refReleaseIsAiEnhanced":
@@ -2676,6 +2677,8 @@ const en: LocaleDictionary = {
   "qualityProfile.allowBdDiskInfo":
     "Allow BD/Disc image releases (ISO/Blu-ray disk style releases) to pass the profile.",
   "qualityProfile.allowDv": "Dolby Vision",
+  "qualityProfile.ignoreProperRepack": "Ignore PROPER/REPACK",
+  "qualityProfile.ignoreProperRepackInfo": "Let quality and scores decide without automatic revision preference or protection. Scoring rules can still reward PROPER/REPACK releases.",
   "qualityProfile.allowUpgrades": "Upgrades allowed",
   "qualityProfile.allowUpgradesInfo":
     "Allow managed copies to be replaced later by a better match, but never above the selected archival quality.",

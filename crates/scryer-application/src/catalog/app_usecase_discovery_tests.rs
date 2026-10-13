@@ -633,6 +633,7 @@ fn scored_search_result(
         preference_score,
         tier_index,
         size_fit_penalty: 0,
+        revision_preference: 0,
     });
     result
 }
@@ -681,20 +682,28 @@ fn the_merge_comparator_orders_tier_before_score() {
     );
 }
 
-/// Within one tier, a PROPER outranks the plain release, and only then does the
-/// score decide — the same order `SearchRank` uses.
+/// Missing scopes have no automatic revision preference (issue #323).
 #[test]
-fn the_merge_comparator_orders_revision_before_score() {
+fn missing_scope_merge_orders_score_before_revision() {
     let mut merged = [
         scored_search_result("Portmere.2024.1080p.WEB-DL-GRP", Some(1), 900, true),
-        scored_search_result("Portmere.2024.PROPER.1080p.WEB-DL-GRP", Some(1), 100, true),
+        scored_search_result(
+            "Portmere.2024.REPACK3.1080p.WEB-DL-OTHER",
+            Some(1),
+            100,
+            true,
+        ),
     ];
     merged.sort_by(compare_release_search_results);
-
-    assert_eq!(
-        merged[0].title.as_str(),
-        "Portmere.2024.PROPER.1080p.WEB-DL-GRP"
-    );
+    assert_eq!(merged[0].title, "Portmere.2024.1080p.WEB-DL-GRP");
+    // Admission assigns this stable key only for a related installed release.
+    merged[1]
+        .quality_profile_decision
+        .as_mut()
+        .unwrap()
+        .revision_preference = 3;
+    merged.sort_by(compare_release_search_results);
+    assert_eq!(merged[0].title, "Portmere.2024.REPACK3.1080p.WEB-DL-OTHER");
 }
 
 /// **D21.** Seeders rank after indexer priority, and "no information" (usenet,

@@ -21191,6 +21191,10 @@ type ParsedReleasePayload {
 	"""
 	isProperUpload: Boolean!
 	"""
+	Numeric release revision; zero denotes the original release.
+	"""
+	revision: Int!
+	"""
 	Whether the release is a remux.
 	"""
 	isRemux: Boolean!
@@ -22910,6 +22914,10 @@ input QualityProfileCriteriaInput {
 	"""
 	allowUpgrades: Boolean!
 	"""
+	Let scores decide without automatic PROPER/REPACK preference.
+	"""
+	ignoreProperRepack: Boolean! = false
+	"""
 	Additional scoring preferences.
 	"""
 	scoringOverrides: ScoringOverridesInput!
@@ -22989,6 +22997,10 @@ type QualityProfileCriteriaPayload {
 	Whether quality upgrades are allowed.
 	"""
 	allowUpgrades: Boolean!
+	"""
+	Let scores decide without automatic PROPER/REPACK preference.
+	"""
+	ignoreProperRepack: Boolean!
 	"""
 	Optional boolean scoring overrides.
 	"""

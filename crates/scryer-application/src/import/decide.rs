@@ -300,7 +300,15 @@ pub(crate) async fn decide_import(
     }
 
     let candidate =
-        crate::admission::CandidateFacts::new(scored.tier_index, scored.revision, scored.score);
+        crate::admission::CandidateFacts::new(scored.tier_index, scored.revision, scored.score)
+            .with_revision_policy(
+                scored.parsed.release_group.as_deref(),
+                input
+                    .scoring_context
+                    .profile()
+                    .criteria
+                    .ignore_proper_repack,
+            );
 
     match evaluate_import_admission(
         &subject,

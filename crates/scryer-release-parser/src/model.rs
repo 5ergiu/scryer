@@ -808,6 +808,8 @@ pub struct ParsedReleaseMetadata {
     pub fps: Option<f32>,
     pub is_proper_upload: bool,
     pub is_repack: bool,
+    /// Numeric PROPER/REPACK revision; zero denotes an original release.
+    pub revision: i32,
     pub is_remux: bool,
     pub is_bd_disk: bool,
     pub is_ai_enhanced: bool,
@@ -865,6 +867,7 @@ impl ParsedReleaseMetadata {
             fps: None,
             is_proper_upload: false,
             is_repack: false,
+            revision: 0,
             is_remux: false,
             is_bd_disk: false,
             is_ai_enhanced: false,
@@ -1103,6 +1106,8 @@ pub struct MetadataEnrichment {
     pub fps: Option<f32>,
     pub is_proper_upload: bool,
     pub is_repack: bool,
+    /// Numeric PROPER/REPACK revision; zero denotes an original release.
+    pub revision: i32,
     pub is_bd_disk: bool,
     pub is_ai_enhanced: bool,
     pub is_hardcoded_subs: bool,

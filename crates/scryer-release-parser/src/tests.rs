@@ -3606,6 +3606,43 @@ fn proper_is_a_revision_flag_not_an_edition() {
 }
 
 #[test]
+fn numbered_revisions_respect_technical_boundaries() {
+    let target = context(ContextFacetHint::Movie, "Movie Title");
+    for (marker, revision) in [
+        ("PROPER", 1),
+        ("REPACK", 1),
+        ("RERIP", 1),
+        ("PROPER2", 2),
+        ("REPACK3", 3),
+        ("rePaCk4", 4),
+        ("REPACK17", 17),
+        ("REAL.PROPER", 2),
+        ("REAL.REAL.REPACK", 3),
+        ("PROPER.REPACK3.REPACK2", 3),
+        ("REPACK0", 0),
+        ("REPACK2147483648", 0),
+        ("REPACK2oops", 0),
+    ] {
+        let raw = format!("Movie.Title.2024.1080p.WEB-DL.{marker}.x264-GRP");
+        let analysis = analyze_release_for_target(&raw, &target);
+        let parsed = &analysis.best_candidate().unwrap().projected;
+        assert_eq!(parsed.revision, revision, "{raw}");
+        assert_eq!(parsed.release_group.as_deref(), Some("GRP"), "{raw}");
+        assert_eq!(parsed.is_proper_upload, revision > 0, "{raw}");
+    }
+    for title in ["The Proper Family", "Real Repack", "Repack2 Adventures"] {
+        let target = context(ContextFacetHint::Movie, title);
+        let raw = format!("{}.2024.1080p.WEB-DL.x264-GRP", title.replace(' ', "."));
+        let analysis = analyze_release_for_target(&raw, &target);
+        assert_eq!(
+            analysis.best_candidate().unwrap().projected.revision,
+            0,
+            "{raw}"
+        );
+    }
+}
+
+#[test]
 fn proper_does_not_shadow_a_real_edition() {
     let mut target = context(ContextFacetHint::Movie, "Movie Title");
     target.known_years.push(2024);

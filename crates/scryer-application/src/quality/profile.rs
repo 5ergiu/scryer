@@ -30,6 +30,8 @@ pub struct QualityProfileCriteria {
     pub prefer_remux: bool,
     pub allow_bd_disk: bool,
     pub allow_upgrades: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_proper_repack: bool,
     pub prefer_dual_audio: bool,
     pub required_audio_languages: Vec<String>,
     pub scoring_persona: ScoringPersona,
@@ -94,6 +96,8 @@ pub(crate) struct AcceptanceCriteria<'a> {
     pub detected_hdr_allowed: bool,
     pub allow_bd_disk: bool,
     pub allow_upgrades: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_proper_repack: bool,
     pub required_audio_languages: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cutoff_tier: Option<&'a String>,
@@ -119,6 +123,7 @@ impl<'a> From<&'a QualityProfileCriteria> for AcceptanceCriteria<'a> {
             detected_hdr_allowed: criteria.detected_hdr_allowed,
             allow_bd_disk: criteria.allow_bd_disk,
             allow_upgrades: criteria.allow_upgrades,
+            ignore_proper_repack: criteria.ignore_proper_repack,
             required_audio_languages: &criteria.required_audio_languages,
             cutoff_tier: criteria.cutoff_tier.as_ref(),
             min_score_to_grab: criteria.min_score_to_grab,
@@ -131,6 +136,8 @@ impl<'a> From<&'a QualityProfileCriteria> for AcceptanceCriteria<'a> {
 /// Stored in the `scoring_config` TEXT column of the `quality_profiles` table.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScoringConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_proper_repack: bool,
     #[serde(default)]
     pub scoring_persona: ScoringPersona,
     #[serde(default)]
@@ -230,6 +237,8 @@ pub struct QualityProfileDecision {
     /// Codec/source/runtime-aware size distance used only to break search ties.
     /// Zero means plausible or unknown; this never contributes to the score.
     pub size_fit_penalty: i32,
+    /// Context-derived revision preference; zero without related incumbents.
+    pub revision_preference: i32,
 }
 
 impl QualityProfileDecision {
@@ -242,6 +251,7 @@ impl QualityProfileDecision {
             preference_score: 0,
             tier_index: None,
             size_fit_penalty: 0,
+            revision_preference: 0,
         }
     }
 
@@ -329,6 +339,8 @@ struct RawQualityProfileCriteria {
     #[serde(default)]
     allow_upgrades: bool,
     #[serde(default)]
+    ignore_proper_repack: bool,
+    #[serde(default)]
     prefer_dual_audio: bool,
     #[serde(default)]
     required_audio_languages: Vec<String>,
@@ -402,6 +414,7 @@ pub fn builtin_4k_profile() -> QualityProfile {
             prefer_remux: false,
             allow_bd_disk: false,
             allow_upgrades: true,
+            ignore_proper_repack: false,
             prefer_dual_audio: false,
             required_audio_languages: vec![],
             scoring_persona: ScoringPersona::default(),
@@ -439,6 +452,7 @@ pub fn builtin_8k_profile() -> QualityProfile {
             prefer_remux: false,
             allow_bd_disk: false,
             allow_upgrades: true,
+            ignore_proper_repack: false,
             prefer_dual_audio: false,
             required_audio_languages: vec![],
             scoring_persona: ScoringPersona::default(),
@@ -471,6 +485,7 @@ pub fn builtin_1080p_profile() -> QualityProfile {
             prefer_remux: false,
             allow_bd_disk: false,
             allow_upgrades: true,
+            ignore_proper_repack: false,
             prefer_dual_audio: false,
             required_audio_languages: vec![],
             scoring_persona: ScoringPersona::default(),
@@ -503,6 +518,7 @@ pub fn builtin_anime_profile() -> QualityProfile {
             prefer_remux: false,
             allow_bd_disk: false,
             allow_upgrades: true,
+            ignore_proper_repack: false,
             prefer_dual_audio: false,
             required_audio_languages: vec![],
             scoring_persona: ScoringPersona::default(),
@@ -556,6 +572,7 @@ fn quality_profile_from_raw(raw: RawQualityProfile) -> Result<QualityProfile, se
             prefer_remux: criteria.prefer_remux,
             allow_bd_disk: criteria.allow_bd_disk,
             allow_upgrades: criteria.allow_upgrades,
+            ignore_proper_repack: criteria.ignore_proper_repack,
             prefer_dual_audio: criteria.prefer_dual_audio,
             required_audio_languages: criteria
                 .required_audio_languages
@@ -597,6 +614,7 @@ impl Default for QualityProfile {
                 prefer_remux: false,
                 allow_bd_disk: false,
                 allow_upgrades: true,
+                ignore_proper_repack: false,
                 prefer_dual_audio: false,
                 required_audio_languages: vec![],
                 scoring_persona: ScoringPersona::default(),
@@ -628,6 +646,7 @@ impl Default for QualityProfileCriteria {
             prefer_remux: false,
             allow_bd_disk: true,
             allow_upgrades: true,
+            ignore_proper_repack: false,
             prefer_dual_audio: false,
             required_audio_languages: vec![],
             scoring_persona: ScoringPersona::default(),

@@ -1273,6 +1273,7 @@ export const RELEASE_SEARCH_RESULT_FIELDS = `
       detectedHdr
       parseConfidence
       isProperUpload
+      revision
       isRemux
       isBdDisk
       isAiEnhanced
@@ -2530,6 +2531,7 @@ const qualityProfileCriteriaFields = `
       preferRemux
       allowBdDisk
       allowUpgrades
+      ignoreProperRepack
       scoringOverrides {
         allowX265Non4K
         blockDvWithoutFallback

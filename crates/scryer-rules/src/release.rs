@@ -173,6 +173,8 @@ pub struct ReleaseDoc {
     pub is_bd_disk: bool,
     pub is_proper_upload: bool,
     pub is_repack: bool,
+    #[serde(default)]
+    pub revision: i32,
     pub is_ai_enhanced: bool,
     pub is_hardcoded_subs: bool,
     pub is_password_protected: Option<bool>,
@@ -802,6 +804,31 @@ fn validate_managed_entries(entries: &[UserRuleEntry]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_revision_is_available_to_custom_rules() {
+        let policy = UserPolicy {
+            id: "revision".into(),
+            name: "Revision".into(),
+            rego_source: rewrite_package_declaration(
+                "score_entry[\"revision\"] := input.release.revision * 7",
+                "revision",
+            ),
+            origin: PolicyOrigin::User,
+            applied_facets: vec![],
+        };
+        let engine =
+            UserRulesEngine::build_with_baseline_rules(&[policy], &Default::default()).unwrap();
+        let mut input = test_input();
+        for revision in [0, 1, 2, 3, 7] {
+            input.release.revision = revision;
+            let result = engine.evaluator().evaluate(&input, "movie").unwrap();
+            assert_eq!(
+                result.entries.iter().map(|entry| entry.delta).sum::<i32>(),
+                revision * 7
+            );
+        }
+    }
 
     type TimingRecord = (String, String, String, String, String);
 
@@ -2049,6 +2076,7 @@ score_entry["internal"] := 300 if {
                 is_bd_disk: false,
                 is_proper_upload: false,
                 is_repack: false,
+                revision: 0,
                 is_ai_enhanced: false,
                 is_hardcoded_subs: false,
                 is_password_protected: None,

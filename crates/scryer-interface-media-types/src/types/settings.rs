@@ -732,6 +732,8 @@ pub struct QualityProfileCriteriaPayload {
     pub allow_bd_disk: bool,
     /// Whether quality upgrades are allowed.
     pub allow_upgrades: bool,
+    /// Let scores decide without automatic PROPER/REPACK preference.
+    pub ignore_proper_repack: bool,
     /// Optional boolean scoring overrides.
     pub scoring_overrides: ScoringOverridesPayload,
     /// Cutoff quality tier, or null when no cutoff is configured.
@@ -1449,6 +1451,9 @@ pub struct QualityProfileCriteriaInput {
     pub allow_bd_disk: bool,
     /// Whether upgrades above the current file are allowed.
     pub allow_upgrades: bool,
+    /// Let scores decide without automatic PROPER/REPACK preference.
+    #[graphql(default)]
+    pub ignore_proper_repack: bool,
     /// Additional scoring preferences.
     pub scoring_overrides: ScoringOverridesInput,
     /// Optional cutoff quality tier.

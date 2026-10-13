@@ -1338,7 +1338,7 @@ impl AppUseCase {
                 None,
                 now,
             )
-                .await;
+            .await;
         }
         let Some(best_index) = results
             .iter()
@@ -1512,6 +1512,7 @@ mod auto_eligibility_reason_tests {
                 preference_score: 0,
                 tier_index: None,
                 size_fit_penalty: 0,
+                revision_preference: 0,
             }),
             extra: Default::default(),
             response_attributes: Default::default(),

@@ -16,7 +16,7 @@ fn incumbent(id: &str, score: i32, covers: &[&str]) -> (Incumbent, bool) {
             revision: 0,
             file_id: id.to_string(),
             file_path: format!("/data/TV/Show/Season 01/{id}.mkv"),
-            release_group: None,
+            release_group: Some("group".into()),
             score,
             covers: covers.iter().map(|value| (*value).to_string()).collect(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -751,7 +751,11 @@ fn revised(id: &str, revision: i32, score: i32) -> (Incumbent, bool) {
 fn a_proper_admits_over_the_same_tier_even_when_it_scores_lower() {
     let subject = AdmissionSubject::new(episodes(&["ep-01"]), [revised("file-1", 0, 900)]);
 
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 1, 400), &auto(200));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(0), 1, 400).with_revision_policy(Some("group"), false),
+        &auto(200),
+    );
     assert!(
         verdict.is_admitted(),
         "a PROPER of what is on disk is not a trimming: {verdict:?}"
@@ -765,7 +769,11 @@ fn a_proper_admits_over_the_same_tier_even_when_it_scores_lower() {
 fn the_original_is_refused_against_a_proper_on_disk() {
     let subject = AdmissionSubject::new(episodes(&["ep-01"]), [revised("file-1", 1, 100)]);
 
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 9_000), &auto(1));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(0), 0, 9_000).with_revision_policy(Some("group"), false),
+        &auto(1),
+    );
     assert!(
         matches!(
             verdict.rejection().map(|r| &r.reason),
@@ -788,7 +796,11 @@ fn a_proper_of_a_lower_tier_is_still_a_downgrade() {
         [tiered("file-1", Some(0), 100, &["ep-01"])],
     );
 
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(1), 2, 9_000), &auto(1));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(1), 2, 9_000).with_revision_policy(Some("group"), false),
+        &auto(1),
+    );
     assert!(matches!(
         verdict.rejection().map(|r| &r.reason),
         Some(AdmissionRejectionReason::LowerQualityTier)
@@ -802,10 +814,18 @@ fn an_equal_revision_leaves_the_score_in_charge() {
     let subject = AdmissionSubject::new(episodes(&["ep-01"]), [revised("file-1", 1, 900)]);
 
     assert!(
-        evaluate_admission(&subject, CandidateFacts::new(Some(0), 1, 1_200), &auto(200))
-            .is_admitted()
+        evaluate_admission(
+            &subject,
+            CandidateFacts::new(Some(0), 1, 1_200).with_revision_policy(Some("group"), false),
+            &auto(200)
+        )
+        .is_admitted()
     );
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 1, 1_000), &auto(200));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(0), 1, 1_000).with_revision_policy(Some("group"), false),
+        &auto(200),
+    );
     assert!(matches!(
         verdict.rejection().map(|r| &r.reason),
         Some(AdmissionRejectionReason::NotAnUpgrade { .. })
@@ -826,15 +846,19 @@ fn a_revision_upgrade_is_not_blocked_by_a_no_upgrade_profile() {
     let subject = AdmissionSubject::new(episodes(&["ep-01"]), [revised("file-1", 0, 900)]);
 
     assert!(
-        evaluate_admission(&subject, CandidateFacts::new(Some(0), 1, 400), &no_upgrades)
-            .is_admitted()
+        evaluate_admission(
+            &subject,
+            CandidateFacts::new(Some(0), 1, 400).with_revision_policy(Some("group"), false),
+            &no_upgrades
+        )
+        .is_admitted()
     );
 
     let on_disk_is_the_proper =
         AdmissionSubject::new(episodes(&["ep-01"]), [revised("file-1", 1, 900)]);
     let verdict = evaluate_admission(
         &on_disk_is_the_proper,
-        CandidateFacts::new(Some(0), 0, 9_000),
+        CandidateFacts::new(Some(0), 0, 9_000).with_revision_policy(Some("group"), false),
         &no_upgrades,
     );
     assert!(matches!(
@@ -857,7 +881,11 @@ fn a_pack_member_is_improvable_by_a_revision_alone() {
 
     // Revision 1 beats file-1 (revision 0) and ties file-2, so exactly one
     // member is improvable — which is reason enough to fetch the pack.
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 1, 500), &auto(200));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(0), 1, 500).with_revision_policy(Some("group"), false),
+        &auto(200),
+    );
     assert_eq!(verdict.superseded(), ["file-1"]);
 }
 
@@ -873,7 +901,11 @@ fn a_pack_of_originals_does_not_displace_propers() {
     let subject =
         AdmissionSubject::new(episodes(&["ep-01", "ep-02"]), [first, second]).per_member();
 
-    let verdict = evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 9_000), &auto(1));
+    let verdict = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(0), 0, 9_000).with_revision_policy(Some("group"), false),
+        &auto(1),
+    );
     assert!(
         !verdict.is_admitted(),
         "every member already holds the later revision: {verdict:?}"
@@ -898,12 +930,17 @@ fn a_manual_pack_grab_bypasses_the_score_comparison() {
     // Automatic: every member is held by a far better file, so there is nothing
     // to fetch.
     assert!(
-        !evaluate_admission(&subject, CandidateFacts::new(Some(0), 0, 10), &auto(1)).is_admitted()
+        !evaluate_admission(
+            &subject,
+            CandidateFacts::new(Some(0), 0, 10).with_revision_policy(Some("group"), false),
+            &auto(1)
+        )
+        .is_admitted()
     );
 
     let verdict = evaluate_admission(
         &subject,
-        CandidateFacts::new(Some(0), 0, 10),
+        CandidateFacts::new(Some(0), 0, 10).with_revision_policy(Some("group"), false),
         &AdmissionPolicy::manual(),
     );
     assert!(
@@ -925,7 +962,7 @@ fn a_manual_pack_grab_still_cannot_fetch_an_unaired_season() {
 
     let verdict = evaluate_admission(
         &subject,
-        CandidateFacts::new(Some(0), 0, 900),
+        CandidateFacts::new(Some(0), 0, 900).with_revision_policy(Some("group"), false),
         &AdmissionPolicy::manual(),
     );
     assert!(matches!(
@@ -938,6 +975,7 @@ fn a_manual_pack_grab_still_cannot_fetch_an_unaired_season() {
 
 fn queued(title: &str, tier_index: Option<usize>, revision: i32, score: i32) -> QueuedRelease {
     QueuedRelease {
+        release_group: Some("group".into()),
         title: title.to_string(),
         covers: Vec::new(),
         tier_index,
@@ -1148,7 +1186,11 @@ fn a_no_upgrade_profile_does_not_fetch_an_upgrade_beside_the_queue() {
         );
     }
 
-    let proper = evaluate_admission(&subject, CandidateFacts::new(Some(1), 1, 100), &policy);
+    let proper = evaluate_admission(
+        &subject,
+        CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("group"), false),
+        &policy,
+    );
     assert!(
         proper.is_admitted(),
         "a PROPER is a fix, not an upgrade: {proper:?}"
@@ -1174,7 +1216,12 @@ fn a_better_candidate_is_admitted_over_a_queued_release() {
     );
     // A PROPER of the same tier.
     assert!(
-        evaluate_admission(&subject, CandidateFacts::new(Some(1), 1, 100), &policy).is_admitted()
+        evaluate_admission(
+            &subject,
+            CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("group"), false),
+            &policy
+        )
+        .is_admitted()
     );
     // A same-tier improvement past the churn threshold.
     assert!(

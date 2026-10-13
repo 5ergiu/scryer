@@ -37,8 +37,8 @@
 //! ```
 //!
 //! Both arrows marked "grab" and the admit arm of the import gate are this
-//! module. The comparison is lexicographic — **tier, then revision, then score**
-//! — and what differs between the lanes is only the [`AdmissionPolicy`]: grab
+//! module. It compares tier, then related-release revision in Honor mode, then
+//! score. Ignore and unrelated groups skip the revision step. The [`AdmissionPolicy`]: grab
 //! applies churn thresholds, the upgrade guard, the format cutoff and the
 //! queue; import accepts ties and refuses only downgrades; manual bypasses the
 //! score entirely while the structural span guard still binds.
@@ -102,6 +102,7 @@ pub(crate) struct Incumbent {
 /// and it does not exist at all for pre-0.18 rows.
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedRelease {
+    pub release_group: Option<String>,
     /// The release name, for the operator-facing message.
     pub title: String,
     /// Episode members covered by the queued submission. Empty for title and
@@ -244,7 +245,9 @@ impl AdmissionPolicy {
 /// custom-format score when both are equal; folding any of it into the score is
 /// what let a size cliff outweigh a resolution step here.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CandidateFacts {
+pub(crate) struct CandidateFacts<'a> {
+    pub release_group: Option<&'a str>,
+    pub ignore_proper_repack: bool,
     pub tier_index: Option<usize>,
     /// PROPER/REPACK rank; [`crate::acquisition::scoring::revision_rank`].
     pub revision: i32,
@@ -255,13 +258,45 @@ pub(crate) struct CandidateFacts {
     pub release_key: Option<u64>,
 }
 
-impl CandidateFacts {
+impl<'a> CandidateFacts<'a> {
     pub(crate) fn new(tier_index: Option<usize>, revision: i32, score: i32) -> Self {
         Self {
             tier_index,
             revision,
             score,
             release_key: None,
+            release_group: None,
+            ignore_proper_repack: false,
+        }
+    }
+
+    pub(crate) fn with_revision_policy(mut self, group: Option<&'a str>, ignore: bool) -> Self {
+        self.release_group = group;
+        self.ignore_proper_repack = ignore;
+        self
+    }
+
+    fn is_related(self, tier: Option<usize>, group: Option<&str>) -> bool {
+        !self.ignore_proper_repack
+            && self.tier_index == tier
+            && self
+                .release_group
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+                .zip(group.map(str::trim).filter(|g| !g.is_empty()))
+                .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+    }
+
+    pub(crate) fn revision_cmp(
+        self,
+        tier: Option<usize>,
+        group: Option<&str>,
+        revision: i32,
+    ) -> std::cmp::Ordering {
+        if self.is_related(tier, group) {
+            self.revision.cmp(&revision)
+        } else {
+            std::cmp::Ordering::Equal
         }
     }
 
@@ -270,6 +305,38 @@ impl CandidateFacts {
         self.release_key = release_key(title);
         self
     }
+}
+
+/// A stable rank within one scope, never a comparison between unrelated candidates.
+pub(crate) fn revision_preference(
+    candidate: CandidateFacts<'_>,
+    subject: &AdmissionSubject,
+) -> i32 {
+    let mut improves = false;
+    let occupied = subject
+        .incumbents
+        .iter()
+        .map(|file| {
+            (
+                file.tier_index,
+                file.release_group.as_deref(),
+                file.revision,
+            )
+        })
+        .chain(subject.queued.iter().map(|queued| {
+            (
+                queued.tier_index,
+                queued.release_group.as_deref(),
+                queued.revision,
+            )
+        }));
+    for (tier, group, revision) in occupied {
+        if !candidate.is_related(tier, group) || candidate.revision < revision {
+            return 0;
+        }
+        improves |= candidate.revision > revision;
+    }
+    if improves { candidate.revision } else { 0 }
 }
 
 /// Compare two positions in the profile's quality ordering.
@@ -547,7 +614,11 @@ fn queued_candidate_win(
     match tier_cmp(candidate.tier_index, queued.tier_index) {
         std::cmp::Ordering::Greater => Some(QueueWin::Tier),
         std::cmp::Ordering::Less => None,
-        std::cmp::Ordering::Equal => match candidate.revision.cmp(&queued.revision) {
+        std::cmp::Ordering::Equal => match candidate.revision_cmp(
+            queued.tier_index,
+            queued.release_group.as_deref(),
+            queued.revision,
+        ) {
             std::cmp::Ordering::Greater => Some(QueueWin::Revision),
             std::cmp::Ordering::Less => None,
             // A tie is never a win over a download already in flight: with a
@@ -790,7 +861,11 @@ fn evaluate_any_member(
                 std::cmp::Ordering::Greater => return policy.allow_upgrades,
                 std::cmp::Ordering::Equal => {}
             }
-            match candidate.revision.cmp(&incumbent.revision) {
+            match candidate.revision_cmp(
+                incumbent.tier_index,
+                incumbent.release_group.as_deref(),
+                incumbent.revision,
+            ) {
                 std::cmp::Ordering::Greater => return true,
                 std::cmp::Ordering::Less => return false,
                 std::cmp::Ordering::Equal => {}
@@ -996,7 +1071,11 @@ pub(crate) fn evaluate_admission(
         // exact `Quality`. A WEB-DL PROPER therefore counts as a revision of a
         // Bluray release of the same resolution. That is the same coarseness the
         // rest of the ladder already has.
-        match candidate.revision.cmp(&incumbent.revision) {
+        match candidate.revision_cmp(
+            incumbent.tier_index,
+            incumbent.release_group.as_deref(),
+            incumbent.revision,
+        ) {
             std::cmp::Ordering::Greater => continue,
             std::cmp::Ordering::Less => {
                 if !policy.allow_upgrades {

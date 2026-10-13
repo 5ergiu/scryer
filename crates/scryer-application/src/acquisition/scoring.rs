@@ -41,25 +41,13 @@ use chrono::{DateTime, Utc};
 
 use crate::IndexerSearchResult;
 
-/// PROPER/REPACK rank — Sonarr's `QualityModel.Revision`, coarsened.
-///
-/// Sonarr counts real versions (`v2`, `v3`, …) and treats PROPER and REPACK as
-/// separate increments; Scryer's parser reports two booleans and no version
-/// counter, so a release is `0`, `1` (a PROPER *or* a REPACK) or `2` (both).
-/// That is enough for the only question anyone asks of it — "is this a
-/// re-release of what I already have?" — and it is the same number on both
-/// sides of every comparison, which is what matters.
-///
-/// One function because three places need the answer and must not drift: the
-/// search rank head below, [`crate::canonical_scoring::ScoredRelease::revision`]
-/// (so an incumbent's bar carries its revision without a second parse), and
-/// [`crate::admission::CandidateFacts`].
+/// Canonical numeric release revision, shared by search, queue and import.
 pub(crate) fn revision_rank(parsed: &crate::ParsedReleaseMetadata) -> i32 {
-    i32::from(parsed.is_proper_upload) + i32::from(parsed.is_repack)
+    parsed.revision
 }
 
-/// The part of a rank that is a property of the **release**: whether the profile
-/// allows it, its tier, its revision, its score — compared in that order.
+/// Shared rank head: eligibility, tier, context-derived revision preference,
+/// then score. Missing scopes and Ignore mode have no revision preference.
 ///
 /// Split out because two places order search results: the rank comparator used
 /// while scoring, and `compare_release_search_results`, which the interactive
@@ -78,7 +66,7 @@ pub(crate) struct RankHead {
     /// Position in the profile's quality ordering; lower is better. `usize::MAX`
     /// for a quality the profile does not list.
     pub tier_index: usize,
-    /// Higher revision (PROPER/REPACK) wins, so this is stored negated.
+    /// Negated revision preference, granted only by related-incumbent context.
     pub negated_revision: i32,
     /// The canonical score, negated so that higher wins.
     pub negated_score: i32,
@@ -90,26 +78,26 @@ impl RankHead {
     /// Read the head straight off a scored result.
     ///
     /// Everything it needs already travels on the result: the profile decision
-    /// carries `allowed`, `preference_score` and (since D11) `tier_index`, and
-    /// the parse carries PROPER/REPACK. An unscored result sorts as allowed,
+    /// carries eligibility, tier, score and the context-derived revision key.
+    /// An unscored result sorts as allowed,
     /// untiered and zero rather than being dropped — ordering must never fail a
     /// search.
     pub(crate) fn from_result(result: &IndexerSearchResult) -> Self {
         let decision = result.quality_profile_decision.as_ref();
-        let parsed = result.parsed_release_metadata.as_ref();
         Self {
             blocked: decision.is_some_and(|decision| !decision.allowed),
             tier_index: crate::admission::tier_sort_key(
                 decision.and_then(|decision| decision.tier_index),
             ),
-            negated_revision: parsed.map_or(0, |parsed| revision_rank(parsed).saturating_neg()),
+            negated_revision: decision
+                .map_or(0, |decision| decision.revision_preference.saturating_neg()),
             negated_score: decision
                 .map_or(0, |decision| decision.preference_score.saturating_neg()),
             size_fit_penalty: decision.map_or(0, |decision| decision.size_fit_penalty),
         }
     }
 
-    fn key(&self) -> (bool, usize, i32, i32, i32) {
+    pub(crate) fn key(&self) -> (bool, usize, i32, i32, i32) {
         (
             self.blocked,
             self.tier_index,

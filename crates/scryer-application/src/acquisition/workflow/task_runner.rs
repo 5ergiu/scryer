@@ -419,8 +419,7 @@ async fn walk_selected_scopes(
         }
     }
 
-    let mut ready_titles =
-        build_background_acquisition_title_work(targets, indices, None);
+    let mut ready_titles = build_background_acquisition_title_work(targets, indices, None);
     let title_ids = ready_titles
         .iter()
         .map(|work| work.title_id.clone())
@@ -1838,8 +1837,11 @@ async fn plan_series_pack_for_title(
             now,
         )
         .await?;
-    app.link_search_session_coverage_scope(&search_outcome.search_session_id, &convergence.scope_key)
-        .await;
+    app.link_search_session_coverage_scope(
+        &search_outcome.search_session_id,
+        &convergence.scope_key,
+    )
+    .await;
 
     let (evaluated_candidates, qualifying_collection_ids) = evaluate_series_pack_candidates(
         app,
@@ -7251,6 +7253,7 @@ mod task_runner_tests {
                 preference_score: 1_000,
                 tier_index: Some(0),
                 size_fit_penalty: 0,
+                revision_preference: 0,
             }),
         );
         let pack = arbitration_candidate(
@@ -7263,6 +7266,7 @@ mod task_runner_tests {
                 preference_score: 500,
                 tier_index: Some(3),
                 size_fit_penalty: 0,
+                revision_preference: 0,
             }),
         );
         assert_eq!(

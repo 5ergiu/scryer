@@ -239,6 +239,8 @@ pub struct ParsedReleasePayload {
     pub detected_hdr: bool,
     /// Whether the release is marked as a proper upload.
     pub is_proper_upload: bool,
+    /// Numeric release revision; zero denotes the original release.
+    pub revision: i32,
     /// Whether the release is a remux.
     pub is_remux: bool,
     /// Whether the release is a Blu-ray disc image.

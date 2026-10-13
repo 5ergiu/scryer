@@ -148,6 +148,7 @@ pub(crate) fn build_rule_input(
             is_bd_disk: parsed.is_bd_disk,
             is_proper_upload: parsed.is_proper_upload,
             is_repack: parsed.is_repack,
+            revision: crate::acquisition::scoring::revision_rank(parsed),
             is_ai_enhanced: parsed.is_ai_enhanced,
             is_hardcoded_subs: parsed.is_hardcoded_subs,
             is_password_protected: release_runtime.is_password_protected,
@@ -430,6 +431,7 @@ mod tests {
                 prefer_remux: false,
                 allow_bd_disk: false,
                 allow_upgrades: true,
+                ignore_proper_repack: false,
                 prefer_dual_audio: false,
                 required_audio_languages: vec![],
                 scoring_persona: crate::ScoringPersona::Balanced,
@@ -456,6 +458,7 @@ mod tests {
             preference_score: 1200,
             tier_index: Some(0),
             size_fit_penalty: 0,
+            revision_preference: 0,
         }
     }
 

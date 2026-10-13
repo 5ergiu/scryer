@@ -273,6 +273,7 @@ impl AppUseCase {
             .await
             .unwrap_or_default();
 
+        let reads = crate::acquisition::title_reads::TitleCatalogReads::new(&title.id);
         let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32, i32)> =
             std::collections::HashMap::with_capacity(releases.len());
         for release in releases.iter() {
@@ -285,12 +286,35 @@ impl AppUseCase {
                 &catalog_collections,
                 &context,
             );
+            let scope = facts
+                .coverage
+                .submission_scope_or(&wanted.submission_scope());
+            let admission = self
+                .admission_subject_for_scope_with_reads(
+                    &title,
+                    &scope,
+                    &context,
+                    facts.size_basis.total_runtime_minutes,
+                    crate::quality::canonical_context::SubjectIntent::Grab,
+                    &reads,
+                )
+                .await;
+            let candidate = crate::admission::CandidateFacts::new(
+                facts.tier_index,
+                facts.revision,
+                facts.score,
+            )
+            .with_revision_policy(
+                facts.release_group.as_deref(),
+                profile.criteria.ignore_proper_repack,
+            );
+            let revision_preference = crate::admission::revision_preference(candidate, &admission);
             keys.insert(
                 release.id.clone(),
                 (
                     !facts.allowed,
                     crate::admission::tier_sort_key(facts.tier_index),
-                    facts.revision.saturating_neg(),
+                    revision_preference.saturating_neg(),
                     facts.score.saturating_neg(),
                     facts.size_fit_penalty,
                 ),
@@ -1368,7 +1392,11 @@ impl AppUseCase {
             facts.revision,
             candidate_score,
         )
-        .with_release_title(&pr.release_title);
+        .with_release_title(&pr.release_title)
+        .with_revision_policy(
+            facts.release_group.as_deref(),
+            upgrade_context.profile.criteria.ignore_proper_repack,
+        );
         // The same candidate-aware cutoff gate the search and RSS lanes run
         // (D15). It used to be a scope-level `if cutoff_reached { return }`
         // above the score, which meant a PROPER parked behind a delay profile

@@ -36,7 +36,7 @@ pub use trash_guides::TRASH_GUIDES_SOURCE_REVISION;
 use parse::{AnalysisInputs, analyze_inputs};
 use sanitize::sanitize_input;
 
-const PARSER_VERSION: &str = "2026.09.06-fused-episode-label";
+const PARSER_VERSION: &str = "2026.10.13-numbered-revisions";
 
 /// Analyze a raw release name against one required target context.
 #[must_use]
