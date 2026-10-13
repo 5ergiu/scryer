@@ -9,6 +9,34 @@ use crate::stored_paths::{
 };
 use crate::{AppError, AppResult, AppUseCase};
 
+/// Immutable roots for one scan operation, shared by its title workers.
+#[derive(Clone)]
+pub(crate) struct ScanFolderRoots {
+    all: Vec<String>,
+    by_library: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl ScanFolderRoots {
+    pub(crate) async fn load(app: &AppUseCase) -> AppResult<std::sync::Arc<Self>> {
+        let libraries = app.services.catalog.libraries.list(None).await?;
+        let by_library: std::collections::HashMap<_, Vec<_>> = libraries
+            .into_iter()
+            .map(|library| {
+                (
+                    library.id,
+                    library.roots.into_iter().map(|root| root.path).collect(),
+                )
+            })
+            .collect();
+        let all = by_library.values().flatten().cloned().collect();
+        Ok(std::sync::Arc::new(Self { all, by_library }))
+    }
+}
+
+tokio::task_local! {
+    pub(crate) static SCAN_FOLDER_ROOTS: std::sync::Arc<ScanFolderRoots>;
+}
+
 fn non_empty_folder_path(path: Option<&str>) -> Option<&str> {
     path.filter(|path| !path.is_empty())
 }
@@ -78,14 +106,21 @@ pub(crate) async fn folder_spans_a_library_root(
     app: &AppUseCase,
     folder_path: &str,
 ) -> AppResult<bool> {
-    let all_roots = app
-        .all_library_root_folders()
-        .await?
-        .into_iter()
-        .map(|root| root.path)
-        .collect::<Vec<_>>();
+    let snapshot = SCAN_FOLDER_ROOTS.try_with(std::sync::Arc::clone).ok();
+    let loaded;
+    let all_roots = if let Some(snapshot) = snapshot.as_ref() {
+        &snapshot.all
+    } else {
+        loaded = app
+            .all_library_root_folders()
+            .await?
+            .into_iter()
+            .map(|root| root.path)
+            .collect::<Vec<_>>();
+        &loaded
+    };
     Ok(matches!(
-        crate::title_folder_rules::title_folder_root_violation(folder_path, &all_roots, &all_roots),
+        crate::title_folder_rules::title_folder_root_violation(folder_path, all_roots, all_roots),
         Some(
             crate::title_folder_rules::TitleFolderRootViolation::EqualsRoot
                 | crate::title_folder_rules::TitleFolderRootViolation::ContainsRoot
@@ -106,20 +141,29 @@ pub(crate) async fn title_folder_is_outside_its_library(
     title: &Title,
     folder_path: &str,
 ) -> AppResult<bool> {
-    let library_roots = app
-        .services
-        .catalog
-        .libraries
-        .get_by_id(&title.library_id)
-        .await?
-        .map(|library| {
-            library
-                .roots
-                .into_iter()
-                .map(|root| root.path)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let library_roots = if let Ok(roots) = SCAN_FOLDER_ROOTS.try_with(|snapshot| {
+        snapshot
+            .by_library
+            .get(&title.library_id)
+            .cloned()
+            .unwrap_or_default()
+    }) {
+        roots
+    } else {
+        app.services
+            .catalog
+            .libraries
+            .get_by_id(&title.library_id)
+            .await?
+            .map(|library| {
+                library
+                    .roots
+                    .into_iter()
+                    .map(|root| root.path)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
     if library_roots.is_empty() {
         return Ok(false);
     }
@@ -152,6 +196,14 @@ pub(crate) async fn ensure_title_folder_is_not_a_library_root(
     app: &AppUseCase,
     title: &Title,
 ) -> AppResult<()> {
+    if let Some(folder) = non_empty_folder_path(title.folder_path.as_deref())
+        && title_folder_is_outside_its_library(app, title, folder).await?
+    {
+        return Err(AppError::Validation(format!(
+            "the recorded folder for \"{}\" is outside its library roots; correct the title's folder first",
+            title.name
+        )));
+    }
     if !title_folder_spans_a_library_root(app, title).await? {
         return Ok(());
     }
@@ -162,6 +214,14 @@ pub(crate) async fn ensure_title_folder_is_not_a_library_root(
             title.folder_path.as_deref().unwrap_or_default()
         )
     )))
+}
+
+pub(crate) async fn title_folder_is_invalid(app: &AppUseCase, title: &Title) -> AppResult<bool> {
+    let Some(folder) = non_empty_folder_path(title.folder_path.as_deref()) else {
+        return Ok(false);
+    };
+    Ok(folder_spans_a_library_root(app, folder).await?
+        || title_folder_is_outside_its_library(app, title, folder).await?)
 }
 
 /// Move a title's stale folder ownership to the folder a scan found its
@@ -295,7 +355,9 @@ pub(crate) async fn claim_title_folder_if_missing(
             folder_path = %folder_path,
             "not recording a library root as a title's folder"
         );
-        return Ok(());
+        return Err(AppError::Validation(
+            "cannot claim a library root as a title folder".into(),
+        ));
     }
     if title_folder_is_outside_its_library(app, title, &folder_path).await? {
         tracing::warn!(
@@ -304,7 +366,9 @@ pub(crate) async fn claim_title_folder_if_missing(
             folder_path = %folder_path,
             "not recording a folder outside the title's library roots as its folder"
         );
-        return Ok(());
+        return Err(AppError::Validation(
+            "cannot claim a title folder outside its library roots".into(),
+        ));
     }
     app.services
         .catalog

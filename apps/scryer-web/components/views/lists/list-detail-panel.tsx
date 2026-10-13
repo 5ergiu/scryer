@@ -230,7 +230,8 @@ export function ListDetailPanel({
                   </div>
                 ))}
               </dl>
-              {subscription.source.provider === "simkl" ? <SimklAttribution /> : subscription.providerUrl ? (
+              {subscription.source.provider === "simkl" ? <SimklAttribution /> : null}
+              {subscription.providerUrl ? (
                 <a
                   href={subscription.providerUrl}
                   target="_blank"

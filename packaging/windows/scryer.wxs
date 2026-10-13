@@ -78,11 +78,17 @@
          leaves the old binaries running. The old product's own StopTrayBeforeRemoval runs too
          late to help, so locate the installed tray and ask it to shut down before validation.
          The tray's shutdown command returns success when no tray is running. -->
-    <Property Id="INSTALLEDTRAYEXE">
-      <DirectorySearch Id="InstalledScryerFolder" Path="[ProgramFiles64Folder]Scryer Media\Scryer">
-        <FileSearch Id="InstalledScryerTrayExe" Name="scryer-tray.exe" />
-      </DirectorySearch>
+    <!-- Without a FileSearch signature, AppSearch returns the registered key file's
+         directory. This also finds installs made with a custom INSTALLFOLDER. -->
+    <Property Id="INSTALLEDAPPLICATIONFOLDER">
+      <ComponentSearch Id="InstalledScryerFolder"
+                       Guid="$(var.ApplicationFilesComponentGuid)" Type="file" />
     </Property>
+    <SetProperty Id="INSTALLEDTRAYEXE"
+                 Value="[INSTALLEDAPPLICATIONFOLDER]scryer-tray.exe"
+                 Before="StopInstalledTrayBeforeValidate"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER" />
     <CustomAction
         Id="StopInstalledTrayBeforeValidate"
         Property="INSTALLEDTRAYEXE"

@@ -70,7 +70,7 @@ async fn discover_episodic_title_files_for_progress(
         None,
     );
     // A recorded folder that is a library root holds other titles' files.
-    if crate::folder_ownership::title_folder_spans_a_library_root(app, title).await?
+    if crate::folder_ownership::title_folder_is_invalid(app, title).await?
         || !episodic_title_directory_present(&title_dir).await?
     {
         return Ok(Vec::new());
@@ -246,7 +246,7 @@ async fn discover_movie_title_files(
     // A recorded folder that is a library root, or holds one, holds other
     // titles' files; walking it would read all of them as this title's.
     let recorded_folder_spans_a_root =
-        crate::folder_ownership::title_folder_spans_a_library_root(app, title).await?;
+        crate::folder_ownership::title_folder_is_invalid(app, title).await?;
     if !recorded_folder_spans_a_root
         && default_candidate_path != media_root_path
         && seen_candidate_paths.insert(path_to_stored_string(&default_candidate_path))
@@ -1141,6 +1141,7 @@ impl LibraryScanMediaWorkReservation {
 /// bulk, making the per-title check a no-op there).
 pub(super) struct LibraryScanMediaAnalysisPool {
     app: AppUseCase,
+    folder_roots: std::sync::Arc<crate::folder_ownership::ScanFolderRoots>,
     actor: User,
     session_id: Option<String>,
     coordinator: Option<LibraryScanCoordinator>,
@@ -1300,6 +1301,7 @@ impl LibraryScanMediaAnalysisPool {
     ) -> AppResult<Self> {
         Ok(Self {
             app: app.clone(),
+            folder_roots: crate::folder_ownership::ScanFolderRoots::load(app).await?,
             actor: actor.clone(),
             session_id: policy.session_id,
             coordinator: policy.coordinator,
@@ -1624,8 +1626,9 @@ impl LibraryScanMediaAnalysisPool {
         let metadata_language = self.metadata_language.clone();
         let hydration_source = self.hydration_source;
         let file_analysis_concurrency = self.analysis_profile.file_analysis_concurrency_per_title;
+        let folder_roots = self.folder_roots.clone();
         self.work_set.spawn(async move {
-            let (discovered_file_count, result) = hydrate_enumerate_and_walk_title_work(
+            let walk = hydrate_enumerate_and_walk_title_work(
                 &app,
                 &actor,
                 work,
@@ -1639,8 +1642,10 @@ impl LibraryScanMediaAnalysisPool {
                     hydration_source,
                     file_analysis_concurrency,
                 },
-            )
-            .await;
+            );
+            let (discovered_file_count, result) = crate::folder_ownership::SCAN_FOLDER_ROOTS
+                .scope(folder_roots, walk)
+                .await;
             LibraryScanTitleWalkTaskOutput {
                 title_id,
                 discovered_file_count,
@@ -2457,7 +2462,7 @@ impl AppUseCase {
         // scoped scan only touches the files it was handed and carries on.
         let walks_title_folder = pre_scanned_files.is_none() || full_folder_scan;
         if walks_title_folder
-            && crate::folder_ownership::title_folder_spans_a_library_root(self, &title).await?
+            && crate::folder_ownership::title_folder_is_invalid(self, &title).await?
         {
             if matches!(mode, LibraryScanTitleWalkMode::OneOff) {
                 crate::folder_ownership::ensure_title_folder_is_not_a_library_root(self, &title)
@@ -2636,7 +2641,7 @@ impl AppUseCase {
         // scan the operator asked for says so; a library scan walks nothing
         // for the title and carries on.
         let title_dir_is_a_library_root = !scoped_discovered_files
-            && crate::folder_ownership::title_folder_spans_a_library_root(self, &title).await?;
+            && crate::folder_ownership::title_folder_is_invalid(self, &title).await?;
         if title_dir_is_a_library_root && matches!(mode, LibraryScanTitleWalkMode::OneOff) {
             crate::folder_ownership::ensure_title_folder_is_not_a_library_root(self, &title)
                 .await?;

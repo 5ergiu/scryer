@@ -11009,7 +11009,11 @@ async fn episode_relink_fixture_in(
     settings
         .set_value(
             SETTINGS_SCOPE_MEDIA,
-            "series.path",
+            if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+                "anime.path"
+            } else {
+                "series.path"
+            },
             tempdir.path().to_string_lossy().as_ref(),
         )
         .await;

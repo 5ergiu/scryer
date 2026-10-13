@@ -517,6 +517,9 @@ async fn run_postgres_rust_hook(
             crate::migrations::repair_root_title_folders::repair_root_title_folders_postgres(tx)
                 .await
         }
+        "repair_live_title_folders" => {
+            crate::migrations::repair_root_title_folders::repair_live_title_folders_postgres(tx).await
+        }
         "migrate_title_image_blobs" => {
             crate::migrations::title_image_blobs::migrate_title_image_blobs_postgres(tx).await
         }

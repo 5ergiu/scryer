@@ -40,13 +40,16 @@ impl TitleFolderRootViolation {
     }
 }
 
-fn is_path_separator(character: char) -> bool {
-    character == '/' || character == '\\'
+fn windows_path_syntax(path: &str) -> bool {
+    cfg!(windows)
+        || path.starts_with(r"\\")
+        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes()[0].is_ascii_alphabetic())
 }
 
 /// Whether a path spells a `.` or `..` component in either separator.
 pub(crate) fn path_has_dot_segments(path: &str) -> bool {
-    path.split(is_path_separator)
+    let windows = windows_path_syntax(path);
+    path.split(|c| c == '/' || (windows && c == '\\'))
         .any(|segment| segment == "." || segment == "..")
 }
 
@@ -58,6 +61,8 @@ fn collapse_dot_segments(path: &str) -> std::borrow::Cow<'_, str> {
     if !path_has_dot_segments(path) {
         return std::borrow::Cow::Borrowed(path);
     }
+    let windows = windows_path_syntax(path);
+    let is_path_separator = |c| c == '/' || (windows && c == '\\');
     let separator = path.chars().find(|c| is_path_separator(*c)).unwrap_or('/');
     let bytes = path.as_bytes();
     let starts_with_separator = |index: usize| {
@@ -120,7 +125,16 @@ fn resolved_display(path: &str) -> String {
 /// display, dot components resolved, then normalized the way configured roots
 /// are.
 fn comparable(path: &str) -> String {
-    normalize_library_root_path(&resolved_display(path))
+    let path = resolved_display(path);
+    if windows_path_syntax(&path) {
+        use unicode_normalization::UnicodeNormalization;
+        normalize_library_root_path(&path)
+            .replace('\\', "/")
+            .nfc()
+            .collect()
+    } else {
+        crate::stored_paths::path_identity_key(&path).unwrap_or_default()
+    }
 }
 
 /// Whether `path` is `folder` or lies beneath it, across both separator
@@ -128,15 +142,24 @@ fn comparable(path: &str) -> String {
 /// Dot components are resolved first, so `/media/tv/Show/..` is the root
 /// itself and `/media/tv/../movies` is not under `/media/tv` at all.
 fn under_or_equal(path: &str, folder: &str) -> bool {
-    library_path_is_under_root(&resolved_display(path), &resolved_display(folder))
+    let path = comparable(path);
+    let folder = comparable(folder);
+    !folder.is_empty()
+        && (path == folder
+            || path
+                .strip_prefix(&folder)
+                .is_some_and(|tail| folder.ends_with('/') || tail.starts_with('/')))
 }
 
 /// [`under_or_equal`] on the paths exactly as spelled.
 fn spelled_under_or_equal(path: &str, folder: &str) -> bool {
-    library_path_is_under_root(
-        &stored_path_to_display_string(path),
-        &stored_path_to_display_string(folder),
-    )
+    let path = stored_path_to_display_string(path);
+    let folder = stored_path_to_display_string(folder);
+    if windows_path_syntax(&path) || windows_path_syntax(&folder) {
+        library_path_is_under_root(&path, &folder)
+    } else {
+        stored_path_is_within_folder(&folder, &path)
+    }
 }
 
 fn same_location(left: &str, right: &str) -> bool {
@@ -181,7 +204,7 @@ pub fn containing_folder_keys(path: &str) -> Vec<String> {
     let Some(key) = folder_containment_key(path) else {
         return Vec::new();
     };
-    let separator = if cfg!(windows) { '\\' } else { '/' };
+    let separator = '/';
     let mut keys = Vec::new();
     for (index, _) in key.match_indices(separator) {
         if index > 0 {
@@ -262,28 +285,26 @@ fn first_segment_folder(path: &str, library_roots: &[String]) -> Option<String> 
     }
     let root = most_specific_root_strictly_containing(path, library_roots)?;
     let original = path.trim();
-    let normalized = normalize_library_root_path(original);
-    // Normalizing a file path only swaps separators (and folds ASCII case on
-    // Windows), so offsets carry over to the original spelling. Anything else
-    // is a shape this does not try to interpret.
-    if normalized.len() != original.len() {
-        return None;
+    let windows = windows_path_syntax(original);
+    let separator = |c| c == '/' || (windows && c == '\\');
+    let root_segments = comparable(root)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .count();
+    let mut segments = 0;
+    let mut in_segment = false;
+    for (offset, character) in original.char_indices() {
+        if separator(character) {
+            if in_segment && segments == root_segments + 1 {
+                return Some(original[..offset].to_string());
+            }
+            in_segment = false;
+        } else if !in_segment {
+            segments += 1;
+            in_segment = true;
+        }
     }
-    let normalized_root = normalize_library_root_path(root);
-    let remainder_start = normalized_root.len();
-    let remainder = normalized.get(remainder_start..)?;
-    let separator = if cfg!(windows) { '\\' } else { '/' };
-    let leading = remainder.len() - remainder.trim_start_matches(separator).len();
-    let segment_start = remainder_start + leading;
-    let rest = normalized.get(segment_start..)?;
-    // A file directly in the root has no folder of its own.
-    let segment_len = rest.find(separator)?;
-    if segment_len == 0 {
-        return None;
-    }
-    original
-        .get(..segment_start + segment_len)
-        .map(str::to_string)
+    None
 }
 
 /// The title folder implied by where a title's files are: the root plus the
@@ -315,6 +336,44 @@ mod tests {
 
     fn roots(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn unicode_equivalent_roots_preserve_original_derived_spelling() {
+        let library = roots(&["/media/Café"]);
+        let path = "/media/Cafe\u{301}/Show/E01.mkv";
+        assert!(path_is_strictly_within(path, &library[0]));
+        assert_eq!(
+            title_folder_from_media_paths(&library, [path]),
+            Some("/media/Cafe\u{301}/Show".into())
+        );
+        assert!(
+            containing_folder_keys(path).contains(&folder_containment_key(&library[0]).unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_backslashes_do_not_cross_folder_boundaries() {
+        let library = roots(&["/media/tv"]);
+        for (path, violation) in [
+            (
+                r"/media/tv\Show",
+                TitleFolderRootViolation::OutsideLibraryRoots,
+            ),
+            (r"/media/tv\Show/..", TitleFolderRootViolation::ContainsRoot),
+            (
+                r"/media/tv\../Show",
+                TitleFolderRootViolation::OutsideLibraryRoots,
+            ),
+        ] {
+            assert_eq!(
+                title_folder_root_violation(path, &library, &library),
+                Some(violation)
+            );
+            assert!(!stored_path_is_inside_folder(&library[0], path));
+        }
+        assert!(path_is_strictly_within(r"/media/tv/Show\Name", &library[0]));
     }
 
     #[test]

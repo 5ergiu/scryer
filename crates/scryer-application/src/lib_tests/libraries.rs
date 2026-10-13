@@ -2658,6 +2658,56 @@ async fn folder_ownership_accepts_a_folder_in_any_root_of_the_titles_own_library
 }
 
 #[tokio::test]
+async fn folder_ownership_scan_snapshot_preserves_root_and_library_boundaries() {
+    let (app, title) = folder_ownership_two_movie_libraries(&["/Volumes/Media/Movies"]).await;
+    let snapshot = crate::folder_ownership::ScanFolderRoots::load(&app)
+        .await
+        .unwrap();
+    crate::folder_ownership::SCAN_FOLDER_ROOTS
+        .scope(snapshot, async {
+            for folder in [
+                "/Volumes/Media/Movies",
+                "/Volumes/Media/Other Movies",
+                "/Volumes/Media",
+            ] {
+                let mut claimant = title.clone();
+                assert!(
+                    crate::folder_ownership::claim_title_folder_if_missing(
+                        &app,
+                        &mut claimant,
+                        Path::new(folder)
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(claimant.folder_path, None);
+            }
+            assert!(
+                crate::folder_ownership::title_folder_is_outside_its_library(
+                    &app,
+                    &title,
+                    "/Volumes/Media/Other Movies/Film"
+                )
+                .await
+                .unwrap()
+            );
+            let mut claimant = title.clone();
+            crate::folder_ownership::claim_title_folder_if_missing(
+                &app,
+                &mut claimant,
+                Path::new("/Volumes/Media/Movies/Film"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                claimant.folder_path.as_deref(),
+                Some("/Volumes/Media/Movies/Film")
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn folder_ownership_refuses_a_folder_inside_another_librarys_root() {
     let (app, title) = folder_ownership_two_movie_libraries(&["/Volumes/Media/Movies"]).await;
     let foreign = "/Volumes/Media/Other Movies/Synthetic Ownership Film (2024)";
@@ -2675,9 +2725,26 @@ async fn folder_ownership_refuses_a_folder_inside_another_librarys_root() {
     );
 
     let mut claimant = title.clone();
-    crate::folder_ownership::claim_title_folder_if_missing(&app, &mut claimant, Path::new(foreign))
-        .await
-        .expect("claim is skipped, not failed");
+    let error = crate::folder_ownership::claim_title_folder_if_missing(
+        &app,
+        &mut claimant,
+        Path::new(foreign),
+    )
+    .await
+    .expect_err("invalid ownership must stop the caller");
+    assert!(matches!(error, AppError::Validation(_)));
+    let mut invalid_owner = title.clone();
+    invalid_owner.folder_path = Some(foreign.to_string());
+    assert!(
+        crate::folder_ownership::ensure_title_folder_is_not_a_library_root(&app, &invalid_owner)
+            .await
+            .is_err()
+    );
+    assert!(
+        crate::folder_ownership::title_folder_is_invalid(&app, &invalid_owner)
+            .await
+            .unwrap()
+    );
     assert_eq!(claimant.folder_path, None);
     let stored = app
         .services

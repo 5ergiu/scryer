@@ -167,6 +167,57 @@ pub async fn repair_root_title_folders_postgres(
     Ok(())
 }
 
+/// Follow-up repair: parked and staged media must not supply folder ownership
+/// evidence. Keep the original migration entry points unchanged for history.
+fn live_media_repair_plan(
+    roots: &[RootRow],
+    titles: &[TitleRow],
+    media: Vec<MediaFileRow>,
+) -> RepairPlan {
+    let live = media
+        .into_iter()
+        .filter(|row| {
+            let path = row.file_path.replace('\\', "/");
+            !path.contains("/.scryer-recycle/") && !path.contains("/.scryer-upgrade-replacement-")
+        })
+        .collect::<Vec<_>>();
+    build_repair_plan(roots, titles, &live)
+}
+
+pub async fn repair_live_title_folders_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> AppResult<()> {
+    let plan = live_media_repair_plan(
+        &sqlite_roots(tx).await?,
+        &sqlite_titles(tx).await?,
+        sqlite_media_files(tx).await?,
+    );
+    log_plan(&plan);
+    for repair in plan.repairs {
+        sqlx::query("UPDATE titles SET folder_path = ?1, root_folder_id = COALESCE(?2, root_folder_id) WHERE id = ?3")
+            .bind(repair.folder_path).bind(repair.root_folder_id).bind(repair.title_id)
+            .execute(&mut **tx).await.map_err(repo_err)?;
+    }
+    Ok(())
+}
+
+pub async fn repair_live_title_folders_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> AppResult<()> {
+    let plan = live_media_repair_plan(
+        &postgres_roots(tx).await?,
+        &postgres_titles(tx).await?,
+        postgres_media_files(tx).await?,
+    );
+    log_plan(&plan);
+    for repair in plan.repairs {
+        sqlx::query("UPDATE titles SET folder_path = $1, root_folder_id = COALESCE($2, root_folder_id) WHERE id = $3")
+            .bind(repair.folder_path).bind(repair.root_folder_id).bind(repair.title_id)
+            .execute(&mut **tx).await.map_err(repo_err)?;
+    }
+    Ok(())
+}
+
 fn recorded_folder(title: &TitleRow) -> Option<&str> {
     title
         .folder_path
@@ -704,6 +755,84 @@ mod tests {
             media(title_id, &format!("{folder}/Show - S01E02.mkv")),
             media(title_id, &format!("{folder}/Show - S02E01.mkv")),
         ]
+    }
+
+    #[test]
+    fn live_repair_ignores_recycled_and_staged_rows() {
+        let titles = vec![title("t1", "/media/tv")];
+        let mut files = flattened("t1", "/media/tv/Synthetic Show");
+        files.push(media("t1", "/media/tv/.scryer-recycle/old.mkv"));
+        files.push(media("t1", "/media/tv/.scryer-upgrade-replacement-new.mkv"));
+        assert!(
+            build_repair_plan(&roots(), &titles, &files)
+                .repairs
+                .is_empty()
+        );
+        let plan = live_media_repair_plan(&roots(), &titles, files);
+        assert_eq!(
+            repaired(&plan, "t1").as_deref(),
+            Some("/media/tv/Synthetic Show")
+        );
+
+        let parked_only = live_media_repair_plan(
+            &roots(),
+            &titles,
+            vec![
+                media("t1", "/media/tv/.scryer-recycle/old.mkv"),
+                media("t1", "/media/tv/.scryer-upgrade-replacement-new.mkv"),
+            ],
+        );
+        assert!(parked_only.repairs.is_empty());
+        let conflicting = live_media_repair_plan(
+            &roots(),
+            &titles,
+            vec![
+                media("t1", "/media/tv/Show A/e1.mkv"),
+                media("t1", "/media/tv/Show B/e2.mkv"),
+            ],
+        );
+        assert!(conflicting.repairs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_repair_sqlite_updates_only_unambiguous_folders_and_is_idempotent() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE library_roots (id TEXT, library_id TEXT, path TEXT);
+            CREATE TABLE titles (id TEXT, library_id TEXT, root_folder_id TEXT, folder_path TEXT);
+            CREATE TABLE media_files (id TEXT, title_id TEXT, file_path TEXT);
+            INSERT INTO library_roots VALUES ('root-tv', 'series', '/media/tv');
+            INSERT INTO titles VALUES ('live', 'series', 'root-tv', '/media/tv'),
+                ('parked', 'series', 'root-tv', '/media/tv');
+            INSERT INTO media_files VALUES ('1', 'live', '/media/tv/Show/e1.mkv'),
+                ('2', 'live', '/media/tv/.scryer-recycle/old.mkv'),
+                ('3', 'parked', '/media/tv/.scryer-upgrade-replacement-new.mkv');",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            repair_live_title_folders_sqlite(&mut tx).await.unwrap();
+            let rows = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT id, folder_path, root_folder_id FROM titles ORDER BY id",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    ("live".into(), "/media/tv/Show".into(), "root-tv".into()),
+                    ("parked".into(), "/media/tv".into(), "root-tv".into()),
+                ]
+            );
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_files")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(count, 3);
+        }
     }
 
     #[test]
