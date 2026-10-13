@@ -4773,8 +4773,26 @@ mod tests {
             .await
             .unwrap();
 
+        // Sync only persists routing scopes it changes, so the plan seeds a
+        // new scope to guarantee a system routing write for the barrier.
         let provider = Arc::new(RecordingPluginProvider::with_sync_plan(
-            crate::IndexerSyncPlan::default(),
+            crate::IndexerSyncPlan {
+                children: vec![crate::ManagedIndexerChildPlan {
+                    child_key: "seeded-child".to_string(),
+                    name: "Seeded Child".to_string(),
+                    provider_type: "torrent_rss".to_string(),
+                    config_json: r#"{"feed_url":"https://seeded.example/rss"}"#.to_string(),
+                    is_enabled: true,
+                    enable_interactive_search: true,
+                    enable_auto_search: true,
+                    managed_metadata_json: None,
+                    caps_snapshot_json: None,
+                    routing_scopes: vec![crate::ManagedIndexerRoutingScope {
+                        scope_id: "anime".to_string(),
+                        categories: vec!["5070".to_string()],
+                    }],
+                }],
+            },
         ));
         let (settings_repo, barrier) = RecordingSettingsRepository::with_system_upsert_barrier();
         let app = test_app(indexer_repo, Some(provider), Arc::new(settings_repo));
@@ -5160,7 +5178,8 @@ mod tests {
             .find(|entry| entry.indexer_id == "managed-keep")
             .unwrap();
         assert!(!keep_movie.enabled);
-        assert_eq!(keep_movie.categories, vec!["2000"]);
+        // Existing categories belong to the operator; the plan only seeds new routes.
+        assert_eq!(keep_movie.categories, vec!["1111"]);
         assert_eq!(keep_movie.priority, 17);
 
         let series = app

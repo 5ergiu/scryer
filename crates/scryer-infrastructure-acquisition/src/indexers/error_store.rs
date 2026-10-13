@@ -58,14 +58,28 @@ impl IndexerErrorRecorder for BlockingIndexerErrorRecorder {
         .increment(1);
         let repository = Arc::clone(&self.repository);
         let runtime = self.runtime.clone();
-        let result = std::thread::scope(|scope| {
-            scope
-                .spawn(move || runtime.block_on(repository.record(error)))
-                .join()
-                .map_err(|_| {
-                    AppError::Repository("indexer error recorder thread panicked".to_string())
-                })?
-        });
+        let persist = || {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || runtime.block_on(repository.record(error)))
+                    .join()
+                    .map_err(|_| {
+                        AppError::Repository("indexer error recorder thread panicked".to_string())
+                    })?
+            })
+        };
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                // Joining the persistence thread must release this worker's
+                // runtime duties: its database socket needs that runtime's I/O
+                // driver even though the repository future runs on another thread.
+                tokio::task::block_in_place(persist)
+            }
+            Ok(_) => Err(AppError::Repository(
+                "synchronous indexer error capture requires a multi-thread runtime".to_string(),
+            )),
+            Err(_) => persist(),
+        };
         if let Err(error) = &result {
             tracing::warn!(error = %error, "failed to persist indexer HTTP error history");
         }
@@ -616,6 +630,223 @@ mod tests {
         async fn delete_older_than(&self, _cutoff: DateTime<Utc>) -> AppResult<u32> {
             Err(AppError::Repository("datastore is down".to_string()))
         }
+    }
+
+    /// Models Postgres persistence waiting for socket I/O on the application
+    /// runtime. The escape channel lets the observer
+    /// release a blocked recorder without needing that runtime to make progress.
+    struct RuntimeDrivenIndexerErrorRepository {
+        entered: std::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+        sockets: std::sync::Mutex<std::collections::HashMap<String, tokio::net::TcpStream>>,
+    }
+
+    #[async_trait]
+    impl IndexerErrorRepository for RuntimeDrivenIndexerErrorRepository {
+        async fn record(&self, error: NewIndexerError) -> AppResult<()> {
+            use tokio::io::AsyncReadExt;
+            let mut socket = self
+                .sockets
+                .lock()
+                .unwrap()
+                .remove(&error.id)
+                .expect("error socket");
+            let (escape_tx, escape_rx) = tokio::sync::oneshot::channel();
+            self.entered
+                .send(escape_tx)
+                .map_err(|_| AppError::Repository("reproduction observer stopped".into()))?;
+            let mut response = [0_u8; 1];
+            tokio::select! {
+                result = socket.read_exact(&mut response) => result
+                    .map(|_| ())
+                    .map_err(|error| AppError::Repository(error.to_string())),
+                _ = escape_rx => Ok(()),
+            }
+        }
+
+        async fn list(
+            &self,
+            indexer_id: Option<&str>,
+            first: usize,
+            after: Option<&str>,
+        ) -> AppResult<IndexerErrorPage> {
+            FailingIndexerErrorRepository
+                .list(indexer_id, first, after)
+                .await
+        }
+
+        async fn get_detail(&self, id: &str) -> AppResult<Option<IndexerErrorDetail>> {
+            FailingIndexerErrorRepository.get_detail(id).await
+        }
+
+        async fn delete_older_than(&self, cutoff: DateTime<Utc>) -> AppResult<u32> {
+            FailingIndexerErrorRepository
+                .delete_older_than(cutoff)
+                .await
+        }
+    }
+
+    #[test]
+    fn concurrent_indexer_error_capture_keeps_runtime_responsive() {
+        fn probe(concurrent_errors: usize) -> bool {
+            use std::io::Write;
+            const WORKERS: usize = 2;
+            const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKERS)
+                .enable_all()
+                .build()
+                .expect("application runtime");
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("persistence listener");
+            let address = listener.local_addr().expect("persistence address");
+            let mut sockets = std::collections::HashMap::new();
+            let mut peers = Vec::new();
+            for index in 0..concurrent_errors {
+                let peer = std::net::TcpStream::connect_timeout(&address, BOUND)
+                    .expect("persistence peer");
+                peer.set_write_timeout(Some(BOUND))
+                    .expect("peer write bound");
+                let (socket, _) = listener.accept().expect("persistence connection");
+                socket
+                    .set_nonblocking(true)
+                    .expect("async persistence socket");
+                let socket = {
+                    let _guard = runtime.enter();
+                    tokio::net::TcpStream::from_std(socket).expect("register persistence socket")
+                };
+                sockets.insert(format!("error-{index}"), socket);
+                peers.push(peer);
+            }
+            let probe_listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
+            let probe_address = probe_listener.local_addr().expect("probe address");
+            probe_listener
+                .set_nonblocking(true)
+                .expect("async probe listener");
+            let probe_listener = {
+                let _guard = runtime.enter();
+                tokio::net::TcpListener::from_std(probe_listener).expect("register probe listener")
+            };
+            let repository = Arc::new(RuntimeDrivenIndexerErrorRepository {
+                entered: entered_tx,
+                sockets: std::sync::Mutex::new(sockets),
+            });
+            let recorder = {
+                let _guard = runtime.enter();
+                BlockingIndexerErrorRecorder::new(repository)
+            };
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            for index in 0..concurrent_errors {
+                let recorder = recorder.clone();
+                let finished = finished_tx.clone();
+                runtime.spawn(async move {
+                    let result = recorder.record(error_event(
+                        &format!("error-{index}"),
+                        &format!("indexer-{index}"),
+                        Utc::now(),
+                    ));
+                    let _ = finished.send(result);
+                });
+            }
+            drop(finished_tx);
+
+            // Each signal proves its caller is inside the synchronous recorder
+            // before the observer supplies any persistence response bytes.
+            // Do not infer saturation from a sleep or a scheduling guess.
+            let mut escape = Vec::new();
+            for _ in 0..concurrent_errors {
+                match entered_rx.recv_timeout(BOUND) {
+                    Ok(sender) => escape.push(sender),
+                    Err(error) => {
+                        drop(escape);
+                        runtime.shutdown_background();
+                        panic!("recorder never reached persistence: {error}");
+                    }
+                }
+            }
+            // These bytes reach the sockets without application-runtime work.
+            // A stalled read therefore cannot be blamed on a slow database.
+            let responses_sent = peers.iter_mut().all(|peer| peer.write_all(&[1]).is_ok());
+            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+            runtime.spawn(async move {
+                let result = probe_listener.accept().await.map(|_| ());
+                let _ = probe_tx.send(result);
+            });
+            let connected = std::net::TcpStream::connect_timeout(&probe_address, BOUND);
+            let responsive = matches!(probe_rx.recv_timeout(BOUND), Ok(Ok(())));
+
+            // The observer is an ordinary test thread. It can wake repository
+            // futures polled by the recorder's scoped threads even when every
+            // application worker is blocked, so failed assertions cannot hang
+            // runtime shutdown or leave the test process wedged.
+            for sender in escape {
+                let _ = sender.send(());
+            }
+            let mut finished = Vec::new();
+            for _ in 0..concurrent_errors {
+                finished.push(finished_rx.recv_timeout(BOUND));
+            }
+            let recovered = responsive || matches!(probe_rx.recv_timeout(BOUND), Ok(Ok(())));
+            runtime.shutdown_background();
+            assert!(
+                responses_sent,
+                "persistence responses must reach every socket"
+            );
+            assert!(connected.is_ok(), "the probe TCP connection must establish");
+            assert!(finished.iter().all(|result| matches!(result, Ok(Ok(())))));
+            assert!(
+                recovered,
+                "runtime must recover when recorder callers are released"
+            );
+            responsive
+        }
+
+        assert!(
+            probe(1),
+            "one free worker must drive persistence and the probe"
+        );
+        assert!(
+            probe(2),
+            "all workers stalled in synchronous indexer error capture; the unrelated runtime probe ran only after the observer released persistence"
+        );
+    }
+
+    #[test]
+    fn current_thread_error_capture_returns_an_error_without_blocking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let subject =
+                BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository));
+            let error = subject
+                .record(error_event("current-thread", "fixture", Utc::now()))
+                .expect_err("a current-thread runtime cannot hand off its driver");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires a multi-thread runtime")
+            );
+        });
+    }
+
+    #[test]
+    fn error_capture_outside_runtime_preserves_repository_failure() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let subject = {
+            let _guard = runtime.enter();
+            BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository))
+        };
+        let error = subject
+            .record(error_event("outside-runtime", "fixture", Utc::now()))
+            .expect_err("repository failure must reach the synchronous caller");
+        assert!(error.to_string().contains("datastore is down"));
     }
 
     #[test]

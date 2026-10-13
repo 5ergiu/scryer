@@ -6,8 +6,9 @@ use scryer_application::{
     AppError, AppResult, BackgroundIndexerSearchStrategyState, HashDomain,
     IndexerSearchCandidateWrite, IndexerSearchLearningKey, IndexerSearchLearningRecord,
     IndexerSearchLearningRepository, IndexerSearchRunWrite, NormalizedIndexerSearchCandidate,
-    ReusableIndexerSearchCandidate, ReusableIndexerSearchStrategy, SEARCH_STRATEGY_CONTAINED,
-    SEARCH_STRATEGY_CONVERGED, blake3_identity_hex,
+    ReusableIndexerSearchCandidate, ReusableIndexerSearchCandidatePage,
+    ReusableIndexerSearchStrategy, SEARCH_STRATEGY_CONTAINED, SEARCH_STRATEGY_CONVERGED,
+    blake3_identity_hex,
 };
 use scryer_infrastructure_crypto::{
     EncryptionKey,
@@ -826,11 +827,26 @@ impl IndexerSearchLearningRepository for IndexerSearchLearningStore {
 
     async fn list_search_run_candidates(
         &self,
-        run_id: &str,
-    ) -> AppResult<Vec<ReusableIndexerSearchCandidate>> {
-        let rows = SqlRuntime::fetch_all(
-            self.datastore.read_exec(),
-            "SELECT s.id, s.provider_ref, s.source, c.title,
+        run_ids: &[String],
+        after_source_id: Option<&str>,
+        limit: u32,
+    ) -> AppResult<ReusableIndexerSearchCandidatePage> {
+        if limit == 0 || run_ids.is_empty() {
+            return Ok(ReusableIndexerSearchCandidatePage::default());
+        }
+        let placeholders = std::iter::repeat_n("{}", run_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut args = run_ids
+            .iter()
+            .cloned()
+            .map(SqlArg::Text)
+            .collect::<Vec<_>>();
+        args.push(SqlArg::Text(
+            after_source_id.unwrap_or_default().to_string(),
+        ));
+        args.push(SqlArg::I64(i64::from(limit)));
+        let query = "SELECT s.id, s.provider_ref, s.source, c.title,
                     s.encrypted_download_url, s.encrypted_link_url, c.size_bytes,
                     s.published_at, c.source_kind, s.thumbs_up, s.thumbs_down,
                     s.grabs, s.grab_current, s.grab_max, s.response_tvdb_id,
@@ -838,15 +854,24 @@ impl IndexerSearchLearningRepository for IndexerSearchLearningStore {
                     s.absolute_episode, s.release_group, s.provider_source, c.info_hash,
                     s.seeders, s.peers, s.download_volume_factor,
                     s.upload_volume_factor, s.protected
-             FROM indexer_search_run_candidate_sources rc
-             JOIN indexer_search_candidate_sources s ON s.id = rc.source_id
+             FROM indexer_search_candidate_sources s
              JOIN indexer_search_candidates c ON c.id = s.candidate_id
-             WHERE rc.run_id = {}
-             ORDER BY s.first_seen_at ASC, s.id ASC",
-            &[SqlArg::Text(run_id.to_string())],
-        )
-        .await?;
-        self.hydrate_candidates(rows).await
+             WHERE s.id IN (
+                 SELECT rc.source_id FROM indexer_search_run_candidate_sources rc
+                 WHERE rc.run_id IN (__RUN_IDS__)
+             ) AND s.id > {}
+             ORDER BY s.id ASC LIMIT {}"
+            .replace("__RUN_IDS__", &placeholders);
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &query, &args).await?;
+        let next_cursor = if rows.len() == limit as usize {
+            rows.last().map(|row| row.text("id")).transpose()?
+        } else {
+            None
+        };
+        Ok(ReusableIndexerSearchCandidatePage {
+            candidates: self.hydrate_candidates(rows).await?,
+            next_cursor,
+        })
     }
 
     async fn list_reusable_search_strategies(
@@ -2094,11 +2119,49 @@ mod tests {
 
         assert_eq!(
             store
-                .list_search_run_candidates(&run.id)
+                .list_search_run_candidates(std::slice::from_ref(&run.id), None, 100)
                 .await
                 .expect("the persisted page should rehydrate")
+                .candidates
                 .len(),
             2
+        );
+
+        let first = store
+            .list_search_run_candidates(std::slice::from_ref(&run.id), None, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.candidates.len(), 1);
+        let second = store
+            .list_search_run_candidates(
+                std::slice::from_ref(&run.id),
+                first.next_cursor.as_deref(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.candidates.len(), 1);
+        assert_ne!(
+            first.candidates[0].normalized.provider_ref,
+            second.candidates[0].normalized.provider_ref
+        );
+        let last = store
+            .list_search_run_candidates(
+                std::slice::from_ref(&run.id),
+                second.next_cursor.as_deref(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(last.candidates.is_empty());
+        assert!(last.next_cursor.is_none());
+        assert!(
+            store
+                .list_search_run_candidates(std::slice::from_ref(&run.id), None, 0)
+                .await
+                .unwrap()
+                .candidates
+                .is_empty()
         );
 
         let mut duplicate_run = run.clone();
@@ -2116,21 +2179,57 @@ mod tests {
             .expect("evaluated candidates should finalize");
         assert_eq!(
             store
-                .list_search_run_candidates(&run.id)
+                .list_search_run_candidates(std::slice::from_ref(&run.id), None, 100)
                 .await
                 .expect("rejected candidates should be removed")
+                .candidates
                 .len(),
             1
         );
         let rehydrated = store
-            .list_search_run_candidates(&duplicate_run.id)
+            .list_search_run_candidates(std::slice::from_ref(&duplicate_run.id), None, 100)
             .await
-            .expect("duplicate page candidates should rehydrate");
+            .expect("duplicate page candidates should rehydrate")
+            .candidates;
         assert_eq!(
             rehydrated.len(),
             1,
             "each run observes the shared canonical source"
         );
+        let chain = store
+            .list_search_run_candidates(&[run.id.clone(), duplicate_run.id.clone()], None, 1)
+            .await
+            .unwrap();
+        assert_eq!(chain.candidates.len(), 1);
+        let end = store
+            .list_search_run_candidates(
+                &[run.id.clone(), duplicate_run.id.clone()],
+                chain.next_cursor.as_deref(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(
+            end.candidates.is_empty(),
+            "a source shared by two runs is replayed once"
+        );
+        assert!(
+            store
+                .list_search_run_candidates(&[], None, 100)
+                .await
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_search_run_candidates(&["missing-run".into()], None, 100)
+                .await
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+
         assert_eq!(
             rehydrated[0].normalized.release_listing_json.as_deref(),
             Some(r#"{"v":1,"extra":{"protocol":"usenet"}}"#),
