@@ -10252,8 +10252,10 @@ mod tests {
         }
     }
 
+    type ReplayTestCall = (Vec<String>, Option<String>, u32);
+
     struct ReplayTestRepository {
-        calls: StdMutex<Vec<(Vec<String>, Option<String>, u32)>>,
+        calls: StdMutex<Vec<ReplayTestCall>>,
         fail: bool,
         candidates_per_run: u32,
     }
