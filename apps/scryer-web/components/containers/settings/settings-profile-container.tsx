@@ -4,7 +4,6 @@ import { notifyExternalAccountInviteSourcesChanged } from "@/components/containe
 import { sanitizeTotpCode } from "@/components/auth/totp-code-form";
 import { ApiKeysPanel } from "@/components/containers/settings/api-keys-panel";
 import { ProfileListAccounts } from "@/components/containers/settings/profile-list-accounts";
-import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { SettingsProfileSection } from "@/components/views/settings/settings-profile-section";
 import { Button } from "@/components/ui/button";
 import {
@@ -152,7 +151,6 @@ function passkeyFailureOptions(error: unknown): GlobalStatusOptions | undefined 
 }
 
 export function SettingsProfileContainer({ userId, username }: Props) {
-  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
   const client = useClient();
@@ -1293,7 +1291,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       onSubmitPlexLink={handleSubmitPlexLink}
       onUnlinkExternalAccount={handleUnlinkExternalAccount}
     />
-    {experimentalFeaturesEnabled && userId ? <ProfileListAccounts key={userId} /> : null}
+    {userId ? <ProfileListAccounts key={userId} /> : null}
     <ApiKeysPanel adoptSession={adoptSession} />
     <Dialog
       open={securityReauthenticationOpen}
