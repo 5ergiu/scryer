@@ -297,6 +297,17 @@ fn title_folder_template_optional_group_omits_missing_values() {
 
 #[test]
 fn movie_title_order_tokens_move_leading_articles_and_bucket_by_sorted_title() {
+    for (name, expected) in [
+        ("The Grey Harbor (2008)", "Grey Harbor, The (2008)"),
+        (
+            "The Grey Harbor (Extended) (2008)",
+            "Grey Harbor, The (Extended) (2008)",
+        ),
+        ("Grey Harbor (2008)", "Grey Harbor (2008)"),
+    ] {
+        assert_eq!(move_leading_article_to_end(name), expected, "{name}");
+    }
+
     let mut title = test_movie_title("The Grey Harbor");
     title.year = Some(2008);
     let tokens = build_title_folder_tokens(&title, None);

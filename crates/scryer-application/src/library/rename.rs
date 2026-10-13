@@ -3242,7 +3242,12 @@ fn move_leading_article_to_end(title: &str) -> String {
     if title_part.is_empty() {
         return title.to_string();
     }
-    format!("{title_part}, {article}{}", &remainder[suffix_start..])
+    let suffix = &remainder[suffix_start..];
+    if suffix.is_empty() {
+        format!("{title_part}, {article}")
+    } else {
+        format!("{title_part}, {article} {suffix}")
+    }
 }
 
 pub(crate) fn render_episode_folder_name(
