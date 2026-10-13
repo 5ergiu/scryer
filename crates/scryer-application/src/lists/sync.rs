@@ -758,7 +758,21 @@ fn membership_row(
 }
 
 fn next_sync_at(subscription: &ListSubscription, now: DateTime<Utc>) -> DateTime<Utc> {
-    now + Duration::seconds(subscription.interval_seconds.max(60))
+    let seconds = if subscription.source.provider == "simkl" {
+        // Stable FNV-1a over the subscription id spreads instances between
+        // five and seven hours without changing on restart or depending on a
+        // process hash seed.
+        let hash = subscription
+            .id
+            .bytes()
+            .fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        5 * 3600 + (hash % (2 * 3600 + 1)) as i64
+    } else {
+        subscription.interval_seconds.max(60)
+    };
+    now + Duration::seconds(seconds)
 }
 
 /// Whether a list the provider reports as unchanged still has work a sync

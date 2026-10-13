@@ -140,6 +140,7 @@ function candidateVariants(value: string): string[] {
     slug.replace(/^scryer-plugin-/, ""),
     slug.replace(/^plugin-/, ""),
     slug.replace(/-plugin$/, ""),
+    slug.replace(/-list$/, ""),
     compactPluginSlug(slug),
   ];
 }

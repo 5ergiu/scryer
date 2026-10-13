@@ -6,11 +6,13 @@ import { useTranslate } from "@/lib/context/translate-context";
 import type { ListPreview, ListPreviewItem } from "@/lib/types/lists";
 import { listKindLabelKey, listPreviewMetadataLookup } from "@/lib/utils/lists";
 import { LIST_TITLE_FLYOUT_CLASS, ListTitleFlyoutBody } from "./list-title-flyout";
+import { SimklAttribution } from "./simkl-attribution";
 import { useListTitleMetadata } from "./use-list-title-metadata";
 
 type ListPreviewSummaryProps = {
   preview: ListPreview;
   idPrefix: string;
+  providerType: string;
 };
 
 /** One previewed title: its poster, and on hover or focus what is known about it. */
@@ -67,7 +69,7 @@ export function ListPreviewPoster({ item }: { item: ListPreviewItem }) {
 }
 
 /** What the next sync would do with the list as it stands: counts, then the titles it would add. */
-export function ListPreviewSummary({ preview, idPrefix }: ListPreviewSummaryProps) {
+export function ListPreviewSummary({ preview, idPrefix, providerType }: ListPreviewSummaryProps) {
   const t = useTranslate();
   const stats: Array<[string, number]> = [
     ["lists.preview.total", preview.total],
@@ -80,6 +82,7 @@ export function ListPreviewSummary({ preview, idPrefix }: ListPreviewSummaryProp
 
   return (
     <div id={`${idPrefix}-preview-summary`} className="space-y-3">
+      {providerType === "simkl" ? <SimklAttribution /> : null}
       <dl className="grid grid-cols-3 gap-2 sm:grid-cols-6">
         {stats.map(([key, value]) => (
           <div
@@ -105,6 +108,7 @@ export function ListPreviewSummary({ preview, idPrefix }: ListPreviewSummaryProp
             {preview.wouldAdd.map((item) => (
               <li key={item.itemKey} className="min-w-0">
                 <ListPreviewPoster item={item} />
+                {providerType === "simkl" ? <SimklAttribution itemKey={item.itemKey} /> : null}
               </li>
             ))}
           </ul>

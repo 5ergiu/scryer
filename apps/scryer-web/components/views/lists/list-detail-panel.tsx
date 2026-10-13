@@ -47,6 +47,7 @@ import { ListCoverageBar } from "./list-coverage-bar";
 import { ListMembershipTitle } from "./list-membership-title";
 import { ListPreviewSummary } from "./list-preview-summary";
 import { ProviderTile } from "./provider-tile";
+import { SimklAttribution } from "./simkl-attribution";
 import type { ListDetailState } from "./lists-view";
 
 type ListDetailPanelProps = {
@@ -229,7 +230,7 @@ export function ListDetailPanel({
                   </div>
                 ))}
               </dl>
-              {subscription.providerUrl ? (
+              {subscription.source.provider === "simkl" ? <SimklAttribution /> : subscription.providerUrl ? (
                 <a
                   href={subscription.providerUrl}
                   target="_blank"
@@ -253,7 +254,7 @@ export function ListDetailPanel({
                 {previewing ? <LoadingMark className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                 {t("lists.preview.run")}
               </Button>
-              {preview ? <ListPreviewSummary preview={preview} idPrefix="list-detail" /> : null}
+              {preview ? <ListPreviewSummary preview={preview} idPrefix="list-detail" providerType={subscription.source.provider} /> : null}
             </LabeledFieldset>
 
             <LabeledFieldset label={t("lists.detail.titles", { count: memberships?.totalCount ?? 0 })}>
@@ -285,6 +286,7 @@ export function ListDetailPanel({
                                 <span className="font-normal text-[var(--scry-muted)]"> ({membership.year})</span>
                               ) : null}
                             </div>
+                            {subscription.source.provider === "simkl" ? <SimklAttribution itemKey={membership.itemKey} /> : null}
                           </TableCell>
                           <TableCell>
                             <MembershipStateBadge membership={membership} />

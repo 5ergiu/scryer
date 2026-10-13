@@ -195,6 +195,24 @@ impl FetchedList {
         self.items.retain(|item| seen.insert(item.item_key.clone()));
     }
 
+    /// Trakt names a show once per listed season. Its plugin keeps a season
+    /// only when every entry for that show agrees, but it sees one page at a
+    /// time; apply the same rule across every page before deduplication keeps
+    /// the first row.
+    fn merge_trakt_seasons(&mut self) {
+        let mut seasons: HashMap<String, Option<i32>> = HashMap::new();
+        for item in &self.items {
+            let season = seasons.entry(item.item_key.clone()).or_insert(item.season);
+            if *season != item.season {
+                *season = None;
+            }
+        }
+        for item in &mut self.items {
+            item.season = seasons[&item.item_key];
+        }
+        self.dedupe();
+    }
+
     fn from_gateway(items: Vec<ListChartItem>) -> Self {
         let mut fetched = Self::default();
         for (item, poster) in chart_items_to_plugin_items(items) {
@@ -344,7 +362,12 @@ async fn fetch_plugin_pages(
         fetched.items.extend(response.items);
         match response.next_cursor.filter(|next| !next.is_empty()) {
             Some(next) => cursor = Some(next),
-            None => return Ok(fetched),
+            None => {
+                if provider == "trakt" {
+                    fetched.merge_trakt_seasons();
+                }
+                return Ok(fetched);
+            }
         }
     }
     Err(ListFailure::new(ListFailureClass::Failed, provider))
@@ -824,6 +847,114 @@ mod tests {
             pages,
             items,
             item_bytes,
+        }
+    }
+
+    struct PagedProvider(std::sync::Arc<PagedClient>);
+    struct PagedClient {
+        descriptor: scryer_plugin_sdk::PluginDescriptor,
+        pages: Vec<ListPluginFetchResponse>,
+    }
+
+    impl ListPluginProvider for PagedProvider {
+        fn client_for_provider(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+        ) -> Option<std::sync::Arc<dyn super::super::plugin::ListProviderClient>> {
+            Some(self.0.clone())
+        }
+        fn descriptors(&self) -> Vec<scryer_plugin_sdk::PluginDescriptor> {
+            vec![self.0.descriptor.clone()]
+        }
+        fn available_provider_types(&self) -> Vec<String> {
+            vec!["trakt".into()]
+        }
+    }
+
+    #[async_trait]
+    impl super::super::plugin::ListProviderClient for PagedClient {
+        fn descriptor(&self) -> &scryer_plugin_sdk::PluginDescriptor {
+            &self.descriptor
+        }
+        async fn fetch(
+            &self,
+            request: ListPluginFetchRequest,
+        ) -> crate::AppResult<PluginResult<ListPluginFetchResponse>> {
+            let page = request
+                .page_cursor
+                .as_deref()
+                .unwrap_or("0")
+                .parse::<usize>()
+                .unwrap();
+            Ok(PluginResult::Ok(self.pages[page].clone()))
+        }
+        async fn account(
+            &self,
+            _: ListCredential,
+        ) -> crate::AppResult<PluginResult<scryer_plugin_sdk::ListPluginAccountResponse>> {
+            unreachable!()
+        }
+        async fn health(
+            &self,
+        ) -> crate::AppResult<PluginResult<scryer_plugin_sdk::ListPluginHealthResponse>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn trakt_merges_seasons_across_pages_without_changing_other_providers() {
+        for (first, second, expected) in [
+            (Some(1), Some(2), None),
+            (Some(1), Some(1), Some(1)),
+            (None, Some(1), None),
+            (Some(1), None, None),
+        ] {
+            let mut one = plugin_item("same-show");
+            one.season = first;
+            one.rank = Some(1);
+            let mut two = one.clone();
+            two.season = second;
+            two.rank = Some(3);
+            let provider = PagedProvider(std::sync::Arc::new(PagedClient {
+                descriptor: ScriptedProvider(ScriptedLists::new())
+                    .descriptors()
+                    .remove(0),
+                pages: vec![
+                    ListPluginFetchResponse {
+                        items: vec![one, plugin_item("other-show")],
+                        next_cursor: Some("1".into()),
+                        ..Default::default()
+                    },
+                    ListPluginFetchResponse {
+                        items: vec![two],
+                        ..Default::default()
+                    },
+                ],
+            }));
+            for name in ["trakt", "fixture-lists"] {
+                let mut list = subscription("fixture");
+                list.source.provider = name.into();
+                let mut fetched = fetch_list_with_limits(
+                    &list,
+                    &provider,
+                    &ScriptedCharts::default(),
+                    None,
+                    &BTreeMap::new(),
+                    limits(2, 3, usize::MAX),
+                )
+                .await
+                .unwrap();
+                fetched.dedupe();
+                assert_eq!(fetched.items.len(), 2);
+                assert_eq!(fetched.items[0].item_key, "same-show");
+                assert_eq!(fetched.items[0].rank, Some(1));
+                assert_eq!(
+                    fetched.items[0].season,
+                    if name == "trakt" { expected } else { first }
+                );
+                assert_eq!(fetched.items[1].item_key, "other-show");
+            }
         }
     }
 
