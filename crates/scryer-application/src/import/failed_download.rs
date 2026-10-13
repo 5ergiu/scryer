@@ -51,10 +51,13 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
         warn_download_not_grabbed(td);
         td.state = TrackedDownloadState::Downloading;
         td.skip_reacquire_on_failure = false;
+        td.manual_failure_cleanup = false;
         return;
     }
 
-    if let Some(failure) = td.client_item.password_failure() {
+    if !td.manual_failure_cleanup
+        && let Some(failure) = td.client_item.password_failure()
+    {
         if crate::acquisition_workflow::record_password_retry_failure(app, td, failure)
             .await
             .is_err()
@@ -84,7 +87,7 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
         "download failed - processing failure"
     );
 
-    let outcome = crate::acquisition_workflow::process_download_failure_for_download(
+    let outcome = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
         app,
         td.canonical_download_id(),
         DownloadFailureContext {
@@ -108,8 +111,14 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
                 .then(|| format!("import rejected: {failure_reason}")),
             skip_reacquire: td.skip_reacquire_on_failure,
         },
+        td.manual_failure_cleanup,
     )
     .await;
+    if outcome == FailureHandlingOutcome::RecordingFailed {
+        td.status_messages =
+            vec!["Could not confirm blocklist entry; download preserved for retry".into()];
+        return;
+    }
     if td.skip_reacquire_on_failure
         && !matches!(outcome, FailureHandlingOutcome::RecordedNoReacquire)
     {

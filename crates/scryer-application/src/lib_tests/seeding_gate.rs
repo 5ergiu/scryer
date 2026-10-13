@@ -136,6 +136,7 @@ fn tracked_for(
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2234,6 +2235,125 @@ async fn a_restart_without_burned_origin_cleans_nzbget_client_failure_payload() 
             "nzb-client-failure-restart-1".to_string(),
             true,
             false,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn manual_blocklist_write_failure_preserves_payload_until_retry_succeeds() {
+    let client = Arc::new(StubDownloadClient::default());
+    let (mut app, user, _) = bootstrap_with_torrent_clients(client.clone());
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    app.services.workflow.blocklist_repo = blocklist.clone();
+    let config = create_enabled_download_client_config(&app, &user, "NZBGet", "nzbget").await;
+    let title = movie_title(&app, &user, "Manual Blocklist Retry").await;
+    let mut tracked = tracked_for(
+        &config.id,
+        "nzbget",
+        "manual-retry",
+        &title,
+        TrackedDownloadState::FailedPending,
+        true,
+    );
+    tracked.client_item.is_scryer_origin = true;
+    tracked.manual_failure_cleanup = true;
+    tracked.skip_reacquire_on_failure = true;
+    let (_root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+    blocklist
+        .fail_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::failed_download_handler::process_failed(&app, &mut tracked).await;
+    assert_eq!(tracked.state, TrackedDownloadState::FailedPending);
+    assert!(payload.exists());
+    assert!(client.deleted_requests.lock().await.is_empty());
+    blocklist
+        .fail_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::failed_download_handler::process_failed(&app, &mut tracked).await;
+    assert_eq!(tracked.state, TrackedDownloadState::Failed);
+    assert_eq!(blocklist.entries.lock().await.len(), 1);
+    assert!(
+        payload.exists(),
+        "only terminal cleanup may remove the payload"
+    );
+}
+
+#[tokio::test]
+async fn manual_blocklist_removes_only_owned_payload_with_automatic_cleanup_disabled() {
+    let client = Arc::new(StubDownloadClient::default());
+    let (app, user, _) = bootstrap_with_torrent_clients(client.clone());
+    let config = create_enabled_download_client_config(&app, &user, "NZBGet", "nzbget").await;
+    set_download_client_cleanup_routing(&app, &user, "movie", &config.id, false, false).await;
+    let title = movie_title(&app, &user, "Manual Blocklist Payload").await;
+    let mut tracked = tracked_for(
+        &config.id,
+        "nzbget",
+        "manual-remove",
+        &title,
+        TrackedDownloadState::Failed,
+        true,
+    );
+    tracked.manual_failure_cleanup = true;
+    let (root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+    let unrelated = root.path().join("unrelated.mkv");
+    std::fs::write(&unrelated, b"unrelated").unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let library_file = library.path().join("movie.mkv");
+    std::fs::hard_link(payload.join("movie.mkv"), &library_file).unwrap();
+
+    let outcome = crate::import::import::reconcile_terminal_download_cleanup_for_tracked(
+        &app,
+        &tracked,
+        TrackedDownloadState::Failed,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, TerminalDownloadCleanupOutcome::Removed);
+    assert!(!payload.exists());
+    assert_eq!(std::fs::read(&library_file).unwrap(), b"media");
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated");
+    assert_eq!(
+        client.deleted_requests.lock().await.clone(),
+        vec![(Some(config.id), None, "manual-remove".into(), true, false)]
+    );
+}
+
+#[tokio::test]
+async fn manual_blocklist_removes_torrent_data_despite_unmet_seed_goal() {
+    let client = Arc::new(StubDownloadClient::default());
+    let (app, mut tracked) = torrent_cleanup_fixture(
+        client.clone(),
+        "Manual Torrent",
+        "manual-torrent",
+        Some(persisted_goals(false)),
+    )
+    .await;
+    tracked.state = TrackedDownloadState::Failed;
+    tracked.manual_failure_cleanup = true;
+    observed(
+        DownloadSeedingSnapshot {
+            can_remove: Some(false),
+            seed_ratio: Some(0.1),
+            ..Default::default()
+        },
+        &mut tracked,
+    );
+    let outcome = crate::import::import::reconcile_terminal_download_cleanup_for_tracked(
+        &app,
+        &tracked,
+        TrackedDownloadState::Failed,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, TerminalDownloadCleanupOutcome::Removed);
+    assert_eq!(
+        client.deleted_requests.lock().await.clone(),
+        vec![(
+            Some(tracked.client_id),
+            None,
+            "manual-torrent".into(),
+            true,
+            true
         )]
     );
 }

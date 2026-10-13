@@ -96,6 +96,7 @@ async fn check_emits_manual_interaction_notification_once() {
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,

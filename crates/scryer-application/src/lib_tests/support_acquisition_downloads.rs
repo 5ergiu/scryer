@@ -19,6 +19,7 @@ pub(super) struct MockReleaseAttemptRepo {
 #[derive(Default)]
 pub(super) struct MockBlocklistRepo {
     pub(super) entries: Arc<Mutex<Vec<BlocklistEntry>>>,
+    pub(super) fail_writes: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -154,6 +155,9 @@ impl ReleaseAttemptRepository for MockReleaseAttemptRepo {
 #[async_trait]
 impl BlocklistRepository for MockBlocklistRepo {
     async fn block(&self, entry: &NewBlocklistEntry) -> AppResult<bool> {
+        if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AppError::Repository("blocklist write failed".into()));
+        }
         let Some(normalized_release_name) =
             crate::normalize_release_name(Some(&entry.release_name))
         else {

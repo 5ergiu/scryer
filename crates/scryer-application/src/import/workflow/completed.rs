@@ -680,6 +680,9 @@ async fn terminal_failure_origin_for_tracked(
     tracked: &crate::tracked_downloads::TrackedDownload,
     state: TrackedDownloadState,
 ) -> TerminalFailureOrigin {
+    if state == TrackedDownloadState::Failed && tracked.manual_failure_cleanup {
+        return TerminalFailureOrigin::ManualBlocklist;
+    }
     if tracked.burned_by_import_gate {
         return TerminalFailureOrigin::ImportGate;
     }
@@ -789,6 +792,7 @@ async fn reconcile_unclaimed_terminal_cleanup(
     let facet = resolved_facet.or_else(|| facet_from_tracked_label(tracked.facet.as_deref()));
     let precomputed_should_remove = if state == TrackedDownloadState::Failed
         && !tracked.burned_by_import_gate
+        && !tracked.manual_failure_cleanup
     {
         let should_remove = crate::import_workflow::should_remove_terminal_download(
             app,
@@ -907,7 +911,14 @@ pub(crate) async fn run_claimed_download_cleanup(
         let library_id = title.as_ref().map(|title| title.library_id.as_str());
         let facet = title.as_ref().map(|title| title.facet.clone())
             .or_else(|| facet_from_tracked_label(record.facet.as_deref()));
-        let remove = if state == TrackedDownloadState::Ignored {
+        let manual_cleanup = state == TrackedDownloadState::Failed && matches!(
+            app.services.workflow.download_submissions.get_identity_tracked_state_reason_for_download(
+                Some(&record.download_id), &crate::DownloadSubmissionIdentity::default(), Some(&locator),
+            ).await?.as_deref(),
+            Some(crate::tracked_downloads::MANUAL_FAILURE_CLEANUP_REASON
+                | crate::tracked_downloads::MANUAL_FAILURE_NO_REACQUIRE_REASON)
+        );
+        let remove = if state == TrackedDownloadState::Ignored || manual_cleanup {
             true
         } else {
             let facet = facet.as_ref().ok_or_else(|| AppError::Validation(CLEANUP_UNATTRIBUTED.into()))?;
@@ -1078,6 +1089,7 @@ pub(crate) async fn run_claimed_download_cleanup(
         tracked.facet = record.facet.clone();
         tracked.source_title = record.source_title.clone();
         tracked.state = state;
+        tracked.manual_failure_cleanup = manual_cleanup;
         let cleanup = reconcile_unclaimed_terminal_cleanup(app, &tracked, state, cache, Some(&record)).await;
         let complete = terminal_download_cleanup_is_complete(cleanup.outcome);
         let outcome = match cleanup.outcome {

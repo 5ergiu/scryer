@@ -779,6 +779,14 @@ impl AppUseCase {
             scryer_domain::LibraryPermission::ResolveImports,
         )
         .await?;
+        self.require_download_item_permission(
+            actor,
+            client_id,
+            Some(client_type),
+            download_client_item_id,
+            scryer_domain::LibraryPermission::ManageTitles,
+        )
+        .await?;
         let handle = self
             .runtime
             .acquisition
@@ -2546,6 +2554,21 @@ async fn handle_tracked_download_command(
                     app, &tracked,
                 )
                 .await;
+            if has_grabbed_submission
+                && !crate::tracked_downloads::persist_tracked_download_state_marker(
+                    app, &tracked, TrackedDownloadState::FailedPending,
+                    Some(if skip_reacquire {
+                        crate::tracked_downloads::MANUAL_FAILURE_NO_REACQUIRE_REASON
+                    } else {
+                        crate::tracked_downloads::MANUAL_FAILURE_CLEANUP_REASON
+                    }), None,
+                ).await
+            {
+                let _ = reply.send(Err(AppError::Repository(
+                    "could not persist manual blocklist request; download preserved".into(),
+                )));
+                return;
+            }
             let result = if let Some(td) = tracker.get_mut_by_download_id(tracked.download_id) {
                 if !has_grabbed_submission {
                     crate::failed_download_handler::warn_download_not_grabbed(td);
@@ -2553,12 +2576,14 @@ async fn handle_tracked_download_command(
                         td.state = TrackedDownloadState::Downloading;
                     }
                     td.skip_reacquire_on_failure = false;
+                    td.manual_failure_cleanup = false;
                     Ok(())
                 } else {
                     td.state = TrackedDownloadState::FailedPending;
                     td.status = TrackedDownloadStatus::Error;
                     td.status_messages.clear();
                     td.skip_reacquire_on_failure = skip_reacquire;
+                    td.manual_failure_cleanup = true;
                     let completed_lookup =
                         crate::completed_download_handler::CompletedDownloadLookup::default();
                     let _ = try_dispatch_tracked_download_background_work(
@@ -3247,8 +3272,14 @@ async fn handle_tracked_download_background_work_result(
                     TrackedDownloadState::ImportBlocked
                 }
                 TrackedDownloadBackgroundWorkKind::Failed => {
-                    tracked.state = TrackedDownloadState::Failed;
-                    TrackedDownloadState::Failed
+                    // A failed worker has not confirmed the blocklist write.
+                    // Keep explicit destructive requests pending for retry.
+                    tracked.state = if tracked.manual_failure_cleanup {
+                        TrackedDownloadState::FailedPending
+                    } else {
+                        TrackedDownloadState::Failed
+                    };
+                    tracked.state
                 }
             }
         }

@@ -1866,12 +1866,12 @@ const en: LocaleDictionary = {
   "queue.releaseHeldSourcesPreservedRemovalFailed": "removal failed",
   "queue.releaseHeldSourcesPreservedDownloadNotImported": "the download was not proven imported",
   "queue.releaseHeldSourcesPreservedLookupIncomplete": "not every folder could be checked",
-  "queue.markFailedSearchAgain": "Mark Failed and Search Again",
-  "queue.markFailedOnly": "Mark Failed Only",
+  "queue.markFailedSearchAgain": "Blocklist, Delete Data and Search Again",
+  "queue.markFailedOnly": "Blocklist and Delete Data",
   "queue.markFailedSearchSuccess":
-    "Download marked failed; reacquisition will run.",
+    "Blocklist and data removal requested; reacquisition enabled.",
   "queue.markFailedOnlySuccess":
-    "Download marked failed without reacquisition.",
+    "Blocklist and data removal requested without reacquisition.",
   "queue.markFailedFailed": "Failed to mark download failed.",
   "queue.bulkIgnoreSuccess": "Ignored {{count}} downloads.",
   "queue.bulkIgnorePartial": "Ignored {{count}} downloads; {{failed}} failed.",

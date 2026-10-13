@@ -504,6 +504,7 @@ pub(crate) async fn reconcile_history_retry_result(
 pub(crate) enum TerminalFailureOrigin {
     ClientFailure,
     ImportGate,
+    ManualBlocklist,
 }
 
 pub(crate) async fn should_remove_terminal_download(
@@ -580,7 +581,13 @@ async fn reconcile_terminal_download_cleanup(
     record: Option<&crate::DownloadCleanupRecord>,
 ) -> TerminalDownloadCleanup {
     let client_id = client_id.trim();
+    let manual_cleanup = state == TrackedDownloadState::Failed
+        && failure_origin == TerminalFailureOrigin::ManualBlocklist;
+    if manual_cleanup && client_type.trim().eq_ignore_ascii_case(crate::seeding_gate::TORRENT_BLACKHOLE_CLIENT_TYPE) {
+        return TerminalDownloadCleanup::bare(TerminalDownloadCleanupOutcome::NotConfigured);
+    }
     let should_remove = match precomputed_should_remove {
+        _ if manual_cleanup => true,
         Some(should_remove) => should_remove,
         None => {
             should_remove_terminal_download(
@@ -631,7 +638,7 @@ async fn reconcile_terminal_download_cleanup(
         return TerminalDownloadCleanup::bare(TerminalDownloadCleanupOutcome::RetryableFailure);
     }
     let mut seeding_report = None;
-    if state.counts_as_imported() || (state == TrackedDownloadState::Failed && is_torrent) {
+    if !manual_cleanup && (state.counts_as_imported() || (state == TrackedDownloadState::Failed && is_torrent)) {
         let key = crate::seeding_gate::SeedGoalLookupKey {
             canonical_download_id: canonical_download_id.cloned(),
             client_id: client_id.to_string(),
@@ -760,6 +767,7 @@ async fn reconcile_terminal_download_cleanup(
             .trim()
             .eq_ignore_ascii_case(crate::seeding_gate::TORRENT_BLACKHOLE_CLIENT_TYPE);
     let remove_data = match state {
+        TrackedDownloadState::Failed if manual_cleanup => true,
         TrackedDownloadState::Imported | TrackedDownloadState::ImportedSeeding => {
             !is_torrent || torrent_data_removal_allowed
         }

@@ -133,6 +133,8 @@ pub(crate) enum FailureHandlingOutcome {
     RecordedOnly,
     RecordedNoReacquire,
     AlreadyHandled,
+    /// No destructive cleanup may follow an unconfirmed blocklist write.
+    RecordingFailed,
 }
 /// Result of walking a scope's saved search results, best first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1138,7 +1140,16 @@ pub(crate) async fn process_download_failure_for_download(
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
 ) -> FailureHandlingOutcome {
-    let outcome = handle_download_failure_for_download(app, canonical_download_id, context).await;
+    process_download_failure_with_cleanup_intent(app, canonical_download_id, context, false).await
+}
+
+pub(crate) async fn process_download_failure_with_cleanup_intent(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    context: DownloadFailureContext,
+    manual_cleanup: bool,
+) -> FailureHandlingOutcome {
+    let outcome = handle_download_failure_for_download(app, canonical_download_id, context, manual_cleanup).await;
     if outcome == FailureHandlingOutcome::Reopened {
         app.runtime
             .acquisition
@@ -1152,6 +1163,7 @@ async fn handle_download_failure_for_download(
     app: &AppUseCase,
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
+    manual_cleanup: bool,
 ) -> FailureHandlingOutcome {
     let failed_submission =
         find_failed_submission_for_download(app, canonical_download_id, &context).await;
@@ -1163,7 +1175,7 @@ async fn handle_download_failure_for_download(
             release_title = context.release_title.as_str(),
             "skipping automatic failed download handling without scryer grab history"
         );
-        return FailureHandlingOutcome::RecordedOnly;
+        return if manual_cleanup { FailureHandlingOutcome::RecordingFailed } else { FailureHandlingOutcome::RecordedOnly };
     }
 
     let resolved_title_id = context
@@ -1465,6 +1477,21 @@ async fn handle_download_failure_for_download(
             None,
         )
         .await;
+    }
+
+    if manual_cleanup {
+        let confirmed = if let (Some(title_id), Some(release_name)) =
+            (resolved_title_id.as_deref(), normalized_source_title.as_deref())
+        {
+            app.services.workflow.blocklist_repo.is_blocked(
+                title_id, &blocklist_indexer_id, release_name, blocklist_info_hash.as_deref(),
+            ).await.unwrap_or(false)
+        } else {
+            false
+        };
+        // The tracker persists the terminal state and explicit cleanup intent
+        // together. Do not enqueue automatic cleanup before that durable write.
+        return if confirmed { outcome } else { FailureHandlingOutcome::RecordingFailed };
     }
 
     // NZBGet must retain history until terminal cleanup has inspected its payload.
