@@ -1359,16 +1359,14 @@ fn apply_implausible_size_limits(
     if release.video_codec.is_none() || release.is_bd_disk {
         return;
     }
-    let (lower_h264_mbps, upper_mbps) =
-        match normalize_quality_tier(release.quality.as_deref()).as_deref() {
-            Some("480P") => (0.04, 40.0),
-            Some("576P") => (0.05, 40.0),
-            Some("720P") => (0.10, 100.0),
-            Some("1080P") => (0.20, 200.0),
-            Some("2160P") => (0.25, 600.0),
-            Some("4320P") => (0.35, 1800.0),
-            _ => return,
-        };
+    let upper_mbps = match normalize_quality_tier(release.quality.as_deref()).as_deref() {
+        Some("480P" | "576P") => 40.0,
+        Some("720P") => 100.0,
+        Some("1080P") => 200.0,
+        Some("2160P") => 600.0,
+        Some("4320P") => 1800.0,
+        _ => return,
+    };
     let actual_mbps = bytes as f64 * 8.0 / 1_000_000.0 / (f64::from(runtime) * 60.0);
     // Includes ample headroom for audio, grain, high frame rates, remuxes and
     // container/archive overhead. Never make an efficient codec's ceiling lower.
@@ -1376,22 +1374,41 @@ fn apply_implausible_size_limits(
     if actual_mbps > upper_mbps {
         decision.reject_requirement("size_implausible_for_quality");
     }
-    // Only codecs with a calibrated efficiency estimate can support a lower
-    // bound. VVC and legacy codecs remain eligible on uncertain small sizes.
-    let lower_factor = match release.video_codec {
-        Some(VideoCodec::H264) => 1.0,
-        Some(VideoCodec::H265 | VideoCodec::Vp9) => 0.75 / 1.1,
-        Some(VideoCodec::Av1) => 0.5 / 1.1,
-        _ => return,
-    };
     let special = release
         .episode
         .as_ref()
         .is_some_and(|episode| episode.season == Some(0));
-    if actual_mbps < lower_h264_mbps * lower_factor && !basis.covers_multiple_members() && !special
+    if minimum_plausible_bitrate_mbps(release).is_some_and(|minimum| actual_mbps < minimum)
+        && !basis.covers_multiple_members()
+        && !special
     {
         decision.reject_requirement("size_implausibly_small_for_quality");
     }
+}
+
+/// Shared lower bound for known codecs and resolutions. The import sample gate
+/// uses the probed runtime when catalog runtime is unavailable.
+pub(crate) fn minimum_plausible_bitrate_mbps(release: &ParsedReleaseMetadata) -> Option<f64> {
+    if release.is_bd_disk {
+        return None;
+    }
+    let lower_h264_mbps = match normalize_quality_tier(release.quality.as_deref()).as_deref() {
+        Some("480P") => 0.04,
+        Some("576P") => 0.05,
+        Some("720P") => 0.10,
+        Some("1080P") => 0.20,
+        Some("2160P") => 0.25,
+        Some("4320P") => 0.35,
+        _ => return None,
+    };
+    // Only calibrated codecs support a lower bound; uncertain sizes stay eligible.
+    let factor = match release.video_codec {
+        Some(VideoCodec::H264) => 1.0,
+        Some(VideoCodec::H265 | VideoCodec::Vp9) => 0.75 / 1.1,
+        Some(VideoCodec::Av1) => 0.5 / 1.1,
+        _ => return None,
+    };
+    Some(lower_h264_mbps * factor)
 }
 
 #[cfg(test)]
