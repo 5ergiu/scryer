@@ -69,8 +69,14 @@ function useScriptInterpreterSettings() {
           return;
         }
         const loaded = interpreterDraftFrom(data?.scriptInterpreterSettings);
-        // Keep anything typed while the settings were loading.
-        setDraft((current) => (sameInterpreters(current, EMPTY_INTERPRETERS) ? loaded : current));
+        // Keep anything typed while the settings were loading, and fill every
+        // field still empty so saving an early edit cannot clear other paths.
+        setDraft((current) => ({
+          python: current.python || loaded.python,
+          powershell: current.powershell || loaded.powershell,
+          batch: current.batch || loaded.batch,
+          go: current.go || loaded.go,
+        }));
         setBaseline(loaded);
       });
     return () => {
