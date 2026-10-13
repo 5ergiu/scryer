@@ -407,7 +407,7 @@ export function PersonalAccounts(props: Props) {
                 {t("label.loading")}
               </p>
             ) : rows.length > 0 ? (
-              <CatalogListTable key={providerType} id={`lists-account-lists-${providerType}`} rows={rows} />
+              <CatalogListTable key={providerType} id={`lists-account-lists-${providerType}`} providerType={providerType} rows={rows} />
             ) : null}
           </div>
         </div>

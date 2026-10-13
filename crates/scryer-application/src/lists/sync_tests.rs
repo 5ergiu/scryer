@@ -1799,3 +1799,32 @@ async fn a_title_the_list_added_that_is_still_present_is_not_added_twice() {
     assert_eq!(row.title_id.as_deref(), Some("title-alpha"));
     assert!(row.added_by_list);
 }
+
+#[test]
+fn simkl_schedule_is_stable_and_spreads_subscriptions_between_five_and_seven_hours() {
+    let mut delays = std::collections::HashSet::new();
+    for id in 0..256 {
+        let mut list = subscription(&format!("fixture-{id}"));
+        list.source.provider = "simkl".into();
+        let delay = next_sync_at(&list, at(0)) - at(0);
+        assert!((5 * 3600..=7 * 3600).contains(&delay.num_seconds()));
+        assert_eq!(next_sync_at(&list, at(60)) - at(60), delay);
+        delays.insert(delay.num_seconds());
+    }
+    assert!(delays.len() > 200);
+}
+
+#[test]
+fn other_providers_keep_the_configured_interval_and_minimum() {
+    let mut list = subscription("fixture");
+    for provider in ["trakt", "anilist", "mal", "fixture-lists"] {
+        list.source.provider = provider.into();
+        for interval in [0, 30, 60, 3600, 24 * 3600] {
+            list.interval_seconds = interval;
+            assert_eq!(
+                next_sync_at(&list, at(0)) - at(0),
+                Duration::seconds(interval.max(60))
+            );
+        }
+    }
+}

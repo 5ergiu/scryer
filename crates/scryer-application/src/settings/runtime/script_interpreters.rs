@@ -32,15 +32,29 @@ const SCRIPT_INTERPRETER_KEYS: [&str; 4] = [
 impl AppUseCase {
     /// Interpreters scripts are launched with. A setting that cannot be read
     /// falls back to the conventional command name rather than blocking the
-    /// run.
+    /// run. Each pin falls back on its own, so a failed read of one key never
+    /// changes which interpreter another language runs with.
     pub async fn script_interpreter_config(&self) -> crate::scripts::runner::InterpreterConfig {
-        match self.load_script_interpreter_config().await {
-            Ok(config) => config,
-            Err(error) => {
-                warn!(error = %error, "failed to read script interpreter settings");
-                crate::scripts::runner::InterpreterConfig::default()
-            }
+        let [python, powershell, batch, go] = SCRIPT_INTERPRETER_KEYS;
+        crate::scripts::runner::InterpreterConfig {
+            python: self.read_script_interpreter_or_default(python).await,
+            powershell: self.read_script_interpreter_or_default(powershell).await,
+            batch: self.read_script_interpreter_or_default(batch).await,
+            go: self.read_script_interpreter_or_default(go).await,
         }
+    }
+
+    async fn read_script_interpreter_or_default(&self, key_name: &str) -> Option<PathBuf> {
+        self.read_script_interpreter(key_name)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    error = %error,
+                    key = key_name,
+                    "failed to read script interpreter setting; using the conventional command"
+                );
+                None
+            })
     }
 
     async fn load_script_interpreter_config(

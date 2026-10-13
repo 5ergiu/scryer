@@ -480,23 +480,16 @@ async fn select_reusable_strategies(
 
     for mut strategy in strategies {
         strategy.request.page_budget = background_page_budget;
-        let Some(mut state) = reusable.remove(&strategy.strategy_id) else {
+        let Some(state) = reusable.remove(&strategy.strategy_id) else {
             selection.live.push(strategy);
             continue;
         };
         let contained_retry_at = state.contained_retry_at();
         let page_chain = background_page_budget.and_then(|_| state.page_chain(now));
-        selection.replayed_result_count = selection
-            .replayed_result_count
-            .saturating_add(state.candidates.len());
-        for result in &mut state.candidates {
-            result.indexer_id = Some(indexer_id.to_string());
-        }
-        if !state.candidates.is_empty() {
-            page_sink
-                .send(state.candidates)
-                .await
-                .map_err(|_| AppError::canceled("indexer scoring pipeline closed"))?;
+        if let Some(replay) = state.replay {
+            selection.replayed_result_count = selection
+                .replayed_result_count
+                .saturating_add(replay.send(page_sink, indexer_id).await?);
         }
 
         let unfinished = state
@@ -646,10 +639,76 @@ impl Drop for SearchDiagnosticCleanupGuard {
 struct ReusableStrategyState {
     completion_state: String,
     retry_at: Option<DateTime<Utc>>,
-    candidates: Vec<IndexerSearchResult>,
+    replay: Option<CandidateReplay>,
     /// The strategy's latest background state, which alone decides a
     /// containment backoff: operator and interactive runs never move it.
     background: Option<BackgroundIndexerSearchStrategyState>,
+}
+
+// Reserve scoring capacity before reading any payloads from the database.
+// History length changes the number of batches, not the size of a batch.
+const CANDIDATE_REPLAY_BATCH_SIZE: u32 = 100;
+
+struct CandidateReplay {
+    context: SearchDiagnosticsContext,
+    config: IndexerConfig,
+    run_ids: Vec<String>,
+    provenance: ReleaseCandidateProvenance,
+}
+
+impl CandidateReplay {
+    async fn send(self, sink: &IndexerSearchPageSink, indexer_id: &str) -> AppResult<usize> {
+        let mut count = 0usize;
+        let mut cursor = None;
+        loop {
+            let reservation = sink
+                .reserve()
+                .await
+                .ok_or_else(|| AppError::canceled("indexer scoring pipeline closed"))?;
+            let page = self
+                .context
+                .repository
+                .list_search_run_candidates(
+                    &self.run_ids,
+                    cursor.as_deref(),
+                    CANDIDATE_REPLAY_BATCH_SIZE,
+                )
+                .await?;
+            let mut candidates = page
+                .candidates
+                .into_iter()
+                .map(|record| reusable_candidate_from_record(record, &self.config))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    AppError::Repository(
+                        "persisted indexer candidate could not be rehydrated".to_string(),
+                    )
+                })?;
+            for candidate in &mut candidates {
+                candidate.provenance = Some(self.provenance.clone());
+                candidate.indexer_id = Some(indexer_id.to_string());
+            }
+            count = count.saturating_add(candidates.len());
+            if !candidates.is_empty() {
+                reservation
+                    .send(candidates)
+                    .await
+                    .map_err(|_| AppError::canceled("indexer scoring pipeline closed"))?;
+            }
+            match page.next_cursor {
+                None => break,
+                Some(next) if cursor.as_ref().is_none_or(|previous| next > *previous) => {
+                    cursor = Some(next);
+                }
+                Some(_) => {
+                    return Err(AppError::Repository(
+                        "persisted indexer candidate cursor did not advance".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(count)
+    }
 }
 
 impl ReusableStrategyState {
@@ -1083,31 +1142,18 @@ impl SearchDiagnosticsContext {
 
         let mut reusable = HashMap::with_capacity(states.len());
         for state in states {
-            let mut candidates = match state.candidate_run_id.as_deref() {
-                Some(run_id) => match self.persisted_candidates(run_id, config).await {
-                    Ok(candidates) => candidates,
-                    Err(error) => {
-                        warn!(
-                            indexer_id = self.indexer_id.as_str(),
-                            query_signature = state.query_signature.as_str(),
-                            error = %error,
-                            "failed to rehydrate reusable indexer strategy candidates"
-                        );
-                        continue;
-                    }
-                },
-                None => Vec::new(),
-            };
-            let provenance = reusable_strategy_provenance(&state.branch);
-            for candidate in &mut candidates {
-                candidate.provenance = Some(provenance.clone());
-            }
+            let replay = state.candidate_run_id.map(|run_id| CandidateReplay {
+                context: self.clone(),
+                config: config.clone(),
+                run_ids: vec![run_id],
+                provenance: reusable_strategy_provenance(&state.branch),
+            });
             reusable.insert(
                 state.query_signature,
                 ReusableStrategyState {
                     completion_state: state.completion_state,
                     retry_at: state.retry_at,
-                    candidates,
+                    replay,
                     background: None,
                 },
             );
@@ -1146,7 +1192,6 @@ impl SearchDiagnosticsContext {
             }
         };
         for state in states {
-            let chain_candidates = self.page_chain_candidates(&state, now, config).await;
             let query_signature = state.query_signature.clone();
             let reusable_state =
                 reusable
@@ -1154,61 +1199,28 @@ impl SearchDiagnosticsContext {
                     .or_insert_with(|| ReusableStrategyState {
                         completion_state: String::new(),
                         retry_at: None,
-                        candidates: Vec::new(),
+                        replay: None,
                         background: None,
                     });
-            if !chain_candidates.is_empty() {
-                let mut seen = reusable_state
-                    .candidates
-                    .iter()
-                    .map(candidate_session_identity_hash)
-                    .collect::<HashSet<_>>();
-                reusable_state.candidates.extend(
-                    chain_candidates.into_iter().filter(|candidate| {
-                        seen.insert(candidate_session_identity_hash(candidate))
-                    }),
-                );
+            if state.chain_run_ids.len() >= 2
+                && state.created_at >= now - Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS)
+            {
+                let replay = reusable_state
+                    .replay
+                    .get_or_insert_with(|| CandidateReplay {
+                        context: self.clone(),
+                        config: config.clone(),
+                        run_ids: Vec::new(),
+                        provenance: reusable_strategy_provenance(&state.branch),
+                    });
+                for run_id in &state.chain_run_ids {
+                    if !replay.run_ids.contains(run_id) {
+                        replay.run_ids.push(run_id.clone());
+                    }
+                }
             }
             reusable_state.background = Some(state);
         }
-    }
-
-    /// The retained candidates of every page a background strategy's latest
-    /// chain read, so a pass that resumes or finishes the chain ranks them
-    /// all, not only the last run's page.
-    async fn page_chain_candidates(
-        &self,
-        state: &BackgroundIndexerSearchStrategyState,
-        now: DateTime<Utc>,
-        config: &IndexerConfig,
-    ) -> Vec<IndexerSearchResult> {
-        if state.chain_run_ids.len() < 2
-            || state.created_at < now - Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS)
-        {
-            return Vec::new();
-        }
-        let provenance = reusable_strategy_provenance(&state.branch);
-        let mut candidates = Vec::new();
-        for run_id in &state.chain_run_ids {
-            match self.persisted_candidates(run_id, config).await {
-                Ok(mut page) => {
-                    for candidate in &mut page {
-                        candidate.provenance = Some(provenance.clone());
-                    }
-                    candidates.append(&mut page);
-                }
-                Err(error) => {
-                    warn!(
-                        indexer_id = self.indexer_id.as_str(),
-                        query_signature = state.query_signature.as_str(),
-                        error = %error,
-                        "failed to rehydrate a paged strategy's earlier pages"
-                    );
-                    return Vec::new();
-                }
-            }
-        }
-        candidates
     }
 
     async fn persist(
@@ -1228,24 +1240,6 @@ impl SearchDiagnosticsContext {
             );
         }
         maybe_cleanup_search_diagnostics(&self.repository, run.created_at);
-    }
-
-    async fn persisted_candidates(
-        &self,
-        run_id: &str,
-        config: &IndexerConfig,
-    ) -> AppResult<Vec<IndexerSearchResult>> {
-        self.repository
-            .list_search_run_candidates(run_id)
-            .await?
-            .into_iter()
-            .map(|record| reusable_candidate_from_record(record, config))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                AppError::Repository(
-                    "persisted indexer candidate could not be rehydrated".to_string(),
-                )
-            })
     }
 }
 
@@ -8294,7 +8288,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use scryer_application::{
         IndexerQueryStats, IndexerSearchPlanCapability, IndexerSearchPlanSummary,
-        IndexerSearchResponse, ReleaseStrategyKind, SchedulerBatchDecision,
+        IndexerSearchResponse, ReleaseStrategyKind, ReusableIndexerSearchCandidatePage,
+        SchedulerBatchDecision,
     };
     use scryer_domain::IndexerProviderCapabilities;
 
@@ -10257,6 +10252,185 @@ mod tests {
         }
     }
 
+    type ReplayTestCall = (Vec<String>, Option<String>, u32);
+
+    struct ReplayTestRepository {
+        calls: StdMutex<Vec<ReplayTestCall>>,
+        fail: bool,
+        candidates_per_run: u32,
+    }
+
+    #[async_trait]
+    impl IndexerSearchLearningRepository for ReplayTestRepository {
+        async fn list_for_title(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> AppResult<Vec<IndexerSearchLearningRecord>> {
+            unreachable!()
+        }
+
+        async fn record_outcome(
+            &self,
+            _: &IndexerSearchLearningKey,
+            _: u32,
+        ) -> AppResult<IndexerSearchLearningRecord> {
+            unreachable!()
+        }
+
+        async fn set_suppressed(&self, _: &IndexerSearchLearningKey, _: bool) -> AppResult<()> {
+            unreachable!()
+        }
+
+        async fn try_claim_suppressed_reprobe(
+            &self,
+            _: &IndexerSearchLearningKey,
+            _: DateTime<Utc>,
+        ) -> AppResult<bool> {
+            unreachable!()
+        }
+
+        async fn list_search_run_candidates(
+            &self,
+            run_ids: &[String],
+            after: Option<&str>,
+            limit: u32,
+        ) -> AppResult<ReusableIndexerSearchCandidatePage> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((run_ids.to_vec(), after.map(str::to_string), limit));
+            if self.fail {
+                return Err(AppError::Repository("synthetic replay failure".into()));
+            }
+            let start = after
+                .map(|value| value.parse::<u32>().unwrap() + 1)
+                .unwrap_or(0);
+            let total = self.candidates_per_run * run_ids.len() as u32;
+            let end = (start + limit).min(total);
+            Ok(ReusableIndexerSearchCandidatePage {
+                candidates: (start..end)
+                    .map(|id| {
+                        let run_id = &run_ids[(id / self.candidates_per_run) as usize];
+                        let title = if self.candidates_per_run == 1 {
+                            run_id.to_string()
+                        } else {
+                            format!("{run_id}.{id:04}")
+                        };
+                        let mut result = search_result(&title);
+                        result.download_url =
+                            Some(format!("https://example.invalid/{run_id}/{id}"));
+                        ReusableIndexerSearchCandidate {
+                            normalized: normalized_candidate(&result, None, None, Utc::now()),
+                        }
+                    })
+                    .collect(),
+                next_cursor: (end < total).then(|| format!("{:04}", end - 1)),
+            })
+        }
+    }
+
+    fn test_candidate_replay(
+        repository: Arc<dyn IndexerSearchLearningRepository>,
+    ) -> CandidateReplay {
+        CandidateReplay {
+            context: SearchDiagnosticsContext {
+                repository,
+                indexer_id: "idx-1".into(),
+                provider_type: "mock".into(),
+                search_session_id: "session".into(),
+                scope_key: "scope".into(),
+                indexer_fingerprint: "fingerprint".into(),
+                background: true,
+            },
+            config: mock_indexer_config(),
+            run_ids: vec!["run-1".into(), "run-2".into()],
+            provenance: reusable_strategy_provenance("ids"),
+        }
+    }
+
+    fn single_candidate_replay(title: &str) -> CandidateReplay {
+        let mut replay = test_candidate_replay(Arc::new(ReplayTestRepository {
+            calls: StdMutex::new(Vec::new()),
+            fail: false,
+            candidates_per_run: 1,
+        }));
+        replay.run_ids = vec![title.to_string()];
+        replay
+    }
+
+    #[tokio::test]
+    async fn candidate_replay_reserves_capacity_before_hydrating_each_batch() {
+        let repository = Arc::new(ReplayTestRepository {
+            calls: StdMutex::new(Vec::new()),
+            fail: false,
+            candidates_per_run: 205,
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = IndexerSearchPageSink::new(tx, 1);
+        let held = sink.reserve().await.unwrap();
+        let mut replay = Box::pin(test_candidate_replay(repository.clone()).send(&sink, "idx-1"));
+        assert!(futures_util::poll!(&mut replay).is_pending());
+        assert!(repository.calls.lock().unwrap().is_empty());
+        drop(held);
+
+        let mut titles = HashSet::new();
+        for batch in 0..5 {
+            let progress = futures_util::poll!(&mut replay);
+            if batch == 4 {
+                assert!(matches!(progress, std::task::Poll::Ready(Ok(410))));
+            } else {
+                assert!(progress.is_pending());
+            }
+            let page = rx.try_recv().expect("one reserved batch is ready");
+            assert_eq!(page.results.len(), if batch == 4 { 10 } else { 100 });
+            for result in &page.results {
+                assert_eq!(result.indexer_id.as_deref(), Some("idx-1"));
+                assert!(result.provenance.is_some());
+                assert!(titles.insert(result.title.clone()));
+            }
+            // Receiving does not free capacity: scoring owns the page until drop.
+            if batch < 4 {
+                assert!(futures_util::poll!(&mut replay).is_pending());
+                assert_eq!(repository.calls.lock().unwrap().len(), batch + 1);
+            }
+            drop(page);
+        }
+        assert_eq!(titles.len(), 410);
+        let calls = repository.calls.lock().unwrap();
+        assert_eq!(calls.len(), 5);
+        assert!(calls.iter().all(|(_, _, limit)| *limit == 100));
+        assert_eq!(calls[1].1.as_deref(), Some("0099"));
+        assert_eq!(calls[2].1.as_deref(), Some("0199"));
+        assert_eq!(calls[3].1.as_deref(), Some("0299"));
+        assert!(calls.iter().all(|(runs, _, _)| runs == &["run-1", "run-2"]));
+    }
+
+    #[tokio::test]
+    async fn candidate_replay_propagates_database_errors_and_closed_consumers() {
+        for fail in [false, true] {
+            let repository = Arc::new(ReplayTestRepository {
+                calls: StdMutex::new(Vec::new()),
+                fail,
+                candidates_per_run: 205,
+            });
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let sink = IndexerSearchPageSink::new(tx, 1);
+            drop(rx);
+            let error = test_candidate_replay(repository.clone())
+                .send(&sink, "idx-1")
+                .await
+                .unwrap_err();
+            if fail {
+                assert!(matches!(error, AppError::Repository(_)));
+            } else {
+                assert!(error.is_canceled());
+            }
+            assert_eq!(repository.calls.lock().unwrap().len(), 1);
+        }
+    }
+
     #[tokio::test]
     async fn strategy_reuse_replays_candidates_and_retries_only_open_work() {
         let strategies = vec![
@@ -10285,7 +10459,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: "complete".into(),
                     retry_at: None,
-                    candidates: vec![search_result("Synthetic.Complete")],
+                    replay: Some(single_candidate_replay("Synthetic.Complete")),
                     background: None,
                 },
             ),
@@ -10294,7 +10468,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: "deferred".into(),
                     retry_at: Some(Utc::now() + Duration::minutes(1)),
-                    candidates: vec![search_result("Synthetic.Deferred")],
+                    replay: Some(single_candidate_replay("Synthetic.Deferred")),
                     background: None,
                 },
             ),
@@ -10303,7 +10477,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: "partial".into(),
                     retry_at: Some(Utc::now() + Duration::minutes(1)),
-                    candidates: vec![search_result("Synthetic.Partial")],
+                    replay: Some(single_candidate_replay("Synthetic.Partial")),
                     background: None,
                 },
             ),
@@ -10312,7 +10486,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: "partial".into(),
                     retry_at: None,
-                    candidates: vec![search_result("Synthetic.PartialDue")],
+                    replay: Some(single_candidate_replay("Synthetic.PartialDue")),
                     background: None,
                 },
             ),
@@ -10323,7 +10497,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: "partial".into(),
                     retry_at: None,
-                    candidates: vec![search_result("Synthetic.Contained")],
+                    replay: Some(single_candidate_replay("Synthetic.Contained")),
                     background: background(
                         SEARCH_STRATEGY_CONTAINED,
                         Utc::now() + Duration::minutes(30),
@@ -10335,7 +10509,7 @@ mod tests {
                 ReusableStrategyState {
                     completion_state: String::new(),
                     retry_at: None,
-                    candidates: Vec::new(),
+                    replay: None,
                     background: background(
                         SEARCH_STRATEGY_CONTAINED,
                         Utc::now() - Duration::minutes(1),
@@ -10442,7 +10616,7 @@ mod tests {
             ReusableStrategyState {
                 completion_state: "partial".into(),
                 retry_at: None,
-                candidates: Vec::new(),
+                replay: None,
                 background: Some(BackgroundIndexerSearchStrategyState {
                     query_signature: "ids".into(),
                     strategy_state: SEARCH_STRATEGY_CONTAINED.into(),
@@ -10514,7 +10688,7 @@ mod tests {
                     ReusableStrategyState {
                         completion_state: "complete".into(),
                         retry_at: None,
-                        candidates: vec![],
+                        replay: None,
                         background: Some(BackgroundIndexerSearchStrategyState {
                             query_signature: String::new(),
                             strategy_state: SEARCH_STRATEGY_CONVERGED.into(),
@@ -10561,7 +10735,7 @@ mod tests {
         let open = |cursor: &str, created_at: DateTime<Utc>| ReusableStrategyState {
             completion_state: "partial".into(),
             retry_at: None,
-            candidates: vec![search_result("Synthetic.Page")],
+            replay: Some(single_candidate_replay("Synthetic.Page")),
             background: Some(BackgroundIndexerSearchStrategyState {
                 query_signature: String::new(),
                 strategy_state: SEARCH_STRATEGY_OPEN.into(),
@@ -16047,23 +16221,42 @@ mod tests {
 
         async fn list_search_run_candidates(
             &self,
-            run_id: &str,
-        ) -> AppResult<Vec<ReusableIndexerSearchCandidate>> {
-            Ok(self
-                .diagnostics
-                .lock()
-                .expect("search diagnostics mutex")
+            run_ids: &[String],
+            after_source_id: Option<&str>,
+            limit: u32,
+        ) -> AppResult<ReusableIndexerSearchCandidatePage> {
+            let diagnostics = self.diagnostics.lock().expect("search diagnostics mutex");
+            let mut candidates = diagnostics
                 .iter()
-                .find(|(run, _)| run.id == run_id)
-                .map(|(_, candidates)| {
+                .filter(|(run, _)| run_ids.contains(&run.id))
+                .flat_map(|(_, candidates)| {
                     candidates
                         .iter()
-                        .map(|candidate| ReusableIndexerSearchCandidate {
-                            normalized: candidate.normalized.clone(),
+                        .filter(|candidate| {
+                            after_source_id
+                                .is_none_or(|id| candidate.session_identity_hash.as_str() > id)
                         })
-                        .collect()
+                        .collect::<Vec<_>>()
                 })
-                .unwrap_or_default())
+                .collect::<Vec<_>>();
+            candidates.sort_by(|a, b| a.session_identity_hash.cmp(&b.session_identity_hash));
+            candidates.dedup_by(|a, b| a.session_identity_hash == b.session_identity_hash);
+            candidates.truncate(limit as usize);
+            Ok(ReusableIndexerSearchCandidatePage {
+                next_cursor: if candidates.len() == limit as usize {
+                    candidates
+                        .last()
+                        .map(|candidate| candidate.session_identity_hash.clone())
+                } else {
+                    None
+                },
+                candidates: candidates
+                    .into_iter()
+                    .map(|candidate| ReusableIndexerSearchCandidate {
+                        normalized: candidate.normalized.clone(),
+                    })
+                    .collect(),
+            })
         }
 
         async fn cleanup_search_diagnostics(

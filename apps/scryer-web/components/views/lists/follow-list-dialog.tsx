@@ -432,7 +432,7 @@ function FollowListDialogBody({
                 {t("lists.preview.run")}
               </Button>
             </div>
-            {preview && previewDraftKey === draftKey ? <ListPreviewSummary preview={preview} idPrefix={ID} /> : null}
+            {preview && previewDraftKey === draftKey ? <ListPreviewSummary preview={preview} idPrefix={ID} providerType={target.kind === "new" ? target.source.provider : target.subscription.source.provider} /> : null}
           </section>
         ) : null}
 

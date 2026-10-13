@@ -736,7 +736,7 @@ struct ImportFileOptions {
     #[cfg(all(test, unix))]
     force_foreign_source_uid: bool,
     #[cfg(all(test, unix))]
-    force_destination_uid_mismatch: bool,
+    destination_uid_override: Option<u32>,
     /// Make a successful hard link report a different file identity, as a
     /// filesystem that synthesises inode numbers per path does.
     #[cfg(test)]
@@ -940,16 +940,6 @@ fn force_foreign_source_uid(_: &ImportFileOptions) -> bool {
     false
 }
 
-#[cfg(all(test, unix))]
-fn force_destination_uid_mismatch(options: &ImportFileOptions) -> bool {
-    options.force_destination_uid_mismatch
-}
-
-#[cfg(all(not(test), unix))]
-fn force_destination_uid_mismatch(_: &ImportFileOptions) -> bool {
-    false
-}
-
 #[cfg(unix)]
 fn effective_uid() -> u32 {
     unsafe { libc::geteuid() as u32 }
@@ -972,35 +962,30 @@ fn source_uid_matches_scryer(
 }
 
 #[cfg(unix)]
-fn verify_imported_regular_file_uid(path: &Path, options: &ImportFileOptions) -> AppResult<()> {
-    if force_destination_uid_mismatch(options) {
-        return Err(AppError::Repository(format!(
-            "import destination is not owned by the Scryer process uid: {}",
-            path.display()
-        )));
+fn log_imported_destination_ownership(path: &Path, _options: &ImportFileOptions) {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::debug!(dest = %path.display(), %error, "could not inspect import destination ownership for diagnostics");
+            return;
+        }
+    };
+    let destination_uid = metadata.uid();
+    #[cfg(test)]
+    let destination_uid = _options.destination_uid_override.unwrap_or(destination_uid);
+    let process_uid = effective_uid();
+    if destination_uid != process_uid {
+        tracing::debug!(
+            dest = %path.display(),
+            destination_uid,
+            process_uid,
+            "import destination ownership differs from process uid; ownership is diagnostic only"
+        );
     }
-    let metadata = std::fs::metadata(path).map_err(|error| {
-        AppError::Repository(format!(
-            "failed to inspect import destination ownership {}: {}",
-            path.display(),
-            error
-        ))
-    })?;
-    if metadata.is_file() && metadata.uid() != effective_uid() {
-        return Err(AppError::Repository(format!(
-            "import destination is owned by uid {}, expected Scryer uid {}: {}",
-            metadata.uid(),
-            effective_uid(),
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(not(unix))]
-fn verify_imported_regular_file_uid(_path: &Path, _options: &ImportFileOptions) -> AppResult<()> {
-    Ok(())
-}
+fn log_imported_destination_ownership(_path: &Path, _options: &ImportFileOptions) {}
 
 #[cfg(unix)]
 fn parse_chmod_mask(mask: &str) -> io::Result<u32> {
@@ -1821,13 +1806,9 @@ fn finalize_imported_regular_destination(
     dest: &Path,
     options: &ImportFileOptions,
     permissions: &ImportFilePermissions,
-) -> AppResult<()> {
-    if let Err(error) = verify_imported_regular_file_uid(dest, options) {
-        let _ = std::fs::remove_file(dest);
-        return Err(error);
-    }
+) {
+    log_imported_destination_ownership(dest, options);
     apply_file_permissions_best_effort(dest, permissions);
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2041,7 +2022,7 @@ fn try_fast_import_placement_blocking(
                                 &prepared.dest,
                                 &prepared.options,
                                 &prepared.permissions,
-                            )?;
+                            );
                             return finish_prepared_import(prepared, ImportStrategy::HardLink)
                                 .map(FastPlacementResult::Finished);
                         }
@@ -2133,9 +2114,9 @@ fn rename_archive_workspace_output(prepared: &PreparedImportPlacement) -> AppRes
                 )));
             }
             Ok(())
-        })
-        .and_then(|()| verify_imported_regular_file_uid(&prepared.dest, &prepared.options));
+        });
     let Err(error) = placed else {
+        log_imported_destination_ownership(&prepared.dest, &prepared.options);
         apply_file_permissions_best_effort(&prepared.dest, &prepared.permissions);
         return Ok(true);
     };
@@ -2296,11 +2277,7 @@ fn copy_prepared_import_blocking(prepared: PreparedImportPlacement) -> AppResult
         prepared.cancellation.as_ref(),
     )?;
     validate_import_destination_guard_after_placement(&prepared.destination_guard, &prepared.dest)?;
-    finalize_imported_regular_destination(
-        &prepared.dest,
-        &prepared.options,
-        &prepared.permissions,
-    )?;
+    finalize_imported_regular_destination(&prepared.dest, &prepared.options, &prepared.permissions);
     // The source-cleanup guard is only built once verification passed, so
     // FR-044 holds structurally: an unproven copy has no guard to remove
     // anything with.
@@ -2401,7 +2378,7 @@ fn import_hardlink_or_copy_blocking(
                                     "applying import permissions to hardlink; metadata changes affect the shared download-side inode"
                                 );
                             }
-                            finalize_imported_regular_destination(&dest, &options, &permissions)?;
+                            finalize_imported_regular_destination(&dest, &options, &permissions);
                             let source_cleanup = cleanup_guard_after_placement(
                                 source_cleanup_required,
                                 &source,
@@ -2466,7 +2443,7 @@ fn import_hardlink_or_copy_blocking(
         None,
     )?;
     validate_import_destination_guard_after_placement(&destination_guard, &dest)?;
-    finalize_imported_regular_destination(&dest, &options, &permissions)?;
+    finalize_imported_regular_destination(&dest, &options, &permissions);
 
     let source_cleanup = cleanup_guard_after_placement(
         source_cleanup_required,
@@ -4545,6 +4522,7 @@ mod tests {
                 buffer: buffer.clone(),
             })
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .without_time()
             .finish();
 
@@ -5172,29 +5150,261 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn final_uid_mismatch_fails_import_and_removes_destination() {
+    fn mapped_destination_ownership_accepts_regular_placement_lanes() {
+        for prepared_lane in [false, true] {
+            for move_mode in [false, true] {
+                for scenario in [
+                    "hardlink",
+                    "cross_device",
+                    "foreign_source",
+                    "unverifiable_link",
+                ] {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    assert!(
+                        hard_links_supported(dir.path()),
+                        "fixture requires hard links"
+                    );
+                    let source = dir.path().join("source.mkv");
+                    let sibling = dir.path().join("unrelated.mkv");
+                    let dest = dir.path().join("library/title.mkv");
+                    std::fs::write(&source, SYNTHETIC_PAYLOAD).expect("write source");
+                    std::fs::write(&sibling, b"unrelated").expect("write sibling");
+                    let destination_uid = effective_uid() ^ 1;
+                    let options = ImportFileOptions {
+                        destination_uid_override: Some(destination_uid),
+                        force_cross_device_move: scenario == "cross_device",
+                        force_foreign_source_uid: scenario == "foreign_source",
+                        force_hard_link_identity_mismatch: scenario == "unverifiable_link",
+                        ..Default::default()
+                    };
+                    let (result, logs) = capture_logs(|| {
+                        if prepared_lane {
+                            let coordinator = ImportPlacementCoordinator::new(1, 2);
+                            let (result, mismatch) = place_in_process(
+                                &coordinator,
+                                prepare_in_process(&source, &dest, options, move_mode),
+                                false,
+                            );
+                            assert_eq!(mismatch.is_some(), scenario == "unverifiable_link");
+                            result
+                        } else {
+                            import_file_blocking(
+                                source.clone(),
+                                dest.clone(),
+                                if move_mode {
+                                    ImportMode::Move
+                                } else {
+                                    ImportMode::HardlinkOrCopy
+                                },
+                                options,
+                                None,
+                                None,
+                                ImportFilePermissions::default(),
+                            )
+                            .expect("mapped ownership must not reject placement")
+                        }
+                    });
+                    assert!(
+                        logs.contains(&format!("destination_uid={destination_uid}")),
+                        "{logs}"
+                    );
+                    assert!(
+                        logs.contains(&format!("process_uid={}", effective_uid())),
+                        "{logs}"
+                    );
+                    assert_eq!(
+                        result.strategy,
+                        if scenario == "hardlink" {
+                            ImportStrategy::HardLink
+                        } else {
+                            ImportStrategy::Copy
+                        }
+                    );
+                    assert_eq!(result.verification.is_some(), scenario != "hardlink");
+                    assert_eq!(result.source_disposition, ImportSourceDisposition::Retained);
+                    assert_eq!(
+                        std::fs::read(&source).expect("source before cleanup"),
+                        SYNTHETIC_PAYLOAD
+                    );
+                    assert_eq!(result.source_cleanup.is_some(), move_mode);
+                    if let Some(guard) = result.source_cleanup {
+                        remove_import_source_after_verified_import_blocking(
+                            guard,
+                            dest.clone(),
+                            options,
+                        )
+                        .expect("guarded cleanup");
+                        assert!(!source.exists());
+                    }
+                    assert_eq!(
+                        std::fs::read(&dest).expect("destination"),
+                        SYNTHETIC_PAYLOAD
+                    );
+                    assert_eq!(std::fs::read(&sibling).expect("sibling"), b"unrelated");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mapped_destination_ownership_accepts_archive_rename() {
+        for move_mode in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (source, dest) = archive_workspace_fixture(dir.path());
+            let sibling = source.with_file_name("unrelated.mkv");
+            std::fs::write(&sibling, b"unrelated").expect("write sibling");
+            let destination_uid = effective_uid() ^ 1;
+            let options = ImportFileOptions {
+                destination_uid_override: Some(destination_uid),
+                ..Default::default()
+            };
+            let coordinator = ImportPlacementCoordinator::new(1, 2);
+            let attempts_before = hard_link_attempts();
+            let ((result, _), logs) = capture_logs(|| {
+                place_in_process(
+                    &coordinator,
+                    prepare_in_process(&source, &dest, options, move_mode),
+                    true,
+                )
+            });
+            assert!(
+                logs.contains(&format!("destination_uid={destination_uid}")),
+                "{logs}"
+            );
+            assert_eq!(result.strategy, ImportStrategy::Move);
+            assert_eq!(
+                result.source_disposition,
+                ImportSourceDisposition::RenamedIntoPlace
+            );
+            assert!(result.source_cleanup.is_none());
+            assert_eq!(hard_link_attempts(), attempts_before);
+            assert!(!source.exists());
+            assert_eq!(
+                std::fs::read(&dest).expect("destination"),
+                SYNTHETIC_PAYLOAD
+            );
+            assert_eq!(std::fs::read(&sibling).expect("sibling"), b"unrelated");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mapped_destination_ownership_keeps_permission_failures_best_effort() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("source.mkv");
-        std::fs::write(&source, b"fake video bytes").expect("write source");
-        let dest = dir.path().join("library").join("Imported.Movie.mkv");
+        let dest = dir.path().join("library/title.mkv");
+        std::fs::write(&source, SYNTHETIC_PAYLOAD).expect("write source");
+        let (result, logs) = capture_logs(|| {
+            import_file_blocking(
+                source.clone(),
+                dest.clone(),
+                ImportMode::HardlinkOrCopy,
+                ImportFileOptions {
+                    force_cross_device_move: true,
+                    destination_uid_override: Some(effective_uid() ^ 1),
+                    ..Default::default()
+                },
+                None,
+                None,
+                ImportFilePermissions {
+                    set_permissions_linux: true,
+                    file_chmod: Some("invalid".to_string()),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(
+            result
+                .expect("permissions remain best effort")
+                .source_cleanup
+                .is_none()
+        );
+        assert!(logs.contains("invalid chmod mask"), "{logs}");
+        assert_eq!(std::fs::read(&source).expect("source"), SYNTHETIC_PAYLOAD);
+        assert_eq!(
+            std::fs::read(&dest).expect("destination"),
+            SYNTHETIC_PAYLOAD
+        );
+    }
 
-        let error = import_file_blocking(
-            source.clone(),
-            dest.clone(),
-            ImportMode::HardlinkOrCopy,
-            ImportFileOptions {
-                force_destination_uid_mismatch: true,
+    #[cfg(unix)]
+    #[test]
+    fn mapped_destination_ownership_does_not_bypass_verification_or_cleanup_guards() {
+        for failure in ["verification", "source_changed", "destination_changed"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let source = dir.path().join("source.mkv");
+            let sibling = dir.path().join("unrelated.mkv");
+            let dest = dir.path().join("library/title.mkv");
+            std::fs::write(&source, SYNTHETIC_PAYLOAD).expect("write source");
+            std::fs::write(&sibling, b"unrelated").expect("write sibling");
+            let options = ImportFileOptions {
+                force_cross_device_move: true,
+                force_copy_verification_failure: failure == "verification",
+                destination_uid_override: Some(effective_uid() ^ 1),
                 ..Default::default()
-            },
-            None,
-            None,
-            ImportFilePermissions::default(),
-        )
-        .expect_err("uid mismatch should fail import");
-
-        assert!(matches!(error, AppError::Repository(_)));
-        assert!(!dest.exists());
-        assert!(source.exists());
+            };
+            let result = import_file_blocking(
+                source.clone(),
+                dest.clone(),
+                ImportMode::Move,
+                options,
+                None,
+                None,
+                ImportFilePermissions::default(),
+            );
+            if failure == "verification" {
+                assert!(
+                    result
+                        .expect_err("verification must fail")
+                        .to_string()
+                        .contains("copy verification failed")
+                );
+                assert!(!dest.exists());
+                assert_eq!(std::fs::read(&source).expect("source"), SYNTHETIC_PAYLOAD);
+            } else {
+                let guard = result
+                    .expect("placement")
+                    .source_cleanup
+                    .expect("cleanup guard");
+                let mut changed = SYNTHETIC_PAYLOAD.to_vec();
+                changed[0] ^= 1;
+                let changed_path = if failure == "source_changed" {
+                    &source
+                } else {
+                    &dest
+                };
+                std::fs::write(changed_path, &changed).expect("change guarded file");
+                let error = remove_import_source_after_verified_import_blocking(
+                    guard,
+                    dest.clone(),
+                    options,
+                )
+                .expect_err("changed content must prevent cleanup");
+                assert!(error.to_string().contains(if failure == "source_changed" {
+                    "source"
+                } else {
+                    "destination proof changed"
+                }));
+                assert_eq!(
+                    std::fs::read(&source).expect("source retained"),
+                    if failure == "source_changed" {
+                        changed.as_slice()
+                    } else {
+                        SYNTHETIC_PAYLOAD
+                    }
+                );
+                assert_eq!(
+                    std::fs::read(&dest).expect("destination retained"),
+                    if failure == "destination_changed" {
+                        changed.as_slice()
+                    } else {
+                        SYNTHETIC_PAYLOAD
+                    }
+                );
+            }
+            assert_eq!(std::fs::read(&sibling).expect("sibling"), b"unrelated");
+        }
     }
 
     #[cfg(unix)]

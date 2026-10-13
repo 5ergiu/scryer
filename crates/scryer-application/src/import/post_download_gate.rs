@@ -302,6 +302,18 @@ const RUNTIME_BAND_MAX_PERCENT: i32 = 200;
 /// would overwrite.
 pub(crate) const REPLACE_BLOCKED_RUNTIME_MISMATCH_CODE: &str = "replace_blocked_runtime_mismatch";
 
+/// A probed duration as a clock reading (`19:35`, or `1:02:05` past an hour),
+/// so a rejection can be checked against the expected runtime at a glance.
+fn runtime_clock(seconds: i32) -> String {
+    let seconds = seconds.max(0);
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 pub(crate) fn facet_to_category_hint(facet: &MediaFacet) -> &'static str {
     facet.as_str()
 }
@@ -338,9 +350,9 @@ fn runtime_sample_rejection(
             return Some(imported_runtime_sample_rejection(
                 SAMPLE_RUNTIME_TOO_SHORT_CODE,
                 format!(
-                    "imported file runtime is too short for automatic import: expected about {} minutes, probed file is {} seconds",
+                    "imported file runtime is too short for automatic import: expected about {} minutes, probed file is {}",
                     (expected_seconds + 59) / 60,
-                    actual_seconds
+                    runtime_clock(actual_seconds)
                 ),
             ));
         }
@@ -356,9 +368,9 @@ fn runtime_sample_rejection(
             return Some(imported_runtime_sample_rejection(
                 RUNTIME_OUT_OF_BAND_CODE,
                 format!(
-                    "imported file runtime is too short for the expected runtime: expected about {} minutes, probed file is {} seconds",
+                    "imported file runtime is too short for the expected runtime: expected about {} minutes, probed file is {}",
                     (expected_seconds + 59) / 60,
-                    actual_seconds
+                    runtime_clock(actual_seconds)
                 ),
             ));
         }
@@ -366,9 +378,9 @@ fn runtime_sample_rejection(
             return Some(imported_runtime_sample_rejection(
                 RUNTIME_OUT_OF_BAND_CODE,
                 format!(
-                    "imported file runtime is too long for the expected runtime: expected about {} minutes, probed file is {} seconds",
+                    "imported file runtime is too long for the expected runtime: expected about {} minutes, probed file is {}",
                     (expected_seconds + 59) / 60,
-                    actual_seconds
+                    runtime_clock(actual_seconds)
                 ),
             ));
         }
@@ -382,8 +394,8 @@ fn runtime_sample_rejection(
         return Some(imported_runtime_sample_rejection(
             SAMPLE_RUNTIME_TOO_SHORT_CODE,
             format!(
-                "imported file runtime is too short for automatic import: probed file is {} seconds",
-                actual_seconds
+                "imported file runtime is too short for automatic import: probed file is {}",
+                runtime_clock(actual_seconds)
             ),
         ));
     }
@@ -456,16 +468,16 @@ pub(crate) fn replace_runtime_band_block(
     // `completed_import_error_message_is_retryable` treats as transient.
     if actual_seconds < band_min_seconds {
         return Some(format!(
-            "imported file runtime is too short to replace the existing file: existing file is about {} minutes, probed file is {} seconds; held for manual resolution",
+            "imported file runtime is too short to replace the existing file: existing file is about {} minutes, probed file is {}; held for manual resolution",
             (incumbent_seconds + 59) / 60,
-            actual_seconds
+            runtime_clock(actual_seconds)
         ));
     }
     if actual_seconds > band_max_seconds {
         return Some(format!(
-            "imported file runtime is too long to replace the existing file: existing file is about {} minutes, probed file is {} seconds; held for manual resolution",
+            "imported file runtime is too long to replace the existing file: existing file is about {} minutes, probed file is {}; held for manual resolution",
             (incumbent_seconds + 59) / 60,
-            actual_seconds
+            runtime_clock(actual_seconds)
         ));
     }
 
@@ -3099,7 +3111,7 @@ mod tests {
         );
         assert_eq!(
             rejection.message,
-            "imported file runtime is too short for the expected runtime: expected about 55 minutes, probed file is 1495 seconds"
+            "imported file runtime is too short for the expected runtime: expected about 55 minutes, probed file is 24:55"
         );
     }
 
@@ -3112,7 +3124,7 @@ mod tests {
         assert_eq!(rejection.recycle_reason, RUNTIME_OUT_OF_BAND_CODE);
         assert_eq!(
             rejection.message,
-            "imported file runtime is too long for the expected runtime: expected about 24 minutes, probed file is 3600 seconds"
+            "imported file runtime is too long for the expected runtime: expected about 24 minutes, probed file is 1:00:00"
         );
     }
 
@@ -3184,7 +3196,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "imported file runtime is too short to replace the existing file: existing file is about 55 minutes, probed file is 1495 seconds; held for manual resolution"
+            "imported file runtime is too short to replace the existing file: existing file is about 55 minutes, probed file is 24:55; held for manual resolution"
         );
     }
 
@@ -3199,7 +3211,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "imported file runtime is too long to replace the existing file: existing file is about 24 minutes, probed file is 3600 seconds; held for manual resolution"
+            "imported file runtime is too long to replace the existing file: existing file is about 24 minutes, probed file is 1:00:00; held for manual resolution"
         );
     }
 
