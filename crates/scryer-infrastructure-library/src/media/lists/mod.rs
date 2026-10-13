@@ -58,6 +58,19 @@ pub(super) fn placeholders(count: usize) -> String {
         .join(", ")
 }
 
+pub(super) fn jsonb_column<T: DeserializeOwned>(
+    row: &SqlRow,
+    column: &str,
+    fallback: &str,
+) -> AppResult<T> {
+    let value = row.opt_json(column)?;
+    match value {
+        Some(value) => serde_json::from_value(value),
+        None => serde_json::from_str(fallback),
+    }
+    .map_err(|error| AppError::Repository(format!("invalid JSON in {column}: {error}")))
+}
+
 pub(super) fn json_column<T: DeserializeOwned>(
     row: &SqlRow,
     column: &str,
@@ -76,6 +89,14 @@ pub(super) fn json_column<T: DeserializeOwned>(
 pub(super) fn json_arg<T: serde::Serialize>(value: &T) -> AppResult<SqlArg> {
     serde_json::to_string(value)
         .map(SqlArg::Text)
+        .map_err(|error| AppError::Repository(format!("failed to encode JSON column: {error}")))
+}
+
+/// Native JSONB on PostgreSQL, serialized JSON text on SQLite. Older list
+/// columns remain text-backed on both engines and use `json_arg` instead.
+pub(super) fn jsonb_arg<T: serde::Serialize>(value: &T) -> AppResult<SqlArg> {
+    serde_json::to_value(value)
+        .map(SqlArg::Json)
         .map_err(|error| AppError::Repository(format!("failed to encode JSON column: {error}")))
 }
 

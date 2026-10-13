@@ -2395,6 +2395,30 @@ async fn fetch_personalized_home_candidates(
         return Ok(Vec::new());
     }
 
+    let (sql, args) = personalized_home_candidates_query(
+        datastore,
+        run_id,
+        readable_library_ids,
+        allowed_media_kinds,
+        include_unresolved,
+        filters,
+        subset,
+        limit,
+    );
+    fetch_discovery_home_candidates_with_sql(datastore, &sql, &args).await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn personalized_home_candidates_query(
+    datastore: &StoreDatastore,
+    run_id: &str,
+    readable_library_ids: &[String],
+    allowed_media_kinds: &[String],
+    include_unresolved: bool,
+    filters: &DiscoveryHomeFilters,
+    subset: Option<PersonalizedItemSubset>,
+    limit: i64,
+) -> (String, Vec<SqlArg>) {
     let mut args = vec![SqlArg::Text(run_id.to_string())];
     let mut clauses = vec![
         "i.base_generation_id = {}".to_string(),
@@ -2432,7 +2456,7 @@ async fn fetch_personalized_home_candidates(
         discovery_home_candidate_projection(datastore, "i", "t"),
         clauses.join(" AND ")
     );
-    fetch_discovery_home_candidates_with_sql(datastore, &sql, &args).await
+    (sql, args)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9343,12 +9367,15 @@ mod tests {
             .expect("run should upsert");
 
         // (target, recommendation_score, rank_score, sort_index)
-        let rows: [(&str, Option<f64>, Option<f64>, i32); 5] = [
+        let rows: [(&str, Option<f64>, Option<f64>, i32); 8] = [
             ("tmdb:movie:1", Some(0.10), Some(90.0), 0),
             ("tmdb:movie:2", Some(0.90), Some(1.0), 4),
             ("tmdb:movie:3", Some(0.50), Some(2.0), 3),
             ("tmdb:movie:4", Some(0.50), Some(9.0), 2),
             ("tmdb:movie:5", None, Some(50.0), 1),
+            ("tmdb:movie:7", Some(0.50), Some(9.0), 1),
+            ("tmdb:movie:6", Some(0.50), Some(9.0), 1),
+            ("tmdb:movie:8", None, None, 0),
         ];
         let items = rows
             .iter()
@@ -9393,15 +9420,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "tmdb:movie:2",
+                "tmdb:movie:6",
+                "tmdb:movie:7",
                 "tmdb:movie:4",
                 "tmdb:movie:3",
                 "tmdb:movie:1",
                 "tmdb:movie:5",
+                "tmdb:movie:8",
             ],
             "relevance leads, rank_score breaks ties, sort_index breaks those, \
              and a missing recommendation score sorts last"
         );
         assert_eq!(candidates[0].item.recommendation_score, Some(0.90));
+
+        let (sql, args) = personalized_home_candidates_query(
+            &store.datastore,
+            run_id,
+            &["movie-library".to_string()],
+            &["movie".to_string()],
+            true,
+            &DiscoveryHomeFilters::default(),
+            None,
+            18,
+        );
+        let plan = SqlRuntime::fetch_all(
+            store.datastore.read_exec(),
+            &format!("EXPLAIN QUERY PLAN {sql}"),
+            &args,
+        )
+        .await
+        .expect("personalized query plan should load")
+        .into_iter()
+        .map(|row| row.text("detail").expect("plan detail"))
+        .collect::<Vec<_>>();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_discovery_items_generation_relevance")),
+            "the application query must use the null-safe generation index: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|detail| detail == "USE TEMP B-TREE FOR ORDER BY"),
+            "only the final title-key tie-breaker may need sorting: {plan:?}"
+        );
 
         let _ = std::fs::remove_file(db);
     }
@@ -9458,6 +9520,12 @@ mod tests {
             .execute(&services.pool)
             .await
             .expect("index drop should succeed");
+        // Migration 0276 also indexes recommendation_score. Rewind that
+        // dependent index before restoring the pre-0238 column layout.
+        sqlx::query("DROP INDEX IF EXISTS idx_discovery_items_generation_relevance")
+            .execute(&services.pool)
+            .await
+            .expect("dependent index drop should succeed");
         for statement in [
             "ALTER TABLE discovery_items DROP COLUMN recommendation_score",
             "ALTER TABLE discovery_items DROP COLUMN base_rank",
@@ -9467,7 +9535,7 @@ mod tests {
                 .await
                 .expect("column drop should succeed");
         }
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 238")
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (238, 276)")
             .execute(&services.pool)
             .await
             .expect("ledger rewind should succeed");
@@ -9489,6 +9557,18 @@ mod tests {
                 .any(|column| column == "recommendation_score")
                 && columns.iter().any(|column| column == "base_rank"),
             "0238 must restore both columns on an existing database: {columns:?}"
+        );
+        let restored_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN \
+             ('idx_discovery_items_generation_recommendation', \
+              'idx_discovery_items_generation_relevance')",
+        )
+        .fetch_one(&services.pool)
+        .await
+        .expect("restored index lookup should succeed");
+        assert_eq!(
+            restored_indexes, 2,
+            "both dependent indexes must be restored"
         );
 
         let _ = std::fs::remove_file(db);

@@ -2,27 +2,37 @@ import * as React from "react";
 import { Eye, Pencil, RefreshCw, Trash2 } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import {
+  TITLE_TABLE_HEADER_CELL_CLASS,
+  TITLE_TABLE_HEADER_ROW_CLASS,
+  TITLE_TABLE_ROW_CLASS,
+} from "@/components/views/media-content/title-table-shared";
+import { LabeledFieldset } from "@/components/common/labeled-fieldset";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { FacetTags } from "@/components/common/facet-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { TextActionButton } from "@/components/ui/text-action-button";
+import { ActionTooltip } from "@/components/ui/tooltip";
 import {
   Table,
   TableBody,
   TableCell,
+  TableCodeCell,
   TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
-import type { ListPreview, ListProviderManifest, ListSubscription } from "@/lib/types/lists";
+import type { ListMembership, ListPreview, ListProviderManifest, ListSubscription } from "@/lib/types/lists";
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import {
   listIntervalParts,
-  listKindLabelKey,
   listMembershipRowId,
+  listMembershipReasonKey,
   listMembershipStateLabelKey,
   listMembershipStateTone,
   listModeLabelKey,
@@ -34,8 +44,10 @@ import {
 } from "@/lib/utils/lists";
 
 import { ListCoverageBar } from "./list-coverage-bar";
+import { ListMembershipTitle } from "./list-membership-title";
 import { ListPreviewSummary } from "./list-preview-summary";
 import { ProviderTile } from "./provider-tile";
+import { SimklAttribution } from "./simkl-attribution";
 import type { ListDetailState } from "./lists-view";
 
 type ListDetailPanelProps = {
@@ -47,14 +59,13 @@ type ListDetailPanelProps = {
   membershipPageSize: number;
   onClose: () => void;
   onPage: (id: string, offset: number) => void;
+  onShowAllRuns: (id: string) => void;
   onPreview: (id: string) => Promise<ListPreview | null>;
   onEdit: (subscription: ListSubscription) => void;
   onSetEnabled: (subscription: ListSubscription, enabled: boolean) => void;
   onSyncNow: (subscription: ListSubscription) => void;
   onUnsubscribe: (subscription: ListSubscription) => Promise<boolean>;
 };
-
-const SECTION_HEADING = "mb-2 text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--scry-muted)]";
 
 export function ListDetailPanel({
   detail,
@@ -65,6 +76,7 @@ export function ListDetailPanel({
   membershipPageSize,
   onClose,
   onPage,
+  onShowAllRuns,
   onPreview,
   onEdit,
   onSetEnabled,
@@ -109,18 +121,22 @@ export function ListDetailPanel({
         className="w-full overflow-y-auto border-l border-[var(--scry-border)] bg-[var(--scry-surf)] text-[var(--scry-ink2)] sm:max-w-2xl"
       >
         <SheetHeader className="border-b border-[var(--scry-border3)] pr-12">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <ProviderTile provider={provider} />
-            <div className="min-w-0">
+            <div className="min-w-[8rem] flex-1">
               <SheetTitle className="truncate font-display text-[19px] text-[var(--scry-ink)]">
                 {subscription?.name ?? t("label.loading")}
               </SheetTitle>
               <SheetDescription className="truncate">
-                {[provider?.name ?? subscription?.source.provider, subscription?.source.sourceType]
-                  .filter(Boolean)
-                  .join(" · ")}
+                {provider?.name ?? subscription?.source.provider}
               </SheetDescription>
             </div>
+            {subscription ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={listSyncStateTone(state)}>{t(listSyncStateLabelKey(state, subscription.sync.lastAt))}</Badge>
+                {subscription.kinds.length > 0 ? <FacetTags values={subscription.kinds} emptyLabel={null} /> : null}
+              </div>
+            ) : null}
           </div>
         </SheetHeader>
 
@@ -130,58 +146,47 @@ export function ListDetailPanel({
           </div>
         ) : (
           <div className="space-y-6 px-4 pb-8">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={listSyncStateTone(state)}>{t(listSyncStateLabelKey(state))}</Badge>
-              {subscription.kinds.map((kind) => (
-                <Badge key={kind} tone="outline">
-                  {t(listKindLabelKey(kind))}
-                </Badge>
-              ))}
-              {canManageLists ? (
-                <div className="ml-auto flex flex-wrap items-center gap-2">
-                  <Switch
+            {canManageLists ? (
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <label className="mr-auto flex shrink-0 items-center gap-3">
+                  <Checkbox
                     id="list-detail-enabled"
-                    aria-label={t("lists.action.enabled", { name: subscription.name })}
+                    size="large"
                     checked={subscription.enabled}
                     disabled={busy}
-                    onCheckedChange={(checked) => onSetEnabled(subscription, checked)}
+                    onCheckedChange={(checked) => onSetEnabled(subscription, checked === true)}
                   />
-                  <Button
-                    id="list-detail-sync"
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={busy || !subscription.enabled}
-                    onClick={() => onSyncNow(subscription)}
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    {t("lists.action.syncNow")}
-                  </Button>
-                  <Button
-                    id="list-detail-edit"
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => onEdit(subscription)}
-                  >
-                    <Pencil className="h-4 w-4" />
-                    {t("label.edit")}
-                  </Button>
-                  <Button
-                    id="list-detail-unfollow"
-                    type="button"
-                    size="sm"
-                    variant="destructive"
-                    disabled={busy}
-                    onClick={() => setConfirmUnfollow(true)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    {t("lists.action.unfollow")}
-                  </Button>
-                </div>
-              ) : null}
-            </div>
+                  <span className="text-sm font-medium">{t("label.enabled")}</span>
+                </label>
+                <TextActionButton
+                  id="list-detail-sync"
+                  tone="accent"
+                  disabled={busy || !subscription.enabled}
+                  onClick={() => onSyncNow(subscription)}
+                  leadingIcon={<RefreshCw className="h-4 w-4" />}
+                >
+                  {t("lists.action.syncNow")}
+                </TextActionButton>
+                <TextActionButton
+                  id="list-detail-edit"
+                  tone="edit"
+                  disabled={busy}
+                  onClick={() => onEdit(subscription)}
+                  leadingIcon={<Pencil className="h-4 w-4" />}
+                >
+                  {t("label.edit")}
+                </TextActionButton>
+                <TextActionButton
+                  id="list-detail-unfollow"
+                  tone="delete"
+                  disabled={busy}
+                  onClick={() => setConfirmUnfollow(true)}
+                  leadingIcon={<Trash2 className="h-4 w-4" />}
+                >
+                  {t("lists.action.unfollow")}
+                </TextActionButton>
+              </div>
+            ) : null}
 
             {state === "FAIL" && subscription.sync.errorMessage ? (
               <p
@@ -200,13 +205,11 @@ export function ListDetailPanel({
               </p>
             ) : null}
 
-            <section>
-              <h3 className={SECTION_HEADING}>{t("lists.detail.coverage")}</h3>
-              <ListCoverageBar counts={subscription.counts} showLegend />
-            </section>
+            <LabeledFieldset label={t("lists.detail.coverage")}>
+              <ListCoverageBar counts={subscription.counts} legend="inline" />
+            </LabeledFieldset>
 
-            <section>
-              <h3 className={SECTION_HEADING}>{t("lists.detail.settings")}</h3>
+            <LabeledFieldset label={t("lists.detail.settings")}>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[13px] sm:grid-cols-3">
                 {(
                   [
@@ -227,48 +230,42 @@ export function ListDetailPanel({
                   </div>
                 ))}
               </dl>
-              {subscription.providerUrl ? (
+              {subscription.source.provider === "simkl" ? <SimklAttribution /> : subscription.providerUrl ? (
                 <a
                   href={subscription.providerUrl}
                   target="_blank"
                   rel="noreferrer noopener"
-                  className="mt-2 inline-block text-[12.5px] text-[var(--scry-accent-text)] hover:underline"
+                  className="inline-block text-[12.5px] text-[var(--scry-accent-text)] hover:underline"
                 >
                   {t("lists.detail.openAtProvider")}
                 </a>
               ) : null}
-            </section>
+            </LabeledFieldset>
 
-            <section>
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h3 className={SECTION_HEADING}>{t("lists.preview.nextSyncHeading")}</h3>
-                <Button
-                  id="list-detail-preview"
-                  type="button"
-                  size="xs"
-                  variant="outline"
-                  onClick={() => void runPreview()}
-                  disabled={previewing}
-                >
-                  {previewing ? <LoadingMark className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  {t("lists.preview.run")}
-                </Button>
-              </div>
-              {preview ? <ListPreviewSummary preview={preview} idPrefix="list-detail" /> : null}
-            </section>
+            <LabeledFieldset label={t("lists.preview.nextSyncHeading")}>
+              <Button
+                id="list-detail-preview"
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => void runPreview()}
+                disabled={previewing}
+              >
+                {previewing ? <LoadingMark className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                {t("lists.preview.run")}
+              </Button>
+              {preview ? <ListPreviewSummary preview={preview} idPrefix="list-detail" providerType={subscription.source.provider} /> : null}
+            </LabeledFieldset>
 
-            <section>
-              <h3 className={SECTION_HEADING}>
-                {t("lists.detail.titles", { count: memberships?.totalCount ?? 0 })}
-              </h3>
+            <LabeledFieldset label={t("lists.detail.titles", { count: memberships?.totalCount ?? 0 })}>
               {memberships && memberships.items.length > 0 ? (
                 <>
-                  <Table id="list-detail-memberships" density="dense">
+                  <Table id="list-detail-memberships" density="dense" wrapperClassName="rounded-[12px] border border-[var(--scry-border3)]">
                     <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-10">#</TableHead>
-                        <TableHead>{t("lists.detail.title")}</TableHead>
-                        <TableHead>{t("lists.detail.state")}</TableHead>
+                      <TableRow className={TITLE_TABLE_HEADER_ROW_CLASS}>
+                        <TableHead className={`w-12 text-center ${TITLE_TABLE_HEADER_CELL_CLASS}`}>#</TableHead>
+                        <TableHead className={TITLE_TABLE_HEADER_CELL_CLASS}>{t("lists.detail.title")}</TableHead>
+                        <TableHead className={TITLE_TABLE_HEADER_CELL_CLASS}>{t("lists.detail.state")}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -279,32 +276,27 @@ export function ListDetailPanel({
                           data-item-key={membership.itemKey}
                           data-title-id={membership.titleId ?? undefined}
                           data-membership-state={membership.state}
+                          className={TITLE_TABLE_ROW_CLASS}
                         >
-                          <TableCell className="text-[12px] text-[var(--scry-muted)]">{membership.rank ?? "—"}</TableCell>
+                          <TableCodeCell className="text-center text-[12px] text-[var(--scry-muted)]">{membership.rank ?? "—"}</TableCodeCell>
                           <TableCell>
-                            <span className="block text-[13px] text-[var(--scry-ink2)]">
-                              {membership.displayTitle ?? membership.itemKey}
+                            <div className="text-[13px] font-medium text-[var(--scry-ink)]">
+                              <ListMembershipTitle membership={membership} />
                               {membership.year ? (
-                                <span className="text-[var(--scry-muted)]"> ({membership.year})</span>
+                                <span className="font-normal text-[var(--scry-muted)]"> ({membership.year})</span>
                               ) : null}
-                            </span>
+                            </div>
+                            {subscription.source.provider === "simkl" ? <SimklAttribution itemKey={membership.itemKey} /> : null}
                           </TableCell>
                           <TableCell>
-                            <Badge tone={listMembershipStateTone(membership.state)}>
-                              {t(listMembershipStateLabelKey(membership.state))}
-                            </Badge>
-                            {membership.stateReason ? (
-                              <span className="mt-0.5 block text-[11.5px] text-[var(--scry-muted)]">
-                                {membership.stateReason}
-                              </span>
-                            ) : null}
+                            <MembershipStateBadge membership={membership} />
                           </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
                   {memberships.totalCount > membershipPageSize ? (
-                    <div className="mt-2 flex items-center justify-between text-[12px] text-[var(--scry-muted)]">
+                    <div className="flex items-center justify-between text-[12px] text-[var(--scry-muted)]">
                       <span>
                         {t("lists.detail.pageRange", {
                           from: offset + 1,
@@ -340,10 +332,9 @@ export function ListDetailPanel({
                   {detail?.loading ? t("label.loading") : t("lists.detail.noTitles")}
                 </p>
               )}
-            </section>
+            </LabeledFieldset>
 
-            <section>
-              <h3 className={SECTION_HEADING}>{t("lists.detail.history")}</h3>
+            <LabeledFieldset label={t("lists.detail.history")}>
               {detail && detail.runs.length > 0 ? (
                 <ul id="list-detail-runs" className="space-y-1.5">
                   {detail.runs.map((run) => (
@@ -377,7 +368,19 @@ export function ListDetailPanel({
               ) : (
                 <p className="text-[12.5px] text-[var(--scry-muted)]">{t("lists.detail.noRuns")}</p>
               )}
-            </section>
+              {detail?.moreRuns ? (
+                <Button
+                  type="button"
+                  id="list-detail-runs-more"
+                  size="xs"
+                  variant="outline"
+                  disabled={detail.loading}
+                  onClick={() => onShowAllRuns(detail.id)}
+                >
+                  {t("lists.detail.olderRuns")}
+                </Button>
+              ) : null}
+            </LabeledFieldset>
           </div>
         )}
 
@@ -401,5 +404,23 @@ export function ListDetailPanel({
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** A list entry's state. When the server recorded why, hovering or focusing the badge says it. */
+function MembershipStateBadge({ membership }: { membership: Pick<ListMembership, "state" | "stateReason"> }) {
+  const t = useTranslate();
+  const badge = <Badge tone={listMembershipStateTone(membership.state)}>{t(listMembershipStateLabelKey(membership.state))}</Badge>;
+  if (!membership.stateReason) return badge;
+  const reasonKey = listMembershipReasonKey(membership.stateReason);
+  return (
+    <ActionTooltip
+      // A reason this client has no sentence for is shown as the server wrote it.
+      content={reasonKey ? t(reasonKey) : membership.stateReason}
+      wrapperClassName="cursor-help"
+      wrapperTabIndex={0}
+    >
+      {badge}
+    </ActionTooltip>
   );
 }

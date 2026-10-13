@@ -46,6 +46,10 @@ pub struct ListProviderDescriptor {
     pub coverage: Vec<ListMediaKind>,
     #[serde(default)]
     pub auth: ListProviderAuth,
+    /// A key each member supplies for themselves, declared beside `auth`. A
+    /// host older than this field ignores it and offers no key form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_key: Option<ListMemberKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<ListProviderGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -120,6 +124,43 @@ pub enum ListAccountFlow {
 pub enum ListAccountExchange {
     Direct,
     SmgRelay,
+}
+
+/// `ListCredential.token_type` when the credential is a key the member
+/// supplied, not a token a sign-in issued.
+pub const LIST_CREDENTIAL_TYPE_API_KEY: &str = "api_key";
+
+/// A provider key a member pastes in instead of signing in through a redirect.
+/// The host asks for it with `label` and `help_text`, stores it as that
+/// member's credential and never writes it to the plugin's config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ListMemberKey {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help_text: Option<String>,
+    /// Where the member finds the key at the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help_url: Option<String>,
+    #[serde(default)]
+    pub use_as: ListMemberKeyUse,
+}
+
+/// What the host does with a member's key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListMemberKeyUse {
+    /// The key is the credential. The host sends it to the account operation
+    /// as `ListCredential.access_token` with `token_type`
+    /// [`LIST_CREDENTIAL_TYPE_API_KEY`]; an `auth_failed` answer means the
+    /// provider refused the key, and a successful one names the account. The
+    /// same credential then travels with each of that member's fetches.
+    #[default]
+    Credential,
+    /// The key stands in for the server's own application in the account flow
+    /// `auth` declares. The member still approves there, and the token that
+    /// flow issues is the credential. Hosts offer this for the
+    /// `tmdb_approval` flow only.
+    AccountApp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -378,6 +419,7 @@ mod tests {
                 byo_app: true,
                 scopes: vec!["read".to_string()],
             },
+            member_key: None,
             groups: vec![ListProviderGroup {
                 label: "Public lists".to_string(),
                 auth_badge: ListAuthBadge::NoAccountNeedsValue,
@@ -425,6 +467,7 @@ mod tests {
     #[test]
     fn list_provider_descriptor_round_trips_through_the_plugin_descriptor() {
         let descriptor = crate::PluginDescriptor {
+            settings: Vec::new(),
             id: "fixture-lists".to_string(),
             name: "Fixture Lists".to_string(),
             version: "1.0.0".to_string(),
@@ -464,6 +507,43 @@ mod tests {
         assert_eq!(descriptor.auth, ListProviderAuth::None);
         assert!(!descriptor.capabilities.requires_member_credential);
         assert!(descriptor.groups.is_empty());
+    }
+
+    #[test]
+    fn a_descriptor_without_a_member_key_reads_as_none_and_writes_no_field() {
+        let descriptor = fixture_descriptor();
+        let json = serde_json::to_value(&descriptor).expect("serialize descriptor");
+        assert!(json.get("member_key").is_none(), "{json}");
+        let decoded: ListProviderDescriptor =
+            serde_json::from_value(json).expect("deserialize descriptor");
+        assert_eq!(decoded.member_key, None);
+    }
+
+    #[test]
+    fn a_member_key_round_trips_and_defaults_to_being_the_credential() {
+        let descriptor: ListProviderDescriptor = serde_json::from_str(
+            r#"{"provider_type":"fixture-lists","member_key":{"label":"Fixture key"}}"#,
+        )
+        .expect("descriptor with a member key");
+        let key = descriptor.member_key.clone().expect("member key");
+        assert_eq!(key.label, "Fixture key");
+        assert_eq!(key.use_as, ListMemberKeyUse::Credential);
+        assert_eq!(key.help_text, None);
+
+        let descriptor = ListProviderDescriptor {
+            member_key: Some(ListMemberKey {
+                label: "Fixture app token".to_string(),
+                help_text: Some("Copy it from your fixture account".to_string()),
+                help_url: Some("https://lists.fixture.invalid/settings/api".to_string()),
+                use_as: ListMemberKeyUse::AccountApp,
+            }),
+            ..fixture_descriptor()
+        };
+        let json = serde_json::to_value(&descriptor).expect("serialize descriptor");
+        assert_eq!(json["member_key"]["use_as"], "account_app");
+        let decoded: ListProviderDescriptor =
+            serde_json::from_value(json).expect("deserialize descriptor");
+        assert_eq!(decoded.member_key, descriptor.member_key);
     }
 
     #[test]

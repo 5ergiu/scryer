@@ -319,8 +319,28 @@ mod routing_tests {
 
         let restored = &routing_by_scope["movie"][0];
         assert!(!restored.enabled);
-        assert_eq!(restored.categories, vec!["2010", "2020"]);
+        assert_eq!(restored.categories, vec!["2000"]);
         assert_eq!(restored.priority, 7);
+    }
+
+    #[test]
+    fn managed_routing_seeds_new_scopes_but_preserves_local_categories() {
+        for categories in [vec!["2040"], vec![]] {
+            let local = routing_entry(true, &categories, 7);
+            let mut routing = HashMap::from([("movie".to_string(), vec![local.clone()])]);
+            let desired = HashMap::from([
+                (
+                    "movie".to_string(),
+                    vec!["2000".to_string(), "2040".to_string()],
+                ),
+                ("anime".to_string(), vec!["5070".to_string()]),
+            ]);
+            for _ in 0..2 {
+                apply_managed_child_routing(&mut routing, "managed-child", &desired);
+                assert_eq!(routing["movie"], vec![local.clone()]);
+                assert_eq!(routing["anime"], vec![routing_entry(true, &["5070"], 1)]);
+            }
+        }
     }
 
     #[test]

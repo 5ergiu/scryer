@@ -102,7 +102,10 @@ pub(crate) async fn resolve_old_file_recycle_context(
                 ))
             },
         )?;
-    crate::fs_safety::ensure_root_available(&old_file_media_root)?;
+    let root_to_check = old_file_media_root.clone();
+    tokio::task::spawn_blocking(move || crate::fs_safety::ensure_root_available(&root_to_check))
+        .await
+        .map_err(|error| AppError::Repository(format!("media root check failed: {error}")))??;
 
     let recycle_config = app
         .recycle_bin_configs_for_recycling(media_roots)
@@ -232,6 +235,8 @@ pub(crate) async fn execute_upgrade(
             old_score,
             final_score,
             episode_ids: target_episode_ids,
+            import_id,
+            source_ref: completed.map(|download| download.download_client_item_id.as_str()),
         },
     )
     .await?;
@@ -271,6 +276,13 @@ pub async fn finalize_upgrade_source_cleanup(
     let Some(guard) = outcome.source_cleanup.as_deref().cloned() else {
         return Ok(());
     };
+    if crate::import::workflow::defer_import_source_cleanup(
+        &guard,
+        &stored_path_to_path_buf(&outcome.final_path_string),
+        completed,
+    ) {
+        return Ok(());
+    }
     let execution_context = crate::ImportFileExecutionContext::new(
         completed.map_or("", |item| item.client_id.as_str()),
         completed.map_or("", |item| item.client_type.as_str()),
@@ -1939,6 +1951,10 @@ struct UpgradeEventDetails<'a> {
     old_score: i32,
     final_score: i32,
     episode_ids: &'a [String],
+    /// Identity of the import that caused the upgrade, carried onto the event
+    /// exactly as the matching import-complete event records it.
+    import_id: &'a str,
+    source_ref: Option<&'a str>,
 }
 
 async fn append_upgrade_event(
@@ -1973,6 +1989,8 @@ async fn append_upgrade_event(
             old_score: Some(details.old_score),
             new_score: Some(details.final_score),
             size_bytes: Some(details.new_size_bytes),
+            import_id: Some(details.import_id.to_string()),
+            source_ref: details.source_ref.map(str::to_string),
         }),
     ))
     .await

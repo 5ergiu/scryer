@@ -10,6 +10,44 @@ use scryer_interface_media::types::*;
 #[derive(Default)]
 pub struct MetadataQueries;
 
+/// The cached backdrop for a looked-up title; a title without one has none,
+/// rather than the placeholder an owner alone would be given.
+fn title_backdrop_url(
+    app: &AppUseCase,
+    upstream_url: Option<&str>,
+    owner_type: &str,
+    owner_id: Option<&str>,
+) -> Option<String> {
+    let upstream_url = upstream_url.map(str::trim).filter(|url| !url.is_empty())?;
+    app.media_image_url(
+        Some(upstream_url),
+        Some(owner_type),
+        owner_id,
+        ImageProxyKind::Fanart,
+        "w1280",
+    )
+}
+
+fn external_ratings_payload(
+    ratings: Vec<scryer_domain::TitleExternalRating>,
+) -> Vec<DiscoveryExternalRatingPayload> {
+    ratings
+        .into_iter()
+        .map(|rating| DiscoveryExternalRatingPayload {
+            source: rating.source,
+            value: rating.value,
+            score: rating.score,
+            normalized: rating.normalized,
+            votes: rating.votes,
+            url: rating.url,
+        })
+        .collect()
+}
+
+fn canonical_tag_names(tags: Vec<scryer_domain::CanonicalMediaTag>) -> Vec<String> {
+    tags.into_iter().map(|tag| tag.name).collect()
+}
+
 fn from_metadata_search_item(
     app: &AppUseCase,
     item: scryer_application::RichMetadataSearchItem,
@@ -206,7 +244,16 @@ impl MetadataQueries {
                 "w250",
             )
             .unwrap_or_default();
+        let background_url = title_backdrop_url(
+            &app,
+            movie.background_url.as_deref(),
+            "metadata_movie",
+            owner_id.as_deref(),
+        );
         Ok(MetadataMoviePayload {
+            background_url,
+            external_ratings: external_ratings_payload(movie.ratings.external_ratings),
+            genres_and_themes: canonical_tag_names(movie.canonical_tags),
             tvdb_id,
             smg_id: movie.smg_id,
             tmdb_id: movie.tmdb_id,
@@ -326,7 +373,16 @@ impl MetadataQueries {
             vec![]
         };
 
+        let background_url = title_backdrop_url(
+            &app,
+            series.background_url.as_deref(),
+            "metadata_series",
+            Some(&series_owner_id),
+        );
         Ok(MetadataSeriesPayload {
+            background_url,
+            external_ratings: external_ratings_payload(series.ratings.external_ratings),
+            genres_and_themes: canonical_tag_names(series.canonical_tags),
             tvdb_id: series_tvdb_id.map(|id| id.to_string()).unwrap_or_default(),
             smg_id: series.smg_id,
             tmdb_id: series.tmdb_id,

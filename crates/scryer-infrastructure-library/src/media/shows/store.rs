@@ -503,7 +503,7 @@ impl ShowRepository for ShowStore {
             let episode_id = episode_id.clone();
             let update = update.clone();
             Box::pin(async move {
-                if episode_update_is_empty(&update) {
+                if !update.has_changes() {
                     return Err(AppError::Validation(
                         "at least one episode field must be provided".into(),
                     ));
@@ -1543,6 +1543,7 @@ async fn list_episodes_in_date_range_query(
                 e.season_number, e.episode_number, e.title AS episode_title, \
                 CASE WHEN t.facet = 'movie' THEN t.overview ELSE COALESCE(e.overview, t.overview) END AS overview, \
                 CASE WHEN t.facet = 'movie' THEN t.poster_url ELSE e.image_url END AS image_url, \
+                CASE WHEN t.facet = 'movie' THEN NULL ELSE t.background_url END AS title_background_url, \
                 e.air_date, (e.monitored AND t.monitored) AS monitored \
            FROM episodes e \
            JOIN titles t ON e.title_id = t.id \
@@ -1941,26 +1942,6 @@ fn apply_collection_update(collection: &mut Collection, update: CollectionUpdate
     }
 }
 
-fn episode_update_is_empty(update: &EpisodeUpdate) -> bool {
-    update.episode_type.is_none()
-        && update.episode_number.is_none()
-        && update.season_number.is_none()
-        && update.episode_label.is_none()
-        && update.title.is_none()
-        && update.air_date.is_none()
-        && update.duration_seconds.is_none()
-        && update.has_multi_audio.is_none()
-        && update.has_subtitle.is_none()
-        && update.monitored.is_none()
-        && update.collection_id.is_none()
-        && update.overview.is_none()
-        && update.tvdb_id.is_none()
-        && update.tmdb_id.is_none()
-        && update.image_url.is_none()
-        && !update.clear_image_url
-        && update.contiguous_absolute_number.is_none()
-}
-
 fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
     if let Some(value) = update.episode_type {
         episode.episode_type = value;
@@ -1972,13 +1953,13 @@ fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
         episode.season_number = Some(value);
     }
     if let Some(value) = update.episode_label {
-        episode.episode_label = Some(value);
+        episode.episode_label = value;
     }
     if let Some(value) = update.title {
-        episode.title = Some(value);
+        episode.title = value;
     }
     if let Some(value) = update.air_date {
-        episode.air_date = Some(value);
+        episode.air_date = value;
     }
     if let Some(value) = update.duration_seconds {
         episode.duration_seconds = Some(value);
@@ -1989,6 +1970,12 @@ fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
     if let Some(value) = update.has_subtitle {
         episode.has_subtitle = value;
     }
+    if let Some(value) = update.is_filler {
+        episode.is_filler = value;
+    }
+    if let Some(value) = update.is_recap {
+        episode.is_recap = value;
+    }
     if let Some(value) = update.monitored {
         episode.monitored = value;
     }
@@ -1996,18 +1983,21 @@ fn apply_episode_update(episode: &mut Episode, update: EpisodeUpdate) {
         episode.collection_id = Some(value);
     }
     if let Some(value) = update.overview {
-        episode.overview = Some(value);
+        episode.overview = value;
     }
     if let Some(value) = update.tvdb_id {
-        episode.tvdb_id = Some(value);
+        episode.tvdb_id = value;
     }
     if let Some(value) = update.tmdb_id {
-        episode.tmdb_id = Some(value);
+        episode.tmdb_id = value;
     }
     if update.clear_image_url {
         episode.image_url = None;
     } else if let Some(value) = update.image_url {
         episode.image_url = Some(value);
+    }
+    if let Some(value) = update.absolute_number {
+        episode.absolute_number = value;
     }
     if let Some(value) = update.contiguous_absolute_number {
         episode.contiguous_absolute_number = value;
@@ -2238,6 +2228,7 @@ fn row_to_calendar_episode(row: &SqlRow) -> AppResult<CalendarEpisode> {
         episode_title: row.opt_text("episode_title")?,
         overview: row.opt_text("overview")?,
         image_url: row.opt_text("image_url")?,
+        title_background_url: row.opt_text("title_background_url")?,
         air_date: row.opt_text("air_date")?,
         monitored: row.bool("monitored")?,
     })

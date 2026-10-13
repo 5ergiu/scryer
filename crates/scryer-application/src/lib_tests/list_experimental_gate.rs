@@ -1,8 +1,6 @@
-//! Lists ship behind the experimental-features switch: while it is off, a
-//! manager cannot follow or sync a public list and the sync job idles.
+//! Lists remain available independently of the experimental-features switch.
 
 use super::*;
-use crate::lists::sync::ListSyncReport;
 
 fn list_manager() -> User {
     let mut manager = User::new_admin("list-manager");
@@ -33,41 +31,20 @@ pub(super) async fn set_experimental_features(harness: &MediaRequestTestHarness,
 }
 
 #[tokio::test]
-async fn public_list_sync_is_refused_until_experimental_features_are_on() {
+async fn public_list_sync_is_available_without_experimental_features() {
     let harness = bootstrap_media_request_app();
-    let manager = list_manager();
-
-    let refused = harness
-        .app
-        .sync_all_public_lists(&manager)
-        .await
-        .expect_err("lists stay off by default");
-    assert!(
-        matches!(refused, AppError::Validation(ref message) if message.contains("experimental")),
-        "unexpected error: {refused:?}"
-    );
-    assert_eq!(
-        harness.app.run_list_sync_job(None).await.unwrap(),
-        ListSyncReport::default(),
-        "the sync job idles while lists are off"
-    );
-
-    set_experimental_features(&harness, true).await;
-    assert_eq!(
-        harness
-            .app
-            .sync_all_public_lists(&manager)
-            .await
-            .expect("lists open once the switch is on"),
-        Vec::<String>::new()
-    );
-
-    set_experimental_features(&harness, false).await;
-    harness
-        .app
-        .sync_all_public_lists(&manager)
-        .await
-        .expect_err("turning the switch back off closes lists again");
+    for enabled in [false, true, false] {
+        set_experimental_features(&harness, enabled).await;
+        assert!(
+            harness
+                .app
+                .sync_all_public_lists(&list_manager())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        harness.app.run_list_sync_job(None).await.unwrap();
+    }
 }
 
 async fn list_sync_starts(harness: &MediaRequestTestHarness) -> usize {
@@ -89,7 +66,6 @@ async fn list_sync_starts(harness: &MediaRequestTestHarness) -> usize {
 #[tokio::test]
 async fn sync_now_clears_the_stored_fingerprint_so_the_list_is_read_in_full() {
     let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
     let mut followed = crate::lists::test_support::subscription("public-list-one");
     followed.sync.fetch_fingerprint = Some("fingerprint-one".to_string());
     *harness.lists.subscriptions.lock().unwrap() = vec![followed];
@@ -107,19 +83,27 @@ async fn sync_now_clears_the_stored_fingerprint_so_the_list_is_read_in_full() {
     assert_eq!(list_sync_starts(&harness).await, 1);
 }
 
+/// A harness with the fixture list provider installed, so a list can be
+/// followed.
+fn bootstrap_with_fixture_lists() -> MediaRequestTestHarness {
+    bootstrap_media_request_app_with_list_plugins(Arc::new(
+        crate::lists::test_support::ScriptedProvider(
+            crate::lists::test_support::ScriptedLists::new(),
+        ),
+    ))
+}
+
 async fn follow_fixture_list(harness: &MediaRequestTestHarness) -> scryer_domain::ListSubscription {
     harness
         .app
         .subscribe_public_list(
             &list_manager(),
             crate::lists::public::PublicListInput {
-                provider: Some(crate::lists::catalog::LIST_PROVIDER_IMDB.to_string()),
-                source_type: Some(
-                    crate::lists::catalog::LIST_SOURCE_TYPE_IMDB_USER_LIST.to_string(),
-                ),
+                provider: Some(crate::lists::test_support::PROVIDER.to_string()),
+                source_type: Some("user_list".to_string()),
                 params: std::collections::BTreeMap::from([(
-                    scryer_domain::LIST_SOURCE_IMDB_LIST_ID_PARAM.to_string(),
-                    "ls0000001".to_string(),
+                    "list_id".to_string(),
+                    "followed-fixture-source".to_string(),
                 )]),
                 mode: scryer_domain::ListMode::Add,
                 ..Default::default()
@@ -161,8 +145,7 @@ fn sync_runs_of(harness: &MediaRequestTestHarness, subscription_id: &str) -> usi
 
 #[tokio::test]
 async fn following_a_list_starts_its_first_sync_at_once() {
-    let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
+    let harness = bootstrap_with_fixture_lists();
     let mut runs = harness.app.runtime.jobs.job_run_tracker.subscribe();
 
     let followed = follow_fixture_list(&harness).await;
@@ -180,8 +163,7 @@ async fn following_a_list_starts_its_first_sync_at_once() {
 
 #[tokio::test]
 async fn a_list_followed_while_a_sync_is_running_is_synced_when_that_sync_ends() {
-    let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
+    let harness = bootstrap_with_fixture_lists();
     let app = &harness.app;
     let tracker = &app.runtime.jobs.job_run_tracker;
     // A sync already mid-pass: it read its due set before the list below
@@ -244,17 +226,13 @@ async fn a_list_followed_while_a_sync_is_running_is_synced_when_that_sync_ends()
     );
 }
 
-fn refused_as_experimental<T: std::fmt::Debug>(result: AppResult<T>) {
-    let error = result.expect_err("lists are off");
-    assert!(
-        matches!(error, AppError::Validation(ref message) if message.contains("experimental")),
-        "unexpected error: {error:?}"
-    );
-}
-
 #[tokio::test]
-async fn list_reads_and_writes_are_refused_while_experimental_features_are_off() {
-    let harness = bootstrap_media_request_app();
+async fn list_reads_and_writes_work_with_experimental_features_off() {
+    let provider = crate::lists::test_support::ScriptedLists::new();
+    provider.serve("public-list-one", &[]);
+    let harness = bootstrap_media_request_app_with_list_plugins(Arc::new(
+        crate::lists::test_support::ScriptedProvider(provider),
+    ));
     let manager = list_manager();
     *harness.lists.subscriptions.lock().unwrap() =
         vec![crate::lists::test_support::subscription("public-list-one")];
@@ -269,56 +247,51 @@ async fn list_reads_and_writes_are_refused_while_experimental_features_are_off()
             scryer_domain::ListExclusionScope::AllLists,
         ));
     let app = &harness.app;
-
-    refused_as_experimental(app.list_provider_catalog(&manager).await);
-    refused_as_experimental(app.list_provider_settings(&manager).await);
-    refused_as_experimental(app.public_list_subscriptions(&manager).await);
-    refused_as_experimental(
-        app.public_list_subscription(&manager, "public-list-one")
-            .await,
-    );
-    refused_as_experimental(
-        app.public_list_memberships(&manager, "public-list-one", 10, 0)
-            .await,
-    );
-    refused_as_experimental(
-        app.public_list_sync_runs(&manager, "public-list-one", 10)
-            .await,
-    );
-    refused_as_experimental(app.preview_public_list(&manager, "public-list-one").await);
-    refused_as_experimental(app.list_exclusions(&manager).await);
-    refused_as_experimental(app.member_list_policies(&manager).await);
-    refused_as_experimental(
-        app.set_public_list_enabled(&manager, "public-list-one", false)
-            .await,
-    );
-    refused_as_experimental(app.remove_list_exclusion(&manager, "exclusion-one").await);
-    refused_as_experimental(
-        app.unsubscribe_public_list(&manager, "public-list-one")
-            .await,
-    );
-
+    app.list_provider_catalog(&manager).await.unwrap();
+    app.list_provider_settings(&manager).await.unwrap();
+    app.require_personal_lists_allowed(&manager).await.unwrap();
+    let mut administrator = manager.clone();
+    administrator.authorization.app = AppPermissionMask::MANAGE_SYSTEM_SETTINGS;
     assert_eq!(
-        harness.lists.subscriptions.lock().unwrap().len(),
-        1,
-        "a refused unfollow keeps the list"
+        app.list_provider_apps(&administrator).await.unwrap().len(),
+        3
     );
-    assert_eq!(
-        harness.lists.exclusions.lock().unwrap().len(),
-        1,
-        "a refused removal keeps the exclusion"
-    );
-
-    set_experimental_features(&harness, true).await;
     assert_eq!(
         app.public_list_subscriptions(&manager).await.unwrap().len(),
         1
     );
+    assert!(
+        app.public_list_subscription(&manager, "public-list-one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    app.public_list_memberships(&manager, "public-list-one", 10, 0)
+        .await
+        .unwrap();
+    app.public_list_sync_runs(&manager, "public-list-one", 10)
+        .await
+        .unwrap();
+    app.preview_public_list(&manager, "public-list-one")
+        .await
+        .unwrap();
+    app.member_list_policies(&manager).await.unwrap();
     assert_eq!(app.list_exclusions(&manager).await.unwrap().len(), 1);
+    app.set_public_list_enabled(&manager, "public-list-one", false)
+        .await
+        .unwrap();
+    app.remove_list_exclusion(&manager, "exclusion-one")
+        .await
+        .unwrap();
+    app.unsubscribe_public_list(&manager, "public-list-one")
+        .await
+        .unwrap();
+    assert!(harness.lists.subscriptions.lock().unwrap().is_empty());
+    assert!(harness.lists.exclusions.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn list_data_on_titles_and_requests_is_empty_while_lists_are_off() {
+async fn list_data_on_titles_and_requests_is_visible_without_experimental_features() {
     let harness = bootstrap_media_request_app();
     *harness.lists.subscriptions.lock().unwrap() =
         vec![crate::lists::test_support::subscription("public-list-one")];
@@ -347,20 +320,6 @@ async fn list_data_on_titles_and_requests_is_empty_while_lists_are_off() {
     );
     let titles = ["title-alpha".to_string()];
 
-    let memberships = harness
-        .app
-        .public_list_memberships_for_titles(&harness.manager, &titles)
-        .await
-        .expect("a title page does not fail while lists are off");
-    assert!(memberships.is_empty());
-    let facts = harness
-        .app
-        .media_request_policy_facts(&harness.manager, std::slice::from_ref(&request))
-        .await
-        .expect("a request page does not fail while lists are off");
-    assert_eq!(facts["request-one"].public_list_name, None);
-
-    set_experimental_features(&harness, true).await;
     let memberships = harness
         .app
         .public_list_memberships_for_titles(&harness.manager, &titles)
@@ -399,7 +358,6 @@ async fn a_reader_sees_list_titles_only_in_libraries_they_may_view() {
     use scryer_domain::ListMembershipState;
 
     let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
     let movies = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let series = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
     let mut followed = subscription("public-list-one");
@@ -520,7 +478,6 @@ async fn removing_an_exclusion_clears_the_fingerprints_it_could_apply_to() {
     use scryer_domain::ListExclusionScope;
 
     let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
     let followed = |id: &str, kind: MediaFacet, enabled: bool| {
         let mut row = subscription(id);
         row.kinds = vec![kind];
@@ -586,7 +543,6 @@ async fn adding_an_exclusion_clears_the_fingerprints_it_could_apply_to() {
     use scryer_domain::ListExclusionScope;
 
     let harness = bootstrap_media_request_app();
-    set_experimental_features(&harness, true).await;
     let followed = |id: &str, kind: MediaFacet, enabled: bool| {
         let mut row = subscription(id);
         row.kinds = vec![kind];

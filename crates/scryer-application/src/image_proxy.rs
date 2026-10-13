@@ -29,6 +29,33 @@ pub fn image_proxy_source_token(
     hasher.finalize().to_hex().to_string()
 }
 
+/// The address to fetch an image from at a display size. TMDB's image CDN
+/// serves each asset at fixed widths, so its address is rewritten to the width
+/// that covers the variant; a host without sized renditions keeps its address.
+/// None when the address is not a URL or the kind has no such variant.
+pub fn image_upstream_variant_url(source_url: &str, kind: &str, variant: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(source_url).ok()?;
+    if parsed.host_str()?.eq_ignore_ascii_case("image.tmdb.org") {
+        let size = match (kind, variant) {
+            ("poster", "w70") => "w92",
+            ("poster", "w250") => "w300",
+            ("poster", "original") | ("fanart", "original") => "original",
+            ("fanart", "w1280") => "w1280",
+            ("person", "w185") => "w185",
+            ("person", "original") => "original",
+            ("episode_still", "w300") => "w300",
+            ("episode_still", "original") => "original",
+            _ => return None,
+        };
+        let path = parsed.path();
+        let prefix = "/t/p/";
+        let rest = path.strip_prefix(prefix)?;
+        let (_, asset) = rest.split_once('/')?;
+        parsed.set_path(&format!("{prefix}{size}/{asset}"));
+    }
+    Some(parsed.to_string())
+}
+
 impl AppUseCase {
     pub fn media_image_url(
         &self,
