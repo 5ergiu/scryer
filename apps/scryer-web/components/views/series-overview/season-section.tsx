@@ -555,6 +555,7 @@ function SeasonSectionImpl({
                 </p>
                 {seasonSearchResults.length > 0 ? (
                   <SearchResultBuckets
+                    titleId={collection.titleId}
                     results={seasonSearchResults}
                     onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
                     requireCandidateToken

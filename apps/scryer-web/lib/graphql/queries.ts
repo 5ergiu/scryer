@@ -1086,6 +1086,13 @@ export const titleDownloadQueueItemsQuery = `query TitleDownloadQueueItems($id: 
   }
 }`;
 
+export const currentReleaseFilesQuery = `query CurrentReleaseFiles($id: ID!) {
+  title(id: $id) {
+    id
+    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath }
+  }
+}`;
+
 export const titleMediaFilesQuery = `query TitleMediaFiles($id: ID!) {
   title(id: $id) {
     id

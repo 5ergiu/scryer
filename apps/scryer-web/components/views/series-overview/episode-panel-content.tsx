@@ -249,6 +249,7 @@ export const EpisodePanelContent = React.memo(function EpisodePanelContent({
             <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
           ) : (
             <SearchResultBuckets
+              titleId={collection.titleId}
               results={episodeResults}
               onQueue={(release) => onQueueFromEpisodeSearch?.(episode, release)}
               onQueueAdditional={(release) => onQueueAdditionalFromEpisodeSearch?.(episode, release)}

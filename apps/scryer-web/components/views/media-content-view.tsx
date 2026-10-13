@@ -1004,6 +1004,7 @@ function TitleContextReleaseSearchPanel({
           </p>
         ) : (
           <SearchResultBuckets
+            titleId={title.id}
             results={results}
             onQueue={(release) => onQueueFromInteractive(title, release)}
             onQueueAdditional={(release) =>

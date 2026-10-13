@@ -1720,6 +1720,7 @@ const en: LocaleDictionary = {
 
   "nzb.searchResultsFor": "NZB results for {{name}}",
   "nzb.noResultsYet": "No release matches yet.",
+  "nzb.currentFile": "Current file",
   "nzb.searchFailed": "Release search failed.",
   "nzb.queue": "Queue",
   "nzb.queueAdditionalFile": "Queue as additional file",
