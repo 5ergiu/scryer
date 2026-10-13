@@ -31,6 +31,7 @@ use super::gateway::{
     GatewayListChartSource, GatewayListItemResolver, LIST_CHART_LANGUAGE, ListChartCatalogEntry,
 };
 use super::ports::ListSubscriptionQuery;
+use super::refusal::{self, refused};
 use super::resolve::resolve_items;
 use super::runtime::{AppListActions, AppListLibraryLookup};
 use super::sync::{deleted_additions, without_rows};
@@ -40,12 +41,19 @@ use crate::{AppError, AppResult, AppUseCase, MediaRequestQuery};
 
 /// The largest page of memberships one read returns.
 pub const LIST_MEMBERSHIP_PAGE_MAX: usize = 500;
-/// The most sync runs one read returns.
-pub const LIST_SYNC_RUNS_MAX: usize = 100;
+/// The most sync runs one read returns. Housekeeping keeps a week of runs, so
+/// this leaves room for a list that syncs every ten minutes.
+pub const LIST_SYNC_RUNS_MAX: usize = 1000;
 /// How many titles a preview lists as would-be adds.
 pub const LIST_PREVIEW_WOULD_ADD_MAX: usize = 100;
 /// The window `list_requests_last_30d` counts over.
 const MEMBER_POLICY_WINDOW_DAYS: i64 = 30;
+/// Every configuration event a list setting writes names a resource with
+/// this prefix, which is how the event feed knows to show it to whoever
+/// manages lists.
+pub(crate) const LIST_CONFIGURATION_RESOURCE_PREFIX: &str = "list_";
+const LIST_EXCLUSION_RESOURCE: &str = "list_exclusion";
+const LIST_MEMBER_POLICY_RESOURCE: &str = "list_member_policy";
 
 /// What a new public follow says.
 #[derive(Clone, Debug, Default)]
@@ -82,15 +90,22 @@ pub struct PublicListPatch {
 /// A source to preview before following it.
 #[derive(Clone, Debug, Default)]
 pub struct ListSourceDraft {
+    pub preview_filters: Vec<ListFilter>,
+    pub preview_kinds: Option<Vec<MediaFacet>>,
+    pub preview_max_per_sync: Option<u32>,
     pub provider: Option<String>,
     pub source_type: Option<String>,
     pub params: BTreeMap<String, String>,
     pub url: Option<String>,
+    pub credential_id: Option<String>,
 }
 
 /// One title the next sync would act on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ListPreviewItem {
+    pub canonical_smg_id: Option<i64>,
+    pub series_movie: Option<scryer_domain::ListSeriesMovieTarget>,
+    pub facts: Option<super::resolve::ListMetadataFacts>,
     pub item_key: String,
     pub display_title: Option<String>,
     pub year: Option<i32>,
@@ -99,7 +114,7 @@ pub struct ListPreviewItem {
 }
 
 /// What following a source would do right now. Nothing is written to make it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListPreview {
     pub recognized: bool,
     pub provider: Option<String>,
@@ -222,6 +237,27 @@ pub fn visible_memberships(
         .collect()
 }
 
+/// Name each entry that is in a library by its library title, which carries
+/// the metadata service's name where a list may spell the title in its
+/// original language. A movie within a series keeps the name the list gave,
+/// since its library title is the series.
+pub fn name_by_library_title(rows: &mut [ListMembership], title_names: &HashMap<String, String>) {
+    for row in rows {
+        if row.series_movie.is_some() {
+            continue;
+        }
+        let name = row
+            .title_id
+            .as_ref()
+            .and_then(|title_id| title_names.get(title_id))
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty());
+        if let Some(name) = name {
+            row.display_title = Some(name.to_string());
+        }
+    }
+}
+
 /// A page of memberships in list order: ranked items first by rank, then
 /// the rest in the order they were first seen.
 pub fn membership_page(
@@ -254,8 +290,9 @@ pub fn validate_public_settings(
     max_per_sync: Option<u32>,
 ) -> AppResult<Vec<MediaFacet>> {
     if matches!(mode, ListMode::Request | ListMode::Discover) {
-        return Err(AppError::Validation(
-            "a public list can search, add, or hold for review".to_string(),
+        return Err(refused(
+            refusal::MODE_NOT_ALLOWED,
+            "a public list can search, add, or hold for review",
         ));
     }
     let kinds = match kinds {
@@ -263,10 +300,10 @@ pub fn validate_public_settings(
             let mut kept = Vec::new();
             for kind in kinds {
                 if !declared_kinds.is_empty() && !declared_kinds.contains(kind) {
-                    return Err(AppError::Validation(format!(
-                        "this list does not contain {} titles",
-                        kind.as_str()
-                    )));
+                    return Err(refused(
+                        refusal::KIND_NOT_IN_LIST,
+                        format!("this list does not contain {} titles", kind.as_str()),
+                    ));
                 }
                 if !kept.contains(kind) {
                     kept.push(kind.clone());
@@ -277,35 +314,70 @@ pub fn validate_public_settings(
         _ => declared_kinds.to_vec(),
     };
     if kinds.is_empty() {
-        return Err(AppError::Validation(
-            "choose at least one kind of title".to_string(),
+        return Err(refused(
+            refusal::KINDS_REQUIRED,
+            "choose at least one kind of title",
         ));
     }
     let mut seen = Vec::new();
     for route in routes {
         if !kinds.contains(&route.kind) {
-            return Err(AppError::Validation(format!(
-                "a route targets {} titles, which this list does not keep",
-                route.kind.as_str()
-            )));
+            return Err(refused(
+                refusal::ROUTE_KIND_NOT_KEPT,
+                format!(
+                    "a route targets {} titles, which this list does not keep",
+                    route.kind.as_str()
+                ),
+            ));
         }
         if seen.contains(&route.kind) {
-            return Err(AppError::Validation(format!(
-                "only one route per kind; {} has two",
-                route.kind.as_str()
-            )));
+            return Err(refused(
+                refusal::ROUTE_KIND_DUPLICATED,
+                format!("only one route per kind; {} has two", route.kind.as_str()),
+            ));
         }
         if route.library_id.trim().is_empty() {
-            return Err(AppError::Validation("a route needs a library".to_string()));
+            return Err(refused(
+                refusal::ROUTE_LIBRARY_REQUIRED,
+                "a route needs a library",
+            ));
         }
         seen.push(route.kind.clone());
     }
     if max_per_sync == Some(0) {
-        return Err(AppError::Validation(
-            "the per-sync cap must be at least 1".to_string(),
+        return Err(refused(
+            refusal::SYNC_CAP_INVALID,
+            "the per-sync cap must be at least 1",
         ));
     }
     Ok(kinds)
+}
+
+/// Fetch display facts only for visible candidates that filtering has not enriched.
+async fn enrich_preview_candidates(
+    evaluated: &mut [super::evaluate::EvaluatedItem],
+    resolver: &dyn super::resolve::ListItemResolver,
+) -> AppResult<()> {
+    let positions = evaluated
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item.decision, ItemDecision::Candidate))
+        .take(LIST_PREVIEW_WOULD_ADD_MAX)
+        .filter(|(_, item)| item.item.facts.is_none())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if positions.is_empty() {
+        return Ok(());
+    }
+    let mut items = positions
+        .iter()
+        .map(|index| evaluated[*index].item.clone())
+        .collect::<Vec<_>>();
+    resolver.enrich(&mut items).await?;
+    for (index, item) in positions.into_iter().zip(items) {
+        evaluated[index].item.facts = item.facts;
+    }
+    Ok(())
 }
 
 /// Summarise one evaluated list into a preview. Would-be adds are the items
@@ -331,11 +403,18 @@ pub fn summarize_preview(
                 if preview.would_add.len() < LIST_PREVIEW_WOULD_ADD_MAX {
                     let key = &item.item.item.item_key;
                     preview.would_add.push(ListPreviewItem {
+                        canonical_smg_id: item.item.smg_title_id,
+                        series_movie: item.item.series_movie.clone(),
+                        facts: item.item.facts.clone(),
                         item_key: key.clone(),
-                        display_title: trimmed(item.item.item.title.as_deref()),
+                        display_title: item.item.display_title(),
                         year: item.item.item.year,
                         kind: item.item.kind.clone(),
-                        poster_url: posters.get(key).cloned(),
+                        poster_url: posters
+                            .get(key)
+                            .filter(|url| !url.trim().is_empty())
+                            .cloned()
+                            .or_else(|| item.item.facts.as_ref()?.poster_url.clone()),
                     });
                 }
             }
@@ -393,7 +472,7 @@ fn draft_subscription(
 
 /// A route for every kind, so a draft preview filters nothing for want of a
 /// route.
-fn preview_routes(kinds: &[MediaFacet]) -> Vec<ListRoute> {
+pub(super) fn preview_routes(kinds: &[MediaFacet]) -> Vec<ListRoute> {
     kinds
         .iter()
         .map(|kind| ListRoute {
@@ -453,7 +532,6 @@ impl AppUseCase {
         &self,
         actor: &User,
     ) -> AppResult<Vec<ListProviderManifest>> {
-        self.require_lists_enabled().await?;
         let plugins = self.services.lists.plugins.descriptors();
         let charts = self.list_chart_catalog().await;
         let mut manifests = merge_provider_catalog(&plugins, &charts);
@@ -491,8 +569,9 @@ impl AppUseCase {
                 }
                 _ => {
                     let Some(url) = trimmed(url) else {
-                        return Err(AppError::Validation(
-                            "name a provider and a list, or paste a link".to_string(),
+                        return Err(refused(
+                            refusal::SOURCE_REQUIRED,
+                            "name a provider and a list, or paste a link",
                         ));
                     };
                     let Some(recognized) = recognize_url(&manifests, &url) else {
@@ -525,13 +604,21 @@ impl AppUseCase {
                 .libraries
                 .get_by_id(&route.library_id)
                 .await?
-                .ok_or_else(|| AppError::Validation("a routed library does not exist".into()))?;
+                .ok_or_else(|| {
+                    refused(
+                        refusal::ROUTE_LIBRARY_NOT_FOUND,
+                        "a routed library does not exist",
+                    )
+                })?;
             if library.facet != route.kind {
-                return Err(AppError::Validation(format!(
-                    "{} titles cannot go to the {} library",
-                    route.kind.as_str(),
-                    library.name
-                )));
+                return Err(refused(
+                    refusal::ROUTE_LIBRARY_KIND_MISMATCH,
+                    format!(
+                        "{} titles cannot go to the {} library",
+                        route.kind.as_str(),
+                        library.name
+                    ),
+                ));
             }
             self.require_library_permission(actor, &library.id, LibraryPermission::ManageTitles)
                 .await?;
@@ -562,7 +649,6 @@ impl AppUseCase {
         &self,
         actor: &User,
     ) -> AppResult<Vec<ListSubscription>> {
-        self.require_lists_enabled().await?;
         let can_manage = self.can_manage_lists(actor).await?;
         let viewable = self.viewable_library_ids(actor).await?;
         let mut subscriptions = self
@@ -590,7 +676,6 @@ impl AppUseCase {
         actor: &User,
         id: &str,
     ) -> AppResult<Option<ListSubscription>> {
-        self.require_lists_enabled().await?;
         let can_manage = self.can_manage_lists(actor).await?;
         let viewable = self.viewable_library_ids(actor).await?;
         match self.public_subscription(id).await {
@@ -612,7 +697,6 @@ impl AppUseCase {
         limit: usize,
         offset: usize,
     ) -> AppResult<ListMembershipPage> {
-        self.require_lists_enabled().await?;
         let subscription = self.public_subscription(id).await?;
         let rows = self
             .services
@@ -629,21 +713,24 @@ impl AppUseCase {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let title_libraries = if title_ids.is_empty() {
-            HashMap::new()
+        let titles = if title_ids.is_empty() {
+            Vec::new()
         } else {
-            self.services
-                .catalog
-                .titles
-                .get_by_ids(&title_ids)
-                .await?
-                .into_iter()
-                .map(|title| (title.id, title.library_id))
-                .collect()
+            self.services.catalog.titles.get_by_ids(&title_ids).await?
         };
+        let title_names = titles
+            .iter()
+            .map(|title| (title.id.clone(), title.name.clone()))
+            .collect();
+        let title_libraries = titles
+            .into_iter()
+            .map(|title| (title.id, title.library_id))
+            .collect();
         let viewable = self.viewable_library_ids(actor).await?;
         let rows = visible_memberships(&subscription, rows, &title_libraries, &viewable);
-        Ok(membership_page(rows, limit, offset))
+        let mut page = membership_page(rows, limit, offset);
+        name_by_library_title(&mut page.items, &title_names);
+        Ok(page)
     }
 
     pub async fn public_list_sync_runs(
@@ -652,7 +739,6 @@ impl AppUseCase {
         id: &str,
         limit: usize,
     ) -> AppResult<Vec<ListSyncRun>> {
-        self.require_lists_enabled().await?;
         let subscription = self.public_subscription(id).await?;
         let can_manage = self.can_manage_lists(actor).await?;
         let runs = self
@@ -673,42 +759,101 @@ impl AppUseCase {
     }
 
     /// Fetch, resolve and evaluate `subscription` without writing anything.
-    async fn run_preview(
+    pub(crate) async fn run_preview(
         &self,
         subscription: &ListSubscription,
         existing: HashMap<String, ListMembership>,
     ) -> AppResult<ListPreview> {
+        if subscription.max_per_sync == Some(0) {
+            return Err(refused(
+                refusal::SYNC_CAP_INVALID,
+                "the per-sync cap must be at least 1",
+            ));
+        }
         let lists = &self.services.lists;
         let gateway = self.services.library.metadata_gateway.clone();
         let charts = GatewayListChartSource::new(gateway.clone());
-        let resolver = GatewayListItemResolver::new(gateway, AppListLibraryLookup::new(self));
+        let resolver = GatewayListItemResolver::new(gateway, AppListLibraryLookup::new(self))
+            .with_vocabulary(lists.vocabulary.clone(), lists.subscriptions.clone());
         // A preview always reads the whole list: an "unchanged" answer would
         // leave it nothing to show.
-        let mut subscription = subscription.clone();
+        let mut subscription =
+            super::resolve::ListItemResolver::normalize_filters(&resolver, subscription).await?;
         subscription.sync.fetch_fingerprint = None;
-        let config = self
+        let mut config = self
             .list_provider_config_for(&subscription.source.provider)
             .await;
-        let mut fetched: FetchedList = fetch_list(
+        // A preview is interactive: it never waits out a slow renewal, and
+        // answers that the account is still refreshing instead.
+        let mut _account_guard = None;
+        let credential = if subscription.is_personal() {
+            let (guard, account) = self
+                .refresh_list_account_interactive(
+                    subscription.credential_id.as_deref().unwrap_or_default(),
+                    |account| {
+                        super::privacy::credential_for(&subscription, Some(account))
+                            .map(|_| ())
+                            .map_err(|failure| AppError::Validation(failure.message))
+                    },
+                )
+                .await?;
+            _account_guard = Some(guard);
+            if account.is_none() {
+                super::privacy::credential_for(&subscription, None)
+                    .map_err(|failure| AppError::Validation(failure.message))?;
+            }
+            if let Some(id) = account
+                .as_ref()
+                .and_then(|account| account.credential.client_id.as_ref())
+            {
+                config.insert("client_id".into(), id.clone());
+            }
+            Some(
+                super::privacy::credential_for(&subscription, account.as_ref())
+                    .map_err(|failure| AppError::Validation(failure.message))?,
+            )
+        } else {
+            None
+        };
+        let mut fetched: FetchedList = match fetch_list(
             &subscription,
             lists.plugins.as_ref(),
             &charts,
-            None,
+            credential,
             &config,
         )
         .await
-        .map_err(|failure| AppError::Validation(failure.message))?;
+        {
+            Ok(fetched) => fetched,
+            Err(failure) => {
+                if subscription.is_personal()
+                    && matches!(failure.class, super::fetch::ListFailureClass::Unauthorized)
+                    && let Some(id) = subscription.credential_id.as_deref()
+                    && let Some(mut account) = lists.accounts.get_by_id(id).await?
+                    && account.user_id == subscription.owner_user_id
+                    && account.provider == subscription.source.provider
+                {
+                    account.status = scryer_domain::UserListAccountStatus::Expired;
+                    account.error_message =
+                        Some("Reconnect this list account to resume syncing.".into());
+                    account.updated_at = Utc::now();
+                    lists.accounts.update(account).await?;
+                }
+                return Err(AppError::Validation(failure.message));
+            }
+        };
         fetched.dedupe();
         let resolved = resolve_items(&subscription, fetched.items, &resolver).await?;
         let exclusions = lists.exclusions.list().await?;
         // Weigh a deleted title the list added the way the sync will.
         let deleted = deleted_additions(&AppListActions::new(self), &resolved, &existing).await;
-        let evaluated = evaluate(
+        let mut evaluated = evaluate(
             &subscription,
             resolved,
             &exclusions,
             &without_rows(&existing, &deleted),
         );
+        enrich_preview_candidates(&mut evaluated, &resolver).await?;
         let mut preview = summarize_preview(&evaluated, &fetched.posters);
         preview.recognized = true;
         preview.provider = Some(subscription.source.provider.clone());
@@ -723,7 +868,6 @@ impl AppUseCase {
     pub async fn preview_public_list(&self, actor: &User, id: &str) -> AppResult<ListPreview> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let subscription = self.public_subscription(id).await?;
         let existing = self
             .services
@@ -746,7 +890,6 @@ impl AppUseCase {
     ) -> AppResult<ListPreview> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let Some((classified, _)) = self
             .classify_source(
                 draft.provider.as_deref(),
@@ -758,9 +901,13 @@ impl AppUseCase {
         else {
             return Ok(ListPreview::default());
         };
-        let kinds = classified.kinds.clone();
-        let subscription =
+        let kinds = draft
+            .preview_kinds
+            .unwrap_or_else(|| classified.kinds.clone());
+        let mut subscription =
             draft_subscription(actor, &classified, kinds.clone(), preview_routes(&kinds));
+        subscription.filters = draft.preview_filters;
+        subscription.max_per_sync = draft.preview_max_per_sync;
         self.run_preview(&subscription, HashMap::new()).await
     }
 
@@ -783,7 +930,6 @@ impl AppUseCase {
     ) -> AppResult<ListSubscription> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let (classified, _) = self
             .classify_source(
                 input.provider.as_deref(),
@@ -793,7 +939,10 @@ impl AppUseCase {
             )
             .await?
             .ok_or_else(|| {
-                AppError::Validation("that link is not a list Scryer can follow".into())
+                refused(
+                    refusal::LINK_NOT_RECOGNIZED,
+                    "that link is not a list Scryer can follow",
+                )
             })?;
         let kinds = validate_public_settings(
             &classified.kinds,
@@ -813,18 +962,29 @@ impl AppUseCase {
             .iter()
             .any(|subscription| same_source(subscription, &classified))
         {
-            return Err(AppError::Validation("this list is already followed".into()));
+            return Err(refused(
+                refusal::ALREADY_FOLLOWED,
+                "this list is already followed",
+            ));
         }
 
         let mut subscription = draft_subscription(actor, &classified, kinds, input.routes);
         subscription.name = trimmed(input.name.as_deref()).unwrap_or(subscription.name);
         subscription.provider_url = trimmed(input.url.as_deref());
         subscription.mode = input.mode;
-        subscription.filters = input.filters;
+        subscription.filters = self
+            .normalize_list_filters(&input.filters, &subscription.kinds)
+            .await?;
         subscription.max_per_sync = input.max_per_sync;
         subscription.on_leave = input.on_leave;
         subscription.sync.next_at = Some(subscription.created_at);
         let created = lists.subscriptions.create(subscription).await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &created,
+            scryer_domain::ConfigurationChangeAction::Saved,
+        )
+        .await;
         // Start the first sync now, the way "sync now" does, instead of
         // waiting for the next scheduled pass. The follow already stands; if
         // the sync cannot start, the list is due and the next pass takes it.
@@ -846,26 +1006,26 @@ impl AppUseCase {
     ) -> AppResult<ListSubscription> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let mut subscription = self.public_subscription(id).await?;
         // The kinds a source declares are the ceiling; a follow may narrow
         // them and widen them back.
-        let declared = match &subscription.source.origin {
-            scryer_domain::ListSourceOrigin::SmgImdbList => {
-                vec![MediaFacet::Movie, MediaFacet::Series]
-            }
-            _ => match self
-                .classify_source(
-                    Some(&subscription.source.provider),
-                    Some(&subscription.source.source_type),
-                    &subscription.source.params,
-                    None,
-                )
-                .await
-            {
-                Ok(Some((classified, _))) => classified.kinds,
-                _ => subscription.kinds.clone(),
-            },
+        if patch.kinds.is_some() {
+            super::catalog::use_include_media_selection(
+                &mut subscription.source,
+                &self.services.lists.plugins.descriptors(),
+            );
+        }
+        let declared = match self
+            .classify_source(
+                Some(&subscription.source.provider),
+                Some(&subscription.source.source_type),
+                &subscription.source.params,
+                None,
+            )
+            .await
+        {
+            Ok(Some((classified, _))) => classified.kinds,
+            _ => subscription.kinds.clone(),
         };
         let mode = patch.mode.unwrap_or(subscription.mode);
         let routes = patch.routes.unwrap_or_else(|| subscription.routes.clone());
@@ -887,7 +1047,9 @@ impl AppUseCase {
         subscription.mode = mode;
         subscription.routes = routes;
         if let Some(filters) = patch.filters {
-            subscription.filters = filters;
+            subscription.filters = self
+                .normalize_list_filters(&filters, &subscription.kinds)
+                .await?;
         }
         subscription.max_per_sync = max_per_sync;
         if let Some(on_leave) = patch.on_leave {
@@ -900,6 +1062,12 @@ impl AppUseCase {
             .subscriptions
             .update(subscription)
             .await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &updated,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(redact_for_viewer(updated, true))
     }
 
@@ -912,7 +1080,6 @@ impl AppUseCase {
     ) -> AppResult<ListSubscription> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let mut subscription = self.public_subscription(id).await?;
         let now = Utc::now();
         subscription.enabled = enabled;
@@ -937,6 +1104,12 @@ impl AppUseCase {
         subscriptions
             .record_sync(&updated.id, &updated.sync, &updated.counts)
             .await?;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &updated,
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
         Ok(redact_for_viewer(updated, true))
     }
 
@@ -945,7 +1118,6 @@ impl AppUseCase {
     pub async fn unsubscribe_public_list(&self, actor: &User, id: &str) -> AppResult<String> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let subscription = self.public_subscription(id).await?;
         self.services
             .lists
@@ -953,10 +1125,16 @@ impl AppUseCase {
             .delete(&subscription.id)
             .await?;
         self.emit_list_unfollowed_event(actor, &subscription).await;
+        self.emit_list_subscription_changed_event(
+            actor,
+            &subscription,
+            scryer_domain::ConfigurationChangeAction::Deleted,
+        )
+        .await;
         Ok(subscription.id)
     }
 
-    async fn queue_list_syncs(
+    pub(crate) async fn queue_list_syncs(
         &self,
         actor: &User,
         subscriptions: Vec<ListSubscription>,
@@ -1007,10 +1185,9 @@ impl AppUseCase {
     pub async fn sync_public_list_now(&self, actor: &User, id: &str) -> AppResult<Vec<String>> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let subscription = self.public_subscription(id).await?;
         if !subscription.enabled {
-            return Err(AppError::Validation("this list is turned off".into()));
+            return Err(refused(refusal::DISABLED, "this list is turned off"));
         }
         self.queue_list_syncs(actor, vec![subscription]).await
     }
@@ -1018,7 +1195,6 @@ impl AppUseCase {
     pub async fn sync_all_public_lists(&self, actor: &User) -> AppResult<Vec<String>> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let subscriptions = self
             .services
             .lists
@@ -1032,7 +1208,6 @@ impl AppUseCase {
     pub async fn list_exclusions(&self, actor: &User) -> AppResult<Vec<ListExclusionView>> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let lists = &self.services.lists;
         let names = lists
             .subscriptions
@@ -1063,7 +1238,6 @@ impl AppUseCase {
     ) -> AppResult<ListExclusionView> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let external_ids = input
             .external_ids
             .into_iter()
@@ -1078,12 +1252,17 @@ impl AppUseCase {
             })
             .collect::<Vec<_>>();
         if external_ids.is_empty() {
-            return Err(AppError::Validation(
-                "an exclusion needs at least one id".into(),
+            return Err(refused(
+                refusal::EXCLUSION_IDS_REQUIRED,
+                "an exclusion needs at least one id",
             ));
         }
-        let display_title = trimmed(Some(&input.display_title))
-            .ok_or_else(|| AppError::Validation("an exclusion needs a title".into()))?;
+        let display_title = trimmed(Some(&input.display_title)).ok_or_else(|| {
+            refused(
+                refusal::EXCLUSION_TITLE_REQUIRED,
+                "an exclusion needs a title",
+            )
+        })?;
         let subscription_name = match &input.scope {
             ListExclusionScope::AllLists => None,
             ListExclusionScope::List { subscription_id } => {
@@ -1106,6 +1285,13 @@ impl AppUseCase {
         // fingerprint only costs a full read, so it goes first.
         self.forget_fingerprints_for_exclusion(&exclusion).await?;
         let exclusion = self.services.lists.exclusions.create(exclusion).await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_EXCLUSION_RESOURCE,
+            Some(exclusion.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Saved,
+        )
+        .await;
         Ok(ListExclusionView {
             exclusion,
             subscription_name,
@@ -1115,7 +1301,6 @@ impl AppUseCase {
     pub async fn remove_list_exclusion(&self, actor: &User, id: &str) -> AppResult<String> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let exclusions = &self.services.lists.exclusions;
         let exclusion = exclusions
             .get_by_id(id)
@@ -1125,6 +1310,13 @@ impl AppUseCase {
         // failure leaves the exclusion standing rather than half-removed.
         self.forget_fingerprints_for_exclusion(&exclusion).await?;
         exclusions.delete(&exclusion.id).await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_EXCLUSION_RESOURCE,
+            Some(exclusion.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Deleted,
+        )
+        .await;
         Ok(exclusion.id)
     }
 
@@ -1162,7 +1354,6 @@ impl AppUseCase {
     pub async fn member_list_policies(&self, actor: &User) -> AppResult<Vec<MemberListPolicy>> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let users = self.services.identity.users.list_all().await?;
         let policies = self
             .services
@@ -1207,7 +1398,6 @@ impl AppUseCase {
     ) -> AppResult<MemberListPolicy> {
         self.require_app_permission(actor, AppPermission::ManageLists)
             .await?;
-        self.require_lists_enabled().await?;
         let user = self
             .services
             .identity
@@ -1226,6 +1416,31 @@ impl AppUseCase {
                 updated_at: Utc::now(),
             })
             .await?;
+        self.emit_configuration_changed_event(
+            actor,
+            LIST_MEMBER_POLICY_RESOURCE,
+            Some(user.id.clone()),
+            scryer_domain::ConfigurationChangeAction::Updated,
+        )
+        .await;
+        // The member whose policy changed is told too: it decides what their
+        // own lists page offers.
+        if let Err(error) = self
+            .append_domain_event(crate::events::domain_events::new_user_domain_event(
+                actor,
+                user.id.clone(),
+                scryer_domain::DomainEventPayload::ConfigurationChanged(
+                    scryer_domain::ConfigurationChangedEventData {
+                        resource_type: LIST_MEMBER_POLICY_RESOURCE.into(),
+                        resource_id: Some(user.id.clone()),
+                        action: scryer_domain::ConfigurationChangeAction::Updated,
+                    },
+                ),
+            ))
+            .await
+        {
+            tracing::warn!(error = %error, "could not tell a member their list policy changed");
+        }
         let since = Utc::now() - Duration::days(MEMBER_POLICY_WINDOW_DAYS);
         let requests = self
             .services

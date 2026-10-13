@@ -2,6 +2,76 @@ use super::*;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(unix)]
+#[test]
+fn blocked_file_sink_keeps_runtime_responsive() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    const BOUND: Duration = Duration::from_secs(30);
+    let dir = tempfile::tempdir().unwrap();
+    let (writer, guard) =
+        open_log_file(&dir.path().join("fixture.log"), policy(u64::MAX, 10)).unwrap();
+    let (mut sink, mut peer) = UnixStream::pair().unwrap();
+    sink.set_nonblocking(true).unwrap();
+    let mut filled = 0;
+    loop {
+        match sink.write(&[0; 8192]) {
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("fill synthetic sink: {error}"),
+        }
+    }
+    sink.set_nonblocking(false).unwrap();
+    // Substitute a full socket for the file descriptor to model a stalled
+    // filesystem write without touching a real log or requiring a failed mount.
+    writer.0.lock().unwrap().file = Some(File::from(OwnedFd::from(sink)));
+    let (writer, guard) = crate::log_delivery::LogDelivery::new("fixture", move |bytes| {
+        let _keep_alive = &guard;
+        writer.make_writer().write_all(bytes)
+    })
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    for _ in 0..2 {
+        let writer = writer.clone();
+        let entered = entered_tx.clone();
+        let finished = finished_tx.clone();
+        runtime.spawn(async move {
+            entered.send(()).unwrap();
+            let result = writer.make_writer().write_all(b"fixture event\n");
+            finished.send(result).unwrap();
+        });
+    }
+    let entered = (0..2).all(|_| entered_rx.recv_timeout(BOUND).is_ok());
+    let (probe_tx, probe_rx) = mpsc::channel();
+    runtime.spawn(async move {
+        let _ = probe_tx.send(());
+    });
+    let responsive = probe_rx.recv_timeout(BOUND).is_ok();
+    // An ordinary observer thread releases the real blocking write, even if
+    // every Tokio worker is waiting. Always release before making assertions.
+    peer.set_read_timeout(Some(BOUND)).unwrap();
+    peer.read_exact(&mut vec![0; filled]).unwrap();
+    let completed = (0..2).all(|_| finished_rx.recv_timeout(BOUND).is_ok());
+    let recovered = responsive || probe_rx.recv_timeout(BOUND).is_ok();
+    runtime.shutdown_background();
+    drop(guard);
+    assert!(
+        entered && completed && recovered,
+        "fixture must enter and recover"
+    );
+    assert!(
+        responsive,
+        "a blocked file log sink starved both runtime workers until external release"
+    );
+}
+
 fn time() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-01-01T23:59:59Z")
         .unwrap()

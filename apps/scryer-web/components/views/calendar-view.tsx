@@ -38,6 +38,7 @@ import {
   episodeAvailabilityPill,
   type EpisodeMediaAvailability,
 } from "@/lib/utils/episode-media-availability";
+import { episodeTitleOrTba } from "@/lib/utils/episode-title";
 
 export type CalendarEpisodeItem = {
   id: string;
@@ -53,6 +54,8 @@ export type CalendarEpisodeItem = {
   episodeTitle: string | null;
   overview: string | null;
   imageUrl: string | null;
+  /** The parent title's background, shown when an episode has no still of its own. */
+  titleBackgroundUrl?: string | null;
   airDate: string | null;
   monitored: boolean;
   playbackLinks: MediaServerPlaybackLink[];
@@ -223,15 +226,21 @@ function CalendarLibraryFacetFilters({
   );
 }
 
-function formatEpisodeLabel(ep: CalendarEpisodeItem): string {
+// Whether the item is an episode, whose missing title reads as "TBA". Movies
+// and title-level items carry no episode title at all.
+function showsEpisodeTitle(ep: CalendarEpisodeItem): boolean {
+  return ep.titleFacet !== "movie" && Boolean(ep.episodeTitle?.trim() || ep.episodeNumber);
+}
+
+function formatEpisodeLabel(ep: CalendarEpisodeItem, t: (key: string) => string): string {
   const parts: string[] = [ep.titleName];
   if (ep.seasonNumber && ep.episodeNumber) {
     parts.push(`S${ep.seasonNumber}E${ep.episodeNumber}`);
   } else if (ep.episodeNumber) {
     parts.push(`E${ep.episodeNumber}`);
   }
-  if (ep.episodeTitle) {
-    parts.push(`- ${ep.episodeTitle}`);
+  if (showsEpisodeTitle(ep)) {
+    parts.push(`- ${episodeTitleOrTba(ep.episodeTitle, t)}`);
   }
   return parts.join(" ");
 }
@@ -261,15 +270,15 @@ function formatDateKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function formatTooltip(ep: CalendarEpisodeItem): string {
+function formatTooltip(ep: CalendarEpisodeItem, t: (key: string) => string): string {
   const lines: string[] = [ep.titleName];
   if (ep.seasonNumber && ep.episodeNumber) {
     lines.push(`Season ${ep.seasonNumber}, Episode ${ep.episodeNumber}`);
   } else if (ep.episodeNumber) {
     lines.push(`Episode ${ep.episodeNumber}`);
   }
-  if (ep.episodeTitle) {
-    lines.push(ep.episodeTitle);
+  if (showsEpisodeTitle(ep)) {
+    lines.push(episodeTitleOrTba(ep.episodeTitle, t));
   }
   lines.push(`Library: ${ep.libraryName ?? ep.libraryId}`);
   lines.push(`Type: ${FACET_LABELS[ep.titleFacet] ?? ep.titleFacet}`);
@@ -316,9 +325,11 @@ export function CalendarEventHoverCard({
   const t = useTranslate();
   const { episode, anchor } = preview;
   const [failedImages, setFailedImages] = useState<string[]>([]);
-  const imageUrl = episode.imageUrl && !failedImages.includes(episode.imageUrl)
-    ? episode.imageUrl
-    : posterFallbackUrl && !failedImages.includes(posterFallbackUrl) ? posterFallbackUrl : null;
+  // The episode's own still first, then its title's background, then a poster.
+  const imageUrl =
+    [episode.imageUrl, episode.titleBackgroundUrl, posterFallbackUrl].find(
+      (url) => url && !failedImages.includes(url),
+    ) ?? null;
   const isPoster = imageUrl === posterFallbackUrl || episode.titleFacet === "movie";
 
   if (typeof document === "undefined") return null;
@@ -390,8 +401,10 @@ export function CalendarEventHoverCard({
             ) : null}
           </div>
           <h3 className="fc-scryer-hover-card-title">{episode.titleName}</h3>
-          {!isMovie && episode.episodeTitle ? (
-            <p className="fc-scryer-hover-card-episode-title">{episode.episodeTitle}</p>
+          {!isMovie && showsEpisodeTitle(episode) ? (
+            <p className="fc-scryer-hover-card-episode-title">
+              {episodeTitleOrTba(episode.episodeTitle, t)}
+            </p>
           ) : null}
           {episode.overview ? (
             <p className="fc-scryer-hover-card-overview">{episode.overview}</p>
@@ -508,12 +521,12 @@ export function CalendarView({
         .filter((ep) => ep.airDate)
         .map((ep) => ({
           id: ep.id,
-          title: formatEpisodeLabel(ep),
+          title: formatEpisodeLabel(ep, t),
           date: ep.airDate!,
           url: buildCalendarEventHref(ep) ?? undefined,
           extendedProps: ep,
         })),
-    [filteredEpisodes],
+    [filteredEpisodes, t],
   );
 
   const handleDatesSet = (arg: DatesSetInfo) => {
@@ -575,12 +588,12 @@ export function CalendarView({
     const facetColor = FACET_COLORS[ep.titleFacet] ?? "#6b7280";
     const facetGradient = FACET_GRADIENTS[ep.titleFacet] ?? facetColor;
     const facetRgb = FACET_RGB[ep.titleFacet] ?? "107, 114, 128";
-    arg.el.setAttribute("aria-label", formatTooltip(ep));
+    arg.el.setAttribute("aria-label", formatTooltip(ep, t));
     arg.el.style.setProperty("--scryer-event-color", facetColor);
     arg.el.style.setProperty("--scryer-event-accent", facetColor);
     arg.el.style.setProperty("--scryer-event-gradient", facetGradient);
     arg.el.style.setProperty("--scryer-event-rgb", facetRgb);
-  }, []);
+  }, [t]);
 
   const renderEventContent = useCallback((arg: EventDisplayInfo) => {
     const ep = arg.event.extendedProps as CalendarEpisodeItem;

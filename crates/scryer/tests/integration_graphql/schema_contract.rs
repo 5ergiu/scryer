@@ -348,6 +348,62 @@ async fn graphql_http_schema_is_fully_documented() {
 }
 
 #[tokio::test]
+async fn private_account_schema_has_owner_queries_and_never_exposes_credentials() {
+    let ctx = TestContext::new().await;
+    let sdl = schema_sdl(&ctx);
+    for field in [
+        "myListAccounts",
+        "myListSubscriptions",
+        "startListAccountLink",
+        "linkListAccountWithKey",
+        "completeListAccountLink",
+        "unlinkListAccount",
+    ] {
+        assert!(sdl.contains(field));
+    }
+    let type_body = |name: &str| {
+        sdl.split(&format!("type {name} {{"))
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let payload = type_body("ListAccountPayload");
+    for secret in [
+        "accessToken",
+        "refreshToken",
+        "refreshHandle",
+        "credential",
+        "clientSecret",
+        "appConfig",
+    ] {
+        assert!(!payload.contains(secret), "account schema exposes {secret}");
+    }
+    // A member's key goes in as an argument and is described, never returned.
+    for name in ["ListAccountKeyLinkPayload", "ListMemberKeyPayload"] {
+        let body = type_body(name);
+        for line in body.lines().filter(|line| !line.trim().is_empty()) {
+            let field = line.trim().split(':').next().unwrap_or_default();
+            assert!(
+                !["key", "apiKey", "token", "accessToken", "credential"].contains(&field),
+                "{name} returns {field}"
+            );
+        }
+    }
+    let body = gql(
+        &ctx,
+        "{ myListAccounts { id provider externalUserId } myListSubscriptions { id } }",
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&body);
+    assert_eq!(body["data"]["myListAccounts"], json!([]));
+    assert_eq!(body["data"]["myListSubscriptions"], json!([]));
+}
+
+#[tokio::test]
 async fn graphql_introspection_schema_census_matches_contract_baseline() {
     let ctx = TestContext::new().await;
     let sdl = schema_sdl(&ctx);
@@ -713,8 +769,16 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // one more read: 184->185. Keeping the jobs view current adds
     // `latestJobRuns`, the newest run per job in one read: 185->186.
     assert!(query_field_names.contains(&"latestJobRuns"));
+    // Canonical list vocabulary adds one authenticated registry query.
+    // Scheduled scripts add `validateScriptSchedule`, the schedule check and
+    // next-run preview the script editor calls before saving: 191->192.
+    assert!(query_field_names.contains(&"validateScriptSchedule"));
+    // Rebased to the release tree: work that landed without moving this
+    // census (installed plugin settings, download password retry, and others)
+    // brings query fields to 195. Scheduled scripts as jobs add no root field;
+    // they ride `jobs`, `jobRuns`, and `triggerJob` with a `customJobId`.
     assert_eq!(
-        query_field_count, 186,
+        query_field_count, 195,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -745,8 +809,15 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // all, unfollow, add and remove an exclusion, and set a member's list
     // policy. 250->259. Changing a list provider's server-wide settings adds
     // one more: 259->260.
+    // Reopening a dismissed request and saving one catalog layout add
+    // `reopenMediaRequest` and `setMyCatalogView`: 265->267.
+    // Rebased to the release tree, as with the query count above: 267->271.
+    // Linking a list account with a key the member supplies adds
+    // `linkListAccountWithKey`: 271->272.
+    // Abandoning an account link the member walked away from adds
+    // `cancelListAccountLink`: 272->273.
     assert_eq!(
-        mutation_field_count, 260,
+        mutation_field_count, 273,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1012,10 +1083,66 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // its failures in two payloads: public types 917->919, OBJECT 497->499.
     assert!(public_type_names.contains(&"RecycleBinRelocationPayload"));
     assert!(public_type_names.contains(&"RecycleBinRelocationFailurePayload"));
-    assert_eq!(public_types.len(), 919);
-    assert_eq!(kind_count("OBJECT"), 499);
-    assert_eq!(kind_count("INPUT_OBJECT"), 232);
-    assert_eq!(kind_count("ENUM"), 176);
+    // Private account management adds six credential-free output objects.
+    // Per-device catalog layouts add one payload, two inputs and two enums:
+    // public types 925->930, OBJECT 505->506, INPUT_OBJECT 232->234,
+    // ENUM 176->178.
+    assert!(public_type_names.contains(&"UiCatalogViewSettingPayload"));
+    assert!(public_type_names.contains(&"SetMyCatalogViewInput"));
+    // Facet ratings and canonical vocabulary add three payload objects and
+    // one rating-minimum input. Existing filter enums gain values, not types.
+    assert!(query_field_names.contains(&"canonicalTagVocabulary"));
+    for name in [
+        "CanonicalTagVocabularyPayload",
+        "CanonicalTagVocabularyEntryPayload",
+        "ListRatingMinimumPayload",
+        "ListRatingMinimumInput",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    // Scheduled scripts add the language, trigger, schedule kind and weekday
+    // enums, the schedule input, and the stored-schedule and schedule-check
+    // payloads: public types 934->941, OBJECT 509->511, INPUT_OBJECT 235->236,
+    // ENUM 178->182.
+    for name in [
+        "ScriptLanguageValue",
+        "ScriptTriggerValue",
+        "ScriptScheduleKindValue",
+        "ScheduleWeekdayValue",
+        "ScriptScheduleInput",
+        "ScriptSchedulePayload",
+        "ScriptScheduleValidationPayload",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    // Rebased to the release tree: public types 941->954, OBJECT 511->516,
+    // INPUT_OBJECT 236->239, ENUM 182->187. `CUSTOM_JOB` is a value on the
+    // existing job-key enum and `customJobId` an additive field, so scheduled
+    // scripts as jobs add no type.
+    // Stringly-typed 0.21.15 fields became enums: public types 954->962,
+    // ENUM 187->195. No object, input, or root field was added.
+    for name in [
+        "UserListAccountStatusValue",
+        "ListAccountPollStatusValue",
+        "PasskeyImpactValue",
+        "ConfigValueSourceValue",
+        "PasskeyRelyingPartySourceValue",
+        "PublicUrlErrorCodeValue",
+        "DownloadPasswordFailureCodeValue",
+        "CanonicalTagCategoryValue",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    // Linking a list account with a key the member supplies adds the key
+    // description on a provider and the link result: public types 962->964,
+    // OBJECT 516->518.
+    for name in ["ListMemberKeyPayload", "ListAccountKeyLinkPayload"] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert_eq!(public_types.len(), 964);
+    assert_eq!(kind_count("OBJECT"), 518);
+    assert_eq!(kind_count("INPUT_OBJECT"), 239);
+    assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
@@ -1492,7 +1619,11 @@ async fn graphql_introspection_media_request_actions_use_direct_request_id() {
             .unwrap_or_else(|| panic!("{field_name}.requestId should exist"))
             .clone()
     };
-    for field_name in ["dismissMediaRequest", "cancelMyMediaRequest"] {
+    for field_name in [
+        "dismissMediaRequest",
+        "reopenMediaRequest",
+        "cancelMyMediaRequest",
+    ] {
         let arg = request_id_arg(field_name);
         assert_eq!(arg["type"]["kind"], "NON_NULL", "{field_name}");
         assert_eq!(arg["type"]["ofType"]["name"], "ID", "{field_name}");

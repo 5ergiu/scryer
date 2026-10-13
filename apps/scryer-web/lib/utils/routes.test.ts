@@ -112,26 +112,18 @@ test("a non-admin's landing route never resolves to the dashboard", () => {
 });
 
 test("catalog viewers and list managers both reach the Lists page", () => {
-  assert.equal(canAccessListsPage(true, false, true), true);
-  assert.equal(canAccessListsPage(false, true, true), true);
-  assert.equal(canAccessListsPage(true, true, true), true);
-  assert.equal(canAccessListsPage(false, false, true), false);
-  // Lists are experimental: no grant reaches the page while the switch is off.
-  assert.equal(canAccessListsPage(true, true, false), false);
+  assert.equal(canAccessListsPage(true, false), true);
+  assert.equal(canAccessListsPage(false, true), true);
+  assert.equal(canAccessListsPage(true, true), true);
+  assert.equal(canAccessListsPage(false, false), false);
 });
 
-test("a reload of the Lists page waits for the instance switches before leaving", () => {
-  // Before the switches load, experimental features read as off, so access
-  // reads as denied; that must not bounce a bookmark to the default page.
-  assert.equal(shouldLeaveListsPage(false, false), false);
-  assert.equal(shouldLeaveListsPage(true, false), false);
-  // Once they are loaded (or failed and left the defaults), a denied reader leaves.
-  assert.equal(shouldLeaveListsPage(false, true), true);
-  assert.equal(shouldLeaveListsPage(true, true), false);
+test("Lists navigation depends on permissions rather than instance switches", () => {
+  assert.equal(shouldLeaveListsPage(false), true);
+  assert.equal(shouldLeaveListsPage(true), false);
 });
 
 test("list exclusions are a list-management surface only", () => {
-  assert.equal(canAccessListExclusions(true, true), true);
-  assert.equal(canAccessListExclusions(false, true), false);
-  assert.equal(canAccessListExclusions(true, false), false);
+  assert.equal(canAccessListExclusions(true), true);
+  assert.equal(canAccessListExclusions(false), false);
 });
