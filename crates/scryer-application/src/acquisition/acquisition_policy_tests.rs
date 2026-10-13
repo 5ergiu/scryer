@@ -1,186 +1,171 @@
-//! What survives of the old upgrade policy: the repack-group rule.
-//!
-//! `evaluate_upgrade`, `UpgradeDecision` and the grab-side upgrade cooldown are
-//! gone — every comparative decision now goes through [`crate::admission`],
-//! which both grab and import call, and which is covered by
-//! `admission_tests.rs`. Sonarr has no recency cooldown either, so nothing
-//! refuses an admitted release for having been searched recently.
+use crate::admission::{
+    AdmissionPolicy, AdmissionScope, AdmissionSubject, CandidateFacts, Incumbent,
+    evaluate_admission, revision_preference,
+};
 
-use super::*;
-
-// ── D16: the repack-group rule, scoped like Sonarr's ──────────────────────
-
-mod repack {
-    use super::*;
-    use crate::admission::{
-        AdmissionScope, AdmissionSubject, CandidateFacts, Incumbent, tier_sort_key,
-    };
-
-    fn candidate(release_title: &str) -> IndexerSearchResult {
-        IndexerSearchResult {
-            indexer_id: None,
-            source: "nzbgeek".to_string(),
-            title: release_title.to_string(),
-            link: None,
-            download_url: None,
-            source_kind: None,
-            size_bytes: None,
-            published_at: None,
-            thumbs_up: None,
-            thumbs_down: None,
-            indexer_languages: None,
-            indexer_subtitles: None,
-            indexer_grabs: None,
-            password_hint: None,
-            parsed_release_metadata: Some(crate::parse_release_metadata(release_title)),
-            quality_profile_decision: None,
-            extra: Default::default(),
-            response_attributes: Default::default(),
-            guid: None,
-            info_url: None,
-            provenance: None,
-            candidate_token: None,
-            queue_scope: None,
-            coverage_scope: None,
-            auto_eligible: None,
-            auto_decision_code: None,
-            auto_decision_summary: None,
-            release_listing_json: None,
-        }
-    }
-
-    fn occupied(tier_index: Option<usize>, revision: i32, group: Option<&str>) -> AdmissionSubject {
-        AdmissionSubject::new(
-            AdmissionScope::Episodes(vec!["ep-01".to_string()]),
-            [(
+fn occupied(groups: &[Option<&str>], revision: i32) -> AdmissionSubject {
+    AdmissionSubject::new(
+        AdmissionScope::Episodes(vec!["ep-1".into(), "ep-2".into()]),
+        groups.iter().enumerate().map(|(index, group)| {
+            (
                 Incumbent {
-                    tier_index,
+                    tier_index: Some(0),
                     revision,
-                    file_id: "file-1".to_string(),
-                    file_path: "/data/TV/Show/Season 01/file-1.mkv".to_string(),
-                    release_group: group.map(str::to_string),
+                    file_id: format!("file-{index}"),
+                    file_path: format!("/library/file-{index}.mkv"),
+                    release_group: group.map(str::to_owned),
                     score: 900,
-                    covers: vec!["ep-01".to_string()],
-                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    covers: vec![format!("ep-{}", index + 1)],
+                    created_at: "2026-01-01T00:00:00Z".into(),
                 },
                 true,
-            )],
+            )
+        }),
+    )
+}
+
+fn policy() -> AdmissionPolicy {
+    AdmissionPolicy {
+        allow_upgrades: true,
+        min_delta: 1,
+        cutoff_score: None,
+        manual_override: false,
+        applies_to_queue: true,
+    }
+}
+
+#[test]
+fn revision_related_groups_and_ignore_control_the_exception() {
+    let subject = occupied(&[Some(" Group ")], 2);
+    for (group, ignore, admitted) in [
+        (Some("group"), false, true),
+        (Some("OTHER"), false, false),
+        (None, false, false),
+        (Some(""), false, false),
+        (Some("group"), true, false),
+    ] {
+        let candidate = CandidateFacts::new(Some(0), 3, 100).with_revision_policy(group, ignore);
+        assert_eq!(
+            evaluate_admission(&subject, candidate, &policy()).is_admitted(),
+            admitted
+        );
+        assert_eq!(
+            revision_preference(candidate, &subject),
+            if admitted { 3 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn revision_unrelated_or_unknown_incumbent_does_not_protect_a_repack() {
+    for group in [Some("OTHER"), None, Some(" ")] {
+        let subject = occupied(&[group], 3);
+        let candidate =
+            CandidateFacts::new(Some(0), 0, 1000).with_revision_policy(Some("group"), false);
+        assert!(evaluate_admission(&subject, candidate, &policy()).is_admitted());
+    }
+}
+
+#[test]
+fn revision_ignore_removes_both_priority_and_downgrade_protection() {
+    let subject = occupied(&[Some("group")], 3);
+    for ignore in [false, true] {
+        let candidate =
+            CandidateFacts::new(Some(0), 0, 1000).with_revision_policy(Some("group"), ignore);
+        assert_eq!(
+            evaluate_admission(&subject, candidate, &policy()).is_admitted(),
+            ignore
+        );
+        assert_eq!(
+            evaluate_admission(&subject, candidate, &AdmissionPolicy::not_a_downgrade())
+                .is_admitted(),
+            ignore
+        );
+    }
+    let subject = occupied(&[Some("group")], 2);
+    let disabled = AdmissionPolicy {
+        allow_upgrades: false,
+        cutoff_score: Some(900),
+        ..policy()
+    };
+    for ignore in [false, true] {
+        let candidate =
+            CandidateFacts::new(Some(0), 3, 100).with_revision_policy(Some("group"), ignore);
+        assert_eq!(
+            evaluate_admission(&subject, candidate, &disabled).is_admitted(),
+            !ignore
+        );
+    }
+}
+
+#[test]
+fn revision_pack_rank_requires_every_incumbent_to_be_related() {
+    let candidate =
+        CandidateFacts::new(Some(0), 3, 1000).with_revision_policy(Some("group"), false);
+    for groups in [
+        vec![Some("group"), Some("other")],
+        vec![Some("group"), None],
+    ] {
+        let subject = occupied(&groups, 2);
+        assert_eq!(revision_preference(candidate, &subject), 0);
+        assert!(evaluate_admission(&subject, candidate, &policy()).is_admitted());
+    }
+    assert_eq!(
+        revision_preference(candidate, &occupied(&[Some("group"), Some("GROUP")], 2)),
+        3
+    );
+    assert_eq!(
+        revision_preference(candidate, &occupied(&[Some("group")], 4)),
+        0
+    );
+    assert_eq!(revision_preference(candidate, &occupied(&[], 0)), 0);
+    assert!(
+        !evaluate_admission(
+            &occupied(&[Some("group")], 2),
+            CandidateFacts::new(Some(1), 9, 10000).with_revision_policy(Some("group"), false),
+            &policy()
         )
-    }
+        .is_admitted()
+    );
+}
 
-    fn empty() -> AdmissionSubject {
-        AdmissionSubject::new(AdmissionScope::Episodes(vec!["ep-01".to_string()]), [])
+#[test]
+fn revision_queue_comparison_uses_the_profile_policy() {
+    let subject = occupied(&[], 0).with_queued(vec![crate::admission::QueuedRelease {
+        title: "Show.S01E01.1080p.REPACK2-GROUP".into(),
+        covers: vec!["ep-1".into(), "ep-2".into()],
+        tier_index: Some(0),
+        revision: 2,
+        release_group: Some("group".into()),
+        score: 900,
+        release_key: None,
+    }]);
+    for (revision, score, group, ignore, admitted) in [
+        (3, 100, Some("GROUP"), false, true),
+        (1, 1000, Some("group"), false, false),
+        (0, 1000, Some("group"), true, true),
+        (3, 100, Some("group"), true, false),
+        (0, 1000, Some("other"), false, true),
+        (0, 1000, None, false, true),
+    ] {
+        let candidate =
+            CandidateFacts::new(Some(0), revision, score).with_revision_policy(group, ignore);
+        assert_eq!(
+            evaluate_admission(&subject, candidate, &policy()).is_admitted(),
+            admitted
+        );
     }
+}
 
-    /// The repack the group itself published, over its own encode. That is the
-    /// one case the rule lets through.
-    #[test]
-    fn a_repack_from_the_same_group_is_allowed() {
-        let candidate = candidate("Show.S01E01.1080p.WEB-DL.REPACK-GRP");
-        assert!(!repack_group_mismatch(
-            &candidate,
-            CandidateFacts::new(Some(1), 1, 900),
-            &occupied(Some(1), 0, Some("grp")),
-        ));
-    }
-
-    /// …and the defect it exists to stop: another group's fix for problems this
-    /// library does not have.
-    #[test]
-    fn a_same_tier_repack_from_another_group_is_skipped() {
-        let candidate = candidate("Show.S01E01.1080p.WEB-DL.REPACK-OTHER");
-        assert!(repack_group_mismatch(
-            &candidate,
-            CandidateFacts::new(Some(1), 1, 900),
-            &occupied(Some(1), 0, Some("grp")),
-        ));
-    }
-
-    /// A REPACK filling a **missing** episode is just a release. Sonarr only
-    /// enters the group comparison inside `IsRevisionUpgrade`, so an unoccupied
-    /// scope never reaches it — and the old rule refused an unparsed-group
-    /// repack here before it ever looked for an existing file.
-    #[test]
-    fn a_repack_filling_a_missing_episode_is_never_skipped() {
-        for release in [
-            "Show.S01E01.1080p.WEB-DL.REPACK-GRP",
-            // No parseable group at all: still fine, there is nothing to fix.
-            "Show.S01E01.1080p.WEB-DL.REPACK",
-        ] {
-            assert!(
-                !repack_group_mismatch(
-                    &candidate(release),
-                    CandidateFacts::new(Some(1), 1, 900),
-                    &empty(),
-                ),
-                "`{release}` had nothing to be a false upgrade over"
-            );
-        }
-    }
-
-    /// A repack of a **better tier** is a quality upgrade that happens to carry
-    /// the token. Sonarr's rule is scoped to same-quality revision upgrades, so
-    /// the group never enters into it.
-    #[test]
-    fn a_cross_tier_repack_is_allowed_whatever_the_groups_say() {
-        let candidate = candidate("Show.S01E01.2160p.WEB-DL.REPACK-OTHER");
-        assert!(!repack_group_mismatch(
-            &candidate,
-            CandidateFacts::new(Some(0), 1, 900),
-            &occupied(Some(1), 0, Some("grp")),
-        ));
-    }
-
-    /// Not a revision upgrade — the file on disk is already a repack — so the
-    /// candidate is judged on score like anything else, not on its group.
-    #[test]
-    fn a_repack_that_is_not_a_revision_upgrade_is_left_to_the_score() {
-        let candidate = candidate("Show.S01E01.1080p.WEB-DL.REPACK-OTHER");
-        assert!(!repack_group_mismatch(
-            &candidate,
-            CandidateFacts::new(Some(1), 1, 900),
-            &occupied(Some(1), 1, Some("grp")),
-        ));
-    }
-
-    /// An unknown group on either side is a mismatch: the one fact that would
-    /// make the repack legitimate cannot be established.
-    #[test]
-    fn an_unknown_group_on_either_side_is_a_mismatch() {
-        // Incumbent's group unknown.
-        assert!(repack_group_mismatch(
-            &candidate("Show.S01E01.1080p.WEB-DL.REPACK-GRP"),
-            CandidateFacts::new(Some(1), 1, 900),
-            &occupied(Some(1), 0, None),
-        ));
-        // Candidate's group unknown.
-        assert!(repack_group_mismatch(
-            &candidate("Show.S01E01.1080p.WEB-DL.REPACK"),
-            CandidateFacts::new(Some(1), 1, 900),
-            &occupied(Some(1), 0, Some("grp")),
-        ));
-    }
-
-    /// A release that is not a repack never reaches the rule, whatever else is
-    /// true of it.
-    #[test]
-    fn a_plain_release_is_not_a_repack() {
-        assert!(!repack_group_mismatch(
-            &candidate("Show.S01E01.1080p.WEB-DL-OTHER"),
-            CandidateFacts::new(Some(1), 0, 900),
-            &occupied(Some(1), 0, Some("grp")),
-        ));
-    }
-
-    /// Both sides unlisted is "same tier" for this rule, exactly as
-    /// `admission::tier_cmp` reads it.
-    #[test]
-    fn two_unlisted_qualities_count_as_the_same_tier() {
-        assert_eq!(tier_sort_key(None), usize::MAX);
-        assert!(repack_group_mismatch(
-            &candidate("Show.S01E01.REPACK-OTHER"),
-            CandidateFacts::new(None, 1, 900),
-            &occupied(None, 0, Some("grp")),
-        ));
-    }
+#[test]
+fn revision_mixed_pack_can_fill_missing_members_without_ranking_priority() {
+    let subject = occupied(&[Some("other")], 3).per_member();
+    let candidate = CandidateFacts::new(Some(0), 1, 100).with_revision_policy(Some("group"), false);
+    assert!(evaluate_admission(&subject, candidate, &policy()).is_admitted());
+    assert_eq!(revision_preference(candidate, &subject), 0);
+    assert!(
+        evaluate_admission(&subject, candidate, &policy())
+            .superseded()
+            .is_empty()
+    );
 }

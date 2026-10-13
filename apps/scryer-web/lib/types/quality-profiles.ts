@@ -42,6 +42,7 @@ export type QualityProfileCriteriaPayload = {
   prefer_remux: boolean;
   allow_bd_disk: boolean;
   allow_upgrades: boolean;
+  ignore_proper_repack: boolean;
   scoring_overrides: ScoringOverridesPayload;
   cutoff_tier: string | null;
   min_score_to_grab: number | null;
@@ -73,6 +74,7 @@ export type QualityProfileGraphCriteriaPayload = {
   preferRemux: boolean;
   allowBdDisk: boolean;
   allowUpgrades: boolean;
+  ignoreProperRepack: boolean;
   scoringOverrides: ScoringOverridesPayload;
   cutoffTier: string | null;
   minScoreToGrab: number | null;
@@ -114,6 +116,7 @@ export type QualityProfileDraft = {
   prefer_remux: boolean;
   allow_bd_disk: boolean;
   allow_upgrades: boolean;
+  ignore_proper_repack: boolean;
   scoring_overrides: ScoringOverridesPayload;
   cutoff_tier: string;
   min_score_to_grab: number | null;

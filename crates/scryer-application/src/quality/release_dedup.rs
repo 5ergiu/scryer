@@ -81,7 +81,9 @@ pub fn build_release_dedup_key(parsed: &ParsedReleaseMetadata) -> String {
     let dual = if parsed.is_dual_audio { "dual" } else { "" };
     let edition = parsed.edition.as_deref().unwrap_or("").to_ascii_lowercase();
 
-    let base = format!("{group}|{episode_key}|{quality}|{codec}|{proper}|{dual}|{edition}");
+    let revision = crate::acquisition::scoring::revision_rank(parsed);
+    let base =
+        format!("{group}|{episode_key}|{quality}|{codec}|{proper}:{revision}|{dual}|{edition}");
     // Preserve the legacy key when no technical presentation was asserted.
     let Some(stereo) = parsed.stereoscopy else {
         return base;
@@ -147,6 +149,20 @@ mod season_pack_key_tests {
             episodes: Vec::new(),
         };
         build_release_dedup_key(&crate::parse_release_metadata_for_target(release, &context))
+    }
+
+    #[test]
+    fn numbered_revision_candidates_keep_distinct_keys() {
+        let mut keys = std::collections::HashSet::new();
+        for marker in ["", "REPACK.", "REPACK2.", "REPACK3.", "REPACK17."] {
+            assert!(keys.insert(key(&format!(
+                "Glass.Harbor.S02.1080p.WEB-DL.{marker}H.264-QUILLFOX"
+            ))));
+        }
+        assert_eq!(
+            key("Glass.Harbor.S02.1080p.WEB-DL.REPACK2.H.264-QUILLFOX"),
+            key("Glass.Harbor.S02.1080p.WEB-DL.REAL.REPACK.H.264-QUILLFOX")
+        );
     }
 
     #[test]

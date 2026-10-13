@@ -250,6 +250,7 @@ pub fn from_quality_profile_criteria(
         prefer_remux: criteria.prefer_remux,
         allow_bd_disk: criteria.allow_bd_disk,
         allow_upgrades: criteria.allow_upgrades,
+        ignore_proper_repack: criteria.ignore_proper_repack,
         scoring_overrides: from_scoring_overrides(criteria.scoring_overrides),
         cutoff_tier: criteria.cutoff_tier,
         min_score_to_grab: criteria.min_score_to_grab,

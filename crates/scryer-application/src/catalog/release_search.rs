@@ -1372,8 +1372,7 @@ impl AppUseCase {
                             || numbering_ambiguous
                             || !protocol_enabled,
                         tier_index: decision.tier_index.unwrap_or(usize::MAX),
-                        negated_revision: -(i32::from(scored_release_metadata.is_proper_upload)
-                            + i32::from(scored_release_metadata.is_repack)),
+                        negated_revision: 0,
                         negated_score: decision.preference_score.saturating_neg(),
                         size_fit_penalty: decision.size_fit_penalty,
                     },

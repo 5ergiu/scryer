@@ -1209,7 +1209,9 @@ fn classify_token(
             strong_anchor: false,
         });
     }
-    if is_release_flag_metadata_token(normalized) {
+    if is_release_flag_metadata_token(normalized)
+        || crate::enrichment::parse_revision_token(normalized).is_some()
+    {
         roles.push(RoleCandidate {
             role: TokenRole::ReleaseFlag,
             confidence: 86,
@@ -4773,6 +4775,7 @@ fn build_candidate(
         fps: None,
         is_proper_upload: false,
         is_repack: false,
+        revision: 0,
         is_remux,
         is_bd_disk: false,
         is_ai_enhanced: false,

@@ -444,7 +444,7 @@ pub(crate) fn compute_search_fingerprint(
     langs.sort();
     langs.dedup();
     let canonical = format!(
-        "v4;profile={};version={};audio={};match={}",
+        "v5;profile={};version={};audio={};match={}",
         profile_id.trim(),
         profile_version.trim(),
         langs.join(","),

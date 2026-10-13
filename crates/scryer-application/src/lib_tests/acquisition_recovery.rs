@@ -4084,6 +4084,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
                             preference_score: 100,
                             tier_index: Some(0),
                             size_fit_penalty: 0,
+                            revision_preference: 0,
                         },
                     ),
                     extra: Default::default(),
@@ -7792,10 +7793,10 @@ async fn a_cycle_with_nothing_due_and_nothing_pending_does_no_work() {
 
 #[tokio::test]
 async fn scheduled_rss_fetches_before_deciding_due_pending_releases() {
-    let pending_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
-    // A strictly better revision makes the fresh winner deterministic. Equal
+    let pending_title = "Scheduled.Pending.Movie.2024.720p.WEB-DL-GRP";
+    // A higher quality tier makes the fresh winner deterministic. Equal
     // releases may legitimately select the durable pending row as the winner.
-    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL.REPACK-GRP";
+    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
@@ -12011,6 +12012,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                                 preference_score: 100,
                                 tier_index: Some(0),
                                 size_fit_penalty: 0,
+                                revision_preference: 0,
                             },
                         ),
                         extra: Default::default(),
