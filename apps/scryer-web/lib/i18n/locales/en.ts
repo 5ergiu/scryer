@@ -1828,6 +1828,7 @@ const en: LocaleDictionary = {
   "queue.assignTitlePlaceholder": "Search titles...",
   "queue.assignTitleResults": "Matching titles",
   "queue.assignTitleEmpty": "No matching titles found.",
+  "queue.assignTitleSearchHint": "Type a title name to search…",
   "queue.assignTitleQueued": "Title assigned. Import will be re-evaluated.",
   "queue.assignTitleFailed": "Failed to assign title.",
   "queue.assignTitleBeforeImport":
