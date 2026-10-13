@@ -403,6 +403,67 @@ fn runtime_sample_rejection(
     None
 }
 
+/// Runtime is authoritative when available from the catalog. Without that
+/// expectation, use the file's own duration and the shared codec/resolution
+/// bitrate floor instead of a fixed byte threshold for episodic media.
+#[cfg(any(feature = "runtime-media-analysis", test))]
+fn sample_rejection(
+    validation: RuntimeSampleValidation,
+    facet: &MediaFacet,
+    parsed_from_probe: &crate::ParsedReleaseMetadata,
+    size_bytes: i64,
+    actual_runtime_seconds: Option<i32>,
+) -> Option<ImportedFileRejection> {
+    // Treat nonpositive catalog durations as unavailable metadata.
+    let validation = RuntimeSampleValidation {
+        expected_runtime_seconds: validation
+            .expected_runtime_seconds
+            .filter(|seconds| *seconds > 0),
+        ..validation
+    };
+    if let Some(rejection) = runtime_sample_rejection(validation, actual_runtime_seconds) {
+        return Some(rejection);
+    }
+    if validation.mode == RuntimeSampleValidationMode::BypassRuntimeSampleCheck
+        || *facet == MediaFacet::Movie
+    {
+        return None;
+    }
+    let actual = actual_runtime_seconds.filter(|seconds| *seconds > 0)?;
+    if let Some(expected) = validation.expected_runtime_seconds {
+        // The general runtime gate already enforces this band at five minutes
+        // and up. Short episodes need the same comparison without the fixed
+        // 90-second sample floor used for conventional television runtimes.
+        if expected < MIN_EXPECTED_RUNTIME_FOR_SAMPLE_RATIO_SECONDS
+            && (actual < expected.saturating_mul(RUNTIME_BAND_MIN_PERCENT) / 100
+                || actual > expected.saturating_mul(RUNTIME_BAND_MAX_PERCENT) / 100)
+        {
+            return Some(imported_runtime_sample_rejection(
+                RUNTIME_OUT_OF_BAND_CODE,
+                format!(
+                    "episode runtime is outside expectations: expected {}, probed file is {}",
+                    runtime_clock(expected),
+                    runtime_clock(actual)
+                ),
+            ));
+        }
+        return None;
+    }
+
+    let minimum = crate::quality_profile::minimum_plausible_bitrate_mbps(parsed_from_probe)?;
+    let actual_mbps = size_bytes as f64 * 8.0 / 1_000_000.0 / f64::from(actual);
+    if actual_mbps < minimum {
+        return Some(imported_runtime_sample_rejection(
+            "sample_size_implausible_for_runtime",
+            format!(
+                "episode file size is implausible for its probed codec and duration: {size_bytes} bytes over {} ({actual_mbps:.3} Mbps; minimum {minimum:.3} Mbps); catalog runtime is unavailable",
+                runtime_clock(actual)
+            ),
+        ));
+    }
+    None
+}
+
 #[cfg(any(feature = "runtime-media-analysis", test))]
 fn imported_runtime_sample_rejection(code: &'static str, message: String) -> ImportedFileRejection {
     ImportedFileRejection {
@@ -895,14 +956,26 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         });
     }
 
+    let accepted_analysis = build_media_file_analysis(&analysis);
+    let (parsed_from_probe, _) = rescore_parsed_from_analysis(parsed, Some(&accepted_analysis));
     if analysis
         .details
         .disc
         .as_ref()
         .is_none_or(|disc| disc.selection.episode_mappings.is_empty())
-        && let Some(rejection) =
-            runtime_sample_rejection(runtime_sample_validation, analysis.duration_seconds)
+        && let Some(rejection) = sample_rejection(
+            runtime_sample_validation,
+            &title.facet,
+            &parsed_from_probe,
+            size_bytes,
+            analysis.duration_seconds,
+        )
     {
+        warn!(
+            path = %path.display(),
+            reason = %rejection.message,
+            "automatic import rejected by sample validation"
+        );
         return ImportedFileGateDecision::Rejected(rejection);
     }
 
@@ -918,7 +991,6 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         Vec::new()
     });
 
-    let accepted_analysis = build_media_file_analysis(&analysis);
     let mut scoring_analyses = accepted_analysis
         .details
         .disc
@@ -3025,6 +3097,138 @@ mod tests {
         assert!(rejection.message.contains("Rule 2 (rule_2)"));
         assert!(!rejection.message.contains("Rule 3 (rule_3)"));
         assert!(rejection.message.contains("3 more rule(s) failed"));
+    }
+
+    #[test]
+    fn small_episode_sample_gate_accepts_expected_runtime_regardless_of_size() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            let parsed = crate::release_parser::parse_release_metadata(
+                "Short.Show.S01E01.1080p.WEB-DL.H264-GRP",
+            );
+            for (size, expected) in [
+                (15_000_000, 360),
+                (38_690_608, 360),
+                (43_320_725, 360),
+                (1_000_000, 30),
+            ] {
+                assert!(
+                    sample_rejection(
+                        automatic(Some(expected)),
+                        &facet,
+                        &parsed,
+                        size,
+                        Some(expected)
+                    )
+                    .is_none()
+                );
+            }
+            // Both endpoints of the established runtime band remain eligible.
+            for actual in [180, 720] {
+                assert!(
+                    sample_rejection(
+                        automatic(Some(360)),
+                        &facet,
+                        &parsed,
+                        15_000_000,
+                        Some(actual)
+                    )
+                    .is_none()
+                );
+            }
+            for actual in [20, 179, 721] {
+                let rejection = sample_rejection(
+                    automatic(Some(360)),
+                    &facet,
+                    &parsed,
+                    15_000_000,
+                    Some(actual),
+                )
+                .expect("outside runtime expectations");
+                assert!(rejection.message.contains("runtime"));
+            }
+            // The same six-minute file cannot fill a normal 24-minute episode.
+            assert!(
+                sample_rejection(
+                    automatic(Some(1440)),
+                    &facet,
+                    &parsed,
+                    15_000_000,
+                    Some(360)
+                )
+                .is_some()
+            );
+            assert!(
+                sample_rejection(automatic(Some(180)), &facet, &parsed, 15_000_000, Some(60))
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn episode_sample_gate_without_catalog_runtime_uses_codec_and_probed_duration() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            for codec in ["H264", "H265", "AV1"] {
+                let parsed = crate::release_parser::parse_release_metadata(&format!(
+                    "Short.Show.S01E01.1080p.WEB-DL.{codec}-GRP"
+                ));
+                assert!(
+                    sample_rejection(automatic(None), &facet, &parsed, 15_000_000, Some(360))
+                        .is_none()
+                );
+                let rejection =
+                    sample_rejection(automatic(None), &facet, &parsed, 10_000, Some(360))
+                        .expect("implausible bitrate");
+                assert_eq!(
+                    rejection.recycle_reason,
+                    "sample_size_implausible_for_runtime"
+                );
+                assert!(rejection.message.contains("catalog runtime is unavailable"));
+                for duration in [None, Some(0), Some(20)] {
+                    assert!(
+                        sample_rejection(automatic(None), &facet, &parsed, 15_000_000, duration)
+                            .is_some()
+                    );
+                }
+            }
+            let av1 = crate::release_parser::parse_release_metadata("Show.S01E01.1080p.AV1-GRP");
+            let h264 = crate::release_parser::parse_release_metadata("Show.S01E01.1080p.H264-GRP");
+            assert!(
+                sample_rejection(automatic(None), &facet, &av1, 5_000_000, Some(360)).is_none()
+            );
+            assert!(
+                sample_rejection(automatic(None), &facet, &h264, 5_000_000, Some(360)).is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn episode_sample_gate_preserves_manual_override_and_movie_size_policy() {
+        let parsed = crate::release_parser::parse_release_metadata("Show.S01E01.1080p.H264-GRP");
+        assert!(sample_rejection(manual(None), &MediaFacet::Series, &parsed, 10, None).is_none());
+        assert!(
+            sample_rejection(automatic(None), &MediaFacet::Movie, &parsed, 10, Some(360)).is_none()
+        );
+        let unknown = crate::release_parser::parse_release_metadata("Show.S01E01-GRP");
+        assert!(
+            sample_rejection(
+                automatic(None),
+                &MediaFacet::Series,
+                &unknown,
+                10,
+                Some(360)
+            )
+            .is_none()
+        );
+        assert!(
+            sample_rejection(
+                automatic(Some(0)),
+                &MediaFacet::Series,
+                &parsed,
+                15_000_000,
+                Some(20)
+            )
+            .is_some()
+        );
     }
 
     #[test]
