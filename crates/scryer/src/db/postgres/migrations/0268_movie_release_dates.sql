@@ -1,1 +1,0 @@
-ALTER TABLE titles ADD COLUMN movie_release_dates_json TEXT;

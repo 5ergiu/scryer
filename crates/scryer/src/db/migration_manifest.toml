@@ -2767,19 +2767,19 @@ engine = "postgres"
 scope = "all"
 
 [[migration]]
-version = 268
+version = 290
 description = "movie release dates"
 checksum_algo = "blake3"
 
 [[migration.steps]]
 kind = "sql"
-file = "migrations/0268_movie_release_dates.sql"
+file = "migrations/0290_movie_release_dates.sql"
 engine = "sqlite"
 scope = "all"
 
 [[migration.steps]]
 kind = "sql"
-file = "postgres/migrations/0268_movie_release_dates.sql"
+file = "postgres/migrations/0290_movie_release_dates.sql"
 engine = "postgres"
 scope = "all"
 
