@@ -318,6 +318,10 @@ pub(super) async fn run_library_scan_pipeline(
     let mut candidates: HashMap<ScanCandidateKey, CandidateRuntime> = HashMap::new();
     let mut early_inventory: HashMap<ScanCandidateKey, CandidateInventoryState> = HashMap::new();
     let mut forward_queue: VecDeque<(ScanCandidateKey, ScanPipelineCandidate)> = VecDeque::new();
+    // Paths this scan recorded as ignored before they became candidates
+    // (refused title boundaries, unusable evidence). Reconcile must keep
+    // their rows, so they count as seen alongside the candidates.
+    let mut ignored_paths: HashSet<String> = HashSet::new();
     let mut match_input_tx = Some(match_input_tx);
     let mut evidence_done = false;
     let mut inventory_done = false;
@@ -391,6 +395,7 @@ pub(super) async fn run_library_scan_pipeline(
                             candidates: &mut candidates,
                             early_inventory: &mut early_inventory,
                             forward_queue: &mut forward_queue,
+                            ignored_paths: &mut ignored_paths,
                             discovery_error: &mut discovery_error,
                         }, event).await {
                             discovery_error = Some(error);
@@ -631,6 +636,7 @@ pub(super) async fn run_library_scan_pipeline(
                         candidates: &mut candidates,
                         early_inventory: &mut early_inventory,
                         forward_queue: &mut forward_queue,
+                        ignored_paths: &mut ignored_paths,
                         discovery_error: &mut discovery_error,
                     },
                     event,
@@ -830,6 +836,7 @@ pub(super) async fn run_library_scan_pipeline(
 
         if !canceled {
             let mut seen_paths = report.seen_paths;
+            seen_paths.extend(ignored_paths);
             for runtime in candidates.values() {
                 let trimmed = runtime.item_path.trim();
                 if !trimmed.is_empty() {
@@ -978,6 +985,7 @@ struct CandidateEventContext<'a> {
     candidates: &'a mut HashMap<ScanCandidateKey, CandidateRuntime>,
     early_inventory: &'a mut HashMap<ScanCandidateKey, CandidateInventoryState>,
     forward_queue: &'a mut VecDeque<(ScanCandidateKey, ScanPipelineCandidate)>,
+    ignored_paths: &'a mut HashSet<String>,
     discovery_error: &'a mut Option<AppError>,
 }
 
@@ -1058,6 +1066,11 @@ async fn handle_candidate_job_event(
                     error = %persist_error,
                     "failed to persist ignored library scan evidence failure"
                 );
+            } else {
+                let normalized = normalize_library_scan_item_path(&item_path);
+                if !normalized.is_empty() {
+                    ctx.ignored_paths.insert(normalized);
+                }
             }
             ctx.summary.scanned += 1;
             ctx.summary.skipped += 1;
