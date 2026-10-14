@@ -69,9 +69,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TrackPopupMenu, TranslateMessage, WM_CLOSE, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP,
-    WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 // The window class and message ids are shared with scryer.exe, which posts
@@ -82,9 +82,10 @@ use super::tray_ipc::{
 };
 
 use super::shared::{
-    self, DEFAULT_PORT, PopoverContent, PopoverRow, SMOKE_SUCCESS_LINE, SMOKE_TIMEOUT,
-    ServerSupervisor,
+    self, DEFAULT_PORT, INSTALLED_EXECUTABLES, PopoverContent, PopoverRow, SMOKE_SUCCESS_LINE,
+    SMOKE_TIMEOUT, ServerSupervisor,
 };
+use application_updater::windows_process::{StopPolicy, stop_product_processes};
 // The "start Scryer when I sign in" registration is shared verbatim with the
 // MSI upgrade helper, which has to observe and restore it around a major
 // upgrade. The tray owns the preference; it does not own a second copy of the
@@ -105,6 +106,27 @@ const FLYOUT_WINDOW_CLASS: &str = "ScryerMedia.Scryer.Desktop.v1.Flyout";
 /// How long the tray waits for a server that asked to be restarted to
 /// actually exit before it stops waiting and kills the child.
 const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long `--shutdown` waits for a running tray to stop itself (its own
+/// server's graceful stop takes up to ten seconds of this), and how it stops
+/// whatever is still running from the installation afterwards. Together with
+/// finding the tray's window they keep `--shutdown` near twenty seconds at
+/// worst, well inside what an installer waits on a custom action.
+const SHUTDOWN_TRAY_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
+const SHUTDOWN_STOP_POLICY: StopPolicy = StopPolicy {
+    ask_attempts: 8,
+    ask_interval: Duration::from_millis(500),
+    terminate_wait: Duration::from_secs(2),
+};
+
+/// How the tray stops a server it did not start when it exits. Short, because
+/// it runs after the tray's own server has been given its graceful stop, and
+/// because `--shutdown` is waiting on this tray while it runs.
+const EXIT_STOP_POLICY: StopPolicy = StopPolicy {
+    ask_attempts: 4,
+    ask_interval: Duration::from_millis(500),
+    terminate_wait: Duration::from_secs(1),
+};
 
 /// The app window's default size, and the smallest window WebView2 is asked to
 /// lay the UI out in. These are logical (96-DPI) pixels; `create_app_window`
@@ -208,11 +230,17 @@ pub(super) fn run() -> Result<(), String> {
 
     let instance = InstanceGuard::acquire()?;
     if !instance.is_primary() {
-        // FindWindowW is session-local. A same-session invocation opens the existing
-        // window; a second session for the same user simply leaves the owner alone.
-        let _ = signal_existing_instance(OPEN_WINDOW_MESSAGE);
+        // A login start (the Run key, or Restart Manager relaunching the tray
+        // after an install) is not a request to see the window; only a user's
+        // own launch is. FindWindowW is session-local. A same-session
+        // invocation opens the existing window; a second session for the same
+        // user simply leaves the owner alone.
+        if !matches!(launch_mode()?, LaunchMode::Login) {
+            let _ = signal_existing_instance(OPEN_WINDOW_MESSAGE);
+        }
         return Ok(());
     }
+    register_for_restart();
 
     let profile_dir = shared::desktop_profile_dir()?;
     let supervisor = ServerSupervisor::new(profile_dir, DEFAULT_PORT);
@@ -428,15 +456,68 @@ fn signal_existing_instance(message: u32) -> Result<(), String> {
     Err("another Scryer tray instance is starting but did not create its window".to_string())
 }
 
+/// Ask Restart Manager to relaunch the tray as a login start after it closes
+/// the tray for an install. Crash, hang and reboot restarts are excluded: the
+/// Run key already starts the tray at sign-in, and a crash loop must not be
+/// automated. Failure only costs the relaunch, so it is ignored.
+fn register_for_restart() {
+    use windows_sys::Win32::System::Recovery::{
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_REBOOT, RegisterApplicationRestart,
+    };
+
+    let command_line = wide("--login-start");
+    // SAFETY: The command line is a NUL-terminated UTF-16 buffer that outlives the call.
+    unsafe {
+        RegisterApplicationRestart(
+            command_line.as_ptr(),
+            RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT,
+        )
+    };
+}
+
+/// `--shutdown`: stop this installation's Scryer entirely, for an installer
+/// that is about to replace its files.
+///
+/// The running tray is asked first, because it stops the server it owns
+/// gracefully. Then every `scryer.exe` and `scryer-tray.exe` still running
+/// from this installation — a server the tray adopted, one orphaned by a tray
+/// that was killed, or a tray that did not exit — is asked to stop and
+/// terminated if it does not. Succeeds only when nothing is left running.
 fn shutdown_existing_instance() -> Result<(), String> {
+    let tray_result = stop_running_tray();
+    let install_dir = shared::installation_dir()?;
+    let report = stop_product_processes(
+        &INSTALLED_EXECUTABLES,
+        &install_dir,
+        &[std::process::id()],
+        SHUTDOWN_STOP_POLICY,
+    );
+    if !report.all_stopped() {
+        return Err(format!(
+            "Scryer processes {:?} in {} are still running after being asked to stop and terminated",
+            report.remaining,
+            install_dir.display()
+        ));
+    }
+    // A tray that timed out but was then terminated has stopped; the
+    // installation is free either way.
+    if let Err(error) = tray_result {
+        eprintln!("Scryer: {error}; it was stopped directly");
+    }
+    Ok(())
+}
+
+/// Ask the running tray of this user, if any, to exit, and wait for it.
+fn stop_running_tray() -> Result<(), String> {
     let instance = InstanceGuard::acquire()?;
     if instance.is_primary() {
         return Ok(());
     }
+    drop(instance);
     signal_existing_instance(SHUTDOWN_MESSAGE)?;
 
     let class_name = wide(CLASS_NAME);
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + SHUTDOWN_TRAY_EXIT_TIMEOUT;
     while Instant::now() < deadline {
         // SAFETY: The class name is a valid nul-terminated UTF-16 string.
         if unsafe { FindWindowW(class_name.as_ptr(), ptr::null()) }.is_null() {
@@ -1111,6 +1192,10 @@ impl TrayState {
         // SAFETY: The icon belongs to this window and is being removed during teardown.
         unsafe { self.remove_icon(window) };
         let _ = self.supervisor.stop();
+        // A server the tray adopted rather than started is still Scryer
+        // running from this installation, and leaving it behind is what kept
+        // the installed executables locked after "closing" Scryer.
+        let _ = self.supervisor.stop_unowned_servers(EXIT_STOP_POLICY);
     }
 }
 
@@ -1153,6 +1238,21 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: This is the live window associated with the tray state.
                 unsafe { DestroyWindow(window) };
                 Ok(())
+            }
+            // Restart Manager (an installer replacing these files) and a
+            // sign-out both ask first; the tray never objects.
+            WM_QUERYENDSESSION => return 1,
+            // `wparam` is nonzero when the session really ends, or when
+            // Restart Manager closes the tray (`ENDSESSION_CLOSEAPP` in
+            // `lparam`). Either way the tray stops its server and exits now:
+            // the process may be ended as soon as this returns.
+            WM_ENDSESSION => {
+                if wparam != 0 {
+                    // SAFETY: This is the live window associated with the
+                    // tray state; WM_DESTROY runs the teardown synchronously.
+                    unsafe { DestroyWindow(window) };
+                }
+                return 0;
             }
             WM_DESTROY => {
                 // SAFETY: The tray owns every handle released here.

@@ -123,7 +123,12 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_System_Registry",
+  # The tray's kill-on-close job object around the server it starts.
+  "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",
+  # `RegisterApplicationRestart`, so Restart Manager relaunches the tray after
+  # an installer closed it.
+  "Win32_System_Recovery",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_Graphics_Dwm",
