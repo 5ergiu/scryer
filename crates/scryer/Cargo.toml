@@ -18,7 +18,7 @@ e2e-harness = []
 jemalloc-prof = []
 
 [dependencies]
-application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "4fc9a4bce9e683c812249cb056990f01a823d353" }
+application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "e55801ce7f66c744667d4fe27dd12432a4697f33" }
 scryer-application = { path = "../scryer-application", features = ["runtime"] }
 scryer-domain = { path = "../scryer-domain" }
 scryer-interface = { path = "../scryer-interface" }
@@ -123,6 +123,8 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_System_Registry",
+  # `SetConsoleCtrlHandler`, to clear an inherited ignore-Ctrl+C flag.
+  "Win32_System_Console",
   # The tray's kill-on-close job object around the server it starts.
   "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",

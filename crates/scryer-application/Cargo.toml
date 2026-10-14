@@ -27,7 +27,7 @@ runtime-plugin-trust = [
 ]
 
 [dependencies]
-application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "4fc9a4bce9e683c812249cb056990f01a823d353" }
+application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "e55801ce7f66c744667d4fe27dd12432a4697f33" }
 # `application-updater` always builds the Sigstore verifier; `runtime-plugin-trust`
 # adds the plugin paths that use it.
 artifact-trust = { git = "https://github.com/scryer-media/artifact-trust.git", tag = "v0.1.2", default-features = false }
@@ -85,7 +85,7 @@ libc = "0.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
-application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "4fc9a4bce9e683c812249cb056990f01a823d353", features = ["test-seams"] }
+application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "e55801ce7f66c744667d4fe27dd12432a4697f33", features = ["test-seams"] }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 # Fixed IANA zones so schedule tests can exercise daylight-saving transitions

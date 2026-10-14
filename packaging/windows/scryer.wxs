@@ -100,21 +100,25 @@
          forced stop below existed only stop the tray itself, so a server nobody owns (orphaned
          by a killed tray or an interrupted upgrade, or started by hand) keeps scryer.exe locked
          and InstallValidate still finds files in use. Once the graceful stop has had its turn,
-         force-stop whatever Scryer processes remain, by image name, so the upgrade never
-         depends on code it is replacing. taskkill exits 128 when nothing matched, so failures
-         are ignored. The upgrade helper runs as scryer-upgrade-helper.exe and is not matched,
-         and no tree kill is requested, so an in-app upgrade keeps its helper. This must run
-         immediately before InstallValidate, which precedes InstallInitialize, so it cannot be
-         deferred; it runs with the installing user's token. -->
-    <SetProperty Id="FORCESTOPTASKKILLEXE"
-                 Value="[System64Folder]taskkill.exe"
+         force-stop the scryer.exe and scryer-tray.exe processes that remain, so the upgrade
+         never depends on code it is replacing. The stop is scoped to executables inside the
+         installed folder, so a portable or development copy running elsewhere survives; a
+         process whose path cannot be read (another user's) is skipped and left to Restart
+         Manager. The folder is read into a variable outside the script block because MSI
+         formatting strips braces around a resolved property. Failures are ignored. There is
+         no tree kill and the upgrade helper runs as scryer-upgrade-helper.exe, which is not
+         in the name list, so an in-app upgrade keeps its helper. This must run immediately
+         before InstallValidate, which precedes InstallInitialize, so it cannot be deferred;
+         it runs with the installing user's token. -->
+    <SetProperty Id="FORCESTOPPOWERSHELLEXE"
+                 Value="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
                  Before="ForceStopScryerProcessesBeforeValidate"
                  Sequence="execute"
-                 Condition="WIX_UPGRADE_DETECTED" />
+                 Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER" />
     <CustomAction
         Id="ForceStopScryerProcessesBeforeValidate"
-        Property="FORCESTOPTASKKILLEXE"
-        ExeCommand="/F /IM scryer.exe /IM scryer-tray.exe"
+        Property="FORCESTOPPOWERSHELLEXE"
+        ExeCommand="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;$folder = '[INSTALLEDAPPLICATIONFOLDER]'; Get-Process scryer,scryer-tray -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($folder, 'OrdinalIgnoreCase') } | Stop-Process -Force&quot;"
         Execute="immediate"
         Return="ignore"
         Impersonate="yes" />
@@ -124,7 +128,7 @@
               Condition="WIX_UPGRADE_DETECTED AND INSTALLEDTRAYEXE" />
       <Custom Action="ForceStopScryerProcessesBeforeValidate"
               Before="InstallValidate"
-              Condition="WIX_UPGRADE_DETECTED AND FORCESTOPTASKKILLEXE" />
+              Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER AND FORCESTOPPOWERSHELLEXE" />
     </InstallExecuteSequence>
 
     <!-- These commands affect only the uninstalling user: their HKCU Run entry, the tray
