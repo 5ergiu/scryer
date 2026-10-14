@@ -1214,6 +1214,7 @@ pub struct TitleHistoryFilter {
     pub title_search: Option<String>,
     pub download_id: Option<String>,
     pub episode_id: Option<String>,
+    pub collection_id: Option<String>,
     pub group_by_event: bool,
     pub limit: usize,
     pub offset: usize,

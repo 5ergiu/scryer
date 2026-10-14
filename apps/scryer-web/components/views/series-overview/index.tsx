@@ -64,6 +64,7 @@ import {
 import {
   buildSeriesTimelineItems,
   sortDbCollections,
+  seasonHeading,
   findLatestSeasonKey,
   episodeSortValue,
   isSpecialsCollection,
@@ -322,6 +323,7 @@ function SeriesOverviewViewImpl({
     episodeId: string;
     episodeLabel: string;
   } | null>(null);
+  const [historyCollectionScope, setHistoryCollectionScope] = React.useState<{ titleId: string; collectionId: string; collectionLabel: string } | null>(null);
   const [episodePanel, dispatchEpisodePanel] = React.useReducer(episodePanelReducer, initialEpisodePanelState);
   const [searchBlockedByEpisode, setSearchBlockedByEpisode] = React.useState<Record<string, boolean>>({});
   const [searchBlockedByCollection, setSearchBlockedByCollection] = React.useState<Record<string, boolean>>({});
@@ -444,11 +446,13 @@ function SeriesOverviewViewImpl({
   }, [hasDownloadClients]);
 
   const handleOpenTitleHistory = React.useCallback(() => {
+    setHistoryCollectionScope(null);
     setHistoryEpisodeScope(null);
     setHistoryOpen(true);
   }, []);
 
   const handleOpenEpisodeHistory = React.useCallback((episode: CollectionEpisode) => {
+    setHistoryCollectionScope(null);
     setHistoryEpisodeScope({
       episodeId: episode.id,
       episodeLabel:
@@ -459,6 +463,12 @@ function SeriesOverviewViewImpl({
     });
     setHistoryOpen(true);
   }, []);
+
+  const handleOpenSeasonHistory = React.useCallback((collection: TitleCollection) => {
+    setHistoryEpisodeScope(null);
+    setHistoryCollectionScope({ titleId: collection.titleId, collectionId: collection.id, collectionLabel: seasonHeading(collection, t) });
+    setHistoryOpen(true);
+  }, [t]);
 
   const defaultExpandedRef = React.useRef(false);
   const lastDeepLinkedEpisodeIdRef = React.useRef<string | null>(null);
@@ -1414,6 +1424,7 @@ function SeriesOverviewViewImpl({
                     autoSearchLoadingByEpisode={episodePanel.autoSearchLoadingByEpisode}
                     onRunEpisodeSearch={canManageTitle ? handleRunEpisodeSearch : undefined}
                     onOpenEpisodeHistory={canManageTitle ? handleOpenEpisodeHistory : undefined}
+                    onOpenSeasonHistory={canManageTitle ? handleOpenSeasonHistory : undefined}
                     onQueueFromEpisodeSearch={canManageTitle ? handleQueueFromEpisodeSearch : undefined}
                     onQueueAdditionalFromEpisodeSearch={
                       canManageTitle ? handleQueueAdditionalFromEpisodeSearch : undefined
@@ -1482,9 +1493,10 @@ function SeriesOverviewViewImpl({
         <TitleHistoryModal
           open={historyOpen}
           onOpenChange={setHistoryOpen}
-          titleId={title.id}
+          titleId={historyCollectionScope?.titleId ?? title.id}
           titleName={title.name}
           scopedEpisode={historyEpisodeScope}
+          scopedCollection={historyCollectionScope}
         />
       ) : null}
       {replaceConflictDialog}

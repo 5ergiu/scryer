@@ -39,13 +39,16 @@ export function TitleHistoryModal({
   titleId,
   titleName,
   scopedEpisode,
+  scopedCollection,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   titleId: string;
   titleName: string;
   scopedEpisode?: ScopedEpisodeHistoryFilter | null;
+  scopedCollection?: { collectionId: string; collectionLabel: string } | null;
 }) {
+  const requestSequence = React.useRef(0);
   const client = useClient();
   const t = useTranslate();
   const [events, setEvents] = React.useState<TitleHistoryEvent[]>([]);
@@ -60,6 +63,8 @@ export function TitleHistoryModal({
     ? null
     : (scopedEpisode ?? null);
 
+  const activeCollection = scopedEpisodeDismissed ? null : scopedCollection;
+
   const fetchHistory = React.useCallback(
     async (
       eventTypes: string[],
@@ -67,6 +72,7 @@ export function TitleHistoryModal({
       append: boolean,
       episodeId?: string | null,
     ) => {
+      const sequence = ++requestSequence.current;
       setLoading(true);
       setError(null);
       try {
@@ -79,6 +85,7 @@ export function TitleHistoryModal({
                   : null,
               titleIds: [titleId],
               episodeId: episodeId ?? null,
+              collectionId: activeCollection?.collectionId ?? null,
               groupByEvent: episodeId == null,
               limit: PAGE_SIZE,
               offset: pageOffset,
@@ -86,6 +93,7 @@ export function TitleHistoryModal({
           }, { requestPolicy: "network-only" })
           .toPromise();
 
+        if (sequence !== requestSequence.current) return;
         if (result.error) {
           setError(
             userFacingGraphQlErrorMessage(
@@ -105,6 +113,7 @@ export function TitleHistoryModal({
           setError(t("history.loadError"));
         }
       } catch (requestError) {
+        if (sequence !== requestSequence.current) return;
         setError(
           userFacingGraphQlErrorMessage(
             requestError,
@@ -112,15 +121,15 @@ export function TitleHistoryModal({
           ),
         );
       } finally {
-        setLoading(false);
+        if (sequence === requestSequence.current) setLoading(false);
       }
     },
-    [client, t, titleId],
+    [client, t, titleId, activeCollection?.collectionId],
   );
 
   React.useEffect(() => {
     setScopedEpisodeDismissed(false);
-  }, [open, scopedEpisode?.episodeId]);
+  }, [open, scopedEpisode?.episodeId, scopedCollection?.collectionId]);
 
   React.useEffect(() => {
     if (open) {
@@ -133,6 +142,7 @@ export function TitleHistoryModal({
         activeScopedEpisode?.episodeId ?? null,
       );
     }
+    return () => { requestSequence.current += 1; };
   }, [open, activeFilters, activeScopedEpisode?.episodeId, fetchHistory]);
 
   const loadMore = React.useCallback(() => {
@@ -186,7 +196,7 @@ export function TitleHistoryModal({
           <DialogTitle>{titleName} — {t("history.title")}</DialogTitle>
         </DialogHeader>
 
-        {activeScopedEpisode ? (
+        {activeScopedEpisode || activeCollection ? (
           <div className="flex flex-wrap items-center gap-2 pb-2">
             <span className="text-xs text-muted-foreground">{t("label.filter")}</span>
             <Button
@@ -194,11 +204,11 @@ export function TitleHistoryModal({
               size="sm"
               variant="secondary"
               onClick={clearScopedEpisode}
-              aria-label={`${t("label.remove")} ${activeScopedEpisode.episodeLabel}`}
+              aria-label={`${t("label.remove")} ${(activeScopedEpisode?.episodeLabel ?? activeCollection?.collectionLabel)}`}
               className="h-7 gap-1.5 px-2 text-xs"
             >
               <span className="max-w-[32rem] truncate">
-                {activeScopedEpisode.episodeLabel}
+                {(activeScopedEpisode?.episodeLabel ?? activeCollection?.collectionLabel)}
               </span>
               <X className="h-3 w-3" />
             </Button>

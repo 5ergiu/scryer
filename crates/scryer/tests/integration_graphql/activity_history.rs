@@ -968,3 +968,176 @@ async fn graphql_search_metadata_movie() {
     assert!(!results.is_empty());
     assert_eq!(results[0]["name"], "Test Movie Title");
 }
+
+#[tokio::test]
+async fn graphql_season_history_scopes_packs_and_pagination() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Season History Fixture",
+        MediaFacet::Series,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+    let collection = ctx
+        .shows
+        .create_collection(Collection {
+            id: Id::new().0,
+            title_id: title.id.clone(),
+            collection_type: CollectionType::Season,
+            collection_index: "1".to_string(),
+            label: Some("Season 1".to_string()),
+            ordered_path: None,
+            narrative_order: None,
+            first_episode_number: Some("1".to_string()),
+            last_episode_number: Some("2".to_string()),
+            monitored: true,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create collection");
+    let episode_one = ctx
+        .shows
+        .create_episode(Episode {
+            id: Id::new().0,
+            title_id: title.id.clone(),
+            collection_id: Some(collection.id.clone()),
+            episode_type: EpisodeType::Standard,
+            episode_number: Some("1".to_string()),
+            season_number: Some("1".to_string()),
+            episode_label: Some("S01E01".to_string()),
+            title: Some("Episode One".to_string()),
+            air_date: Some("2024-01-01".to_string()),
+            duration_seconds: Some(1500),
+            has_multi_audio: false,
+            has_subtitle: false,
+            is_filler: false,
+            is_recap: false,
+            absolute_number: Some("1".to_string()),
+            contiguous_absolute_number: None,
+            overview: None,
+            tvdb_id: Some("episode-history-1".to_string()),
+            tmdb_id: None,
+            image_url: None,
+            monitored: true,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("create first episode");
+
+    let mut other_collection = collection.clone();
+    other_collection.id = Id::new().0;
+    other_collection.collection_index = "2".into();
+    ctx.shows
+        .create_collection(other_collection.clone())
+        .await
+        .unwrap();
+    let mut other_episode = episode_one.clone();
+    other_episode.id = Id::new().0;
+    other_episode.collection_id = Some(other_collection.id.clone());
+    other_episode.tvdb_id = Some("season-history-other".into());
+    ctx.shows
+        .create_episode(other_episode.clone())
+        .await
+        .unwrap();
+    for (release, ids) in [
+        ("First.Season", vec![episode_one.id.clone()]),
+        ("Other.Season", vec![other_episode.id.clone()]),
+        (
+            "Cross.Season.Pack",
+            vec![episode_one.id.clone(), other_episode.id.clone()],
+        ),
+        ("Title.Only", vec![]),
+    ] {
+        ctx.app
+            .append_domain_event(NewDomainEvent {
+                event_id: Id::new().0,
+                occurred_at: Utc::now(),
+                actor_kind: DomainEventActorKind::System,
+                actor_user_id: None,
+                actor_display_name: "System".into(),
+                facet: Some(MediaFacet::Series),
+                title_id: Some(title.id.clone()),
+                correlation_id: None,
+                causation_id: None,
+                schema_version: 1,
+                stream: DomainEventStream::Title {
+                    title_id: title.id.clone(),
+                },
+                payload: DomainEventPayload::ReleaseGrabbed(
+                    scryer_domain::ReleaseGrabbedEventData {
+                        title: TitleContextSnapshot {
+                            title_name: title.name.clone(),
+                            facet: MediaFacet::Series,
+                            external_ids: DomainExternalIds::default(),
+                            poster_url: None,
+                            year: None,
+                        },
+                        source_title: Some(release.into()),
+                        source_hint: None,
+                        source_provider: None,
+                        download_id: None,
+                        episode_ids: ids,
+                        release_facts: None,
+                    },
+                ),
+            })
+            .await
+            .unwrap();
+    }
+    let query = r#"query($filter: TitleHistoryFilterInput!) {
+        titleHistory(filter: $filter) { totalCount items { sourceTitle episodeId } }
+    }"#;
+    let first = gql(
+        &ctx,
+        query,
+        json!({"filter": {"collectionId": collection.id,
+        "groupByEvent": true, "limit": 1, "offset": 0}}),
+    )
+    .await;
+    assert_no_errors(&first);
+    assert_eq!(first["data"]["titleHistory"]["totalCount"], 2);
+    assert_eq!(
+        first["data"]["titleHistory"]["items"][0]["sourceTitle"],
+        "Cross.Season.Pack"
+    );
+    let second = gql(
+        &ctx,
+        query,
+        json!({"filter": {"collectionId": collection.id,
+        "groupByEvent": true, "limit": 1, "offset": 1}}),
+    )
+    .await;
+    assert_no_errors(&second);
+    assert_eq!(second["data"]["titleHistory"]["totalCount"], 2);
+    assert_eq!(
+        second["data"]["titleHistory"]["items"][0]["sourceTitle"],
+        "First.Season"
+    );
+    let ungrouped = gql(
+        &ctx,
+        query,
+        json!({"filter": {"collectionId": collection.id,
+        "groupByEvent": false}}),
+    )
+    .await;
+    assert_no_errors(&ungrouped);
+    assert_eq!(ungrouped["data"]["titleHistory"]["totalCount"], 2);
+    for row in ungrouped["data"]["titleHistory"]["items"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(row["episodeId"], episode_one.id);
+    }
+    let mismatch = gql(
+        &ctx,
+        query,
+        json!({"filter": {"collectionId": collection.id,
+        "titleIds": ["unrelated-title"]}}),
+    )
+    .await;
+    assert_no_errors(&mismatch);
+    assert_eq!(mismatch["data"]["titleHistory"]["totalCount"], 0);
+}

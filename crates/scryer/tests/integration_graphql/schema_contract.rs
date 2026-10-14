@@ -2467,6 +2467,9 @@ async fn graphql_introspection_title_history_filter_uses_event_type_enum() {
     let episode_id = id_list_input("episodeId");
     assert_eq!(episode_id["type"]["kind"], "SCALAR");
     assert_eq!(episode_id["type"]["name"], "ID");
+    let collection_id = id_list_input("collectionId");
+    assert_eq!(collection_id["type"]["kind"], "SCALAR");
+    assert_eq!(collection_id["type"]["name"], "ID");
 
     let names: Vec<&str> = body["data"]["eventType"]["enumValues"]
         .as_array()
