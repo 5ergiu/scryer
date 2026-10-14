@@ -36,6 +36,7 @@ const RENAME_MISSING_METADATA_POLICY_OPTIONS = [
 const COMMON_RENAME_TOKENS = [
   "title", "title_with_year", "title_without_year", "year", "quality", "source",
   "video_codec", "audio_codec", "audio_channels", "group", "ext",
+  "title_with_article", "title_first_character",
 ];
 const EXTERNAL_ID_RENAME_TOKENS = [
   "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
@@ -46,8 +47,6 @@ const EPISODE_RENAME_TOKENS = [
 const VALID_MOVIE_RENAME_TOKENS = new Set([
   ...COMMON_RENAME_TOKENS,
   "edition",
-  "title_with_article",
-  "title_first_character",
   ...EXTERNAL_ID_RENAME_TOKENS,
 ]);
 const VALID_EPISODE_RENAME_TOKENS = new Set([
@@ -57,16 +56,13 @@ const VALID_EPISODE_RENAME_TOKENS = new Set([
 ]);
 const VALID_FOLDER_TOKENS = new Set([
   "title", "title_with_year", "title_without_year", "year",
+  "title_with_article", "title_first_character",
   "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
 ]);
-const MOVIE_TITLE_ORDER_TOKENS = [
+const TITLE_ORDER_TOKENS = [
   { token: "title_with_article", labelKey: "settings.renameTokenTitleWithArticle" },
   { token: "title_first_character", labelKey: "settings.renameTokenTitleFirstCharacter" },
 ];
-const VALID_MOVIE_FOLDER_TOKENS = new Set([
-  ...VALID_FOLDER_TOKENS,
-  ...MOVIE_TITLE_ORDER_TOKENS.map(({ token }) => token),
-]);
 const VALID_SEASON_FOLDER_TOKENS = new Set([
   ...VALID_FOLDER_TOKENS,
   "season",
@@ -79,6 +75,7 @@ const TITLE_YEAR_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
 
 const FOLDER_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_ORDER_TOKENS,
   ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "imdb_id", labelKey: "settings.renameTokenImdbId" },
@@ -90,7 +87,6 @@ const FOLDER_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
 ];
 const MOVIE_FOLDER_TOKEN_DESCRIPTIONS = [
   ...FOLDER_TOKEN_DESCRIPTIONS,
-  ...MOVIE_TITLE_ORDER_TOKENS,
 ];
 const SEASON_FOLDER_TOKEN_DESCRIPTIONS = [
   ...FOLDER_TOKEN_DESCRIPTIONS,
@@ -99,6 +95,7 @@ const SEASON_FOLDER_TOKEN_DESCRIPTIONS = [
 
 const SHARED_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_ORDER_TOKENS,
   ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "quality", labelKey: "settings.renameTokenQuality" },
@@ -112,7 +109,6 @@ const SHARED_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = 
 
 const MOVIE_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "edition", labelKey: "settings.renameTokenEdition" },
-  ...MOVIE_TITLE_ORDER_TOKENS,
 ];
 
 const EXTERNAL_ID_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
@@ -1110,15 +1106,15 @@ export function RenameSettingsPanel({
   const t = useTranslate();
   const folderTemplateValue = categoryFolderTemplates[activeQualityScopeId];
   const episodicScope = activeQualityScopeId !== "MOVIE";
-  const folderTokens = activeQualityScopeId === "MOVIE" ? VALID_MOVIE_FOLDER_TOKENS : VALID_FOLDER_TOKENS;
+  const folderTokens = VALID_FOLDER_TOKENS;
   const useSeasonFolders = categoryUseSeasonFolders[activeQualityScopeId] !== false;
   const seasonFolderTemplateValue = categorySeasonFolderTemplates[activeQualityScopeId];
   const specialsFolderTemplateValue = categorySpecialsFolderTemplates[activeQualityScopeId];
   const renameEnabled = categoryRenameEnabled[activeQualityScopeId] !== "false";
   const templateValue = categoryRenameTemplates[activeQualityScopeId];
   const folderValidationError = React.useMemo(
-    () => validateFolderTemplate(folderTemplateValue, t, folderTokens, undefined, !episodicScope),
-    [episodicScope, folderTemplateValue, folderTokens, t],
+    () => validateFolderTemplate(folderTemplateValue, t, folderTokens, undefined, true),
+    [folderTemplateValue, folderTokens, t],
   );
   const renameValidationError = React.useMemo(
     () => (renameEnabled ? validateRenameTemplate(templateValue, activeQualityScopeId, t) : null),

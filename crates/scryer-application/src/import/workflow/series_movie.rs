@@ -372,13 +372,14 @@ pub(super) async fn archive_extraction_destination_for_title(
     import_id: &str,
     title: &scryer_domain::Title,
 ) -> AppResult<crate::archive_extractor::ArchiveExtractionDestination> {
+    let title = &app.title_for_naming(title).await;
     let ImportPathSettings {
         media_root,
         folder_template,
         ..
     } = resolve_import_paths(app, title).await?;
     let staging_parent = effective_title_folder_path(&media_root, title, &folder_template, None);
-    persist_title_folder_path_if_missing(app, title, &staging_parent).await?;
+    ensure_import_title_folder_available(app, title, &staging_parent).await?;
     Ok(
         crate::archive_extractor::ArchiveExtractionDestination::new(staging_parent, import_id)
             .with_stale_cleanup_parent(media_root),
@@ -1516,6 +1517,7 @@ async fn import_additional_movie_download(
     started_at: chrono::DateTime<Utc>,
 ) -> AppResult<ImportResult> {
     let source_title = release_evidence.release_title(Some(source_video));
+    let title = &app.title_for_naming(title).await;
     let full_folder_path =
         effective_title_folder_path(media_root, title, folder_template, parsed.year);
     ensure_import_title_folder_available(app, title, &full_folder_path).await?;
@@ -1785,6 +1787,7 @@ async fn import_movie_download(
     started_at: chrono::DateTime<Utc>,
     runtime_sample_mode: crate::post_download_gate::RuntimeSampleValidationMode,
 ) -> AppResult<ImportResult> {
+    let title = &app.title_for_naming(title).await;
     let largest = pick_largest_import_video_file(video_files)?;
     // Only release parsing reads the recovered name; every path below is the
     // physical file.
@@ -2603,6 +2606,7 @@ async fn import_series_movie_download(
         }
     };
     let movie = &link.movie;
+    let title = &app.title_for_naming(title).await;
 
     let largest = pick_largest_import_video_file(video_files)?;
     // Only release parsing reads the recovered name; every path below is the

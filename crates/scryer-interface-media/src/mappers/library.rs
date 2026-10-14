@@ -667,6 +667,22 @@ pub fn from_media_rename_plan(plan: RenamePlan) -> MediaRenamePlanPayload {
         conflicts: plan.conflicts as i32,
         errors: plan.errors as i32,
         folder_repairs: plan.folder_repairs.len() as i32,
+        organizing_folder_changes: plan
+            .naming_context
+            .iter()
+            .filter(|context| context.organizing_folder_changed)
+            .count() as i32,
+        naming_context: plan
+            .naming_context
+            .into_iter()
+            .map(|context| MediaRenameNamingContextPayload {
+                title_id: context.title_id.into(),
+                language: context.language,
+                current_relative_path: context.current_relative_path,
+                proposed_relative_path: context.proposed_relative_path,
+                organizing_folder_changed: context.organizing_folder_changed,
+            })
+            .collect(),
         items: plan
             .items
             .into_iter()

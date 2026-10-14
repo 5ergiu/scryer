@@ -2499,6 +2499,9 @@ async fn library_access_surfaces_agree_for_catalog_settings_only_users() {
 #[tokio::test]
 async fn delete_preview_checks_the_title_folder_against_its_own_library_roots() {
     let (app, user) = bootstrap();
+    let app = app.with_test_overrides(|services| {
+        services.with_media_files(Arc::new(MockMediaFileRepo::default()))
+    });
     let tempdir = tempfile::tempdir().expect("tempdir");
     let library = app
         .create_library(
@@ -2539,6 +2542,22 @@ async fn delete_preview_checks_the_title_folder_against_its_own_library_roots() 
         .set_folder_path(&created.title.id, title_dir.to_string_lossy().as_ref())
         .await
         .expect("set title folder");
+
+    app.services
+        .library
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: created.title.id.clone(),
+            file_path: title_dir
+                .join("Archived Serial - S01E01.mkv")
+                .to_string_lossy()
+                .into_owned(),
+            size_bytes: 64,
+            role: MediaFileRole::Primary,
+            ..Default::default()
+        })
+        .await
+        .expect("record owned episode file");
 
     // The folder sits under the title's own library root, not under the
     // facet default library's root; the guard has to look at the former.

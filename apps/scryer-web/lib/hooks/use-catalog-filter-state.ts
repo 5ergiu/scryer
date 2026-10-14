@@ -27,14 +27,27 @@ export function useCatalogFilterState(activeFacet: Facet) {
   const [byFacet, setByFacet] = useState(readFiltersByFacet);
   const [debouncedByFacet, setDebouncedByFacet] = useState(byFacet);
   const saved = useRef(byFacet);
-  useEffect(() => {
+  const latest = useRef(byFacet);
+  const persist = useCallback(() => {
     for (const facet of CATALOG_FILTER_FACETS) {
-      if (saved.current[facet] !== byFacet[facet]) {
-        writeCatalogFilters(facet, byFacet[facet]);
+      if (saved.current[facet] !== latest.current[facet]) {
+        writeCatalogFilters(facet, latest.current[facet]);
       }
     }
-    saved.current = byFacet;
-  }, [byFacet]);
+    saved.current = latest.current;
+  }, []);
+  useEffect(() => {
+    latest.current = byFacet;
+    const timer = window.setTimeout(persist, 250);
+    return () => window.clearTimeout(timer);
+  }, [byFacet, persist]);
+  useEffect(() => {
+    window.addEventListener("pagehide", persist);
+    return () => {
+      window.removeEventListener("pagehide", persist);
+      persist();
+    };
+  }, [persist]);
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedByFacet(byFacet), 250);
     return () => window.clearTimeout(timer);

@@ -72,6 +72,7 @@ async fn import_series_download(
     started_at: chrono::DateTime<Utc>,
     subtitle_deliveries: &mut Vec<(PathBuf, PathBuf)>,
 ) -> AppResult<ImportResult> {
+    let title = &app.title_for_naming(title).await;
     let ImportPathSettings {
         media_root,
         rename_enabled,
@@ -2038,6 +2039,14 @@ pub(crate) async fn resolve_import_paths(
         default_folder_template,
         title.facet.as_str(),
     );
+    if title
+        .folder_path
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        let naming_title = app.title_for_naming(title).await;
+        crate::library::rename::validate_title_folder_rendering(&naming_title, &folder_template)?;
+    }
     let season_folder_template = crate::normalize_season_folder_template_or_default(
         app.read_setting_string_value_for_scope(
             super::SETTINGS_SCOPE_SYSTEM,

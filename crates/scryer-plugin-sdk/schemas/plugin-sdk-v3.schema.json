@@ -10074,7 +10074,7 @@
       ]
     },
     "ResolveNetworkEndpointsResponse": {
-      "description": "Payload of the `resolve_network_endpoints` action. Origins must contain\nonly an HTTP(S) scheme, hostname, and optional port.",
+      "description": "Payload of the `resolve_network_endpoints` action. Origins must contain\nonly an HTTP(S) scheme, hostname, and optional port.\nThe host validates these origins, then grants instance-scoped hostname\npermissions using the descriptor network policy. Scheme and port are not\npermission boundaries: other HTTP(S) ports on a declared host are allowed.",
       "type": "object",
       "properties": {
         "origins": {

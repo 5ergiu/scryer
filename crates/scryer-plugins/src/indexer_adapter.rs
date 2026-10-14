@@ -266,43 +266,49 @@ impl WasmIndexerClient {
             .descriptor
             .indexer()
             .is_some_and(|value| value.capabilities.resolve_network_endpoints);
+        let deadline = tokio::time::Instant::now() + indexer.timeout;
         let initialize = async {
             if resolve {
-                // Permissions are rebuilt from this configuration, never accumulated.
-                indexer.host.set_declared_hosts(Vec::new());
-                let resolver = indexer
-                    .host
-                    .endpoint_resolver()
-                    .map_err(|_| endpoint_resolution_error())?;
-                resolver.bind_cancellation(token.clone());
-                let mut actor = indexer
-                    .runtime
-                    .instantiate(&resolver)
-                    .await
-                    .map_err(|_| endpoint_resolution_error())?;
-                let request = serde_json::to_vec(&PluginActionRequest {
-                    action: "resolve_network_endpoints".into(),
-                    payload: serde_json::Value::Null,
+                tokio::time::timeout_at(deadline, async {
+                    // Permissions are rebuilt from this configuration, never accumulated.
+                    indexer.host.set_declared_hosts(Vec::new());
+                    let resolver = indexer
+                        .host
+                        .endpoint_resolver()
+                        .map_err(|_| endpoint_resolution_error())?;
+                    resolver.bind_cancellation(token.clone());
+                    let mut actor = indexer
+                        .runtime
+                        .instantiate(&resolver)
+                        .await
+                        .map_err(|_| endpoint_resolution_error())?;
+                    let request = serde_json::to_vec(&PluginActionRequest {
+                        action: "resolve_network_endpoints".into(),
+                        payload: serde_json::Value::Null,
+                    })
+                    .expect("static action request");
+                    let bytes = actor
+                        .action(request)
+                        .await
+                        .map_err(|_| endpoint_resolution_error())?
+                        .map_err(|_| endpoint_resolution_error())?;
+                    let hosts = validate_network_endpoints(&bytes)?;
+                    indexer.host.set_declared_hosts(hosts);
+                    Ok::<_, AppError>(())
                 })
-                .expect("static action request");
-                let bytes = actor
-                    .action(request)
-                    .await
-                    .map_err(|_| endpoint_resolution_error())?
-                    .map_err(|_| endpoint_resolution_error())?;
-                let hosts = validate_network_endpoints(&bytes)?;
-                indexer.host.set_declared_hosts(hosts);
-            }
-            indexer
-                .runtime
-                .instantiate(&indexer.host)
                 .await
+                .map_err(|_| endpoint_resolution_error())??;
+            }
+            tokio::time::timeout_at(deadline, indexer.runtime.instantiate(&indexer.host))
+                .await
+                .map_err(|_| {
+                    AppError::Repository("Indexer component initialization timed out".into())
+                })?
                 .map_err(|_| AppError::Repository("Indexer component initialization failed".into()))
         };
         tokio::select! {
             _ = token.cancelled() => Err(AppError::canceled("Indexer initialization canceled")),
-            result = tokio::time::timeout(indexer.timeout, initialize) =>
-                result.unwrap_or_else(|_| Err(endpoint_resolution_error())),
+            result = initialize => result,
         }
     }
 

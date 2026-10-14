@@ -16313,6 +16313,32 @@ input MediaRenameBulkApplyInput {
 }
 
 """
+Effective language and root-relative title placement used by a rename preview.
+"""
+type MediaRenameNamingContextPayload {
+	"""
+	Title whose folder is being previewed.
+	"""
+	titleId: ID!
+	"""
+	Metadata language used for language-sensitive naming tokens.
+	"""
+	language: String!
+	"""
+	Current title folder relative to its root, or null when no valid folder is recorded.
+	"""
+	currentRelativePath: String
+	"""
+	Complete proposed title folder relative to its root.
+	"""
+	proposedRelativePath: String!
+	"""
+	Whether the organizing directories above this title folder change.
+	"""
+	organizingFolderChanged: Boolean!
+}
+
+"""
 One media rename plan item with current and proposed paths and decision details.
 """
 type MediaRenamePlanItemPayload {
@@ -16411,6 +16437,14 @@ type MediaRenamePlanPayload {
 	title folder; applying the plan records the planned folder for them.
 	"""
 	folderRepairs: Int!
+	"""
+	Per-title naming language and complete relative folder placement.
+	"""
+	namingContext: [MediaRenameNamingContextPayload!]!
+	"""
+	Number of titles whose organizing directories change in this plan.
+	"""
+	organizingFolderChanges: Int!
 	"""
 	Plan items in deterministic service order.
 	"""

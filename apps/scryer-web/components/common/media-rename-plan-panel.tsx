@@ -28,6 +28,14 @@ export type MediaRenamePlan = {
   conflicts: number;
   errors: number;
   folderRepairs?: number;
+  organizingFolderChanges?: number;
+  namingContext?: {
+    titleId: string;
+    language: string;
+    currentRelativePath: string | null;
+    proposedRelativePath: string;
+    organizingFolderChanged: boolean;
+  }[];
   items: MediaRenamePlanItem[];
 };
 
@@ -74,6 +82,19 @@ export function MediaRenamePlanPanel({
           errors: plan.errors,
         })}
       </div>
+      {plan.namingContext?.length ? (
+        <div className="space-y-2 rounded-lg border border-border p-3 text-sm">
+          <p>{t("rename.organizingFolderChanges", { count: plan.organizingFolderChanges ?? 0 })}</p>
+          {plan.namingContext.map((context) => (
+            <div key={context.titleId} className="break-all">
+              <p className="text-muted-foreground">{t("rename.namingLanguage", { language: context.language })}</p>
+              <p className="font-[var(--font-code)] text-xs">{context.currentRelativePath ?? "—"}</p>
+              <ArrowDown aria-hidden className="my-1 h-3 w-3" />
+              <p className="font-[var(--font-code)] text-xs">{context.proposedRelativePath}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="max-h-96 overflow-auto rounded-lg border border-border">
         <ul className="text-sm">
           {plan.items.map((item, index) => (

@@ -244,6 +244,68 @@ async fn load_titles_for_background_refresh(
     Ok(existing_titles)
 }
 
+async fn refresh_title_boundaries(
+    app: &AppUseCase,
+    facet: &MediaFacet,
+    library_id: &str,
+    root: &Path,
+    session_id: &str,
+) -> AppResult<(Vec<PathBuf>, usize)> {
+    let policy =
+        crate::library_discovery::TitleFolderBoundaryPolicy::load(app, facet, library_id, root)
+            .await?;
+    let mut receiver = crate::library_discovery::stream_title_folder_boundaries(
+        root.into(),
+        policy,
+        64,
+        Default::default(),
+    );
+    let mut accepted = Vec::new();
+    let mut rejected = 0;
+    while let Some(batch) = receiver.recv().await {
+        for boundary in batch? {
+            if let Some(reason) = boundary.rejection {
+                let path = path_to_stored_string(&boundary.path);
+                let name = boundary
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                crate::library_scan_unmatched::persist_ignored_library_scan_item(
+                    app,
+                    facet,
+                    library_id,
+                    crate::library_scan_unmatched::IgnoredLibraryScanItemArgs {
+                        title_id: None,
+                        session_id: Some(session_id),
+                        library_path: &path_to_stored_string(root),
+                        item_path: &path,
+                        display_name: &name,
+                        query: &name,
+                        year_hint: None,
+                        reason_code:
+                            crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY,
+                        error_message: Some(reason),
+                        size_bytes: None,
+                    },
+                )
+                .await?;
+                rejected += 1;
+            } else {
+                accepted.push(boundary.path);
+            }
+        }
+    }
+    let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
+    coordinator
+        .register_discovery_batch(rejected as usize, false)
+        .await;
+    coordinator
+        .mark_title_match_completed(rejected as usize)
+        .await;
+    Ok((accepted, rejected))
+}
+
 pub(super) async fn background_refresh_series(
     app: &AppUseCase,
     actor: &User,
@@ -256,13 +318,17 @@ pub(super) async fn background_refresh_series(
     let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
     let root = require_directory_library_path(library_path)?;
 
-    let folders = list_child_directories(root).await?;
+    let (folders, boundary_rejections) =
+        refresh_title_boundaries(app, facet, library_id, root, session_id).await?;
     coordinator
         .register_discovery_batch(folders.len(), false)
         .await;
     coordinator.publish_progress().await;
 
-    let mut summary = LibraryScanSummary::default();
+    let mut summary = LibraryScanSummary {
+        unmatched: boundary_rejections,
+        ..Default::default()
+    };
     let mut metadata_lookup_stats = MetadataLookupBatchStats::default();
     let pool_policy =
         LibraryScanMediaAnalysisPolicy::background_refresh(app, session_id, None).await;
@@ -422,13 +488,21 @@ pub(super) async fn background_refresh_movies(
     let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
     let root = require_directory_library_path(library_path)?;
 
-    let entries = list_movie_top_level_entries(root).await?;
+    let (folders, boundary_rejections) =
+        refresh_title_boundaries(app, &MediaFacet::Movie, library_id, root, session_id).await?;
+    let entries = folders
+        .into_iter()
+        .map(|path| MovieTopLevelEntry { path, is_dir: true })
+        .collect::<Vec<_>>();
     coordinator
         .register_discovery_batch(entries.len(), false)
         .await;
     coordinator.publish_progress().await;
 
-    let mut summary = LibraryScanSummary::default();
+    let mut summary = LibraryScanSummary {
+        unmatched: boundary_rejections,
+        ..Default::default()
+    };
     let mut metadata_lookup_stats = MetadataLookupBatchStats::default();
     let pool_policy =
         LibraryScanMediaAnalysisPolicy::background_refresh(app, session_id, None).await;

@@ -3272,6 +3272,7 @@ async fn execute_manual_import_with_release_evidence_inner(
             .collect::<Vec<_>>(),
     );
 
+    let title = app.title_for_naming(&title).await;
     let ImportPathSettings {
         media_root,
         rename_enabled,
@@ -4201,9 +4202,7 @@ async fn execute_queued_manual_import_with_outcome(
         .ok()
         .flatten()
         .and_then(|record| serde_json::from_str::<serde_json::Value>(&record.payload_json).ok())
-        .is_none_or(|payload| {
-            payload["archive_processing_pending"].as_bool() == Some(true)
-        });
+        .is_none_or(|payload| payload["archive_processing_pending"].as_bool() == Some(true));
     if outcome
         .as_ref()
         .is_ok_and(|outcome| outcome.status == ImportStatus::Completed)

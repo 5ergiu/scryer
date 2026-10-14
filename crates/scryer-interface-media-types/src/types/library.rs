@@ -832,6 +832,21 @@ pub struct MediaRenamePlanItemPayload {
 }
 
 #[derive(SimpleObject, Clone)]
+/// Effective language and root-relative title placement used by a rename preview.
+pub struct MediaRenameNamingContextPayload {
+    /// Title whose folder is being previewed.
+    pub title_id: ID,
+    /// Metadata language used for language-sensitive naming tokens.
+    pub language: String,
+    /// Current title folder relative to its root, or null when no valid folder is recorded.
+    pub current_relative_path: Option<String>,
+    /// Complete proposed title folder relative to its root.
+    pub proposed_relative_path: String,
+    /// Whether the organizing directories above this title folder change.
+    pub organizing_folder_changed: bool,
+}
+
+#[derive(SimpleObject, Clone)]
 /// Read-only media rename plan and stable fingerprint for later application.
 pub struct MediaRenamePlanPayload {
     /// Media facet covered by the plan.
@@ -859,6 +874,10 @@ pub struct MediaRenamePlanPayload {
     /// Number of titles with nothing to move whose recorded folder is not a
     /// title folder; applying the plan records the planned folder for them.
     pub folder_repairs: i32,
+    /// Per-title naming language and complete relative folder placement.
+    pub naming_context: Vec<MediaRenameNamingContextPayload>,
+    /// Number of titles whose organizing directories change in this plan.
+    pub organizing_folder_changes: i32,
     /// Plan items in deterministic service order.
     pub items: Vec<MediaRenamePlanItemPayload>,
 }
