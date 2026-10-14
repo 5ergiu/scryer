@@ -96,10 +96,35 @@
         Execute="immediate"
         Return="ignore"
         Impersonate="yes" />
+    <!-- The installed tray's shutdown is the installed product's code. Releases before the
+         forced stop below existed only stop the tray itself, so a server nobody owns (orphaned
+         by a killed tray or an interrupted upgrade, or started by hand) keeps scryer.exe locked
+         and InstallValidate still finds files in use. Once the graceful stop has had its turn,
+         force-stop whatever Scryer processes remain, by image name, so the upgrade never
+         depends on code it is replacing. taskkill exits 128 when nothing matched, so failures
+         are ignored. The upgrade helper runs as scryer-upgrade-helper.exe and is not matched,
+         and no tree kill is requested, so an in-app upgrade keeps its helper. This must run
+         immediately before InstallValidate, which precedes InstallInitialize, so it cannot be
+         deferred; it runs with the installing user's token. -->
+    <SetProperty Id="FORCESTOPTASKKILLEXE"
+                 Value="[System64Folder]taskkill.exe"
+                 Before="ForceStopScryerProcessesBeforeValidate"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED" />
+    <CustomAction
+        Id="ForceStopScryerProcessesBeforeValidate"
+        Property="FORCESTOPTASKKILLEXE"
+        ExeCommand="/F /IM scryer.exe /IM scryer-tray.exe"
+        Execute="immediate"
+        Return="ignore"
+        Impersonate="yes" />
     <InstallExecuteSequence>
       <Custom Action="StopInstalledTrayBeforeValidate"
-              Before="InstallValidate"
+              Before="ForceStopScryerProcessesBeforeValidate"
               Condition="WIX_UPGRADE_DETECTED AND INSTALLEDTRAYEXE" />
+      <Custom Action="ForceStopScryerProcessesBeforeValidate"
+              Before="InstallValidate"
+              Condition="WIX_UPGRADE_DETECTED AND FORCESTOPTASKKILLEXE" />
     </InstallExecuteSequence>
 
     <!-- These commands affect only the uninstalling user: their HKCU Run entry, the tray
