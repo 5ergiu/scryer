@@ -131,13 +131,17 @@
          process they own, and their Scryer desktop profile. A major upgrade removes the old
          product as part of installing the new one; UPGRADINGPRODUCTCODE is set only in that
          removal, so the startup preference and the profile both survive an upgrade and are
-         cleared only by a real uninstall. -->
+         cleared only by a real uninstall. A missing tray, or one that cannot be started (for
+         example quarantined by antivirus), must never turn an uninstall or the removal half of
+         an upgrade into a rollback, so the stop's result is ignored: an upgrade has already
+         force-stopped the remaining Scryer processes before InstallValidate, and the
+         installer's own file handling covers anything still in use. -->
     <CustomAction
         Id="StopTrayBeforeRemoval"
         FileRef="ScryerTrayExe"
         ExeCommand="--shutdown"
         Execute="immediate"
-        Return="check"
+        Return="ignore"
         Impersonate="yes" />
     <CustomAction
         Id="RemoveTrayStartupBeforeRemoval"
