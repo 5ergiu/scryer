@@ -758,22 +758,6 @@ impl WeaverDownloadClient {
             .with_backoff(Duration::from_secs(1), Duration::from_secs(15))
     }
 
-    async fn supports_password_candidates(&self) -> bool {
-        // Optional input fields require positive schema evidence. Failed or
-        // disabled introspection must leave the published single-password API
-        // usable, including its independent request/cooldown scope.
-        let policy = RequestPolicy::safe_read(
-            format!("weaver-capabilities:{}", self.graphql_url),
-            "weaver_password_capabilities",
-        )
-        .with_max_retries(0);
-        self.graphql_request_typed::<Value>(policy,
-            "query PasswordCapabilities { __type(name: \"SubmitNzbInput\") { inputFields { name } } }",
-            json!({}),
-        ).await.ok().and_then(|data| data["__type"]["inputFields"].as_array().cloned())
-            .is_some_and(|fields| fields.iter().any(|field| field["name"] == "passwordCandidates"))
-    }
-
     /// Test connectivity by querying metrics.
     pub async fn test_connection(&self) -> AppResult<String> {
         match self
@@ -1501,9 +1485,18 @@ impl DownloadClient for WeaverDownloadClient {
                     "clientRequestId": client_request_id,
                 }
             });
-            if password_candidates.iter().nth(1).is_some() && self.supports_password_candidates().await {
+            if password_candidates.iter().nth(1).is_some() {
                 variables["input"]["passwordCandidates"] = json!(password_candidates);
             }
+            let content_length = tokio::fs::metadata(&staged.staged_nzb.compressed_path)
+                .await
+                .map_err(|error| {
+                    AppError::Repository(format!(
+                        "failed to stat staged nzb {}: {error}",
+                        staged.staged_nzb.compressed_path.display()
+                    ))
+                })?
+                .len();
 
             debug!(
                 endpoint = self.graphql_url.as_str(),
@@ -1512,7 +1505,7 @@ impl DownloadClient for WeaverDownloadClient {
                 "weaver submitNzb multipart request"
             );
 
-            match self
+            let mut submission = self
                 .graphql_multipart_request::<SubmissionPayload>(GraphqlMultipartUploadRequest {
                     request_label: "weaver_submit_nzb",
                     query: graphql_docs::SUBMIT_NZB_MUTATION,
@@ -1521,18 +1514,36 @@ impl DownloadClient for WeaverDownloadClient {
                     filename: format!("{nzb_filename}.zst"),
                     upload_path: &staged.staged_nzb.compressed_path,
                     content_type: "application/zstd",
-                    content_length: tokio::fs::metadata(&staged.staged_nzb.compressed_path)
-                        .await
-                        .map_err(|error| {
-                            AppError::Repository(format!(
-                                "failed to stat staged nzb {}: {error}",
-                                staged.staged_nzb.compressed_path.display()
-                            ))
-                        })?
-                        .len(),
+                    content_length,
                 })
-                .await
-            {
+                .await;
+            if let Err(error) = &submission {
+                // A Weaver without `passwordCandidates` refuses the whole input.
+                // That is a schema gap, not a failure: resend the published
+                // single-password shape once and carry on silently.
+                let sent_candidates = variables["input"].get("passwordCandidates").is_some();
+                if sent_candidates && is_weaver_schema_error(error, "passwordCandidates") {
+                    if let Some(input) = variables["input"].as_object_mut() {
+                        input.remove("passwordCandidates");
+                    }
+                    submission = self
+                        .graphql_multipart_request::<SubmissionPayload>(
+                            GraphqlMultipartUploadRequest {
+                                request_label: "weaver_submit_nzb",
+                                query: graphql_docs::SUBMIT_NZB_MUTATION,
+                                variables: variables.clone(),
+                                upload_variable_path: "variables.input.nzbUpload",
+                                filename: format!("{nzb_filename}.zst"),
+                                upload_path: &staged.staged_nzb.compressed_path,
+                                content_type: "application/zstd",
+                                content_length,
+                            },
+                        )
+                        .await;
+                }
+            }
+
+            match submission {
                 Ok(data) => {
                     let submission = data.submit_nzb;
                     // Branch on STATUS, not on `accepted`. `accepted: false` is
@@ -2252,62 +2263,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_weaver_submission_keeps_single_password_when_candidates_are_unavailable() {
-        for capabilities in [
-            json!({"data":{"__type":{"inputFields":[{"name":"password"}]}}}),
-            json!({"errors":[{"message":"Introspection disabled"}]}),
-        ] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/graphql"))
-                .and(body_string_contains("PasswordCapabilities"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
-                .expect(1)
-                .mount(&server)
-                .await;
-            Mock::given(method("POST")).and(path("/graphql"))
-                .and(|request: &wiremock::Request| String::from_utf8_lossy(&request.body).contains("mutation SubmitNzb"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "data":{"submitNzb":{"accepted":true,"status":"ACCEPTED","jobId":77,"item":{"id":77}}}
-                }))).expect(1).mount(&server).await;
-            let directory = tempfile::tempdir().unwrap();
-            let store = Arc::new(
-                FileSystemStagedNzbStore::new(directory.path())
-                    .await
-                    .unwrap(),
-            );
-            let mut staged = store
-                .stage_nzb_bytes_for_test(b"<nzb></nzb>")
+    async fn older_weaver_submission_resends_single_password_when_candidates_are_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(|request: &wiremock::Request| {
+                String::from_utf8_lossy(&request.body).contains("passwordCandidates")
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors":[{"message":"Unknown field \"passwordCandidates\" of type \"SubmitNzbInput\"."}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/graphql"))
+            .and(|request: &wiremock::Request| {
+                let body = String::from_utf8_lossy(&request.body);
+                body.contains("mutation SubmitNzb") && !body.contains("passwordCandidates")
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data":{"submitNzb":{"accepted":true,"status":"ACCEPTED","jobId":77,"item":{"id":77}}}
+            }))).expect(1).mount(&server).await;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            FileSystemStagedNzbStore::new(directory.path())
                 .await
-                .unwrap();
-            let compressed = tokio::fs::read(&staged.compressed_path).await.unwrap();
-            assert_eq!(
-                zstd::stream::decode_all(compressed.as_slice()).unwrap(),
-                b"<nzb></nzb>"
-            );
-            staged
-                .password_candidates
-                .extend(["synthetic-first", "synthetic-second"]);
-            let mut request =
-                test_add_request("scryer-download:00000000-0000-4000-8000-000000000024");
-            request.staged_nzb = Some(staged);
-            let client = WeaverDownloadClient::with_staged_nzb_store(
-                server.uri(),
-                None,
-                store,
-                Arc::new(Semaphore::new(1)),
-            );
-            assert_eq!(client.submit_download(&request).await.unwrap().job_id, "77");
-            let requests = server.received_requests().await.unwrap();
-            let upload = requests
-                .iter()
-                .find(|request| {
-                    String::from_utf8_lossy(&request.body).contains("mutation SubmitNzb")
-                })
-                .unwrap();
-            let body = String::from_utf8_lossy(&upload.body);
-            assert!(body.contains("\"password\":\"synthetic-first\""));
-            assert!(!body.contains("passwordCandidates"));
+                .unwrap(),
+        );
+        let mut staged = store
+            .stage_nzb_bytes_for_test(b"<nzb></nzb>")
+            .await
+            .unwrap();
+        let compressed = tokio::fs::read(&staged.compressed_path).await.unwrap();
+        staged
+            .password_candidates
+            .extend(["synthetic-first", "synthetic-second"]);
+        let mut request = test_add_request("scryer-download:00000000-0000-4000-8000-000000000024");
+        request.staged_nzb = Some(staged);
+        let client = WeaverDownloadClient::with_staged_nzb_store(
+            server.uri(),
+            None,
+            store,
+            Arc::new(Semaphore::new(1)),
+        );
+        assert_eq!(client.submit_download(&request).await.unwrap().job_id, "77");
+        let requests = server.received_requests().await.unwrap();
+        let uploads: Vec<_> = requests
+            .iter()
+            .filter(|request| String::from_utf8_lossy(&request.body).contains("mutation SubmitNzb"))
+            .collect();
+        assert_eq!(uploads.len(), 2);
+        let first = String::from_utf8_lossy(&uploads[0].body);
+        assert!(first.contains("\"passwordCandidates\":["));
+        assert!(first.contains("\"synthetic-first\""));
+        assert!(first.contains("\"synthetic-second\""));
+        let second = String::from_utf8_lossy(&uploads[1].body);
+        assert!(second.contains("\"password\":\"synthetic-first\""));
+        assert!(!second.contains("passwordCandidates"));
+        for upload in uploads {
             assert!(
                 upload
                     .body
@@ -2470,14 +2483,6 @@ mod tests {
                 .and(|request: &wiremock::Request| String::from_utf8_lossy(&request.body).contains("mutation SubmitNzb"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"submitNzb":{"accepted":true,"status":"ACCEPTED","jobId":77,"item":{"id":77}}}})))
                 .mount(&server).await;
-            Mock::given(method("POST"))
-                .and(path("/graphql"))
-                .and(body_string_contains("PasswordCapabilities"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "data":{"__type":{"inputFields":[{"name":"passwordCandidates"}]}}
-                })))
-                .mount(&server)
-                .await;
             Mock::given(method("POST"))
                 .and(path("/jsonrpc"))
                 .and(wiremock::matchers::body_partial_json(
