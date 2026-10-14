@@ -85,6 +85,8 @@ struct ComponentHostInner {
     config: BTreeMap<String, String>,
     provider_profile: Option<Vec<u8>>,
     allowed_hosts: Vec<String>,
+    declared_hosts: Mutex<Vec<String>>,
+    endpoint_resolution: bool,
     egress_policy: scryer_outbound_http::PluginEgressPolicy,
     proxy_policy: Option<ProxyPolicy>,
     timeout: Duration,
@@ -123,6 +125,7 @@ struct ComponentState {
 struct ComponentIndexerErrorCapture {
     context: IndexerErrorCaptureContext,
     final_response: Option<CapturedIndexerHttpResponse>,
+    denied_host: Option<String>,
 }
 
 #[derive(Default)]
@@ -196,6 +199,8 @@ impl ComponentHost {
                 config,
                 provider_profile,
                 allowed_hosts,
+                declared_hosts: Mutex::new(Vec::new()),
+                endpoint_resolution: false,
                 egress_policy,
                 proxy_policy,
                 timeout,
@@ -213,6 +218,49 @@ impl ComponentHost {
                 transport_proxy_client: Mutex::new(None),
             }),
         })
+    }
+
+    /// A disposable resolver gets configuration but no network or writable state.
+    pub(crate) fn endpoint_resolver(&self) -> Result<Self, String> {
+        let mut host = Self::for_indexer_with_provider_profile(
+            self.inner.config.clone(),
+            Vec::new(),
+            scryer_outbound_http::PluginEgressPolicy::default(),
+            None,
+            self.inner.timeout,
+            None,
+            self.inner.provider_profile.clone(),
+        )?;
+        Arc::get_mut(&mut host.inner)
+            .expect("new resolver host")
+            .endpoint_resolution = true;
+        Ok(host)
+    }
+
+    pub(crate) fn set_declared_hosts(&self, hosts: Vec<String>) {
+        *self
+            .inner
+            .declared_hosts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hosts;
+        self.inner
+            .transport_proxy_client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    fn allowed_hosts(&self) -> Vec<String> {
+        let mut hosts = self.inner.allowed_hosts.clone();
+        hosts.extend(
+            self.inner
+                .declared_hosts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
+        hosts
     }
 
     /// Calls against one component actor are serialized by its adapter, so
@@ -326,6 +374,9 @@ impl ComponentHost {
     }
 
     async fn http(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        if self.inner.endpoint_resolution {
+            return Err(TransportError::ForbiddenOrigin);
+        }
         if self.cancellation().is_cancelled() {
             return Err(TransportError::Cancelled);
         }
@@ -344,8 +395,18 @@ impl ComponentHost {
             actor: &self.inner.active,
         };
 
-        enforce_allowed_hosts(Some(&self.inner.allowed_hosts), &request.url)
-            .map_err(|_| TransportError::ForbiddenOrigin)?;
+        if enforce_allowed_hosts(Some(&self.allowed_hosts()), &request.url).is_err() {
+            if let Ok(mut capture) = self.inner.indexer_error_capture.lock()
+                && let Some(capture) = capture.as_mut()
+            {
+                capture.denied_host = url::Url::parse(&request.url).ok().and_then(|url| {
+                    url.host_str()
+                        .filter(|host| host.len() <= 253)
+                        .map(str::to_owned)
+                });
+            }
+            return Err(TransportError::ForbiddenOrigin);
+        }
         let extra_ca_bundle_pem = shared_plugin_http_runtime()
             .extra_ca_bundle_pem()
             .map_err(|_| TransportError::Transport)?;
@@ -486,9 +547,7 @@ impl ComponentHost {
         let client = transport_proxy::transport_proxied_reqwest_client_with_redirect_policy(
             config,
             extra_ca_bundle_pem,
-            crate::plugin_http_host::plugin_transport_redirect_policy(Some(
-                self.inner.allowed_hosts.clone(),
-            )),
+            crate::plugin_http_host::plugin_transport_redirect_policy(Some(self.allowed_hosts())),
         )
         .map_err(|message| {
             transport_proxy::record_transport_proxy_failure(config, &message);
@@ -813,6 +872,7 @@ impl ComponentHost {
                 *capture = Some(ComponentIndexerErrorCapture {
                     context,
                     final_response: None,
+                    denied_host: None,
                 });
             }
             Err(error) => {
@@ -841,6 +901,10 @@ impl ComponentHost {
         let Some(capture) = capture else {
             return;
         };
+        if let Some(host) = capture.denied_host {
+            PluginHttpHost::record_host_policy_denial(&capture.context, &host);
+            return;
+        }
         let Some(response) = capture.final_response else {
             if operation_failed {
                 PluginHttpHost::record_transport_failure(&capture.context);
@@ -850,6 +914,14 @@ impl ComponentHost {
         if operation_failed && (200..300).contains(&response.status) {
             PluginHttpHost::record_captured_response(&capture.context, response);
         }
+    }
+
+    pub(crate) fn captured_host_policy_error(&self) -> Option<scryer_application::AppError> {
+        let capture = self.inner.indexer_error_capture.lock().ok()?;
+        let host = capture.as_ref()?.denied_host.as_deref()?;
+        Some(scryer_application::AppError::Validation(format!(
+            "indexer_host_not_allowed: Host {host} is missing permission for this indexer instance"
+        )))
     }
 
     /// Prefer the immutable accounting identity over error-response capture.
@@ -916,6 +988,9 @@ impl ComponentHost {
         expected: Option<Vec<u8>>,
         replacement: Option<Vec<u8>>,
     ) -> bool {
+        if self.inner.endpoint_resolution {
+            return false;
+        }
         let Ok(mut state) = self.inner.state.lock() else {
             return false;
         };
@@ -1154,6 +1229,9 @@ impl Host for ComponentCtx {
     }
 
     fn log(&mut self, level: LogLevel, message: String) {
+        if self.host.inner.endpoint_resolution || self.host.captured_host_policy_error().is_some() {
+            return;
+        }
         match level {
             LogLevel::Trace => tracing::trace!(target: "scryer_plugins::component", "{message}"),
             LogLevel::Debug => tracing::debug!(target: "scryer_plugins::component", "{message}"),
@@ -1221,6 +1299,9 @@ impl contract_v1_1::scryer::indexer::host::Host for ComponentCtx {
     }
 
     fn log(&mut self, level: contract_v1_1::scryer::indexer::host::LogLevel, message: String) {
+        if self.host.inner.endpoint_resolution || self.host.captured_host_policy_error().is_some() {
+            return;
+        }
         use contract_v1_1::scryer::indexer::host::LogLevel as V1LogLevel;
 
         match level {
@@ -1572,6 +1653,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_endpoints_resolver_cannot_use_http_or_write_state() {
+        let host = strategy_test_host(None);
+        host.set_declared_hosts(vec!["api.example".into()]);
+        let resolver = host.endpoint_resolver().unwrap();
+        assert!(!resolver.state_cas("key".into(), None, Some(vec![1])));
+        assert!(resolver.state_get("key").is_none());
+        assert!(matches!(
+            resolver
+                .http(HttpRequest {
+                    method: "GET".into(),
+                    url: "http://127.0.0.1:9/private?secret=value".into(),
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                })
+                .await,
+            Err(TransportError::ForbiddenOrigin)
+        ));
+        assert!(resolver.allowed_hosts().is_empty());
+        let other = strategy_test_host(None);
+        assert!(other.allowed_hosts().is_empty());
+        host.set_declared_hosts(vec!["new.example".into()]);
+        assert_eq!(host.allowed_hosts(), vec!["new.example"]);
+    }
+
+    #[tokio::test]
     async fn strategy_events_require_an_active_plan() {
         let host = strategy_test_host(None);
 
@@ -1579,6 +1685,51 @@ mod tests {
             host.emit_strategy_event(vec![1]).await,
             Err(StrategyEventSinkError::NoActivePlan)
         );
+    }
+
+    #[tokio::test]
+    async fn network_endpoints_denial_records_one_sanitized_error() {
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<scryer_application::NewIndexerError>>);
+        impl scryer_application::IndexerErrorRecorder for Recorder {
+            fn record(
+                &self,
+                error: scryer_application::NewIndexerError,
+            ) -> scryer_application::AppResult<()> {
+                self.0.lock().unwrap().push(error);
+                Ok(())
+            }
+        }
+        let recorder = Arc::new(Recorder::default());
+        let host = strategy_test_host(None);
+        // Declaring one host must not authorize any other destination.
+        host.set_declared_hosts(vec!["allowed.example".into()]);
+        host.begin_indexer_error_capture(IndexerErrorCaptureContext {
+            indexer_id: "endpoint-fixture".into(),
+            indexer_name: "Fixture".into(),
+            operation: scryer_application::IndexerErrorOperation::ConnectionTest,
+            recorder: recorder.clone(),
+            stats: Arc::new(scryer_application::NullIndexerStatsTracker),
+        });
+        assert!(matches!(
+            host.http(HttpRequest {
+                method: "GET".into(),
+                url: "https://user:secret@blocked.example/private?token=secret".into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+            .await,
+            Err(TransportError::ForbiddenOrigin)
+        ));
+        let error = host.captured_host_policy_error().unwrap().to_string();
+        assert!(error.contains("indexer_host_not_allowed") && error.contains("blocked.example"));
+        assert!(!error.contains("secret") && !error.contains("/private"));
+        host.finish_indexer_error_capture(true);
+        host.finish_indexer_error_capture(true);
+        let errors = recorder.0.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("indexer_host_not_allowed"));
+        assert!(errors[0].response.is_none());
     }
 
     #[tokio::test]

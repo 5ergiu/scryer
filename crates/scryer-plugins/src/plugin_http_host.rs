@@ -937,6 +937,39 @@ impl PluginHttpHost {
         }
     }
 
+    pub(crate) fn record_host_policy_denial(capture: &IndexerErrorCaptureContext, host: &str) {
+        const CODE: &str = "indexer_host_not_allowed";
+        let message =
+            format!("{CODE}: Host {host} is missing permission for this indexer instance");
+        tracing::warn!(
+            indexer_id = capture.indexer_id.as_str(),
+            reason = CODE,
+            hostname = host,
+            "Indexer request denied by instance host policy"
+        );
+        if !scryer_application::indexer_error_history_is_persistable(&capture.indexer_id) {
+            return;
+        }
+        let error = scryer_application::NewIndexerError {
+            id: uuid::Uuid::new_v4().to_string(),
+            indexer_id: capture.indexer_id.clone(),
+            indexer_name: capture.indexer_name.clone(),
+            operation: capture.operation,
+            classification: scryer_application::IndexerErrorClassification::Unknown,
+            provider_error_code: None,
+            message,
+            content_type: None,
+            response: None,
+            occurred_at: chrono::Utc::now(),
+        };
+        if capture.recorder.record(error).is_err() {
+            tracing::warn!(
+                indexer_id = capture.indexer_id.as_str(),
+                "Failed to persist indexer host-policy error"
+            );
+        }
+    }
+
     fn store_rate_limit_message(
         state: &Arc<Mutex<PluginHttpHostState>>,
         plugin_id: &str,
@@ -999,9 +1032,10 @@ pub(crate) fn enforce_allowed_hosts(
     let host = url.host_str().unwrap_or_default();
     let matches = allowed_hosts.is_some_and(|patterns| {
         patterns.iter().any(|pattern| {
-            Pattern::new(pattern)
-                .map(|compiled| compiled.matches(host))
-                .unwrap_or_else(|_| pattern == host)
+            pattern == host
+                || Pattern::new(pattern)
+                    .map(|compiled| compiled.matches(host))
+                    .unwrap_or(false)
         })
     });
 
@@ -2567,6 +2601,7 @@ mod tests {
 
     #[test]
     fn enforce_allowed_hosts_rejects_disallowed_hosts() {
+        assert!(enforce_allowed_hosts(Some(&["[::1]".into()]), "http://[::1]:8080/").is_ok());
         let error = enforce_allowed_hosts(
             Some(&["example.com".to_string()]),
             "https://jimaku.example.test/search",

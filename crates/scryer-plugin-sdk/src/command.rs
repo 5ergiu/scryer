@@ -100,6 +100,14 @@ pub struct PluginActionResponse {
     pub payload: serde_json::Value,
 }
 
+/// Payload of the `resolve_network_endpoints` action. Origins must contain
+/// only an HTTP(S) scheme, hostname, and optional port.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveNetworkEndpointsResponse {
+    pub origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
