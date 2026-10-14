@@ -2193,6 +2193,86 @@ async fn folder_reconciliation_does_not_reuse_analysis_for_changed_bytes() {
     assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn legacy_season_folders_preserve_title_boundaries() {
+    use crate::library::discovery::{
+        TitleFolderBoundaryPolicy, ensure_existing_title_boundary, episode_folder_patterns,
+        stream_title_folder_boundaries,
+    };
+
+    let fixture = FolderMatchFixture::new_series().await;
+    fixture
+        .app
+        .services
+        .config
+        .settings
+        .upsert_setting_json(
+            SETTINGS_SCOPE_SYSTEM,
+            crate::SEASON_FOLDER_TEMPLATE_KEY,
+            Some(MediaFacet::Series.as_str().to_string()),
+            serde_json::to_string("Cycle {season:02}").unwrap(),
+            "test",
+            None,
+        )
+        .await
+        .unwrap();
+    let patterns = episode_folder_patterns(&fixture.app, &MediaFacet::Series)
+        .await
+        .unwrap();
+    for name in ["S01", "s02", "Season 03", "Specials", "Cycle 04"] {
+        let title = fixture.folder(&format!("Show-{name}"));
+        let season = title.join(name);
+        std::fs::create_dir_all(&season).unwrap();
+        fixture.write_media(&season, "Show.S01E01.mkv");
+        ensure_existing_title_boundary(&title, &patterns)
+            .await
+            .unwrap();
+
+        let mut stream = stream_title_folder_boundaries(
+            title.parent().unwrap().into(),
+            TitleFolderBoundaryPolicy {
+                template_depth: 1,
+                stored_folders: vec![],
+                other_roots: vec![],
+                episode_folders: patterns.clone(),
+            },
+            1,
+            Default::default(),
+        );
+        let discovered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut found = false;
+            while let Some(batch) = stream.recv().await {
+                found |= batch
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.path == title && entry.rejection.is_none());
+            }
+            found
+        })
+        .await
+        .unwrap();
+        assert!(discovered, "legacy title must be discoverable: {name}");
+
+        // A second title is still a boundary even if its media uses a legacy
+        // season folder, and a mixed parent must never own that child's files.
+        let nested = title.join("Other Show").join("S01");
+        std::fs::create_dir_all(&nested).unwrap();
+        fixture.write_media(&nested, "Other.S01E01.mkv");
+        assert!(
+            ensure_existing_title_boundary(&title, &patterns)
+                .await
+                .is_err()
+        );
+        ensure_existing_title_boundary(nested.parent().unwrap(), &patterns)
+            .await
+            .unwrap();
+    }
+    let movie_patterns = episode_folder_patterns(&fixture.app, &MediaFacet::Movie)
+        .await
+        .unwrap();
+    assert!(movie_patterns.is_empty());
+}
+
 /// Reconciling a title's own, unchanged folder keeps every analysis-derived
 /// value: rows whose bytes still match their snapshot are neither re-probed
 /// nor overwritten with an empty analysis, and layout inference does not run.

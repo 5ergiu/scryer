@@ -14,6 +14,8 @@ function harness() {
   const slots: unknown[] = [];
   const effects: (() => void)[] = [];
   const timers = new Map<number, () => void>();
+  const cleanups = new Map<number, () => void>();
+  const listeners = new Map<string, Set<() => void>>();
   const storage = new Map<string, string>();
   let cursor = 0;
   let timerId = 0;
@@ -45,11 +47,26 @@ function harness() {
       const prior = slots[index] as { deps: unknown[]; cleanup?: () => void } | undefined;
       if (!prior || !same(prior.deps, deps)) effects.push(() => {
         prior?.cleanup?.();
-        slots[index] = { deps, cleanup: fn() };
+        const cleanup = fn();
+        slots[index] = { deps, cleanup };
+        if (cleanup) cleanups.set(index, cleanup);
+        else cleanups.delete(index);
       });
     },
   };
   const browser = {
+    addEventListener(type: string, callback: () => void) {
+      const callbacks = listeners.get(type) ?? new Set<() => void>();
+      callbacks.add(callback);
+      listeners.set(type, callbacks);
+    },
+    removeEventListener(type: string, callback: () => void) {
+      listeners.get(type)?.delete(callback);
+    },
+    dispatchEvent(event: Event) {
+      for (const callback of [...(listeners.get(event.type) ?? [])]) callback();
+      return true;
+    },
     localStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => { storage.set(key, value); },
@@ -66,7 +83,11 @@ function harness() {
     (id: string) => id === "react" ? react : persistence, module, module.exports,
   );
   return {
-    storage, browser,
+    storage, browser, listeners, timers,
+    unmount() {
+      for (const cleanup of cleanups.values()) cleanup();
+      cleanups.clear();
+    },
     render(facet: Facet) {
       cursor = 0;
       const result = module.exports.useCatalogFilterState(facet);
@@ -188,6 +209,25 @@ test("malformed and older saved filters safely normalize", (t) => {
   assert.equal(invalid.advanced.maximumYear, null);
   assert.deepEqual(invalid.advanced.presences, ["MISSING"]);
   assert.equal(invalid.advanced.needsAttention, false);
+});
+
+test("pagehide persists pending filters and unmount removes listeners and timers", (t) => {
+  const h = harness();
+  installBrowser(t, h.browser);
+  h.render("MOVIE").setTitleFilter("before leaving");
+  h.render("MOVIE");
+  assert.equal(h.listeners.get("pagehide")?.size, 1);
+  h.browser.dispatchEvent(new Event("pagehide"));
+  assert.equal(persistence.readCatalogFilters("MOVIE").query, "before leaving");
+  h.render("MOVIE").setTitleFilter("on unmount");
+  h.render("MOVIE");
+  h.unmount();
+  assert.equal(persistence.readCatalogFilters("MOVIE").query, "on unmount");
+  assert.equal(h.listeners.get("pagehide")?.size, 0);
+  assert.equal(h.timers.size, 0);
+  h.storage.clear();
+  h.browser.dispatchEvent(new Event("pagehide"));
+  assert.equal(h.storage.size, 0);
 });
 
 test("unavailable storage preserves in-memory filtering", (t) => {

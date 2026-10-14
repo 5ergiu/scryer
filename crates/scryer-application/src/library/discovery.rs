@@ -182,10 +182,18 @@ pub(crate) async fn episode_folder_patterns(
         app.read_setting_string_value(SPECIALS_FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
             .await?,
     );
-    [season, specials]
-        .iter()
-        .map(|template| crate::library::rename::episode_folder_discovery_pattern(template))
-        .collect()
+    // Naming changes do not rename existing library directories. Keep the
+    // conventional episode layouts recognizable alongside current templates.
+    [
+        season,
+        specials,
+        "S{season:00}".into(),
+        "Season {season}".into(),
+        "Specials".into(),
+    ]
+    .iter()
+    .map(|template| crate::library::rename::episode_folder_discovery_pattern(template))
+    .collect()
 }
 
 /// Enumerate ownership boundaries before invoking the media walker. The

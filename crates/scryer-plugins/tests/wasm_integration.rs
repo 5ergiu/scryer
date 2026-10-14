@@ -12,6 +12,7 @@ static TEST_WASM_RUNTIME: Once = Once::new();
 
 fn initialize_wasm_runtime_for_tests() {
     TEST_WASM_RUNTIME.call_once(|| {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         // Nextest gives each test a process, so this test-only cache is shared
         // across the suite instead of recompiling the same modules per test.
         // It lives under the build directory, not the system temp dir, which
@@ -249,7 +250,13 @@ async fn real_cardigann_component_wasm_searches_through_assigned_trawl_proxy() {
     let descriptor = scryer_plugins::WasmPluginDescriptorLoader
         .load_descriptor_from_wasm_bytes(&wasm)
         .expect("the component artifact must pass the normal descriptor loader");
-    let provider = scryer_plugins::WasmIndexerPluginProvider::empty().with_external_bytes(&wasm);
+    let provider = scryer_plugins::build_indexer_plugin_provider(
+        &[scryer_application::ExternalPluginWasm {
+            bytes: &wasm,
+            first_party: true,
+        }],
+        &[],
+    );
     assert!(
         provider
             .available_provider_types()
@@ -444,15 +451,45 @@ search:
     selector: tr.result
   fields:
     title: {{ selector: a.title }}
-    download: {{ selector: a.download, attribute: href }}
+    details: {{ selector: a.download, attribute: href }}
+    download: {{ text: "{{{{ .Result.details }}}}" }}
 "#
     );
-    let provider = scryer_plugins::WasmIndexerPluginProvider::empty().with_external_bytes(&wasm);
+    let untrusted = scryer_plugins::WasmIndexerPluginProvider::empty().with_external_bytes(&wasm);
+    let provider =
+        scryer_plugins::DynamicPluginProvider::new(scryer_plugins::build_indexer_plugin_provider(
+            &[scryer_application::ExternalPluginWasm {
+                bytes: &wasm,
+                first_party: true,
+            }],
+            &[],
+        ));
     let mut config = test_config("cardigann");
     config.base_url = "http://127.0.0.1/".into();
     config.config_json = Some(
         serde_json::json!({"base_url": config.base_url, "definition_yaml": definition}).to_string(),
     );
+    // The identical artifact and self-declared identity cannot authorize a
+    // resolver when loaded without host-verified first-party provenance.
+    assert!(untrusted.client_for_provider(&config).is_none());
+    assert!(api.received_requests().await.unwrap().is_empty());
+    assert!(provider.client_for_provider(&config).is_some());
+    let mut replacement = scryer_application::RuntimePluginLoad {
+        installation_id: Some("cardigann-fixture".into()),
+        descriptor: descriptor.clone(),
+        wasm_bytes: wasm.clone(),
+        first_party: false,
+        settings: Default::default(),
+    };
+    provider
+        .reload_runtime_plugins(&[replacement.clone()], &[])
+        .unwrap();
+    assert!(provider.client_for_provider(&config).is_none());
+    assert!(api.received_requests().await.unwrap().is_empty());
+    replacement.first_party = true;
+    provider
+        .reload_runtime_plugins(&[replacement], &[])
+        .unwrap();
     let client = provider.client_for_provider(&config).unwrap();
     for operation in [
         scryer_application::IndexerErrorOperation::ConnectionTest,
@@ -527,6 +564,8 @@ search:
     );
     values["definition_yaml"] = definition.into();
     config.config_json = Some(values.to_string());
+    // Persisted edits advance the revision used by the dynamic client cache.
+    config.updated_at += chrono::Duration::seconds(1);
     for id in ["idx-1", "idx-2"] {
         config.id = id.into();
         let other = provider.client_for_provider(&config).unwrap();
@@ -552,6 +591,7 @@ search:
         )
         .into();
     config.config_json = Some(values.to_string());
+    config.updated_at += chrono::Duration::seconds(1);
     let invalid = provider.client_for_provider(&config).unwrap();
     let before = api.received_requests().await.unwrap().len();
     let error = tokio::time::timeout(
