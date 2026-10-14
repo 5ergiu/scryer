@@ -2014,6 +2014,8 @@ export const mediaRenamePreviewBulkQuery = `query MediaRenamePreviewBulk($input:
     conflicts
     errors
     folderRepairs
+    organizingFolderChanges
+    namingContext { titleId language currentRelativePath proposedRelativePath organizingFolderChanged }
     items {
       collectionId
       currentPath
@@ -2037,6 +2039,8 @@ export const mediaRenamePreviewQuery = `query MediaRenamePreview($input: MediaRe
     conflicts
     errors
     folderRepairs
+    organizingFolderChanges
+    namingContext { titleId language currentRelativePath proposedRelativePath organizingFolderChanged }
     items {
       collectionId
       seriesMovieLinkIds

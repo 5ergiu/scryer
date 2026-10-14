@@ -62,6 +62,7 @@ async fn discover_episodic_title_files_for_progress(
     app: &AppUseCase,
     title: &Title,
 ) -> AppResult<Vec<LibraryFile>> {
+    let title = &app.title_for_naming(title).await;
     let import_paths = crate::import_workflow::resolve_import_paths(app, title).await?;
     let title_dir = crate::effective_title_folder_path(
         &import_paths.media_root,
@@ -161,6 +162,7 @@ async fn discover_movie_title_files(
     app: &AppUseCase,
     title: &Title,
 ) -> AppResult<Vec<LibraryFile>> {
+    let title = &app.title_for_naming(title).await;
     let import_paths = crate::import_workflow::resolve_import_paths(app, title).await?;
     let media_root_path = PathBuf::from(&import_paths.media_root);
     let collections = app
@@ -2608,6 +2610,7 @@ impl AppUseCase {
             ));
         }
 
+        let title = self.title_for_naming(&title).await;
         let import_paths = crate::import_workflow::resolve_import_paths(self, &title).await?;
         let media_root_path = PathBuf::from(&import_paths.media_root);
         let title_dir = crate::effective_title_folder_path(

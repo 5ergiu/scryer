@@ -50,6 +50,7 @@ function parsed(fields: Partial<NonNullable<Release["parsedRelease"]>>) {
     detectedHdr: false,
     parseConfidence: 1,
     isProperUpload: false,
+    revision: 0,
     isRemux: false,
     isBdDisk: false,
     isAiEnhanced: false,

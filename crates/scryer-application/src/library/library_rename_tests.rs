@@ -305,7 +305,11 @@ fn movie_title_order_tokens_move_leading_articles_and_bucket_by_sorted_title() {
         ),
         ("Grey Harbor (2008)", "Grey Harbor (2008)"),
     ] {
-        assert_eq!(move_leading_article_to_end(name), expected, "{name}");
+        assert_eq!(
+            scryer_domain::title_naming::title_with_article(name, Some("en")),
+            expected,
+            "{name}"
+        );
     }
 
     let mut title = test_movie_title("The Grey Harbor");
@@ -393,13 +397,29 @@ fn movie_title_folder_templates_allow_safe_nested_paths_only() {
 }
 
 #[test]
-fn movie_title_order_tokens_are_not_valid_for_episode_file_templates() {
-    validate_rename_template_for_facet("{title_with_article}.{ext}", &MediaFacet::Movie)
-        .expect("movie file templates should accept article sorting");
+fn title_folder_template_rendering_rejects_empty_components_without_changing_depth() {
+    let title = test_movie_title("The A/B\\C: Example");
+    let template = "{title_first_character}/{title_with_article}";
+    validate_title_folder_rendering(&title, template).unwrap();
+    let rendered = render_title_folder_template(template, &build_title_folder_tokens(&title, None));
+    assert_eq!(rendered.split('/').count(), 2);
+    assert!(!rendered.contains(['\\', ':']));
+    assert!(validate_title_folder_rendering(&title, "{imdb_id}/{title}").is_err());
     assert!(
-        validate_rename_template_for_facet("{title_first_character}.{ext}", &MediaFacet::Series)
-            .is_err()
+        render_title_folder_template(
+            "{imdb_id}/{title}",
+            &build_title_folder_tokens(&title, None)
+        )
+        .starts_with("_/")
     );
+}
+
+#[test]
+fn title_order_tokens_are_valid_for_every_facet() {
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        validate_rename_template_for_facet("{title_with_article}.{ext}", &facet).unwrap();
+        validate_rename_template_for_facet("{title_first_character}.{ext}", &facet).unwrap();
+    }
 }
 
 #[test]
@@ -420,7 +440,7 @@ fn render_title_folder_template_literal_braces_around_external_id() {
 fn render_title_folder_template_trims_empty_literal_brace_group() {
     let t = tokens(&[]);
     let result = render_title_folder_template("{{{edition}}}", &t);
-    assert_eq!(result, "");
+    assert_eq!(result, "_");
 }
 
 #[test]
@@ -1168,7 +1188,7 @@ fn test_movie_title(name: &str) -> Title {
         country: None,
         aliases: vec![],
         tagged_aliases: vec![],
-        metadata_language: None,
+        metadata_language: Some("eng".into()),
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
@@ -1969,6 +1989,17 @@ fn two_titles_planned_into_the_same_folder_overlap() {
     let mut pair = [outer, inner];
     pair.sort();
     assert_eq!(pair, ["title-a", "title-c"]);
+}
+
+#[test]
+fn nested_title_case_only_destinations_are_blocked_when_volume_case_is_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let planned = [
+        planned_folder("first", &root.path().join("E/Example").to_string_lossy()),
+        planned_folder("second", &root.path().join("e/example").to_string_lossy()),
+    ];
+    assert!(planned_title_folder_overlap(&planned, &[]).is_some());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[test]

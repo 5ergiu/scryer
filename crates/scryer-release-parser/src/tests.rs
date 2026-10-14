@@ -2765,6 +2765,29 @@ fn anime_release_group_keeps_the_whole_hyphenated_suffix() {
 }
 
 #[test]
+fn anime_release_group_does_not_absorb_audio_or_subtitle_tags() {
+    let target = context(ContextFacetHint::Anime, "Show A");
+    for tag in ["Dual-Audio", "Multi-Subs", "Multi-Audio"] {
+        for release in [
+            format!("Show A S01E01 1080p WEB-DL H.264-{tag}-Group-Raws"),
+            format!("Show A S01E01 1080p WEB-DL H.264 [{tag}] [Group-Raws]"),
+        ] {
+            let analysis = analyze_release_for_target(&release, &target);
+            assert_eq!(
+                analysis
+                    .best_candidate()
+                    .unwrap()
+                    .projected
+                    .release_group
+                    .as_deref(),
+                Some("Group-Raws"),
+                "{release}"
+            );
+        }
+    }
+}
+
+#[test]
 fn episode_titles_and_edition_tags_do_not_invent_release_groups() {
     let target = context(ContextFacetHint::Series, "Show C");
     let mut unexpected_groups = Vec::new();

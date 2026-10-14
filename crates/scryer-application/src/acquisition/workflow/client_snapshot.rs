@@ -135,6 +135,8 @@ pub(crate) enum FailureHandlingOutcome {
     AlreadyHandled,
     /// No destructive cleanup may follow an unconfirmed blocklist write.
     RecordingFailed,
+    /// No usable release identity exists; repeating the write cannot repair it.
+    MissingBlocklistKey,
 }
 /// Result of walking a scope's saved search results, best first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1149,7 +1151,9 @@ pub(crate) async fn process_download_failure_with_cleanup_intent(
     context: DownloadFailureContext,
     manual_cleanup: bool,
 ) -> FailureHandlingOutcome {
-    let outcome = handle_download_failure_for_download(app, canonical_download_id, context, manual_cleanup).await;
+    let outcome =
+        handle_download_failure_for_download(app, canonical_download_id, context, manual_cleanup)
+            .await;
     if outcome == FailureHandlingOutcome::Reopened {
         app.runtime
             .acquisition
@@ -1175,7 +1179,11 @@ async fn handle_download_failure_for_download(
             release_title = context.release_title.as_str(),
             "skipping automatic failed download handling without scryer grab history"
         );
-        return if manual_cleanup { FailureHandlingOutcome::RecordingFailed } else { FailureHandlingOutcome::RecordedOnly };
+        return if manual_cleanup {
+            FailureHandlingOutcome::RecordingFailed
+        } else {
+            FailureHandlingOutcome::RecordedOnly
+        };
     }
 
     let resolved_title_id = context
@@ -1192,6 +1200,14 @@ async fn handle_download_failure_for_download(
     let preferred_source_title =
         preferred_failed_release_title(&context, failed_submission.as_ref());
     let normalized_source_title = normalize_release_name(preferred_source_title.as_deref());
+    if manual_cleanup
+        && (resolved_title_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+            || normalized_source_title.is_none())
+    {
+        return FailureHandlingOutcome::MissingBlocklistKey;
+    }
     let normalized_source_hint = resolved_failed_release_hint(failed_submission.as_ref());
     // Both halves of the blocklist key come off the submission: source_provider_id
     // has carried the indexer id since 0150, info_hash since 0192.
@@ -1480,18 +1496,31 @@ async fn handle_download_failure_for_download(
     }
 
     if manual_cleanup {
-        let confirmed = if let (Some(title_id), Some(release_name)) =
-            (resolved_title_id.as_deref(), normalized_source_title.as_deref())
-        {
-            app.services.workflow.blocklist_repo.is_blocked(
-                title_id, &blocklist_indexer_id, release_name, blocklist_info_hash.as_deref(),
-            ).await.unwrap_or(false)
+        let confirmed = if let (Some(title_id), Some(release_name)) = (
+            resolved_title_id.as_deref(),
+            normalized_source_title.as_deref(),
+        ) {
+            app.services
+                .workflow
+                .blocklist_repo
+                .is_blocked(
+                    title_id,
+                    &blocklist_indexer_id,
+                    release_name,
+                    blocklist_info_hash.as_deref(),
+                )
+                .await
+                .unwrap_or(false)
         } else {
             false
         };
         // The tracker persists the terminal state and explicit cleanup intent
         // together. Do not enqueue automatic cleanup before that durable write.
-        return if confirmed { outcome } else { FailureHandlingOutcome::RecordingFailed };
+        return if confirmed {
+            outcome
+        } else {
+            FailureHandlingOutcome::RecordingFailed
+        };
     }
 
     // NZBGet must retain history until terminal cleanup has inspected its payload.
