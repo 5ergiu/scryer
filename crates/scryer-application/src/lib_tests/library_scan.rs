@@ -1045,6 +1045,89 @@ async fn movie_full_scan_persists_and_reconciles_unmatched_items() {
 }
 
 #[tokio::test]
+async fn movie_full_scan_keeps_refused_title_boundary_rows_across_reconcile() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mixed_parent = tempdir
+        .path()
+        .join("M")
+        .join("Mqvx Mixed Placeholder (2003)");
+    let mixed_child = mixed_parent.join("Mqvx Nested Placeholder (2004)");
+    std::fs::create_dir_all(&mixed_child).expect("create mixed layout");
+    let parent_file = mixed_parent.join("Mqvx Mixed Placeholder (2003).mkv");
+    let child_file = mixed_child.join("Mqvx Nested Placeholder (2004).mkv");
+    std::fs::write(&parent_file, b"parent").expect("write parent movie file");
+    std::fs::write(&child_file, b"child").expect("write nested movie file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "movies.path",
+            tempdir.path().to_string_lossy().as_ref(),
+        )
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_tracking(
+        settings,
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched_items.clone(),
+    );
+    app.services
+        .config
+        .settings
+        .upsert_setting_json(
+            SETTINGS_SCOPE_SYSTEM,
+            crate::FOLDER_TEMPLATE_KEY,
+            Some(MediaFacet::Movie.as_str().to_string()),
+            serde_json::to_string("{title_first_character}/{title_with_article} ({year})")
+                .expect("serialize template"),
+            "test",
+            None,
+        )
+        .await
+        .expect("set the nested movie folder template");
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile legacy movie root");
+
+    let refused_rows = |items: &[LibraryScanUnmatchedItem]| {
+        items
+            .iter()
+            .filter(|item| {
+                item.item_path == mixed_parent.to_string_lossy()
+                    && item.reason_code
+                        == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+            })
+            .count()
+    };
+
+    for pass in 1..=2 {
+        app.scan_library(&user, MediaFacet::Movie)
+            .await
+            .expect("movie scan");
+        let items = unmatched_items.items().await;
+        assert_eq!(
+            refused_rows(&items),
+            1,
+            "scan {pass} must keep the refused mixed-layout row; rows: {:?}",
+            items
+                .iter()
+                .map(|item| (item.item_path.clone(), item.reason_code.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    assert_eq!(std::fs::read(&parent_file).unwrap(), b"parent");
+    assert_eq!(std::fs::read(&child_file).unwrap(), b"child");
+    assert!(
+        app.list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn title_scan_returns_error_when_one_off_hydration_fails() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let settings = Arc::new(StoredSettingsRepo::default());
