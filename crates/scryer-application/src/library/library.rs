@@ -6,8 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::domain_events::DomainEventActor;
-#[cfg(test)]
-use crate::library_discovery::list_child_directories;
 use crate::library_discovery::{
     BackgroundRefreshProbeOutcome, MovieTopLevelEntry, elapsed_ms_u64, matching_movie_nfo_path,
     run_background_refresh_probe_with_delta,
