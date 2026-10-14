@@ -2216,6 +2216,7 @@ impl CatalogQueries {
             title_search: filter.title_search,
             download_id: filter.download_id,
             episode_id: filter.episode_id.map(String::from),
+            collection_id: filter.collection_id.map(String::from),
             group_by_event: filter.group_by_event.unwrap_or(false),
             limit: filter.limit.unwrap_or(50).max(1) as usize,
             offset: filter.offset.unwrap_or(0).max(0) as usize,

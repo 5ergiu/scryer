@@ -30118,6 +30118,10 @@ input TitleHistoryFilterInput {
 	"""
 	episodeId: ID
 	"""
+	Season collection ID to include, or null for all collections.
+	"""
+	collectionId: ID
+	"""
 	Whether equivalent events should be grouped.
 	"""
 	groupByEvent: Boolean
