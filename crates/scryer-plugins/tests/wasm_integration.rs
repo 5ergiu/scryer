@@ -377,6 +377,218 @@ fn empty_dir_loads_no_plugins() {
     assert!(provider.available_provider_types().is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn real_cardigann_network_endpoints_authorize_only_configured_instance() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some(wasm_path) = std::env::var_os("CARDIGANN_COMPONENT_WASM") else {
+        return;
+    };
+    initialize_wasm_runtime_for_tests();
+    let wasm = std::fs::read(wasm_path).unwrap();
+    let descriptor = scryer_application::PluginDescriptorLoader::load_descriptor_from_wasm_bytes(
+        &scryer_plugins::WasmPluginDescriptorLoader,
+        &wasm,
+    )
+    .expect("endpoint component descriptor must load");
+    assert!(
+        descriptor
+            .indexer()
+            .unwrap()
+            .capabilities
+            .resolve_network_endpoints
+    );
+    let api = MockServer::start().await;
+    let api_url = api.uri().replace("127.0.0.1", "localhost");
+    Mock::given(method("POST"))
+        .and(path("/login"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&api)
+        .await;
+    let html = format!(
+        "<table><tr class=result><td><a class=title>Fixture</a><a class=download href='{api_url}/download/1'>DL</a></td></tr></table>"
+    );
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(html))
+        .mount(&api)
+        .await;
+    let torrent = "d4:infod4:name4:testee";
+    Mock::given(method("GET"))
+        .and(path("/download/1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(torrent)
+                .insert_header("Content-Type", "application/x-bittorrent"),
+        )
+        .mount(&api)
+        .await;
+    let definition = format!(
+        r#"
+id: endpoint-fixture
+name: Endpoint Fixture
+type: public
+links: ["http://127.0.0.1/"]
+caps: {{}}
+settings:
+  - name: apiurl
+    type: text
+    default: "{api_url}"
+login:
+  method: post
+  path: "{{{{ .Config.apiurl }}}}/login"
+search:
+  paths:
+    - path: "{{{{ .Config.apiurl }}}}/search"
+  rows:
+    selector: tr.result
+  fields:
+    title: {{ selector: a.title }}
+    download: {{ selector: a.download, attribute: href }}
+"#
+    );
+    let provider = scryer_plugins::WasmIndexerPluginProvider::empty().with_external_bytes(&wasm);
+    let mut config = test_config("cardigann");
+    config.base_url = "http://127.0.0.1/".into();
+    config.config_json = Some(
+        serde_json::json!({"base_url": config.base_url, "definition_yaml": definition}).to_string(),
+    );
+    let client = provider.client_for_provider(&config).unwrap();
+    for operation in [
+        scryer_application::IndexerErrorOperation::ConnectionTest,
+        scryer_application::IndexerErrorOperation::InteractiveSearch,
+    ] {
+        let response = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.search(
+                "fixture".into(),
+                Default::default(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                scryer_application::SearchMode::Interactive,
+                operation,
+                None,
+                None,
+                None,
+                None,
+                vec![],
+                None,
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.results.len(), 1);
+    }
+    let artifact = tokio::time::timeout(
+        Duration::from_secs(60),
+        client.resolve_download(&format!("{api_url}/download/1")),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(artifact, scryer_application::ResolvedDownloadArtifact::TorrentFile { bytes, .. } if bytes == torrent.as_bytes())
+    );
+
+    let denied = tokio::time::timeout(
+        Duration::from_secs(60),
+        client.resolve_download("http://unrelated.invalid/private?credential=secret"),
+    )
+    .await
+    .unwrap()
+    .unwrap_err()
+    .to_string();
+    assert!(
+        denied.contains("indexer_host_not_allowed") && denied.contains("unrelated.invalid"),
+        "{denied}"
+    );
+    assert!(
+        !denied.contains("credential")
+            && !denied.contains("secret")
+            && !denied.contains("/private")
+    );
+
+    // Changing this instance's config rebuilds its permissions; another instance
+    // with no alternate API endpoint cannot inherit the first one's authority.
+    let mut values: serde_json::Value =
+        serde_json::from_str(config.config_json.as_ref().unwrap()).unwrap();
+    values["extra_field_data_json"] = serde_json::json!({"apiurl": "http://127.0.0.1"})
+        .to_string()
+        .into();
+    let definition = values["definition_yaml"].as_str().unwrap().replace(
+        "login:\n  method: post\n  path: \"{{ .Config.apiurl }}/login\"\n",
+        "",
+    );
+    values["definition_yaml"] = definition.into();
+    config.config_json = Some(values.to_string());
+    for id in ["idx-1", "idx-2"] {
+        config.id = id.into();
+        let other = provider.client_for_provider(&config).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(60),
+            other.resolve_download(&format!("{api_url}/download/1")),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("indexer_host_not_allowed") && error.contains("localhost"),
+            "{error}"
+        );
+    }
+    values["definition_yaml"] = values["definition_yaml"]
+        .as_str()
+        .unwrap()
+        .replace(
+            "{{ .Config.apiurl }}/search",
+            "https://{{ .Result.host }}/search",
+        )
+        .into();
+    config.config_json = Some(values.to_string());
+    let invalid = provider.client_for_provider(&config).unwrap();
+    let before = api.received_requests().await.unwrap().len();
+    let error = tokio::time::timeout(
+        Duration::from_secs(60),
+        invalid.resolve_download(&format!("{api_url}/download/1")),
+    )
+    .await
+    .unwrap()
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("network_endpoint_resolution_failed"),
+        "{error}"
+    );
+    let requests = api.received_requests().await.unwrap();
+    assert_eq!(requests.len(), before);
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.path() == "/login")
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/search")
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/download/1")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn scoring_policies_empty_for_test_plugin() {
     let fixtures_dir = fixtures_dir();

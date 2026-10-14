@@ -723,6 +723,9 @@ where
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct IndexerCapabilities {
+    /// Resolve instance-specific HTTP origins before any ordinary operation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve_network_endpoints: bool,
     #[serde(default = "default_true")]
     pub rss: bool,
     #[serde(default, serialize_with = "serialize_ordered_string_map")]
@@ -766,6 +769,7 @@ pub struct IndexerCapabilities {
 impl Default for IndexerCapabilities {
     fn default() -> Self {
         Self {
+            resolve_network_endpoints: false,
             rss: true,
             supported_ids: HashMap::new(),
             deduplicates_aliases: false,
@@ -3132,6 +3136,7 @@ struct PluginSdkSchemaDocument {
     host_response: host::PluginHostResponse,
     indexer_search_request: PluginSearchRequest,
     indexer_search_response: PluginSearchResponse,
+    resolve_network_endpoints_response: command::ResolveNetworkEndpointsResponse,
     indexer_search_plan_request: PluginSearchPlanRequest,
     indexer_search_strategy_event: PluginSearchStrategyEvent,
     indexer_search_plan_summary: PluginSearchPlanSummary,
@@ -3179,6 +3184,20 @@ pub fn plugin_sdk_schema_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_endpoints_capability_is_opt_in_and_omitted_for_old_plugins() {
+        let capabilities: IndexerCapabilities = serde_json::from_str("{}").unwrap();
+        assert!(!capabilities.resolve_network_endpoints);
+        assert!(
+            serde_json::to_value(&capabilities)
+                .unwrap()
+                .get("resolve_network_endpoints")
+                .is_none()
+        );
+        let enabled: IndexerCapabilities =
+            serde_json::from_str(r#"{"resolve_network_endpoints":true}"#).unwrap();
+        assert!(enabled.resolve_network_endpoints);
+    }
     use crate::indexer::{
         indexer_capability_fixtures, normalize_external_ids, torrent_result, usenet_result,
     };
