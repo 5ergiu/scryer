@@ -39,6 +39,7 @@ pub const SCRYER_PRODUCT: ProductDescriptor = ProductDescriptor {
     windows_server_executable: "scryer.exe",
     windows_tray_executable: "scryer-tray.exe",
     windows_helper_executable: "scryer-upgrade-helper.exe",
+    windows_product_process_names: &["scryer.exe", "scryer-tray.exe"],
     staged_replacement_prefix: ".scryer-upgrade-new-",
     disable_self_upgrade_env: "SCRYER_DISABLE_SELF_UPGRADE",
     package_env: "SCRYER_PACKAGE",
