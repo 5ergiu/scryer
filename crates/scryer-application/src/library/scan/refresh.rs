@@ -297,12 +297,8 @@ async fn refresh_title_boundaries(
         }
     }
     let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
-    coordinator
-        .register_discovery_batch(rejected as usize, false)
-        .await;
-    coordinator
-        .mark_title_match_completed(rejected as usize)
-        .await;
+    coordinator.register_discovery_batch(rejected, false).await;
+    coordinator.mark_title_match_completed(rejected).await;
     Ok((accepted, rejected))
 }
 

@@ -10803,6 +10803,8 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
         serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
     let mut input = external_test_input();
+    // With no incumbent, use a tier upgrade rather than a revision-only tie.
+    input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
     input.published_at = Some(Utc::now());
     input.flags = vec!["freeleech".into()];
     let first = app
@@ -16590,7 +16592,7 @@ async fn a_queue_covered_saved_pack_costs_no_writes_until_the_queued_pack_leaves
 async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let covered_single = "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-GroupB".to_string();
-    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupC".to_string();
+    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     seed_season_eight_scopes(&app, &title).await;
@@ -16643,7 +16645,7 @@ async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
 #[tokio::test]
 async fn a_covered_episode_row_does_not_hide_a_refused_pack_below_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
-    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB".to_string();
+    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     let anchor = season_scope_states(&app, &title, "7")

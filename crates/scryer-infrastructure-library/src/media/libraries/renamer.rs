@@ -408,6 +408,7 @@ mod tests {
             ],
             title_folders: Vec::new(),
             folder_repairs: Vec::new(),
+            naming_context: Vec::new(),
         };
 
         let results = FileSystemLibraryRenamer::new()

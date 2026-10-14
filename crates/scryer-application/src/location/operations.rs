@@ -2532,23 +2532,22 @@ impl AppUseCase {
         let naming_title = self
             .title_for_naming(merge_destination.unwrap_or(title))
             .await;
-        if merge_destination.is_none()
+        if (merge_destination.is_none()
             || naming_title
                 .folder_path
                 .as_deref()
-                .is_none_or(|path| path.trim().is_empty())
-        {
-            if let Err(error) = crate::library::rename::validate_title_folder_rendering(
+                .is_none_or(|path| path.trim().is_empty()))
+            && let Err(error) = crate::library::rename::validate_title_folder_rendering(
                 &naming_title,
                 folder_template,
-            ) {
-                draft.class = TitleLocationClass::NeedsResolution;
-                draft.blocked_reason = Some(error.to_string());
-                return Ok(RootMoveTitleOutcome::settled(
-                    draft,
-                    Some("invalid_title_folder_template"),
-                ));
-            }
+            )
+        {
+            draft.class = TitleLocationClass::NeedsResolution;
+            draft.blocked_reason = Some(error.to_string());
+            return Ok(RootMoveTitleOutcome::settled(
+                draft,
+                Some("invalid_title_folder_template"),
+            ));
         }
         let destination_folder = match merge_destination {
             Some(_) => {

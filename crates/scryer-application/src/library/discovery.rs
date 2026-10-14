@@ -135,7 +135,7 @@ impl TitleFolderBoundaryPolicy {
             .iter()
             .filter(|title| title.library_id == library_id)
             .filter_map(|title| title.folder_path.as_deref())
-            .map(|path| stored_path_to_path_buf(&path))
+            .map(stored_path_to_path_buf)
             .filter(|path| path != root && path.starts_with(root))
             .collect();
         let mut other_roots: Vec<_> = app
@@ -230,7 +230,7 @@ pub(crate) fn stream_title_folder_boundaries(
                     continue;
                 }
                 if !kind.is_dir() || should_skip_library_top_level_entry(&path, true) { continue; }
-                if policy.other_roots.iter().any(|other| path == *other) { continue; }
+                if policy.other_roots.contains(&path) { continue; }
                 let resolved = tokio::fs::canonicalize(&path).await.map_err(|error| AppError::Repository(error.to_string()))?;
                 if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
                     tokio::select! {

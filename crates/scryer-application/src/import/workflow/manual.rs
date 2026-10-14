@@ -4976,7 +4976,8 @@ mod manual_movie_primary_selection_tests {
         let root = std::fs::canonicalize(dir.path()).expect("canonical root");
         const { assert!(1024 * 1024 < SAMPLE_SIZE_THRESHOLD) };
         let small_movie = write_video(&root, "Short.Film.1998.480p.DVDRip.mkv", 1024 * 1024);
-        assert!(is_sample_file(Path::new(&small_movie.file_path)));
+        assert_eq!(std::fs::metadata(&small_movie.file_path).unwrap().len(), 1024 * 1024);
+        assert!(!is_sample_file(Path::new(&small_movie.file_path)));
         assert!(!is_sample_named_file(Path::new(&small_movie.file_path)));
 
         assert_eq!(

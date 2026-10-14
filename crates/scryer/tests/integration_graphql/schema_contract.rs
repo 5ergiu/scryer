@@ -1139,8 +1139,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     for name in ["ListMemberKeyPayload", "ListAccountKeyLinkPayload"] {
         assert!(public_type_names.contains(&name), "missing type {name}");
     }
-    assert_eq!(public_types.len(), 964);
-    assert_eq!(kind_count("OBJECT"), 518);
+    // Rename previews now expose the existing per-title naming context.
+    assert!(public_type_names.contains(&"MediaRenameNamingContextPayload"));
+    assert_eq!(public_types.len(), 965);
+    assert_eq!(kind_count("OBJECT"), 519);
     assert_eq!(kind_count("INPUT_OBJECT"), 239);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);

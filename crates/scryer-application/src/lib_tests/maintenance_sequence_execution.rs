@@ -1335,11 +1335,19 @@ async fn high_risk_sequence_failures_trip_the_per_pass_breaker_before_a_fourth_d
         );
     }
     for (index, title) in titles.iter().enumerate() {
-        let path = fixture.root.join(format!("missing-{index}.mkv"));
+        let folder = fixture.root.join(format!("title-{index}"));
+        std::fs::create_dir(&folder).expect("create title folder");
+        let path = folder.join(format!("missing-{index}.mkv"));
         add_catalog_movie_file_without_physical_path(&fixture.execution.app, &title.id, &path)
             .await;
         std::fs::write(&path, b"admit the configured-root title")
             .expect("create file for storage-scoped evaluation");
+        super::maintenance_title_completion::record_fixture_title_folder(
+            &fixture.execution.app,
+            &title.id,
+            &folder,
+        )
+        .await;
     }
     let draft = selected_root_sequence_deletion_draft(&fixture).await;
     let (rule_set_id, candidates) = arm_and_evaluate_all(&fixture.execution, draft).await;

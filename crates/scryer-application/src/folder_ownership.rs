@@ -435,6 +435,7 @@ pub(crate) async fn ensure_folder_move_available_to_title(
             && let Some(owned_path) = owner.folder_path.as_deref()
             && !owned_path.is_empty()
             && title_folders_overlap(&folder_path, owned_path)?
+            && !folder_spans_a_library_root(app, owned_path).await?
         {
             return Err(AppError::Validation(format!(
                 "folder {folder_path} overlaps the folder owned by title {}",
