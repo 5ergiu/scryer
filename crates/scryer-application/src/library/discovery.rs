@@ -108,6 +108,15 @@ pub(crate) struct TitleFolderBoundaryPolicy {
 }
 
 impl TitleFolderBoundaryPolicy {
+    fn contains_stored_folder(root: &Path, folder: &Path) -> bool {
+        let root = crate::stored_paths::folder_path_identity_key(&path_to_stored_string(root));
+        let folder = crate::stored_paths::folder_path_identity_key(&path_to_stored_string(folder));
+        match (root, folder) {
+            (Some(root), Some(folder)) => root != folder && Path::new(&folder).starts_with(&root),
+            _ => false,
+        }
+    }
+
     pub(crate) async fn load(
         app: &AppUseCase,
         facet: &MediaFacet,
@@ -136,7 +145,7 @@ impl TitleFolderBoundaryPolicy {
             .filter(|title| title.library_id == library_id)
             .filter_map(|title| title.folder_path.as_deref())
             .map(stored_path_to_path_buf)
-            .filter(|path| path != root && path.starts_with(root))
+            .filter(|path| Self::contains_stored_folder(root, path))
             .collect();
         let mut other_roots: Vec<_> = app
             .services
@@ -147,7 +156,7 @@ impl TitleFolderBoundaryPolicy {
             .into_iter()
             .flat_map(|library| library.roots)
             .map(|root| stored_path_to_path_buf(&root.path))
-            .filter(|path| path != root && path.starts_with(root))
+            .filter(|path| Self::contains_stored_folder(root, path))
             .collect();
         other_roots.extend(
             titles
@@ -155,7 +164,13 @@ impl TitleFolderBoundaryPolicy {
                 .filter(|title| title.library_id != library_id)
                 .filter_map(|title| title.folder_path)
                 .map(|path| stored_path_to_path_buf(&path))
-                .filter(|path| path.starts_with(root)),
+                .filter(|path| {
+                    Self::contains_stored_folder(root, path)
+                        || crate::stored_paths::folder_paths_match(
+                            &path_to_stored_string(root),
+                            &path_to_stored_string(path),
+                        )
+                }),
         );
         let episode_folders = episode_folder_patterns(app, facet).await?;
         Ok(Self {
@@ -230,7 +245,9 @@ pub(crate) fn stream_title_folder_boundaries(
                     continue;
                 }
                 if !kind.is_dir() || should_skip_library_top_level_entry(&path, true) { continue; }
-                if policy.other_roots.contains(&path) { continue; }
+                if policy.other_roots.iter().any(|other| crate::stored_paths::folder_paths_match(
+                    &path_to_stored_string(other), &path_to_stored_string(&path),
+                )) { continue; }
                 let resolved = tokio::fs::canonicalize(&path).await.map_err(|error| AppError::Repository(error.to_string()))?;
                 if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
                     tokio::select! {
@@ -242,7 +259,7 @@ pub(crate) fn stream_title_folder_boundaries(
                 let owned = policy.stored_folders.iter().any(|stored| crate::stored_paths::folder_paths_match(
                     &path_to_stored_string(stored), &path_to_stored_string(&path),
                 ));
-                let contains_owner = policy.stored_folders.iter().any(|stored| stored != &path && stored.starts_with(&path));
+                let contains_owner = policy.stored_folders.iter().any(|stored| TitleFolderBoundaryPolicy::contains_stored_folder(&path, stored));
                 let content = if owned {
                     TitleBoundaryContent { has_media: true, has_child_titles: false }
                 } else {
@@ -938,6 +955,41 @@ fn metadata_probe_marker(metadata: &std::fs::Metadata) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn stored_folder_selection_uses_windows_path_identity() {
+        let root = Path::new(r"C:\Media");
+        assert!(TitleFolderBoundaryPolicy::contains_stored_folder(
+            root,
+            Path::new(r"c:\media\Movie"),
+        ));
+        for excluded in [r"c:\media", r"C:\Media-other\Movie", r"D:\Media\Movie"] {
+            assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+                root,
+                Path::new(excluded)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stored_folder_selection_preserves_case_sensitive_boundaries() {
+        assert!(TitleFolderBoundaryPolicy::contains_stored_folder(
+            Path::new("/media/"),
+            Path::new("/media/./Movie"),
+        ));
+        assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+            Path::new("/media"),
+            Path::new("/Media/Movie"),
+        ));
+        for excluded in ["/media", "/media-other/Movie", "/other/Movie"] {
+            assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+                Path::new("/media"),
+                Path::new(excluded)
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn nested_title_owned_layouts_survive_template_changes() {

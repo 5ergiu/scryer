@@ -173,12 +173,16 @@ fn live_media_repair_plan(
     roots: &[RootRow],
     titles: &[TitleRow],
     media: Vec<MediaFileRow>,
+    custom_recycle_path: Option<&str>,
 ) -> RepairPlan {
     let live = media
         .into_iter()
         .filter(|row| {
             let path = row.file_path.replace('\\', "/");
-            !path.contains("/.scryer-recycle/") && !path.contains("/.scryer-upgrade-replacement-")
+            !path.contains("/.scryer-recycle/")
+                && !path.contains("/.scryer-upgrade-replacement-")
+                && !custom_recycle_path
+                    .is_some_and(|folder| stored_path_is_inside_folder(folder, &row.file_path))
         })
         .collect::<Vec<_>>();
     build_repair_plan(roots, titles, &live)
@@ -187,10 +191,21 @@ fn live_media_repair_plan(
 pub async fn repair_live_title_folders_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> AppResult<()> {
+    let custom_recycle_path = sqlx::query_scalar::<_, String>(
+        "SELECT v.value_json FROM settings_values v
+         JOIN settings_definitions d ON d.id = v.setting_definition_id
+         WHERE d.scope = 'media' AND d.key_name = 'recycle_bin.path'
+         AND v.scope = 'media' AND v.scope_id IS NULL",
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(repo_err)?
+    .and_then(|raw| recycle_path_setting(&raw));
     let plan = live_media_repair_plan(
         &sqlite_roots(tx).await?,
         &sqlite_titles(tx).await?,
         sqlite_media_files(tx).await?,
+        custom_recycle_path.as_deref(),
     );
     log_plan(&plan);
     for repair in plan.repairs {
@@ -204,10 +219,21 @@ pub async fn repair_live_title_folders_sqlite(
 pub async fn repair_live_title_folders_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> AppResult<()> {
+    let custom_recycle_path = sqlx::query_scalar::<_, String>(
+        "SELECT v.value_json::text FROM settings_values v
+         JOIN settings_definitions d ON d.id = v.setting_definition_id
+         WHERE d.scope = 'media' AND d.key_name = 'recycle_bin.path'
+         AND v.scope = 'media' AND v.scope_id IS NULL",
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(repo_err)?
+    .and_then(|raw| recycle_path_setting(&raw));
     let plan = live_media_repair_plan(
         &postgres_roots(tx).await?,
         &postgres_titles(tx).await?,
         postgres_media_files(tx).await?,
+        custom_recycle_path.as_deref(),
     );
     log_plan(&plan);
     for repair in plan.repairs {
@@ -216,6 +242,13 @@ pub async fn repair_live_title_folders_postgres(
             .execute(&mut **tx).await.map_err(repo_err)?;
     }
     Ok(())
+}
+
+fn recycle_path_setting(raw: &str) -> Option<String> {
+    serde_json::from_str::<String>(raw)
+        .ok()
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
 }
 
 fn recorded_folder(title: &TitleRow) -> Option<&str> {
@@ -768,7 +801,7 @@ mod tests {
                 .repairs
                 .is_empty()
         );
-        let plan = live_media_repair_plan(&roots(), &titles, files);
+        let plan = live_media_repair_plan(&roots(), &titles, files, None);
         assert_eq!(
             repaired(&plan, "t1").as_deref(),
             Some("/media/tv/Synthetic Show")
@@ -781,6 +814,7 @@ mod tests {
                 media("t1", "/media/tv/.scryer-recycle/old.mkv"),
                 media("t1", "/media/tv/.scryer-upgrade-replacement-new.mkv"),
             ],
+            None,
         );
         assert!(parked_only.repairs.is_empty());
         let conflicting = live_media_repair_plan(
@@ -790,8 +824,53 @@ mod tests {
                 media("t1", "/media/tv/Show A/e1.mkv"),
                 media("t1", "/media/tv/Show B/e2.mkv"),
             ],
+            None,
         );
         assert!(conflicting.repairs.is_empty());
+    }
+
+    #[test]
+    fn live_repair_custom_recycle_exclusion_respects_path_boundaries() {
+        let titles = vec![title("t1", "/media/tv")];
+        let custom = "/media/tv/Recycle";
+        let mut files = flattened("t1", "/media/tv/Synthetic Show");
+        files.push(media("t1", "/media/tv/Recycle/old.mkv"));
+        assert!(
+            live_media_repair_plan(&roots(), &titles, files.clone(), None)
+                .repairs
+                .is_empty()
+        );
+        assert_eq!(
+            repaired(
+                &live_media_repair_plan(&roots(), &titles, files.clone(), Some(custom)),
+                "t1"
+            )
+            .as_deref(),
+            Some("/media/tv/Synthetic Show"),
+        );
+        files.push(media("t1", "/media/tv/Recycle-other/live.mkv"));
+        assert!(
+            live_media_repair_plan(&roots(), &titles, files, Some(custom))
+                .repairs
+                .is_empty()
+        );
+        assert!(
+            live_media_repair_plan(
+                &roots(),
+                &titles,
+                vec![media("t1", "/media/tv/Recycle/old.mkv")],
+                Some(custom)
+            )
+            .repairs
+            .is_empty()
+        );
+        assert_eq!(
+            recycle_path_setting(r#"" /media/tv/Recycle ""#).as_deref(),
+            Some(custom)
+        );
+        for absent in ["null", "false", "{}", r#""   ""#] {
+            assert_eq!(recycle_path_setting(absent), None);
+        }
     }
 
     #[tokio::test]
@@ -802,11 +881,15 @@ mod tests {
             "CREATE TABLE library_roots (id TEXT, library_id TEXT, path TEXT);
             CREATE TABLE titles (id TEXT, library_id TEXT, root_folder_id TEXT, folder_path TEXT);
             CREATE TABLE media_files (id TEXT, title_id TEXT, file_path TEXT);
+            CREATE TABLE settings_definitions (id TEXT, scope TEXT, key_name TEXT);
+            CREATE TABLE settings_values (setting_definition_id TEXT, scope TEXT, scope_id TEXT, value_json TEXT);
+            INSERT INTO settings_definitions VALUES ('recycle', 'media', 'recycle_bin.path');
+            INSERT INTO settings_values VALUES ('recycle', 'media', NULL, '\"/media/tv/Custom Recycle\"');
             INSERT INTO library_roots VALUES ('root-tv', 'series', '/media/tv');
             INSERT INTO titles VALUES ('live', 'series', 'root-tv', '/media/tv'),
                 ('parked', 'series', 'root-tv', '/media/tv');
             INSERT INTO media_files VALUES ('1', 'live', '/media/tv/Show/e1.mkv'),
-                ('2', 'live', '/media/tv/.scryer-recycle/old.mkv'),
+                ('2', 'live', '/media/tv/Custom Recycle/old.mkv'),
                 ('3', 'parked', '/media/tv/.scryer-upgrade-replacement-new.mkv');",
         )
         .execute(&mut *tx)

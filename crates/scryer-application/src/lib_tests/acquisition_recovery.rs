@@ -16286,6 +16286,28 @@ async fn assert_upgrade_waits_for_the_client_queue_then_grabs(
 }
 
 #[tokio::test]
+async fn expired_pending_ranking_prefers_revision_of_queued_group() {
+    let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
+    let (app, title, _) = season_pack_downloading_fixture(vec![queued_pack]).await;
+    let wanted = season_scope_states(&app, &title, "7").await.remove(0);
+    let mut unrelated = pending_movie_release(
+        &wanted.id,
+        &title,
+        "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB",
+        PendingReleaseStatus::Waiting,
+    );
+    unrelated.id = "a-unrelated-group".into();
+    unrelated.release_size_bytes = None;
+    let mut revision = unrelated.clone();
+    revision.id = "b-queued-group-revision".into();
+    revision.release_title = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".into();
+    let mut releases = vec![unrelated, revision];
+    app.order_expired_releases_by_rank(&wanted, &mut releases, Utc::now())
+        .await;
+    assert_eq!(releases[0].id, "b-queued-group-revision");
+}
+
+#[tokio::test]
 async fn saved_proper_of_the_downloading_pack_is_grabbed() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let proper_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();

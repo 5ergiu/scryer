@@ -613,6 +613,15 @@ fn render_episode_folder_name_selects_regular_and_specials_templates() {
     let title = test_movie_title("Neon Cipher");
 
     assert_eq!(
+        render_episode_folder_name(&title, 0, "Season {season}", "{tvdb_id}"),
+        "Specials"
+    );
+    assert_eq!(
+        render_episode_folder_name(&title, 0, "Season {season}", "_"),
+        "_"
+    );
+
+    assert_eq!(
         render_episode_folder_name(&title, 3, "Season {season}", "Specials"),
         "Season 3"
     );

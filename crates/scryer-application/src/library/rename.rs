@@ -3387,7 +3387,7 @@ pub(crate) fn render_episode_folder_name(
     };
     let mut tokens = build_title_folder_tokens(title, title.year);
     tokens.insert("season".to_string(), season.to_string());
-    let rendered = render_title_folder_template(template, &tokens);
+    let rendered = render_title_folder_template_components(template, &tokens);
     if rendered.is_empty() {
         render_title_folder_template(default_template, &tokens)
     } else {
