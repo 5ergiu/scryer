@@ -224,25 +224,6 @@ pub(crate) async fn read_valid_movie_nfo_metadata(
     Some(meta)
 }
 
-pub(crate) async fn read_series_boundary_metadata(folder: &Path) -> Option<NfoMetadata> {
-    let nfo = crate::library_discovery::read_discovery_nfo(&folder.join("tvshow.nfo"))
-        .await
-        .ok()
-        .flatten()
-        .map(|content| parse_nfo(&content));
-    if nfo.as_ref().is_some_and(|meta| {
-        meta.has_external_ids()
-            || meta
-                .title
-                .as_deref()
-                .is_some_and(|title| !title.trim().is_empty())
-    }) {
-        nfo
-    } else {
-        read_plexmatch_metadata(Some(folder.to_path_buf())).await
-    }
-}
-
 async fn read_tvshow_nfo_metadata(folder: PathBuf) -> Option<crate::nfo::NfoMetadata> {
     let path = folder.join("tvshow.nfo");
     let metadata = tokio::fs::metadata(&path).await.ok()?;
