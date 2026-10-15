@@ -231,7 +231,8 @@ impl BoundaryEvidence {
         let (walk, conflict) =
             crate::library_filename_parser::library_title_walk_with_id_conflicts(name);
         let title = crate::helpers::parse_usable_release_title(name)
-            .map(|parsed| parsed.normalized_title.to_lowercase());
+            .map(|parsed| crate::title_matching::canonical_lookup_key(&parsed.normalized_title))
+            .filter(|title| !title.is_empty());
         Self {
             title,
             conflict,
@@ -242,20 +243,59 @@ impl BoundaryEvidence {
         }
     }
 
-    fn contradicts_folder(&self, path: &Path) -> bool {
+    async fn contradicts_folder(&self, path: &Path, episodic: bool) -> bool {
         let folder = Self::from_name(&path.file_name().unwrap_or_default().to_string_lossy());
-        self.conflict
+        if self.conflict
             || folder.conflict
-            || self
-                .title
-                .as_ref()
-                .zip(folder.title.as_ref())
-                .is_some_and(|(a, b)| a != b)
             || self
                 .ids
                 .iter()
                 .zip(folder.ids.iter())
                 .any(|(a, b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a != b))
+        {
+            return true;
+        }
+        if !self
+            .title
+            .as_ref()
+            .zip(folder.title.as_ref())
+            .is_some_and(|(a, b)| a != b)
+        {
+            return false;
+        }
+        // Local series identity takes precedence over decorated folder labels,
+        // as it does in the matching pipeline. It cannot override conflicting
+        // file identities or external IDs already found in folder/file names.
+        if episodic
+            && let Some(meta) =
+                crate::library_scan_metadata::read_series_boundary_metadata(path).await
+        {
+            let ids = [
+                meta.imdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_imdb_id),
+                meta.tmdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_numeric_id),
+                meta.tvdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_numeric_id),
+            ];
+            if [&self.ids, &folder.ids].iter().any(|source| {
+                source
+                    .iter()
+                    .zip(ids.iter())
+                    .any(|(a, b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a != b))
+            }) {
+                return true;
+            }
+            if meta.title.as_ref().is_some_and(|title| {
+                self.title.as_ref() == Some(&crate::title_matching::canonical_lookup_key(title))
+            }) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -265,6 +305,7 @@ struct BoundaryFrame {
     depth: usize,
     season: bool,
     evidence: BoundaryEvidence,
+    has_title_nfo: bool,
     child_titles: bool,
     blocked: bool,
     inspection_error: Option<String>,
@@ -300,17 +341,40 @@ async fn boundary_entry_file_type(
     entry.file_type().await
 }
 
+pub(crate) async fn read_discovery_nfo(path: &Path) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if !metadata.is_file() || metadata.len() > MAX_BYTES {
+        return Ok(None);
+    }
+    let file = tokio::fs::File::open(path).await?;
+    if file.metadata().await?.len() > MAX_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 impl BoundaryFrame {
     async fn open(
         path: PathBuf,
         depth: usize,
         season: bool,
+        episodic: bool,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> AppResult<Self> {
         let mut entries = tokio::fs::read_dir(&path)
             .await
             .map_err(|e| AppError::Repository(e.to_string()))?;
         let mut evidence = BoundaryEvidence::default();
+        let mut has_title_nfo = false;
         let mut inspection_error = None;
         // Inspect immediate entries only. Reopen for child traversal so memory
         // stays independent of directory width and extras do not depend on order.
@@ -334,6 +398,22 @@ impl BoundaryFrame {
                 }
             };
             let child = entry.path();
+            if episodic && !season && kind.is_file() && entry.file_name() == "tvshow.nfo" {
+                match read_discovery_nfo(&child).await {
+                    Ok(Some(content)) => {
+                        let meta = crate::nfo::parse_nfo(&content);
+                        has_title_nfo = meta.has_external_ids()
+                            || meta
+                                .title
+                                .as_deref()
+                                .is_some_and(|title| !title.trim().is_empty());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        inspection_error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
             if kind.is_file()
                 && is_allowed_video_path(&child)
                 && !should_skip_library_top_level_entry(&child, false)
@@ -356,13 +436,14 @@ impl BoundaryFrame {
                     .unwrap_or_else(|| error.to_string()),
             )
         })?;
-        let skip_extras = depth > 0 && (evidence.has_media || season);
+        let skip_extras = depth > 0 && (evidence.has_media || has_title_nfo || season);
         Ok(Self {
             path,
             entries,
             depth,
             season,
             evidence,
+            has_title_nfo,
             child_titles: false,
             blocked: inspection_error.is_some(),
             inspection_error,
@@ -407,7 +488,7 @@ async fn discover_title_folder_boundaries(
         .await
         .map_err(|e| AppError::Repository(e.to_string()))?;
     let episodic = policy.facet != MediaFacet::Movie;
-    let mut stack = vec![BoundaryFrame::open(root, 0, false, cancel).await?];
+    let mut stack = vec![BoundaryFrame::open(root, 0, false, episodic, cancel).await?];
     let mut batch = Vec::with_capacity(batch_size.min(256));
     let mut first_io_error = None;
     while let Some(frame) = stack.last_mut() {
@@ -545,7 +626,7 @@ async fn discover_title_folder_boundaries(
                         .then(|| "folder contains another recorded title boundary".into()),
                 });
             } else {
-                match BoundaryFrame::open(path.clone(), depth, season, cancel).await {
+                match BoundaryFrame::open(path.clone(), depth, season, episodic, cancel).await {
                     Ok(mut child) => {
                         // A missing recorded descendant still owns its path;
                         // do not let discovery claim the ancestor around it.
@@ -595,12 +676,16 @@ async fn discover_title_folder_boundaries(
                 parent.child_titles |= frame.child_titles;
                 parent.blocked |= frame.blocked;
             } else {
-                parent.child_titles |=
-                    frame.evidence.has_media || frame.child_titles || frame.blocked;
-                if frame.evidence.has_media && !frame.rejection_emitted {
+                let is_candidate = frame.evidence.has_media || frame.has_title_nfo;
+                parent.child_titles |= is_candidate || frame.child_titles || frame.blocked;
+                if is_candidate && !frame.rejection_emitted {
                     let rejection = if frame.blocked || frame.child_titles {
                         Some("folder contains another title boundary or an unreadable branch; select individual title folders".into())
-                    } else if frame.evidence.contradicts_folder(&frame.path) {
+                    } else if frame
+                        .evidence
+                        .contradicts_folder(&frame.path, episodic)
+                        .await
+                    {
                         Some("media identity conflicts with the proposed title folder".into())
                     } else {
                         None
@@ -1397,6 +1482,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_title_nfo_only_discovery_ignores_empty_organizers() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_discovery_nfo(root.path()).await.unwrap().is_none());
+        #[cfg(unix)]
+        {
+            let link = root.path().join("sidecar-link");
+            std::os::unix::fs::symlink(root.path(), &link).unwrap();
+            assert!(read_discovery_nfo(&link).await.unwrap().is_none());
+            std::fs::remove_file(link).unwrap();
+        }
+        for relative in ["Flat", "Network/A/Nested", "Mixed", "Mixed/Child"] {
+            let folder = root.path().join(relative);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("tvshow.nfo"),
+                "<tvshow><title>Example Show</title><tvdbid>123</tvdbid></tvshow>",
+            )
+            .unwrap();
+        }
+        for relative in [
+            "Empty",
+            "Invalid",
+            "Oversized",
+            "Oversized [Group]",
+            "Season 1",
+        ] {
+            let folder = root.path().join(relative);
+            std::fs::create_dir_all(&folder).unwrap();
+            if relative == "Invalid" {
+                std::fs::write(folder.join("tvshow.nfo"), "<tvshow></tvshow>").unwrap();
+            }
+            if relative.starts_with("Oversized") {
+                let path = folder.join("tvshow.nfo");
+                std::fs::write(&path, "<tvshow><title>Oversized</title></tvshow>").unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_len(10 * 1024 * 1024 + 1)
+                    .unwrap();
+            }
+            if relative == "Oversized [Group]" {
+                std::fs::write(folder.join("Oversized.S01E01.mkv"), b"media").unwrap();
+                assert!(
+                    crate::library_scan_metadata::read_series_boundary_metadata(&folder)
+                        .await
+                        .is_none()
+                );
+            }
+        }
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            let entries = collect_nested_boundaries(root.path(), discovery_policy(facet)).await;
+            assert_eq!(entries.len(), 5);
+            for relative in ["Flat", "Network/A/Nested", "Mixed/Child"] {
+                assert!(
+                    entries
+                        .iter()
+                        .any(|entry| entry.path == root.path().join(relative)
+                            && entry.rejection.is_none()),
+                    "{relative}"
+                );
+            }
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.path == root.path().join("Mixed")
+                        && entry.rejection.is_some())
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn nested_title_conflicts_and_mixed_parent_preserve_safe_children() {
         let root = tempfile::tempdir().unwrap();
         for relative in [
@@ -1432,6 +1589,72 @@ mod tests {
             );
         }
         assert!(!entries.iter().any(|e| e.path == root.path().join("Empty")));
+    }
+
+    #[tokio::test]
+    async fn nested_title_decorated_folders_preserve_local_identity_precedence() {
+        for (folder, file) in [
+            ("Anime Scan [SubsPlease]", "Anime.Scan.S01E01.1080p.WEB-DL"),
+            ("Existing Anime [BD]", "Existing.Anime.S01E01.1080p.WEB-DL"),
+            (
+                "Iron Vale!! [BD]",
+                "Iron.Vale!!.S01E01.1080p.BluRay.x264-GRP",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(folder);
+            std::fs::create_dir(&path).unwrap();
+            let evidence = BoundaryEvidence::from_name(file);
+            let title = evidence.title.as_ref().expect("usable filename identity");
+            std::fs::write(
+                path.join("tvshow.nfo"),
+                format!("<tvshow><title>{title}</title><tvdbid>123</tvdbid></tvshow>"),
+            )
+            .unwrap();
+            assert!(!evidence.contradicts_folder(&path, true).await, "{folder}");
+            let conflicting = BoundaryEvidence::from_name("Other.Show.S01E01.{tvdb-456}");
+            assert!(conflicting.contradicts_folder(&path, true).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_sidecar_corroboration_cannot_override_identity_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        for (folder, file, nfo, plexmatch) in [
+            (
+                "Show [Group]",
+                "Show.S01E01.{tvdb-456}",
+                "<tvshow><title>Show</title><tvdbid>123</tvdbid></tvshow>",
+                "",
+            ),
+            (
+                "Show [Group] {tvdb-456}",
+                "Show.S01E01",
+                "<tvshow><title>Show</title><tvdbid>123</tvdbid></tvshow>",
+                "",
+            ),
+            (
+                "Show [Other Group]",
+                "Show.S01E01",
+                "<tvshow><tvdbid>123</tvdbid></tvshow>",
+                "title: Show\ntvdbid: 456\n",
+            ),
+        ] {
+            let path = root.path().join(folder);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("tvshow.nfo"), nfo).unwrap();
+            std::fs::write(path.join(".plexmatch"), plexmatch).unwrap();
+            let evidence = BoundaryEvidence::from_name(file);
+            assert_eq!(evidence.title.as_deref(), Some("show"));
+            assert!(evidence.contradicts_folder(&path, true).await, "{folder}");
+        }
+        let path = root.path().join("Show [Plex Group]");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join(".plexmatch"), "title: Show\ntvdbid: 123\n").unwrap();
+        let mut evidence = BoundaryEvidence::from_name("Show.S01E01.{tvdb-123}");
+        assert!(!evidence.contradicts_folder(&path, true).await);
+        evidence.merge(BoundaryEvidence::from_name("Other.Show.S01E02.{tvdb-123}"));
+        assert!(evidence.contradicts_folder(&path, true).await);
     }
 
     #[tokio::test]

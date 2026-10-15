@@ -1612,8 +1612,10 @@ async fn library_series_scan_creates_unmonitored_titles() {
     seed_typed_settings_definitions(&ctx).await;
 
     let media_root = tempfile::tempdir().expect("media root tempdir");
-    let show_dir = media_root.path().join("Harbor Pals");
+    let show_dir = media_root.path().join("Network/H/Harbor Pals");
     std::fs::create_dir_all(&show_dir).expect("create show dir");
+    std::fs::create_dir_all(media_root.path().join("Empty Organizer"))
+        .expect("create empty organizer");
     std::fs::write(
         show_dir.join("tvshow.nfo"),
         r#"<tvshow><title>Harbor Pals</title><tvdbid>81189</tvdbid></tvshow>"#,
