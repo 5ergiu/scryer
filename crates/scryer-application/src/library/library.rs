@@ -56,7 +56,7 @@ mod scan_pipeline;
 #[path = "scan/refresh.rs"]
 mod scan_refresh;
 #[path = "scan/title_files.rs"]
-mod scan_title_files;
+pub(crate) mod scan_title_files;
 #[path = "scan/title_finalize.rs"]
 mod scan_title_finalize;
 #[path = "scan/title_scan.rs"]

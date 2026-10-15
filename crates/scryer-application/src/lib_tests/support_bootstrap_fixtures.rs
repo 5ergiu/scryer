@@ -1476,7 +1476,7 @@ pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_titles(
 /// can inject store failures or seed multi-episode files.
 pub(super) fn bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
     settings: Arc<StoredSettingsRepo>,
-    library_scanner: Arc<MutableLibraryScanner>,
+    library_scanner: Arc<dyn LibraryScanner>,
     unmatched_items: Arc<TrackingLibraryScanUnmatchedItemRepo>,
     metadata_gateway: Arc<dyn MetadataGateway>,
 ) -> (

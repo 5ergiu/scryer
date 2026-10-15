@@ -103,7 +103,12 @@ async fn claim_series_candidate_folder(
     title: &mut Title,
     candidate: &PreparedSeriesLibraryScanCandidate,
 ) -> AppResult<()> {
-    crate::folder_ownership::claim_title_folder_if_missing(app, title, &candidate.folder_path).await
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
+        app,
+        title,
+        &candidate.folder_path,
+    )
+    .await
 }
 
 #[expect(
@@ -320,7 +325,7 @@ async fn sync_movie_title_folder_path_for_scan_inner(
         return Ok((None, scan_folder_path));
     };
 
-    crate::folder_ownership::claim_title_folder_if_missing(
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
         app,
         title,
         &stored_path_to_path_buf(folder_path),
@@ -748,7 +753,7 @@ async fn merge_series_title_work_for_index(
     mode: LibraryScanTitleWalkMode,
     created_in_scan: bool,
 ) -> AppResult<()> {
-    crate::folder_ownership::claim_title_folder_if_missing(
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
         app,
         &mut existing_titles[index],
         folder_path,

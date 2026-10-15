@@ -2223,7 +2223,7 @@ async fn legacy_season_folders_preserve_title_boundaries() {
         let title = fixture.folder(&format!("Show-{name}"));
         let season = title.join(name);
         std::fs::create_dir_all(&season).unwrap();
-        fixture.write_media(&season, "Show.S01E01.mkv");
+        fixture.write_media(&season, "S01E01.mkv");
         ensure_existing_title_boundary(&title, &patterns)
             .await
             .unwrap();
@@ -2231,10 +2231,13 @@ async fn legacy_season_folders_preserve_title_boundaries() {
         let mut stream = stream_title_folder_boundaries(
             title.parent().unwrap().into(),
             TitleFolderBoundaryPolicy {
-                template_depth: 1,
-                stored_folders: vec![],
+                facet: MediaFacet::Series,
+                stored_folders: if name == "Cycle 04" {
+                    vec![title.clone()]
+                } else {
+                    vec![]
+                },
                 other_roots: vec![],
-                episode_folders: patterns.clone(),
             },
             1,
             Default::default(),

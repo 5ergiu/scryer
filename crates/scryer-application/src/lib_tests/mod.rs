@@ -95,6 +95,7 @@ mod support_imports;
 mod support_indexers_metadata;
 mod support_library_show;
 mod support_settings_scan;
+pub(crate) use library_scan::{NestedDiscoveryGateway, bootstrap_nested_discovery_app};
 use support_acquisition_downloads::*;
 pub(crate) use support_bootstrap_fixtures::bootstrap;
 #[cfg(unix)]

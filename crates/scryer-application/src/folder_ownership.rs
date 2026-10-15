@@ -531,6 +531,35 @@ pub(crate) async fn claim_title_folder_if_missing(
     title: &mut Title,
     folder_path: &Path,
 ) -> AppResult<()> {
+    claim_title_folder_with_layout(app, title, folder_path, TitleFolderClaimLayout::Configured)
+        .await
+}
+
+pub(crate) async fn claim_title_folder_for_scan_if_missing(
+    app: &AppUseCase,
+    title: &mut Title,
+    folder_path: &Path,
+) -> AppResult<()> {
+    claim_title_folder_with_layout(
+        app,
+        title,
+        folder_path,
+        TitleFolderClaimLayout::Conventional,
+    )
+    .await
+}
+
+enum TitleFolderClaimLayout {
+    Configured,
+    Conventional,
+}
+
+async fn claim_title_folder_with_layout(
+    app: &AppUseCase,
+    title: &mut Title,
+    folder_path: &Path,
+    layout: TitleFolderClaimLayout,
+) -> AppResult<()> {
     ensure_folder_available_to_title(app, title, folder_path).await?;
     if non_empty_folder_path(title.folder_path.as_deref()).is_some() {
         return Ok(());
@@ -552,9 +581,24 @@ pub(crate) async fn claim_title_folder_if_missing(
         Err(error) => return Err(AppError::Repository(error.to_string())),
     };
     if has_contents {
-        let patterns = crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
-        crate::library_discovery::ensure_folder_holds_no_child_titles(folder_path, &patterns)
-            .await?;
+        match layout {
+            TitleFolderClaimLayout::Configured => {
+                let patterns =
+                    crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
+                crate::library_discovery::ensure_folder_holds_no_child_titles(
+                    folder_path,
+                    &patterns,
+                )
+                .await?;
+            }
+            TitleFolderClaimLayout::Conventional => {
+                crate::library_discovery::ensure_scanned_folder_holds_no_child_titles(
+                    folder_path,
+                    &title.facet,
+                )
+                .await?;
+            }
+        }
     }
 
     let folder_path = path_to_stored_string(folder_path);
@@ -768,6 +812,134 @@ mod tests {
             min_availability: None,
             digital_release_date: None,
             folder_path: folder_path.map(str::to_string),
+        }
+    }
+
+    async fn unowned_scan_title(facet: MediaFacet, root: &Path) -> (AppUseCase, Title) {
+        let (app, user) = crate::lib_tests::bootstrap();
+        let library_id = scryer_domain::default_library_id_for_facet(&facet);
+        let library = app
+            .services
+            .catalog
+            .libraries
+            .get_by_id(&library_id)
+            .await
+            .unwrap()
+            .unwrap();
+        app.services
+            .catalog
+            .libraries
+            .update(
+                &library_id,
+                library.name,
+                library.slug,
+                vec![crate::LibraryRootDraft {
+                    path: path_to_stored_string(root),
+                    is_default: true,
+                }],
+            )
+            .await
+            .unwrap();
+        let created = app
+            .create_title_without_hydration_in_library(
+                &user,
+                crate::NewTitle {
+                    name: "Scan Fixture".into(),
+                    facet,
+                    ..Default::default()
+                },
+                library_id,
+            )
+            .await
+            .unwrap();
+        assert!(created.title.folder_path.is_none());
+        (app, created.title)
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_accepts_conventional_layout_without_changing_import_guard() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            for season in [
+                "Series 1",
+                "Special Episodes",
+                "Season_1",
+                "Season-1",
+                "Season1",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let folder = root.path().join("Scan Fixture");
+                let file = folder.join(season).join("Scan.Fixture.S01E01.mkv");
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"synthetic media").unwrap();
+                let (app, mut title) = unowned_scan_title(facet.clone(), root.path()).await;
+
+                assert!(
+                    claim_title_folder_if_missing(&app, &mut title, &folder)
+                        .await
+                        .is_err()
+                );
+                assert!(title.folder_path.is_none());
+                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                    .await
+                    .unwrap();
+                assert!(title_owns_folder(&title, &folder));
+                let stored = app
+                    .services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(title_owns_folder(&stored, &folder));
+                assert_eq!(std::fs::read(&file).unwrap(), b"synthetic media");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_preserves_mixed_title_and_movie_boundaries() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime, MediaFacet::Movie] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let child = folder
+                .join("Other Title")
+                .join("Series 1")
+                .join("S01E01.mkv");
+            std::fs::create_dir_all(child.parent().unwrap()).unwrap();
+            std::fs::write(&child, b"preserved child media").unwrap();
+            let loose = folder.join("Scan.Fixture.2024.mkv");
+            std::fs::write(&loose, b"preserved direct media").unwrap();
+            // Movies do not recognize episode layouts, so use a direct child
+            // file to prove their existing boundary remains guarded.
+            let direct_child = (facet == MediaFacet::Movie)
+                .then(|| folder.join("Other Title").join("Other.Title.2024.mkv"));
+            if let Some(path) = &direct_child {
+                std::fs::write(path, b"preserved child movie").unwrap();
+            }
+            let (app, mut title) = unowned_scan_title(facet, root.path()).await;
+            assert!(
+                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                    .await
+                    .is_err()
+            );
+            assert!(title.folder_path.is_none());
+            assert!(
+                app.services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .folder_path
+                    .is_none()
+            );
+            assert_eq!(std::fs::read(&child).unwrap(), b"preserved child media");
+            assert_eq!(std::fs::read(&loose).unwrap(), b"preserved direct media");
+            if let Some(path) = direct_child {
+                assert_eq!(std::fs::read(path).unwrap(), b"preserved child movie");
+            }
         }
     }
 

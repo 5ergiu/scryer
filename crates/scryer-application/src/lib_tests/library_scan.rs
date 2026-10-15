@@ -102,6 +102,453 @@ impl LibraryScanner for NotifyingLibraryScanner {
     }
 }
 
+// Filesystem-backed inventory for discovery integration tests. Unlike the
+// fixed-list scanner, each request sees only files in the requested boundary.
+struct NestedDiscoveryScanner;
+
+impl NestedDiscoveryScanner {
+    fn files(root: &str, recursive: bool) -> AppResult<Vec<LibraryFile>> {
+        let mut pending = vec![std::path::PathBuf::from(root)];
+        let mut files = Vec::new();
+        while let Some(path) = pending.pop() {
+            for entry in std::fs::read_dir(path).map_err(|e| AppError::Repository(e.to_string()))? {
+                let entry = entry.map_err(|e| AppError::Repository(e.to_string()))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|e| AppError::Repository(e.to_string()))?;
+                if kind.is_dir() && recursive {
+                    pending.push(entry.path());
+                } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "mkv") {
+                    files.push(build_test_library_file(entry.path().to_str().unwrap()));
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    async fn batch(root: &str, recursive: bool) -> AppResult<LibraryFileBatchReceiver> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender.send(Self::files(root, recursive)).await.unwrap();
+        Ok(receiver)
+    }
+}
+
+#[async_trait]
+impl LibraryScanner for NestedDiscoveryScanner {
+    async fn scan_library(&self, root: &str) -> AppResult<Vec<LibraryFile>> {
+        Self::files(root, true)
+    }
+    async fn scan_library_batched(
+        &self,
+        root: &str,
+        _batch_size: usize,
+    ) -> AppResult<LibraryFileBatchReceiver> {
+        Self::batch(root, true).await
+    }
+    async fn scan_directory_batched(
+        &self,
+        root: &str,
+        _batch_size: usize,
+    ) -> AppResult<LibraryFileBatchReceiver> {
+        Self::batch(root, false).await
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NestedDiscoveryGateway {
+    queries: Mutex<Vec<MetadataSearchQuery>>,
+    search_gate: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+}
+
+impl NestedDiscoveryGateway {
+    pub(crate) fn gated(
+        started: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self {
+            search_gate: Some((started, release)),
+            ..Default::default()
+        }
+    }
+}
+
+pub(crate) fn bootstrap_nested_discovery_app(
+    gateway: Arc<dyn MetadataGateway>,
+) -> (AppUseCase, User) {
+    let (app, user, _, _, _) = bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+        Arc::new(StoredSettingsRepo::default()),
+        Arc::new(NestedDiscoveryScanner),
+        Arc::new(TrackingLibraryScanUnmatchedItemRepo::default()),
+        gateway,
+    );
+    (app, user)
+}
+
+const NESTED_DISCOVERY_TITLES: [(i64, &str); 4] = [
+    (701, "Alpha Horizon"),
+    (702, "Beta Harbor"),
+    (703, "Gamma Valley"),
+    (704, "Delta Meadow"),
+];
+
+#[async_trait]
+impl MetadataGateway for NestedDiscoveryGateway {
+    async fn get_series_titles(
+        &self,
+        refs: &[SeriesTitleRef],
+        language: &str,
+        _include_episodes: bool,
+        _include_episode_orders: bool,
+    ) -> AppResult<SeriesTitleBulkResult> {
+        let ids: Vec<_> = refs.iter().filter_map(|r| r.tvdb_id).collect();
+        let bulk = self.get_metadata_bulk(&[], &ids, language).await?;
+        let mut result = SeriesTitleBulkResult::default();
+        for (index, reference) in refs.iter().enumerate() {
+            if let Some(series) = reference.tvdb_id.and_then(|id| bulk.series.get(&id)) {
+                result.by_ref_index.insert(index, series.clone());
+            } else {
+                result.missing_ref_indexes.push(index);
+            }
+        }
+        Ok(result)
+    }
+    async fn search_tvdb(
+        &self,
+        _query: &str,
+        _type_hint: &str,
+        _year: Option<i32>,
+    ) -> AppResult<Vec<MetadataSearchItem>> {
+        panic!("scan must batch matching")
+    }
+    async fn search_tvdb_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        _language: &str,
+    ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        self.queries.lock().await.extend_from_slice(queries);
+        if let Some((started, release)) = &self.search_gate {
+            started.add_permits(1);
+            release.acquire().await.unwrap().forget();
+        }
+        Ok(queries
+            .iter()
+            .cloned()
+            .map(|query| {
+                let result = NESTED_DISCOVERY_TITLES.iter().find(|(id, name)| {
+                    query.tvdb_id.as_deref() == Some(id.to_string().as_str())
+                        || query.query.eq_ignore_ascii_case(name)
+                });
+                let items = result
+                    .map(|(id, name)| {
+                        vec![MetadataSearchItem {
+                            tvdb_id: id.to_string(),
+                            name: (*name).into(),
+                            year: Some(2024),
+                            auto_match_safe: true,
+                            auto_match_signals: vec!["identity".into()],
+                            smg_id: None,
+                            primary_source: None,
+                            external_ids: vec![],
+                        }]
+                    })
+                    .unwrap_or_default();
+                (query, items)
+            })
+            .collect())
+    }
+    async fn search_titles_batch(
+        &self,
+        queries: &[MetadataSearchQuery],
+        _kind: &str,
+        language: &str,
+        _create_missing: bool,
+    ) -> AppResult<HashMap<MetadataSearchQuery, Vec<MetadataSearchItem>>> {
+        self.search_tvdb_batch(queries, language).await
+    }
+    async fn search_tvdb_rich(
+        &self,
+        _query: &str,
+        _type_hint: &str,
+        _limit: i32,
+        _language: &str,
+        _year: Option<i32>,
+    ) -> AppResult<Vec<RichMetadataSearchItem>> {
+        Ok(vec![])
+    }
+    async fn search_tvdb_multi(
+        &self,
+        _query: &str,
+        _limit: i32,
+        _language: &str,
+    ) -> AppResult<MultiMetadataSearchResult> {
+        Ok(Default::default())
+    }
+    async fn get_movie(&self, id: i64, _language: &str) -> AppResult<MovieMetadata> {
+        let (_, name) = NESTED_DISCOVERY_TITLES
+            .iter()
+            .find(|(key, _)| *key == id)
+            .unwrap();
+        Ok(MovieMetadata {
+            tvdb_id: Some(id),
+            name: (*name).into(),
+            year: Some(2024),
+            ..Default::default()
+        })
+    }
+    async fn get_movie_titles(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
+        super::movie_titles_from_tvdb_bulk(self, refs, language).await
+    }
+    async fn get_metadata_bulk(
+        &self,
+        movies: &[i64],
+        series: &[i64],
+        language: &str,
+    ) -> AppResult<BulkMetadataResult> {
+        let mut result = BulkMetadataResult::default();
+        for id in movies {
+            result
+                .movies
+                .insert(*id, self.get_movie(*id, language).await?);
+        }
+        for id in series {
+            let (_, name) = NESTED_DISCOVERY_TITLES
+                .iter()
+                .find(|(key, _)| key == id)
+                .unwrap();
+            result.series.insert(
+                *id,
+                SeriesMetadata {
+                    tvdb_id: *id,
+                    name: (*name).into(),
+                    sort_name: (*name).into(),
+                    slug: name.to_lowercase().replace(' ', "-"),
+                    year: Some(2024),
+                    seasons: [0, 1]
+                        .into_iter()
+                        .map(|number| SeasonMetadata {
+                            tvdb_id: id * 10 + i64::from(number),
+                            tmdb_id: None,
+                            number,
+                            label: format!("Season {number}"),
+                            episode_type: "official".into(),
+                        })
+                        .collect(),
+                    episodes: [0, 1]
+                        .into_iter()
+                        .map(|season_number| EpisodeMetadata {
+                            tvdb_id: id * 100 + i64::from(season_number),
+                            tmdb_id: None,
+                            episode_number: 1,
+                            name: "Opening".into(),
+                            aired: "2024-01-01".into(),
+                            runtime_minutes: 45,
+                            is_filler: false,
+                            is_recap: false,
+                            overview: String::new(),
+                            absolute_number: String::new(),
+                            contiguous_absolute_number: None,
+                            season_number,
+                            image_url: String::new(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(result)
+    }
+}
+
+async fn assert_fresh_nested_discovery(facet: MediaFacet) {
+    let root = tempfile::tempdir().unwrap();
+    let folders = [
+        "Alpha Horizon (2024)",
+        "Example Network/B/Beta Harbor (2024) {tvdb-702}",
+        "ReleaseGroup/G/Gamma Valley (2024)",
+        "Mixed/Delta Meadow (2024)",
+    ];
+    let mut expected_files = Vec::new();
+    for (index, (_, name)) in NESTED_DISCOVERY_TITLES.iter().enumerate() {
+        let suffix = if facet == MediaFacet::Movie {
+            format!("{name}.2024.mkv")
+        } else {
+            match index {
+                0 => format!("Season_1/{name}.S01E01.mkv"),
+                1 => format!("Series 1/{name}.S01E01.mkv"),
+                2 => format!("Special Episodes/{name}.S00E01.mkv"),
+                _ => format!("{name}.S01E01.mkv"),
+            }
+        };
+        let path = root.path().join(folders[index]).join(suffix);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"synthetic media").unwrap();
+        expected_files.push(path);
+    }
+    for relative in ["Mixed/Mixed.2024.mkv", "Conflict/Other.Title.2024.mkv"] {
+        let path = root.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"preserved ambiguous media").unwrap();
+    }
+    std::fs::create_dir_all(root.path().join("Empty")).unwrap();
+    let mut baseline_queries = None;
+    for custom_templates in [false, true] {
+        let settings = Arc::new(StoredSettingsRepo::default());
+        let gateway = Arc::new(NestedDiscoveryGateway::default());
+        let unmatched = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+        let (app, user, _, _, media) =
+            bootstrap_with_scan_unmatched_and_metadata_tracking_and_repos(
+                settings,
+                Arc::new(NestedDiscoveryScanner),
+                unmatched.clone(),
+                gateway.clone(),
+            );
+        app.update_media_settings(
+            &user,
+            facet.clone(),
+            empty_update_media_settings_with_roots(vec![build_root_folder_entry(
+                root.path(),
+                true,
+            )]),
+        )
+        .await
+        .unwrap();
+        if custom_templates {
+            for (key, value) in [
+                (
+                    crate::FOLDER_TEMPLATE_KEY,
+                    "{title_first_character}/{title_with_article} ({year})",
+                ),
+                (crate::SEASON_FOLDER_TEMPLATE_KEY, "Cycle {season:02}"),
+                (crate::SPECIALS_FOLDER_TEMPLATE_KEY, "{title}"),
+            ] {
+                app.services
+                    .config
+                    .settings
+                    .upsert_setting_json(
+                        SETTINGS_SCOPE_SYSTEM,
+                        key,
+                        Some(facet.as_str().into()),
+                        serde_json::to_string(value).unwrap(),
+                        "test",
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(
+            app.list_titles_unpaged(&user, Some(facet.clone()), None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut first_ids = None;
+        for pass in 0..2 {
+            tokio::time::timeout(TEST_WAIT_DEADLINE, app.scan_library(&user, facet.clone()))
+                .await
+                .unwrap()
+                .unwrap();
+            let titles = app
+                .list_titles_unpaged(&user, Some(facet.clone()), None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                titles.len(),
+                4,
+                "facet={facet:?}, custom={custom_templates}, pass={pass}; pending={:?}",
+                unmatched.items().await
+            );
+            let mut ids: Vec<_> = titles.iter().map(|title| title.id.clone()).collect();
+            ids.sort();
+            if let Some(first) = &first_ids {
+                assert_eq!(&ids, first);
+            } else {
+                first_ids = Some(ids);
+            }
+            for (index, (_, name)) in NESTED_DISCOVERY_TITLES.iter().enumerate() {
+                let title = titles.iter().find(|t| t.name == *name).unwrap();
+                assert_eq!(
+                    title.folder_path.as_deref(),
+                    Some(root.path().join(folders[index]).to_str().unwrap())
+                );
+                let files = media.list_media_files_for_title(&title.id).await.unwrap();
+                assert_eq!(
+                    files.len(),
+                    1,
+                    "{name}: {files:?}; pending={:?}",
+                    unmatched.items().await
+                );
+                assert_eq!(files[0].file_path, expected_files[index].to_str().unwrap());
+            }
+            let pending = unmatched.items().await;
+            assert_eq!(pending.len(), 2, "{pending:?}");
+            assert!(pending.iter().all(|item| {
+                item.status == PendingImportStatus::Ignored
+                    && item.reason_code
+                        == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+            }));
+            for relative in ["Mixed", "Conflict"] {
+                assert!(
+                    pending
+                        .iter()
+                        .any(|item| item.item_path == root.path().join(relative).to_string_lossy())
+                );
+            }
+            if pass == 0 {
+                let mut queries = gateway.queries.lock().await.clone();
+                queries.sort_by_key(|q| (q.query.clone(), q.tvdb_id.clone()));
+                assert_eq!(queries.len(), 4, "{queries:?}");
+                for query in &queries {
+                    assert_eq!(
+                        query.type_hint,
+                        if facet == MediaFacet::Movie {
+                            "movie"
+                        } else {
+                            "series"
+                        }
+                    );
+                    assert!(
+                        query.query.is_empty()
+                            || NESTED_DISCOVERY_TITLES
+                                .iter()
+                                .any(|(_, name)| query.query.eq_ignore_ascii_case(name)),
+                        "organizer leaked: {query:?}"
+                    );
+                    if query.tvdb_id.is_none() {
+                        assert_eq!(query.year, Some(2024));
+                    } else {
+                        assert_eq!(query.tvdb_id.as_deref(), Some("702"));
+                    }
+                }
+                assert!(queries.iter().any(|q| q.tvdb_id.as_deref() == Some("702")));
+                if let Some(baseline) = &baseline_queries {
+                    assert_eq!(&queries, baseline);
+                } else {
+                    baseline_queries = Some(queries);
+                }
+            }
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("Mixed/Mixed.2024.mkv")).unwrap(),
+            b"preserved ambiguous media"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fresh_nested_movie_scan_matches_and_owns_only_individual_titles() {
+    assert_fresh_nested_discovery(MediaFacet::Movie).await;
+}
+
+#[tokio::test]
+async fn fresh_nested_series_scan_matches_and_owns_only_individual_titles() {
+    assert_fresh_nested_discovery(MediaFacet::Series).await;
+}
+
 struct HydratingMovieSearchGateway {
     search_item: MetadataSearchItem,
     movie: MovieMetadata,
@@ -1042,6 +1489,101 @@ async fn movie_full_scan_persists_and_reconciles_unmatched_items() {
     let third_items = unmatched_items.items().await;
     assert_eq!(third_items.len(), 1);
     assert_eq!(third_items[0].item_path, second_folder.to_string_lossy());
+}
+
+#[tokio::test]
+async fn library_scan_reconcile_preserves_unseen_descendants_of_current_ignored_boundaries() {
+    use crate::library_scan_unmatched::{
+        IgnoredLibraryScanItemArgs, LIBRARY_SCAN_INVALID_TITLE_BOUNDARY,
+        LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE, build_ignored_library_scan_item,
+        reconcile_library_scan_unmatched_items,
+    };
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let scan_root = tempdir.path().to_string_lossy().to_string();
+    for facet in [MediaFacet::Movie, MediaFacet::Series] {
+        for reason in [
+            LIBRARY_SCAN_INVALID_TITLE_BOUNDARY,
+            LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
+        ] {
+            let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+            let (app, _) = bootstrap_with_scan_unmatched_tracking(
+                Arc::new(StoredSettingsRepo::default()),
+                Arc::new(MutableLibraryScanner::default()),
+                unmatched_items.clone(),
+            );
+            let mut paths = std::collections::HashMap::new();
+            for (relative, status) in [
+                ("Opaque", PendingImportStatus::Ignored),
+                ("Opaque/Previous Title", PendingImportStatus::Pending),
+                (
+                    "Opaque/Previous Title/Season 01/Episode.mkv",
+                    PendingImportStatus::Pending,
+                ),
+                ("Opaque Other/Removed Title", PendingImportStatus::Pending),
+                ("Healthy", PendingImportStatus::Pending),
+                ("Healthy/Removed Title", PendingImportStatus::Pending),
+                ("Missing", PendingImportStatus::Ignored),
+                ("Missing/Removed Title", PendingImportStatus::Pending),
+            ] {
+                let item_path = tempdir.path().join(relative).to_string_lossy().to_string();
+                let mut item = build_ignored_library_scan_item(
+                    &facet,
+                    "fixture-library",
+                    IgnoredLibraryScanItemArgs {
+                        title_id: None,
+                        session_id: Some("fixture-session"),
+                        library_path: &scan_root,
+                        item_path: &item_path,
+                        display_name: relative,
+                        query: relative,
+                        year_hint: None,
+                        reason_code: reason,
+                        error_message: None,
+                        size_bytes: None,
+                    },
+                );
+                item.status = status;
+                unmatched_items
+                    .upsert_library_scan_unmatched_item(&item)
+                    .await
+                    .expect("seed unmatched item");
+                paths.insert(relative, item_path);
+            }
+            let seen_paths = [paths["Opaque"].clone(), paths["Healthy"].clone()]
+                .into_iter()
+                .collect();
+
+            reconcile_library_scan_unmatched_items(&app, &facet, &scan_root, &seen_paths)
+                .await
+                .expect("reconcile partially observed library");
+
+            let remaining: std::collections::HashSet<_> = unmatched_items
+                .items()
+                .await
+                .into_iter()
+                .map(|item| item.item_path)
+                .collect();
+            let expected = [
+                "Opaque",
+                "Opaque/Previous Title",
+                "Opaque/Previous Title/Season 01/Episode.mkv",
+                "Healthy",
+            ]
+            .map(|relative| paths[relative].clone())
+            .into_iter()
+            .collect();
+            assert_eq!(remaining, expected, "facet={facet:?}, reason={reason}");
+
+            let seen_paths = [paths["Healthy"].clone()].into_iter().collect();
+            reconcile_library_scan_unmatched_items(&app, &facet, &scan_root, &seen_paths)
+                .await
+                .expect("reconcile fully observed library");
+            let remaining = unmatched_items.items().await;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].item_path, paths["Healthy"]);
+        }
+    }
 }
 
 #[tokio::test]
@@ -3765,7 +4307,7 @@ async fn movie_title_scan_cleans_out_of_canonical_folder_pollution() {
 async fn movie_full_scan_records_duplicate_same_title_sibling_folder_as_ownership_conflict() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let first_dir = tempdir.path().join("Duplicate Title (2026)");
-    let second_dir = tempdir.path().join("Duplicate Title Copy (2026)");
+    let second_dir = tempdir.path().join("Duplicate Title (2026) 720p");
     std::fs::create_dir(&first_dir).expect("create first movie folder");
     std::fs::create_dir(&second_dir).expect("create second movie folder");
     let first_path = first_dir.join("Duplicate.Title.2026.1080p.WEB-DL.mkv");
@@ -4278,6 +4820,11 @@ async fn series_full_scan_persists_unmatched_folders() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(tempdir.path().join("Unknown Show (2020)"))
         .expect("create unknown show folder");
+    std::fs::write(
+        tempdir.path().join("Unknown Show (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -4403,6 +4950,16 @@ async fn series_full_scan_scans_all_configured_roots_in_one_session() {
     std::fs::create_dir_all(root_two.join("Unknown Show Two (2021)"))
         .expect("create second show folder");
 
+    std::fs::write(
+        root_one.join("Unknown Show One (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
+    std::fs::write(
+        root_two.join("Unknown Show Two (2021)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
     let settings = Arc::new(StoredSettingsRepo::default());
     let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
     let (app, user) = bootstrap_with_scan_unmatched_tracking(
@@ -4453,6 +5010,7 @@ async fn series_full_scan_batches_sonarr_identity_hints_at_gateway_cap() {
     for index in 0..22 {
         let folder = series_root.join(format!("Arr Show {index:02} (1999)"));
         std::fs::create_dir_all(&folder).expect("create hinted show folder");
+        std::fs::write(folder.join("S01E01.mkv"), b"episode").unwrap();
         let folder_path = folder.to_string_lossy().to_string();
         scan_hints.push(LibraryScanHint {
             source: LibraryScanHintSource::ExternalImportSonarr,
@@ -4537,6 +5095,7 @@ async fn series_full_scan_keeps_hinted_batch_intact_across_unhinted_folder() {
         };
         let folder = series_root.join(folder_name);
         std::fs::create_dir_all(&folder).expect("create hinted show folder");
+        std::fs::write(folder.join("S01E01.mkv"), b"episode").unwrap();
         let folder_path = folder.to_string_lossy().to_string();
         scan_hints.push(LibraryScanHint {
             source: LibraryScanHintSource::ExternalImportSonarr,
@@ -4555,6 +5114,11 @@ async fn series_full_scan_keeps_hinted_batch_intact_across_unhinted_folder() {
     }
     std::fs::create_dir_all(series_root.join("M Unhinted Show (1999)"))
         .expect("create unhinted show folder");
+    std::fs::write(
+        series_root.join("M Unhinted Show (1999)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     let metadata_gateway = Arc::new(RecordingExactIdMetadataGateway::default());
@@ -4857,6 +5421,7 @@ async fn series_full_scan_keeps_every_identity_from_a_rich_gateway_match() {
     let series_root = tempdir.path().join("series");
     let folder = series_root.join("Rich Identity Show (1999)");
     std::fs::create_dir_all(&folder).expect("create hinted show folder");
+    std::fs::write(folder.join("S01E01.mkv"), b"episode").unwrap();
     let folder_path = folder.to_string_lossy().to_string();
 
     let mut scan_hints = LibraryScanHintSet::new();
@@ -5644,7 +6209,7 @@ async fn movie_full_scan_by_id_uses_selected_library_scope() {
 }
 
 #[tokio::test]
-async fn movie_full_scan_adopts_empty_folder_match_with_zero_files() {
+async fn movie_full_scan_ignores_empty_folder_until_media_arrives() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let movie_root = tempdir.path().join("movies");
     let empty_folder = movie_root.join("scan-item-empty");
@@ -5687,8 +6252,8 @@ async fn movie_full_scan_adopts_empty_folder_match_with_zero_files() {
         })
         .await;
     let summary = completed.summary.expect("scan summary");
-    assert_eq!(summary.scanned, 1);
-    assert_eq!(summary.matched, 1);
+    assert_eq!(summary.scanned, 0);
+    assert_eq!(summary.matched, 0);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.unmatched, 0);
     assert!(completed.file_total_known);
@@ -5777,7 +6342,7 @@ async fn movie_full_scan_adopts_empty_folder_match_with_zero_files() {
 }
 
 #[tokio::test]
-async fn movie_full_scan_records_empty_folder_without_safe_match_as_pending_import() {
+async fn movie_full_scan_ignores_empty_folder_without_creating_pending_import() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let movie_root = tempdir.path().join("movies");
     let empty_folder = movie_root.join("scan-item-unmatched (2024)");
@@ -5809,9 +6374,9 @@ async fn movie_full_scan_records_empty_folder_without_safe_match_as_pending_impo
         })
         .await;
     let summary = completed.summary.expect("scan summary");
-    assert_eq!(summary.scanned, 1);
+    assert_eq!(summary.scanned, 0);
     assert_eq!(summary.matched, 0);
-    assert_eq!(summary.unmatched, 1);
+    assert_eq!(summary.unmatched, 0);
     assert_eq!(summary.skipped, 0);
     assert!(completed.file_total_known);
     assert_eq!(completed.file_progress.total, 0);
@@ -5827,12 +6392,7 @@ async fn movie_full_scan_records_empty_folder_without_safe_match_as_pending_impo
         )
         .await
         .expect("pending imports");
-    assert_eq!(pending.total, 1);
-    assert_eq!(
-        pending.items[0].path,
-        empty_folder.to_string_lossy().to_string()
-    );
-    assert_eq!(pending.items[0].status, PendingImportStatus::Pending);
+    assert_eq!(pending.total, 0);
 
     let ignored = app
         .pending_imports(
@@ -5958,6 +6518,11 @@ async fn series_full_scan_marks_title_match_total_known_before_completion() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let series_root = tempdir.path().join("series");
     std::fs::create_dir_all(series_root.join("Unknown Show (2020)")).expect("create series folder");
+    std::fs::write(
+        series_root.join("Unknown Show (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -6022,6 +6587,7 @@ async fn series_full_scan_starts_immediate_title_walk_before_blocked_metadata_lo
     let known_season = known_folder.join("Season 01");
     std::fs::create_dir_all(&known_season).expect("create known show season");
     std::fs::create_dir_all(&unknown_folder).expect("create unknown show folder");
+    std::fs::write(unknown_folder.join("S01E01.mkv"), b"episode").unwrap();
     let known_file = known_season.join("Known Show - S01E01.mkv");
     std::fs::write(&known_file, b"episode").expect("write known episode");
 
@@ -6420,6 +6986,16 @@ async fn multi_root_full_scan_waits_for_final_root_to_mark_title_match_total_kno
     std::fs::create_dir_all(root_two.join("Unknown Show Two (2021)"))
         .expect("create second series folder");
 
+    std::fs::write(
+        root_one.join("Unknown Show One (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
+    std::fs::write(
+        root_two.join("Unknown Show Two (2021)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
     let settings = Arc::new(StoredSettingsRepo::default());
     let metadata_gateway = Arc::new(BlockingBatchMetadataGateway::blocking_calls(&[1, 2]));
     let (app, user) = bootstrap_with_scan_unmatched_and_metadata_tracking(
@@ -6489,6 +7065,11 @@ async fn additive_scan_keeps_title_match_total_unknown_until_completion() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let series_root = tempdir.path().join("series");
     std::fs::create_dir_all(series_root.join("Unknown Show (2020)")).expect("create series folder");
+    std::fs::write(
+        series_root.join("Unknown Show (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -6771,6 +7352,16 @@ async fn distinct_movie_libraries_scan_concurrently_and_cancel_independently() {
     std::fs::create_dir_all(&default_root).expect("create default movie root");
     std::fs::create_dir_all(&first_title_dir).expect("create first movie folder");
     std::fs::create_dir_all(&second_title_dir).expect("create second movie folder");
+    std::fs::write(
+        first_title_dir.join("First.Unknown.Movie.2025.mkv"),
+        b"movie",
+    )
+    .unwrap();
+    std::fs::write(
+        second_title_dir.join("Second.Unknown.Movie.2026.mkv"),
+        b"movie",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -6919,6 +7510,11 @@ async fn cancel_full_library_scan_marks_session_canceled_and_allows_restart() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let series_root = tempdir.path().join("series");
     std::fs::create_dir_all(series_root.join("Unknown Show (2020)")).expect("create series folder");
+    std::fs::write(
+        series_root.join("Unknown Show (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -7005,6 +7601,11 @@ async fn cancel_library_scan_rejects_additive_sessions() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let series_root = tempdir.path().join("series");
     std::fs::create_dir_all(series_root.join("Unknown Show (2020)")).expect("create series folder");
+    std::fs::write(
+        series_root.join("Unknown Show (2020)/S01E01.mkv"),
+        b"episode",
+    )
+    .unwrap();
 
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -10477,6 +11078,7 @@ async fn series_full_scan_assigns_the_root_the_candidate_was_found_under() {
     std::fs::create_dir_all(&default_root).expect("create default root");
     let folder = second_root.join("Tidewater Signals (1999)");
     std::fs::create_dir_all(&folder).expect("create show folder");
+    std::fs::write(folder.join("Tidewater.Signals.S01E01.mkv"), b"episode").unwrap();
     let folder_path = folder.to_string_lossy().to_string();
 
     let mut scan_hints = LibraryScanHintSet::new();
