@@ -131,6 +131,30 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
 
 const STANDBY_LISTING_SNAPSHOT: &str = r#"{"v":1,"thumbs_up":4,"extra":{"synthetic_listing_attribute":"standby"},"captured_at":"2026-01-01T00:00:00Z"}"#;
 
+fn assert_scored_1080p_listing(actual: Option<&str>, expected: Option<String>, decision: &str) {
+    let mut actual: serde_json::Value =
+        serde_json::from_str(actual.expect("recorded listing")).unwrap();
+    let scoring = actual.as_object_mut().unwrap().remove("grab_scoring");
+    assert_eq!(
+        scoring,
+        Some(serde_json::json!({
+            "candidate_score": 100,
+            "previous_score": null,
+            "delta": null,
+            "decision_code": decision,
+            "comparisons": [],
+            "entries": [{"code": "quality_resolution_1080p", "delta": 100,
+                "kind": "score_contribution", "source": null}]
+        }))
+    );
+    let expected: serde_json::Value =
+        serde_json::from_str(&expected.expect("expected listing")).unwrap();
+    assert_eq!(
+        actual, expected,
+        "all original listing facts remain unchanged"
+    );
+}
+
 /// The standby row's frozen facts, stamped at the instant the row was grabbed.
 fn standby_listing_stamped_at(grabbed_at: &str) -> String {
     use crate::quality::release_listing::ReleaseListingSnapshot;
@@ -378,10 +402,10 @@ async fn failed_grab_retries_standby_candidate(
             submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
         })
         .expect("standby submission");
-    assert_eq!(
-        standby_submission.release_listing_json,
+    assert_scored_1080p_listing(
+        standby_submission.release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(standby_grabbed_at)),
-        "the standby grab carries the facts frozen when the row was saved, stamped at the grab"
+        "initial",
     );
     let identities = download_submissions.identities.lock().await;
     assert!(
@@ -6107,12 +6131,12 @@ async fn automatic_search_grab_persists_the_listing_it_was_offered() {
     .with_timezone(&chrono::Utc);
     // The lane scores and grabs at one instant, so the snapshot it persists is
     // the offered listing captured exactly when the grab was recorded.
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, grabbed_at,
         ),
-        "the grab persists the snapshot it scored, captured at the lane's grab time"
+        "initial",
     );
 }
 
@@ -6175,12 +6199,12 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     );
     let added_at =
         crate::quality_profile::parse_published_at(&row.added_at).expect("valid first-seen time");
-    assert_eq!(
-        row.release_listing_json,
+    assert_scored_1080p_listing(
+        row.release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, added_at,
         ),
-        "the hold freezes the listing it scored and parked, captured at park time"
+        "release_age_unknown",
     );
     let delay_until = crate::quality_profile::parse_published_at(&row.delay_until)
         .expect("valid escalation deadline");
@@ -8394,10 +8418,10 @@ async fn expired_pending_release_grabs_with_its_frozen_listing_snapshot() {
         .grabbed_at
         .as_deref()
         .expect("promotion records its grab instant");
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(promoted_at)),
-        "promotion keeps every fact frozen at park time and stamps it at the promotion instant"
+        "initial",
     );
 }
 
@@ -8428,15 +8452,16 @@ async fn automatic_promotion_grabs_a_pending_release_at_the_current_minimum_seed
     // capture from the row itself.
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         Some(
             crate::quality::release_listing::ReleaseListingSnapshot::capture_from_pending_release(
                 &row,
                 captured_at,
             )
-            .to_json_string()
-        )
+            .to_json_string(),
+        ),
+        "initial",
     );
 }
 
@@ -11217,13 +11242,13 @@ async fn rss_grabs_missing_movie_with_no_wanted_row_and_creates_state_row() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the RSS grab persists the listing it was offered"
+        "initial",
     );
 }
 
@@ -11263,13 +11288,13 @@ async fn manual_best_release_grab_persists_the_listing_it_was_offered() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the manual grab persists the listing it was offered"
+        "initial",
     );
 }
 
