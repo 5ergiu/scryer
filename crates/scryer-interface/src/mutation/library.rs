@@ -461,6 +461,7 @@ impl LibraryMutations {
     async fn refresh_file_scores(
         &self,
         ctx: &Context<'_>,
+        #[graphql(desc = "Exactly one bounded selection of file, season, or title IDs.")]
         selection: FileScoreSelectionInput,
     ) -> GqlResult<JobRunPayload> {
         use scryer_application::ScoreRefreshSelection;
@@ -484,7 +485,11 @@ impl LibraryMutations {
     }
 
     /// Cancel queued or active scoring work, retaining evaluations already saved.
-    async fn cancel_file_score_refresh(&self, ctx: &Context<'_>, run_id: ID) -> GqlResult<bool> {
+    async fn cancel_file_score_refresh(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the score refresh job started by the current user.")] run_id: ID,
+    ) -> GqlResult<bool> {
         let app = app_from_ctx(ctx)?;
         let actor = actor_from_ctx(ctx)?;
         app.cancel_file_score_refresh(&actor, run_id.as_str())

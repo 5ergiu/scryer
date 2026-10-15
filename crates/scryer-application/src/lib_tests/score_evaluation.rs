@@ -186,3 +186,31 @@ async fn score_evaluation_rechecks_permissions_before_queued_work() {
     assert_eq!(terminal(&app, &run.id).await.status, JobRunStatus::Warning);
     assert!(files.score_evaluations.lock().await.is_empty());
 }
+
+#[tokio::test]
+async fn score_evaluation_selection_limits_and_cancellation_are_owner_scoped() {
+    let (app, user, files, id) = fixture().await;
+    assert!(
+        app.refresh_selected_file_scores(
+            &user,
+            ScoreRefreshSelection::Files(vec![id.clone(); 1001])
+        )
+        .await
+        .is_err()
+    );
+    let worker = app.runtime.jobs.score_refresh.worker.lock().await;
+    let run = app
+        .refresh_selected_file_scores(&user, ScoreRefreshSelection::Files(vec![id.clone(), id]))
+        .await
+        .unwrap();
+    let mut other = user.clone();
+    other.id = "other-operator".into();
+    assert!(matches!(
+        app.cancel_file_score_refresh(&other, &run.id).await,
+        Err(AppError::Unauthorized(_))
+    ));
+    assert!(app.cancel_file_score_refresh(&user, &run.id).await.unwrap());
+    assert_eq!(terminal(&app, &run.id).await.status, JobRunStatus::Warning);
+    assert!(files.score_evaluations.lock().await.is_empty());
+    drop(worker);
+}

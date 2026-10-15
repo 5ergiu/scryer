@@ -9,14 +9,28 @@ impl AppUseCase {
         actor: &User,
         selection: ScoreRefreshSelection,
     ) -> AppResult<JobRun> {
-        let ids: BTreeSet<_> = selection.ids().iter().collect();
-        if ids.is_empty() || ids.len() > 1000 || ids.iter().any(|id| id.trim().is_empty()) {
+        if selection.ids().is_empty()
+            || selection.ids().len() > 1000
+            || selection.ids().iter().any(|id| id.trim().is_empty())
+        {
             return Err(AppError::Validation(
                 "select between 1 and 1000 files, seasons, or titles".into(),
             ));
         }
+        let ids: Vec<_> = selection
+            .ids()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let selection = match selection {
+            ScoreRefreshSelection::Files(_) => ScoreRefreshSelection::Files(ids),
+            ScoreRefreshSelection::Seasons(_) => ScoreRefreshSelection::Seasons(ids),
+            ScoreRefreshSelection::Titles(_) => ScoreRefreshSelection::Titles(ids),
+        };
         let mut libraries = BTreeSet::new();
-        for id in ids {
+        for id in selection.ids() {
             let title_id = match &selection {
                 ScoreRefreshSelection::Files(_) => {
                     self.services

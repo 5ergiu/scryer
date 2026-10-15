@@ -1,6 +1,7 @@
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import { formatUiDateTime } from "@/lib/utils/date-format";
+import { scoringEntryText } from "@/lib/utils/release-decision-explanation";
 import type { FileScoreEvaluation, ScoreEntry } from "@/lib/types/file-score";
 
 export function ScoreBreakdown({ entries }: { entries: readonly ScoreEntry[] }) {
@@ -11,8 +12,11 @@ export function ScoreBreakdown({ entries }: { entries: readonly ScoreEntry[] }) 
     <ul className="space-y-1 py-2">
       {entries.map((entry, index) => <li key={index} className="flex flex-wrap gap-2">
         <span>{entry.source ? `${entry.source}: ` : ""}{entry.code}</span>
-        <span>{entry.delta > 0 ? "+" : ""}{entry.delta}</span>
-        {entry.kind.endsWith("_rejection") ? <span>{t("scoring.rejected")}</span> : null}
+        <span>{scoringEntryText({
+          delta: entry.delta,
+          kind: entry.kind === "mandatory_rejection" || entry.kind === "final_score_rejection"
+            ? entry.kind : "score_contribution",
+        }, t)}</span>
       </li>)}
     </ul>
   </details>;
