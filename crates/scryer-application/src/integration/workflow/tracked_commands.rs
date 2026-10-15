@@ -2556,13 +2556,17 @@ async fn handle_tracked_download_command(
                 .await;
             if has_grabbed_submission
                 && !crate::tracked_downloads::persist_tracked_download_state_marker(
-                    app, &tracked, TrackedDownloadState::FailedPending,
+                    app,
+                    &tracked,
+                    TrackedDownloadState::FailedPending,
                     Some(if skip_reacquire {
                         crate::tracked_downloads::MANUAL_FAILURE_NO_REACQUIRE_REASON
                     } else {
                         crate::tracked_downloads::MANUAL_FAILURE_CLEANUP_REASON
-                    }), None,
-                ).await
+                    }),
+                    None,
+                )
+                .await
             {
                 let _ = reply.send(Err(AppError::Repository(
                     "could not persist manual blocklist request; download preserved".into(),
@@ -2584,6 +2588,7 @@ async fn handle_tracked_download_command(
                     td.status_messages.clear();
                     td.skip_reacquire_on_failure = skip_reacquire;
                     td.manual_failure_cleanup = true;
+                    td.blocklist_confirmation_failed = false;
                     let completed_lookup =
                         crate::completed_download_handler::CompletedDownloadLookup::default();
                     let _ = try_dispatch_tracked_download_background_work(

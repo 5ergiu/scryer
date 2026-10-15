@@ -108,12 +108,8 @@ fn build_pending_import_search_attempt(
 
 fn pending_import_movie_entry_path(item: &LibraryScanUnmatchedItem) -> PathBuf {
     let item_path = stored_path_to_path_buf(item.item_path.trim());
-    let scan_root = stored_path_to_path_buf(item.scan_root.trim());
-
-    if let Ok(relative) = item_path.strip_prefix(&scan_root)
-        && let Some(first_component) = relative.components().next()
-    {
-        return scan_root.join(first_component.as_os_str());
+    if item_path.is_file() {
+        return item_path.parent().unwrap_or(&item_path).to_path_buf();
     }
 
     item_path
@@ -366,6 +362,11 @@ fn pending_import_item_requires_action(item: &LibraryScanUnmatchedItem) -> bool 
 }
 
 fn reject_folder_ownership_conflict_resolution(item: &LibraryScanUnmatchedItem) -> AppResult<()> {
+    if item.reason_code == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY {
+        return Err(AppError::Validation(
+            "this folder is not a title boundary; select an individual title folder through Change folder".into(),
+        ));
+    }
     if pending_import_item_is_folder_ownership_item(item) {
         return Err(AppError::Validation(
             "folder ownership conflicts cannot be bound or adopted".into(),
@@ -806,8 +807,15 @@ impl AppUseCase {
                 ));
             }
             let entry_path = pending_import_movie_entry_path(item);
-            if metadata.is_dir() || entry_path != item_path {
+            if metadata.is_dir()
+                || (entry_path != item_path
+                    && entry_path != stored_path_to_path_buf(item.scan_root.trim()))
+            {
                 refuse_library_root_as_title_folder(self, &entry_path).await?;
+                let patterns =
+                    crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
+                crate::library_discovery::ensure_existing_title_boundary(&entry_path, &patterns)
+                    .await?;
                 crate::folder_ownership::claim_title_folder_if_missing(
                     self,
                     &mut title,
@@ -863,6 +871,9 @@ impl AppUseCase {
         if pending_import_path_is_directory(item).await {
             let mut title = title.clone();
             let item_path = stored_path_to_path_buf(item.item_path.trim());
+            let patterns =
+                crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
+            crate::library_discovery::ensure_existing_title_boundary(&item_path, &patterns).await?;
             let discovered_files = self
                 .services
                 .library

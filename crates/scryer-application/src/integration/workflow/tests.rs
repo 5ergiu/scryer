@@ -192,6 +192,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -994,6 +995,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -1046,6 +1048,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -1097,6 +1100,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -1156,6 +1160,7 @@ mod tests {
                 import_hold: None,
                 skip_reacquire_on_failure: false,
                 manual_failure_cleanup: false,
+                blocklist_confirmation_failed: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
                 retained_in_client_after_cleanup: false,
@@ -1299,6 +1304,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -1692,6 +1698,7 @@ mod tests {
             import_hold: None,
             skip_reacquire_on_failure: false,
             manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -2044,16 +2051,23 @@ mod tests {
         tracked.state = TrackedDownloadState::FailedPending;
         let mut in_flight = std::collections::HashSet::from([SHARED_TORRENT_ID.to_string()]);
         super::handle_tracked_download_background_work_result(
-            &app, &mut tracker, &mut in_flight,
+            &app,
+            &mut tracker,
+            &mut in_flight,
             super::TrackedDownloadBackgroundWorkResult {
-                download_id: live, id: SHARED_TORRENT_ID.to_string(),
+                download_id: live,
+                id: SHARED_TORRENT_ID.to_string(),
                 kind: TrackedDownloadBackgroundWorkKind::Failed,
                 outcome: Err("worker failed before confirming blocklist".into()),
                 elapsed: std::time::Duration::ZERO,
             },
-        ).await;
+        )
+        .await;
         assert!(in_flight.is_empty());
-        assert_eq!(tracker.get_by_download_id(live).unwrap().state, TrackedDownloadState::FailedPending);
+        assert_eq!(
+            tracker.get_by_download_id(live).unwrap().state,
+            TrackedDownloadState::FailedPending
+        );
         assert_eq!(row_debug(&tracker, settled), settled_before);
     }
 

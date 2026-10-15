@@ -346,6 +346,42 @@ impl AppUseCase {
             )));
         }
 
+        let selected_path = stored_path_to_path_buf(&selected_folder);
+        let root_path = stored_path_to_path_buf(&selected_root.path);
+        let resolved = crate::folder_ownership::resolved_folder_identity(&selected_path)?;
+        let resolved_root = crate::folder_ownership::resolved_folder_identity(&root_path)?;
+        if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
+            return Err(AppError::Validation(
+                "selected folder resolves outside its library root".into(),
+            ));
+        }
+        if !title_owns_folder(&title, &selected_path) {
+            let patterns =
+                crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
+            crate::library_discovery::ensure_existing_title_boundary(&selected_path, &patterns)
+                .await?;
+        }
+        for candidate in self
+            .services
+            .catalog
+            .titles
+            .list_delete_preview_info()
+            .await?
+        {
+            if candidate.title_id == title.id {
+                continue;
+            }
+            if let Some(folder) = candidate.folder_path
+                && !crate::stored_paths::folder_paths_match(&selected_folder, &folder)
+                && crate::folder_ownership::title_folders_overlap(&selected_folder, &folder)?
+            {
+                return Err(AppError::Validation(
+                    "selected folder overlaps another title's folder; no ownership was changed"
+                        .into(),
+                ));
+            }
+        }
+
         let current_root = title_folder_path(&title).and_then(|current| {
             library
                 .roots

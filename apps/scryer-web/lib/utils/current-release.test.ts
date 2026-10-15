@@ -43,3 +43,22 @@ test("episode, season and series-movie scopes exclude unrelated owned releases",
   assert.deepEqual([...currentReleaseNames(files, { seriesMovieLinkId: "movie-b" })], ["show.e02-group"]);
   assert.equal(currentReleaseNames(files, { episodeId: "missing" }).size, 0);
 });
+
+test("fallback identities strip every supported video extension", () => {
+  for (const extension of ["mkv", "mp4", "avi", "wmv", "mov", "m4v", "ts", "m2ts", "webm", "flv", "ogv", "strm", "mpg", "mpeg", "vob", "iso"]) {
+    for (const suffix of [extension, extension.toUpperCase()]) {
+      assert.deepEqual([...currentReleaseNames([
+        { role: "primary", originalFilePath: `/downloads/Movie.Release.${suffix}`, filePath: "/library/renamed.mkv" },
+        { role: "primary", originalFilePath: `D:\\downloads\\Other.Release.${suffix}`, filePath: "/library/renamed.mkv" },
+      ])], ["movie.release", "other.release"], suffix);
+    }
+  }
+});
+
+test("fallback normalization preserves unknown suffixes and persisted identities", () => {
+  assert.deepEqual([...currentReleaseNames([
+    { role: "primary", originalFilePath: "/downloads/Movie.Release", filePath: "/library/renamed.mkv" },
+    { role: "primary", grabbedReleaseTitle: "Grabbed.iso", filePath: "/library/renamed.iso" },
+    { role: "primary", sceneName: "Scene.iso", filePath: "/library/renamed.iso" },
+  ])], ["movie.release", "grabbed.iso", "scene.iso"]);
+});

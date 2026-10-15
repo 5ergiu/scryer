@@ -8,6 +8,7 @@ import { normalizedRatingSource, ratingSourceInfo } from "./title-ratings.ts";
 const PLUGIN_LOGO_BASE_PATH = "/plugin-logos";
 
 const PLUGIN_LOGO_SVG_SLUGS = [
+  "aninzb",
   "apprise",
   "aria2",
   "deluge",

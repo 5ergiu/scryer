@@ -762,6 +762,30 @@ fn a_proper_admits_over_the_same_tier_even_when_it_scores_lower() {
     );
 }
 
+#[test]
+fn cross_group_and_unknown_group_propers_use_score_in_both_directions() {
+    for group in [None, Some(""), Some("  "), Some("other")] {
+        for (candidate_revision, incumbent_revision) in [(1, 0), (0, 1)] {
+            let (mut file, primary) = revised("file-1", incumbent_revision, 900);
+            file.release_group = group.map(str::to_string);
+            let subject = AdmissionSubject::new(episodes(&["ep-01"]), [(file, primary)]);
+            for (score, admitted) in [(400, false), (1_200, true)] {
+                let verdict = evaluate_admission(
+                    &subject,
+                    CandidateFacts::new(Some(0), candidate_revision, score)
+                        .with_revision_policy(Some("group"), false),
+                    &auto(200),
+                );
+                assert_eq!(
+                    verdict.is_admitted(),
+                    admitted,
+                    "group={group:?}, candidate revision={candidate_revision}, score={score}: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
 /// …and the converse. The original facing the PROPER already on disk is not an
 /// upgrade at any score, and it reports the revision rather than a misleading
 /// "equal or better score".

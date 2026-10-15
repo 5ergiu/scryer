@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub mod download_identity;
 pub mod import_space;
 pub mod lists;
+pub mod title_naming;
 pub mod title_normalization;
 pub use lists::*;
 mod title_sort;

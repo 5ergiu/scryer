@@ -44,7 +44,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.15.0";
+pub const SDK_VERSION: &str = "3.16.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)
@@ -135,7 +135,23 @@ pub fn validate_plugin_descriptor_sdk_contract(
         &descriptor.sdk_version,
         &descriptor.sdk_constraint,
         host_sdk_version,
-    )
+    )?;
+    if descriptor
+        .indexer()
+        .is_some_and(|indexer| indexer.capabilities.resolve_network_endpoints)
+    {
+        let minimum = Version::new(3, 16, 0);
+        // Both versions were parsed by validate_sdk_contract above.
+        if Version::parse(descriptor.sdk_version.trim()).unwrap() < minimum
+            || Version::parse(host_sdk_version).unwrap() < minimum
+        {
+            return Err(format!(
+                "{}: resolve_network_endpoints requires plugin and host SDK >=3.16.0",
+                descriptor.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -723,6 +739,9 @@ where
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct IndexerCapabilities {
+    /// Resolve instance-specific HTTP origins before any ordinary operation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve_network_endpoints: bool,
     #[serde(default = "default_true")]
     pub rss: bool,
     #[serde(default, serialize_with = "serialize_ordered_string_map")]
@@ -766,6 +785,7 @@ pub struct IndexerCapabilities {
 impl Default for IndexerCapabilities {
     fn default() -> Self {
         Self {
+            resolve_network_endpoints: false,
             rss: true,
             supported_ids: HashMap::new(),
             deduplicates_aliases: false,
@@ -3132,6 +3152,7 @@ struct PluginSdkSchemaDocument {
     host_response: host::PluginHostResponse,
     indexer_search_request: PluginSearchRequest,
     indexer_search_response: PluginSearchResponse,
+    resolve_network_endpoints_response: command::ResolveNetworkEndpointsResponse,
     indexer_search_plan_request: PluginSearchPlanRequest,
     indexer_search_strategy_event: PluginSearchStrategyEvent,
     indexer_search_plan_summary: PluginSearchPlanSummary,
@@ -3179,6 +3200,20 @@ pub fn plugin_sdk_schema_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_endpoints_capability_is_opt_in_and_omitted_for_old_plugins() {
+        let capabilities: IndexerCapabilities = serde_json::from_str("{}").unwrap();
+        assert!(!capabilities.resolve_network_endpoints);
+        assert!(
+            serde_json::to_value(&capabilities)
+                .unwrap()
+                .get("resolve_network_endpoints")
+                .is_none()
+        );
+        let enabled: IndexerCapabilities =
+            serde_json::from_str(r#"{"resolve_network_endpoints":true}"#).unwrap();
+        assert!(enabled.resolve_network_endpoints);
+    }
     use crate::indexer::{
         indexer_capability_fixtures, normalize_external_ids, torrent_result, usenet_result,
     };
@@ -3246,6 +3281,54 @@ mod tests {
         let err = validate_sdk_contract("sdk2-plugin", "2.3.0", ">=2.3.0, <3.0.0", SDK_VERSION)
             .expect_err("SDK 2 plugin should not load on SDK 3 host");
         assert!(err.contains(&format!("host sdk_version {SDK_VERSION}")));
+    }
+
+    #[test]
+    fn endpoint_resolution_requires_sdk_316_and_keeps_old_plugins_compatible() {
+        let mut descriptor = download_fixture("fixture", DownloadTorrentCapabilities::default());
+        descriptor.provider = ProviderDescriptor::Indexer(IndexerDescriptor {
+            provider_type: "fixture".into(),
+            provider_aliases: vec![],
+            provider_profiles: vec![],
+            source_kind: IndexerSourceKind::Usenet,
+            capabilities: IndexerCapabilities {
+                resolve_network_endpoints: true,
+                ..Default::default()
+            },
+            scoring_policies: vec![],
+            config_fields: vec![],
+            allowed_hosts: vec![],
+            rate_limit_seconds: None,
+            search_semantics_version: None,
+            strategy_plan: None,
+        });
+        descriptor.sdk_constraint = ">=3.0.0, <4.0.0".into();
+        descriptor.sdk_version = "3.15.0".into();
+        assert!(validate_plugin_descriptor_sdk_contract(&descriptor, SDK_VERSION).is_err());
+        descriptor.sdk_version = SDK_VERSION.into();
+        assert!(validate_plugin_descriptor_sdk_contract(&descriptor, "3.15.0").is_err());
+        assert!(validate_plugin_descriptor_sdk_contract(&descriptor, SDK_VERSION).is_ok());
+        descriptor.sdk_constraint = current_sdk_constraint();
+        assert!(
+            !host_version_matches_constraint(
+                "3.15.0",
+                &plugin_descriptor_sdk_constraint(&descriptor)
+            )
+            .unwrap()
+        );
+        assert!(
+            host_version_matches_constraint(
+                SDK_VERSION,
+                &plugin_descriptor_sdk_constraint(&descriptor)
+            )
+            .unwrap()
+        );
+        if let ProviderDescriptor::Indexer(indexer) = &mut descriptor.provider {
+            indexer.capabilities.resolve_network_endpoints = false;
+        }
+        descriptor.sdk_version = "3.15.0".into();
+        descriptor.sdk_constraint = ">=3.15.0, <4.0.0".into();
+        assert!(validate_plugin_descriptor_sdk_contract(&descriptor, SDK_VERSION).is_ok());
     }
 
     #[test]

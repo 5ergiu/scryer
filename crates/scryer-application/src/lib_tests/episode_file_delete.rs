@@ -55,6 +55,22 @@ async fn seed_episode_delete_fixture_for(facet: MediaFacet) -> EpisodeDeleteFixt
         .await
         .expect("create series title");
 
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(
+            &title.id,
+            &root
+                .join(if title.facet == MediaFacet::Movie {
+                    "Emberfall (2026)"
+                } else {
+                    "Emberfall"
+                })
+                .to_string_lossy(),
+        )
+        .await
+        .expect("record owned title folder");
+
     EpisodeDeleteFixture {
         app,
         admin,
@@ -63,6 +79,231 @@ async fn seed_episode_delete_fixture_for(facet: MediaFacet) -> EpisodeDeleteFixt
         media_files,
         _tempdir: tempdir,
     }
+}
+
+#[tokio::test]
+async fn nested_title_delete_preserves_shared_bucket_and_sibling_bytes() {
+    let fixture = seed_episode_delete_fixture().await;
+    let title_folder = fixture.root.join("E/Emberfall");
+    fixture
+        .app
+        .services
+        .catalog
+        .titles
+        .set_folder_path(&fixture.title_id, &title_folder.to_string_lossy())
+        .await
+        .unwrap();
+    fixture
+        .add_episode_file("E/Emberfall/Season 01/episode.mkv", "episode-1")
+        .await;
+    let sibling = fixture.root.join("E/Echo/episode.mkv");
+    std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    std::fs::write(&sibling, b"sibling bytes").unwrap();
+    let bucket_file = fixture.root.join("E/notes.txt");
+    std::fs::write(&bucket_file, b"bucket bytes").unwrap();
+    let before = [sibling.clone(), bucket_file.clone()].map(|path| {
+        let hash = blake3::hash(&std::fs::read(&path).unwrap());
+        (path, hash)
+    });
+    let preview = fixture
+        .app
+        .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+        .await
+        .unwrap();
+    fixture
+        .app
+        .delete_title(
+            &fixture.admin,
+            &fixture.title_id,
+            true,
+            Some(DeleteExecutionConfirmation {
+                preview_fingerprint: preview.fingerprint,
+                typed_confirmation: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!title_folder.exists());
+    assert!(fixture.root.join("E").is_dir());
+    for (path, hash) in before {
+        assert_eq!(blake3::hash(&std::fs::read(path).unwrap()), hash);
+    }
+    assert!(
+        fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .get_by_id(&fixture.title_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn nested_title_delete_refuses_legacy_bucket_and_preserves_untracked_sibling() {
+    let fixture = seed_episode_delete_fixture().await;
+    let bucket = fixture.root.join("E");
+    let own_file = fixture.root.join("E/Emberfall/Season 01/episode.mkv");
+    fixture
+        .add_episode_file("E/Emberfall/Season 01/episode.mkv", "episode-1")
+        .await;
+    let sibling = fixture.root.join("E/Echo/Season 01/episode.mkv");
+    std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    std::fs::write(&sibling, b"untracked sibling").unwrap();
+    fixture
+        .app
+        .services
+        .catalog
+        .titles
+        .set_folder_path(&fixture.title_id, &bucket.to_string_lossy())
+        .await
+        .unwrap();
+    let before =
+        [own_file.clone(), sibling.clone()].map(|path| blake3::hash(&std::fs::read(path).unwrap()));
+    assert!(
+        fixture
+            .app
+            .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        [own_file, sibling].map(|path| blake3::hash(&std::fs::read(path).unwrap())),
+        before
+    );
+    assert!(bucket.is_dir());
+    assert!(
+        !fixture
+            .app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&fixture.title_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .get_by_id(&fixture.title_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn nested_title_delete_refuses_foreign_media_even_without_foreign_folder() {
+    let fixture = seed_episode_delete_fixture().await;
+    fixture
+        .add_episode_file("Emberfall/Season 01/episode.mkv", "own-episode")
+        .await;
+    let foreign_id = fixture
+        .add_episode_file("Emberfall/Season 01/foreign.mkv", "foreign-episode")
+        .await;
+    let other = fixture
+        .app
+        .add_title(
+            &fixture.admin,
+            NewTitle {
+                name: "Echo".into(),
+                facet: MediaFacet::Series,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(other.folder_path.is_none());
+    fixture
+        .media_files
+        .store
+        .lock()
+        .await
+        .iter_mut()
+        .find(|file| file.id == foreign_id)
+        .unwrap()
+        .title_id = other.id.clone();
+    let paths = [
+        fixture.root.join("Emberfall/Season 01/episode.mkv"),
+        fixture.root.join("Emberfall/Season 01/foreign.mkv"),
+    ];
+    let before = paths
+        .each_ref()
+        .map(|path| blake3::hash(&std::fs::read(path).unwrap()));
+    let error = fixture
+        .app
+        .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("another title"));
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| blake3::hash(&std::fs::read(path).unwrap())),
+        before
+    );
+    assert_eq!(fixture.media_files.store.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn nested_title_ancestor_scan_conflict_keeps_media_associations() {
+    let fixture = seed_episode_delete_fixture().await;
+    let title_folder = fixture.root.join("E/Emberfall");
+    fixture
+        .app
+        .services
+        .catalog
+        .titles
+        .set_folder_path(&fixture.title_id, &title_folder.to_string_lossy())
+        .await
+        .unwrap();
+    let file_id = fixture
+        .add_episode_file("E/Emberfall/Season 01/episode.mkv", "episode-1")
+        .await;
+    let title = fixture
+        .app
+        .services
+        .catalog
+        .titles
+        .get_by_id(&fixture.title_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let path = title_folder.join("Season 01/episode.mkv");
+    let before = blake3::hash(&std::fs::read(&path).unwrap());
+    let detached = crate::folder_ownership::unlink_title_media_in_folder(
+        &fixture.app,
+        &title,
+        &fixture.root.join("E"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(detached, 0);
+    assert_eq!(fixture.remaining_file_ids().await, vec![file_id]);
+    assert_eq!(blake3::hash(&std::fs::read(path).unwrap()), before);
+}
+
+#[tokio::test]
+async fn nested_title_single_file_delete_refuses_sibling_path_and_keeps_row() {
+    let fixture = seed_episode_delete_fixture().await;
+    let file_id = fixture
+        .add_episode_file("E/Echo/episode.mkv", "episode-1")
+        .await;
+    let path = fixture.root.join("E/Echo/episode.mkv");
+    let before = blake3::hash(&std::fs::read(&path).unwrap());
+    let result = fixture
+        .app
+        .preview_delete_media_file(&fixture.admin, &file_id)
+        .await;
+    assert!(matches!(result, Err(AppError::Validation(_))));
+    assert_eq!(fixture.remaining_file_ids().await, vec![file_id]);
+    assert_eq!(blake3::hash(&std::fs::read(path).unwrap()), before);
 }
 
 impl EpisodeDeleteFixture {

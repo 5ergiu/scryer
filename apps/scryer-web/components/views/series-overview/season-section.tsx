@@ -6,6 +6,8 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  History,
+  Info,
   Search,
   Zap,
 } from "lucide-react";
@@ -17,6 +19,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { IconButton } from "@/components/ui/icon-button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchResultBuckets } from "@/components/common/release-search-results";
 import { TitleSearchDownloadClientNotice } from "@/components/common/title-search-download-client-notice";
@@ -91,6 +100,7 @@ type SeasonSectionProps = {
   onClearReleaseBlocklistEntry?: (entryId: string) => Promise<void> | void;
   onRunEpisodeSearch?: (episode: CollectionEpisode) => void;
   onOpenEpisodeHistory?: (episode: CollectionEpisode) => void;
+  onOpenSeasonHistory?: (collection: TitleCollection) => void;
   onQueueFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
   onQueueAdditionalFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
   onAutoSearchEpisode?: (episode: CollectionEpisode) => void;
@@ -204,6 +214,7 @@ function SeasonSectionImpl({
   searchBlockedByEpisode,
   onRunEpisodeSearch,
   onOpenEpisodeHistory,
+  onOpenSeasonHistory,
   onQueueFromEpisodeSearch,
   onQueueAdditionalFromEpisodeSearch,
   autoSearchLoadingByEpisode,
@@ -231,6 +242,7 @@ function SeasonSectionImpl({
   const isMobile = useIsMobile();
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seasonToggling, setSeasonToggling] = React.useState(false);
+  const [detailsOpen, setDetailsOpen] = React.useState(false);
   const stableSubtitleDownloads = subtitleDownloads ?? EMPTY_SUBTITLE_DOWNLOADS;
   const selectionEnabled = Boolean(onToggleEpisodeSelected);
 
@@ -396,6 +408,30 @@ function SeasonSectionImpl({
       data-collection-id={collection.id}
       className="overflow-hidden rounded-lg border border-border bg-background/40"
     >
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <DialogContent id={`season-details-dialog-${collection.id}`}>
+          <DialogHeader>
+            <DialogTitle>{seasonHeading(collection, t)} — {t("episode.details")}</DialogTitle>
+          </DialogHeader>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
+            <dt className="text-muted-foreground">{t("title.table.monitored")}</dt>
+            <dd>{t(collection.monitored ? "label.yes" : "label.no")}</dd>
+            <dt className="text-muted-foreground">{t("title.table.episodes")}</dt>
+            <dd>
+              {episodesReady || (collection.episodesTotal != null && collection.episodesOwned != null && collection.episodesMonitored != null)
+                ? t("title.table.episodeProgressTooltipWithTotal", {
+                    owned: collectionMetrics.ownedEpisodes,
+                    total: collectionMetrics.totalEpisodes,
+                    monitored: collectionMetrics.monitoredEpisodes,
+                  })
+                : t("label.unknown")}
+              {episodeRangeLabel ? <p className="text-muted-foreground">{episodeRangeLabel}</p> : null}
+            </dd>
+            <dt className="text-muted-foreground">{t("title.table.size")}</dt>
+            <dd>{collectionSizeLabel ?? t("label.unknown")}</dd>
+          </dl>
+        </DialogContent>
+      </Dialog>
       {showCollectionHeader ? (
         <div
           id={seriesOverviewSeasonToggleId(collection.collectionIndex)}
@@ -490,6 +526,30 @@ function SeasonSectionImpl({
               />
             ) : null}
             {canRefreshScores ? <RefreshScoresButton selection={{ seasonIds: [collection.id] }} /> : null}
+            <IconButton
+              id={`season-details-${collection.id}`}
+              label={`${seasonHeading(collection, t)} — ${t("episode.details")}`}
+              onKeyDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setDetailsOpen(true);
+              }}
+            >
+              <Info className="h-4 w-4" />
+            </IconButton>
+            {onOpenSeasonHistory ? (
+              <IconButton
+                id={`season-history-${collection.id}`}
+                label={`${seasonHeading(collection, t)} — ${t("history.title")}`}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenSeasonHistory(collection);
+                }}
+              >
+                <History className="h-4 w-4" />
+              </IconButton>
+            ) : null}
             {onRunSeasonSearch ? (
               <EpisodeTableActionButton
                 id={seriesOverviewSeasonSearchId(collection.id)}

@@ -33,10 +33,10 @@ pub(crate) const DEFAULT_PORT: u16 = 8080;
 /// rather than the shorter budget a server with no bootstrap work needs.
 pub(crate) const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// How long a Unix stop waits after `SIGTERM` before escalating to `SIGKILL`.
-/// The server's own graceful teardown is what needs the time here; a process
-/// that ignores the signal must not be able to strand the wrapper.
-#[cfg(unix)]
+/// How long a stop waits after asking the server to shut down (`SIGTERM` on
+/// Unix, a console `CTRL_C_EVENT` on Windows) before killing it. The server's
+/// own graceful teardown is what needs the time here; a process that ignores
+/// the request must not be able to strand the wrapper.
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The names the wrapper and the server are installed under. Both binaries
@@ -596,6 +596,13 @@ pub(crate) struct ServerSupervisor {
     profile_dir: PathBuf,
     port: u16,
     server: Option<Child>,
+    /// The kill-on-close job every server this wrapper starts is placed in, so
+    /// a wrapper that dies without stopping its server (killed from Task
+    /// Manager, crashed, or ended by a frozen installer) cannot leave an
+    /// orphan holding the installed executables open. Created on the first
+    /// start and held for the wrapper's lifetime; closing it is what kills.
+    #[cfg(windows)]
+    job: Option<windows_job::KillOnCloseJob>,
     /// How long the log was when the owned server was started, so a failed
     /// start is reported with its own error rather than an earlier run's.
     log_offset: u64,
@@ -607,6 +614,8 @@ impl ServerSupervisor {
             profile_dir,
             port,
             server: None,
+            #[cfg(windows)]
+            job: None,
             log_offset: 0,
         }
     }
@@ -695,12 +704,30 @@ impl ServerSupervisor {
                 server_executable.display()
             )
         })?;
+        #[cfg(windows)]
+        self.place_in_job(&child);
         self.server = Some(child);
         Ok(())
     }
 
-    /// Stop the server this wrapper started. A server it did not start is left
-    /// alone: it belongs to whoever ran it.
+    /// Put a freshly started server in the wrapper's kill-on-close job.
+    ///
+    /// A server outside the job still runs and is still stopped by
+    /// [`Self::stop`]; it only loses the guarantee that it dies with the
+    /// wrapper, so a failure here is not a failed start.
+    #[cfg(windows)]
+    fn place_in_job(&mut self, child: &Child) {
+        if self.job.is_none() {
+            self.job = windows_job::KillOnCloseJob::new().ok();
+        }
+        if let Some(job) = self.job.as_ref() {
+            let _ = job.assign(child);
+        }
+    }
+
+    /// Stop the server this wrapper started: ask it to shut down, then kill
+    /// it if it has not within [`GRACEFUL_STOP_TIMEOUT`]. A server it did not
+    /// start is left to [`Self::stop_unowned_servers`].
     pub(crate) fn stop(&mut self) -> Result<(), String> {
         let Some(mut child) = self.server.take() else {
             return Ok(());
@@ -710,7 +737,6 @@ impl ServerSupervisor {
             .map_err(|error| format!("failed to check Scryer server status: {error}"))?
             .is_none()
         {
-            #[cfg(unix)]
             if request_graceful_stop(&mut child)? {
                 return Ok(());
             }
@@ -722,6 +748,29 @@ impl ServerSupervisor {
                 .map_err(|error| format!("failed to wait for Scryer server exit: {error}"))?;
         }
         Ok(())
+    }
+
+    /// Stop every Scryer server running from this installation that the
+    /// wrapper did not start — the server it adopted on start-up, or one
+    /// orphaned by an earlier wrapper that was killed. Each is asked to shut
+    /// down, then terminated once `policy` runs out. Returns the ids of
+    /// servers still running afterwards.
+    #[cfg(windows)]
+    pub(crate) fn stop_unowned_servers(
+        &self,
+        policy: application_updater::windows_process::StopPolicy,
+    ) -> Result<Vec<u32>, String> {
+        let install_dir = installation_dir()?;
+        let owned: Vec<u32> = self.server.iter().map(Child::id).collect();
+        Ok(
+            application_updater::windows_process::stop_product_processes(
+                &[SERVER_EXECUTABLE],
+                &install_dir,
+                &owned,
+                policy,
+            )
+            .remaining,
+        )
     }
 
     /// Stop and start again, from a user action.
@@ -837,6 +886,22 @@ impl ServerSupervisor {
         Ok(server)
     }
 }
+
+/// The directory this wrapper runs from, which is the installation both
+/// executables ship in.
+#[cfg(windows)]
+pub(crate) fn installation_dir() -> Result<PathBuf, String> {
+    let wrapper = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve {WRAPPER_EXECUTABLE} path: {error}"))?;
+    wrapper
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} has no parent directory", wrapper.display()))
+}
+
+/// The executables this installation runs: the server and this wrapper.
+#[cfg(windows)]
+pub(crate) const INSTALLED_EXECUTABLES: [&str; 2] = [SERVER_EXECUTABLE, WRAPPER_EXECUTABLE];
 
 /// How much of the end of the log a failed start reads. The error that
 /// stopped the server is the last thing it wrote.
@@ -994,27 +1059,122 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
 /// Keep the server out of the user's face. On Windows a console subsystem
 /// child would flash a window on every start; on macOS the child inherits the
 /// wrapper's already-windowless session and needs nothing.
+///
+/// `CREATE_NO_WINDOW` still gives the server a console of its own, just
+/// without a window, and that console is how a stop reaches it with
+/// `CTRL_C_EVENT`. `DETACHED_PROCESS` would leave it no console and no way to
+/// be asked to stop.
 #[cfg(windows)]
 fn configure_server_command(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
     command.creation_flags(CREATE_NO_WINDOW);
+    // A tray relaunched by the upgrade helper inherits its ignore-Ctrl+C flag;
+    // clear it so the server does not inherit it and ignore its stop request.
+    // SAFETY: A null handler with FALSE only clears this process's flag.
+    unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0) };
 }
 
 #[cfg(not(windows))]
 fn configure_server_command(_command: &mut Command) {}
 
+#[cfg(windows)]
+mod windows_job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    /// A job object that kills every process in it when its last handle
+    /// closes — when the wrapper exits for any reason, including being killed.
+    ///
+    /// The handle is created without inheritance, so no child holds it open
+    /// past the wrapper. Breakaway is allowed: the upgrade helper the server
+    /// starts asks to break away, because it must outlive the wrapper it is
+    /// about to stop.
+    pub(super) struct KillOnCloseJob(HANDLE);
+
+    impl KillOnCloseJob {
+        pub(super) fn new() -> Result<Self, String> {
+            // SAFETY: Null attributes (non-inheritable) and no name.
+            let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+            if handle.is_null() {
+                return Err(format!(
+                    "failed to create the Scryer server job object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let job = Self(handle);
+            // SAFETY: Zero is the documented initializer for this structure.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            // SAFETY: `limits` is a fully initialized structure of the size
+            // passed, and the job handle is open.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(format!(
+                    "failed to configure the Scryer server job object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(job)
+        }
+
+        pub(super) fn assign(&self, child: &Child) -> Result<(), String> {
+            // SAFETY: Both handles are open: the job by this value, the
+            // process by `child`.
+            let ok = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
+            if ok == 0 {
+                return Err(format!(
+                    "failed to place the Scryer server in its job object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for KillOnCloseJob {
+        fn drop(&mut self) {
+            // SAFETY: This value owns the job handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
 /// Ask the server to shut down cleanly, and report whether it did.
 ///
 /// The server writes a database on every job; killing it outright is safe but
-/// throws away the flush it would otherwise do, so the signal comes first and
-/// the caller only escalates when this returns false.
-#[cfg(unix)]
+/// throws away the flush it would otherwise do, so the request comes first and
+/// the caller only escalates when this returns false. On Unix the request is
+/// `SIGTERM`; on Windows it is `CTRL_C_EVENT` on the server's own (windowless)
+/// console, which the server's `ctrl_c` shutdown handler answers.
 fn request_graceful_stop(child: &mut Child) -> Result<bool, String> {
-    // SAFETY: `child` is a live process this wrapper started, so its PID is
-    // still ours to signal and cannot have been recycled.
-    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    #[cfg(unix)]
+    {
+        // SAFETY: `child` is a live process this wrapper started, so its PID
+        // is still ours to signal and cannot have been recycled.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(windows)]
+    if !application_updater::windows_process::request_console_interrupt(child.id()) {
+        return Ok(false);
+    }
 
     let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
     while Instant::now() < deadline {

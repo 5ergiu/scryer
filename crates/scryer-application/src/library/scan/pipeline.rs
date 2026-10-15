@@ -7,8 +7,8 @@ use crate::library_scan_metadata::{
     split_ready_metadata_candidates,
 };
 use crate::library_scan_unmatched::{
-    IgnoredLibraryScanItemArgs, LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
-    persist_ignored_library_scan_item,
+    IgnoredLibraryScanItemArgs, LIBRARY_SCAN_INVALID_TITLE_BOUNDARY,
+    LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE, persist_ignored_library_scan_item,
 };
 use crate::stored_paths::path_to_stored_string;
 use std::collections::VecDeque;
@@ -105,6 +105,7 @@ enum ScanCandidateJobEvent {
     EvidenceFailed {
         item_path: String,
         error: AppError,
+        invalid_boundary: bool,
     },
     EvidenceDone {
         metrics: CandidateJobMetrics,
@@ -264,6 +265,8 @@ pub(super) async fn run_library_scan_pipeline(
         app: app.clone(),
         session_id: session_id.to_string(),
         library_path: library_path.to_string(),
+        facet: facet.clone(),
+        library_id: library_id.to_string(),
         kind,
         scan_hints,
         mark_discovery_complete_on_drain,
@@ -315,6 +318,10 @@ pub(super) async fn run_library_scan_pipeline(
     let mut candidates: HashMap<ScanCandidateKey, CandidateRuntime> = HashMap::new();
     let mut early_inventory: HashMap<ScanCandidateKey, CandidateInventoryState> = HashMap::new();
     let mut forward_queue: VecDeque<(ScanCandidateKey, ScanPipelineCandidate)> = VecDeque::new();
+    // Paths this scan recorded as ignored before they became candidates
+    // (refused title boundaries, unusable evidence). Reconcile must keep
+    // their rows, so they count as seen alongside the candidates.
+    let mut ignored_paths: HashSet<String> = HashSet::new();
     let mut match_input_tx = Some(match_input_tx);
     let mut evidence_done = false;
     let mut inventory_done = false;
@@ -388,6 +395,7 @@ pub(super) async fn run_library_scan_pipeline(
                             candidates: &mut candidates,
                             early_inventory: &mut early_inventory,
                             forward_queue: &mut forward_queue,
+                            ignored_paths: &mut ignored_paths,
                             discovery_error: &mut discovery_error,
                         }, event).await {
                             discovery_error = Some(error);
@@ -628,6 +636,7 @@ pub(super) async fn run_library_scan_pipeline(
                         candidates: &mut candidates,
                         early_inventory: &mut early_inventory,
                         forward_queue: &mut forward_queue,
+                        ignored_paths: &mut ignored_paths,
                         discovery_error: &mut discovery_error,
                     },
                     event,
@@ -827,6 +836,7 @@ pub(super) async fn run_library_scan_pipeline(
 
         if !canceled {
             let mut seen_paths = report.seen_paths;
+            seen_paths.extend(ignored_paths);
             for runtime in candidates.values() {
                 let trimmed = runtime.item_path.trim();
                 if !trimmed.is_empty() {
@@ -975,6 +985,7 @@ struct CandidateEventContext<'a> {
     candidates: &'a mut HashMap<ScanCandidateKey, CandidateRuntime>,
     early_inventory: &'a mut HashMap<ScanCandidateKey, CandidateInventoryState>,
     forward_queue: &'a mut VecDeque<(ScanCandidateKey, ScanPipelineCandidate)>,
+    ignored_paths: &'a mut HashSet<String>,
     discovery_error: &'a mut Option<AppError>,
 }
 
@@ -1011,7 +1022,11 @@ async fn handle_candidate_job_event(
             );
             ctx.forward_queue.push_back((key, candidate));
         }
-        ScanCandidateJobEvent::EvidenceFailed { item_path, error } => {
+        ScanCandidateJobEvent::EvidenceFailed {
+            item_path,
+            error,
+            invalid_boundary,
+        } => {
             warn!(
                 item_path = %item_path,
                 error = %error,
@@ -1034,7 +1049,11 @@ async fn handle_candidate_job_event(
                     display_name: &display_name,
                     query: &display_name,
                     year_hint: None,
-                    reason_code: LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
+                    reason_code: if invalid_boundary {
+                        LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+                    } else {
+                        LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE
+                    },
                     error_message: Some(error.to_string()),
                     // Evidence failed before any file metadata was gathered.
                     size_bytes: None,
@@ -1047,6 +1066,11 @@ async fn handle_candidate_job_event(
                     error = %persist_error,
                     "failed to persist ignored library scan evidence failure"
                 );
+            } else {
+                let normalized = normalize_library_scan_item_path(&item_path);
+                if !normalized.is_empty() {
+                    ctx.ignored_paths.insert(normalized);
+                }
             }
             ctx.summary.scanned += 1;
             ctx.summary.skipped += 1;
@@ -1747,6 +1771,8 @@ struct CandidateJobContext {
     app: AppUseCase,
     session_id: String,
     library_path: String,
+    facet: MediaFacet,
+    library_id: String,
     kind: LibraryScanPipelineKind,
     scan_hints: Option<LibraryScanHintSet>,
     mark_discovery_complete_on_drain: bool,
@@ -1787,6 +1813,7 @@ enum EvidenceJobOutput {
     Failed {
         item_path: String,
         error: AppError,
+        invalid_boundary: bool,
     },
 }
 
@@ -1873,11 +1900,19 @@ impl<'a> CandidateJobRunner<'a> {
                 }
                 true
             }
-            EvidenceJobOutput::Failed { item_path, error } => {
+            EvidenceJobOutput::Failed {
+                item_path,
+                error,
+                invalid_boundary,
+            } => {
                 self.metrics.failed = self.metrics.failed.saturating_add(1);
                 self.ctx
                     .candidate_events
-                    .send(ScanCandidateJobEvent::EvidenceFailed { item_path, error })
+                    .send(ScanCandidateJobEvent::EvidenceFailed {
+                        item_path,
+                        error,
+                        invalid_boundary,
+                    })
                     .is_ok()
             }
         }
@@ -2129,8 +2164,19 @@ impl<'a> CandidateJobRunner<'a> {
 
 async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     let root = require_directory_library_path(&ctx.library_path)?.to_path_buf();
-    let discovered_entries =
-        stream_movie_top_level_entries_batched(&root, LIBRARY_SCAN_MOVIE_BATCH_SIZE).await?;
+    let policy = crate::library_discovery::TitleFolderBoundaryPolicy::load(
+        &ctx.app,
+        &ctx.facet,
+        &ctx.library_id,
+        &root,
+    )
+    .await?;
+    let discovered_entries = crate::library_discovery::stream_title_folder_boundaries(
+        root,
+        policy,
+        LIBRARY_SCAN_MOVIE_BATCH_SIZE,
+        ctx.cancel_token.clone().unwrap_or_default(),
+    );
     let mut queued_entries = spawn_library_discovery_queue(
         ctx.app.clone(),
         ctx.session_id.clone(),
@@ -2141,7 +2187,8 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     );
 
     let mut runner = CandidateJobRunner::new(ctx);
-    let mut pending_entries: VecDeque<MovieTopLevelEntry> = VecDeque::new();
+    let mut pending_entries: VecDeque<crate::library_discovery::TitleFolderBoundary> =
+        VecDeque::new();
     let mut discovery_closed = false;
 
     loop {
@@ -2156,6 +2203,20 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
         while runner.evidence_set.len() < LIBRARY_SCAN_EVIDENCE_CONCURRENCY {
             let Some(entry) = pending_entries.pop_front() else {
                 break;
+            };
+            if let Some(reason) = entry.rejection {
+                runner
+                    .forward_evidence_output(EvidenceJobOutput::Failed {
+                        item_path: path_to_stored_string(&entry.path),
+                        error: AppError::Validation(reason),
+                        invalid_boundary: true,
+                    })
+                    .await;
+                continue;
+            }
+            let entry = MovieTopLevelEntry {
+                path: entry.path,
+                is_dir: true,
             };
             let key = runner.allocate_key();
             let scanner = ctx.app.services.library.library_scanner.clone();
@@ -2242,14 +2303,29 @@ async fn movie_evidence_job(
             inventory_target: (inline_inventory.is_none() && is_dir).then_some(entry_path),
             inline_inventory,
         },
-        Err(error) => EvidenceJobOutput::Failed { item_path, error },
+        Err(error) => EvidenceJobOutput::Failed {
+            item_path,
+            error,
+            invalid_boundary: false,
+        },
     }
 }
 
 async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     let root = require_directory_library_path(&ctx.library_path)?.to_path_buf();
-    let discovered_folders =
-        stream_child_directories_batched(&root, LIBRARY_SCAN_SERIES_BATCH_SIZE).await?;
+    let policy = crate::library_discovery::TitleFolderBoundaryPolicy::load(
+        &ctx.app,
+        &ctx.facet,
+        &ctx.library_id,
+        &root,
+    )
+    .await?;
+    let discovered_folders = crate::library_discovery::stream_title_folder_boundaries(
+        root.clone(),
+        policy,
+        LIBRARY_SCAN_SERIES_BATCH_SIZE,
+        ctx.cancel_token.clone().unwrap_or_default(),
+    );
     let mut queued_folders = spawn_library_discovery_queue(
         ctx.app.clone(),
         ctx.session_id.clone(),
@@ -2261,7 +2337,8 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
 
     let coordinator = LibraryScanCoordinator::new(ctx.app.clone(), ctx.session_id.clone());
     let mut runner = CandidateJobRunner::new(ctx);
-    let mut pending_folders: VecDeque<PathBuf> = VecDeque::new();
+    let mut pending_folders: VecDeque<crate::library_discovery::TitleFolderBoundary> =
+        VecDeque::new();
     let mut discovery_closed = false;
 
     loop {
@@ -2277,6 +2354,17 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
             let Some(folder) = pending_folders.pop_front() else {
                 break;
             };
+            if let Some(reason) = folder.rejection {
+                runner
+                    .forward_evidence_output(EvidenceJobOutput::Failed {
+                        item_path: path_to_stored_string(&folder.path),
+                        error: AppError::Validation(reason),
+                        invalid_boundary: true,
+                    })
+                    .await;
+                continue;
+            }
+            let folder = folder.path;
             let key = runner.allocate_key();
             let scan_hints = ctx.scan_hints.clone();
             runner
@@ -2375,7 +2463,11 @@ async fn series_evidence_job(
             inline_inventory: None,
             inventory_target: Some(folder),
         },
-        Err(error) => EvidenceJobOutput::Failed { item_path, error },
+        Err(error) => EvidenceJobOutput::Failed {
+            item_path,
+            error,
+            invalid_boundary: false,
+        },
     }
 }
 

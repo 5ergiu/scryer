@@ -41,6 +41,136 @@ fn non_empty_folder_path(path: Option<&str>) -> Option<&str> {
     path.filter(|path| !path.is_empty())
 }
 
+/// Resolve links in the existing prefix without requiring a destination to
+/// exist yet. Callers must repeat this check after creating the destination.
+pub(crate) fn resolved_folder_identity(path: &Path) -> AppResult<std::path::PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(AppError::Validation(
+            "title folder must be an absolute path without parent traversal".into(),
+        ));
+    }
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let mut resolved = std::fs::canonicalize(ancestor).map_err(|error| {
+                    AppError::Validation(format!(
+                        "cannot resolve title folder {}: {error}",
+                        ancestor.display(),
+                    ))
+                })?;
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    AppError::Validation("title folder has no existing ancestor".into())
+                })?;
+                missing.push(component.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    AppError::Validation("title folder has no existing ancestor".into())
+                })?;
+            }
+            Err(error) => {
+                return Err(AppError::Validation(format!(
+                    "cannot inspect title folder {}: {error}",
+                    ancestor.display()
+                )));
+            }
+        }
+    }
+}
+
+pub(crate) fn title_folders_overlap(left: &str, right: &str) -> AppResult<bool> {
+    fn overlaps(left: &str, right: &str) -> bool {
+        folder_paths_match(left, right)
+            || crate::title_folder_rules::path_is_strictly_within(left, right)
+            || crate::title_folder_rules::path_is_strictly_within(right, left)
+    }
+    if overlaps(left, right) {
+        return Ok(true);
+    }
+    let left = resolved_folder_identity(&stored_path_to_path_buf(left))?;
+    let right = match resolved_folder_identity(&stored_path_to_path_buf(right)) {
+        Ok(path) => path,
+        Err(error) => {
+            let other = stored_path_to_path_buf(right);
+            if !other.is_absolute()
+                || other
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                tracing::debug!(%error, "invalid unrelated stored folder omitted from alias comparison");
+                return Ok(false);
+            }
+            return Err(error);
+        }
+    };
+    let left_string = path_to_stored_string(&left);
+    let right_string = path_to_stored_string(&right);
+    Ok(overlaps(&left_string, &right_string)
+        || (overlaps(&left_string.to_lowercase(), &right_string.to_lowercase())
+            && (folder_case_insensitive(&left) || folder_case_insensitive(&right))))
+}
+
+/// Probe existing directory entries without writing to the library. Unknown
+/// case behavior is treated conservatively when reserving a destination.
+pub(crate) fn folder_case_insensitive(path: &Path) -> bool {
+    let Some(parent) = path.ancestors().find(|ancestor| ancestor.is_dir()) else {
+        return true;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return true;
+    };
+    for entry in entries.take(16).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((index, character)) = name.char_indices().find(|(_, c)| c.is_ascii_alphabetic())
+        else {
+            continue;
+        };
+        let mut alternative = name.to_string();
+        alternative.replace_range(
+            index..index + 1,
+            &if character.is_ascii_uppercase() {
+                character.to_ascii_lowercase()
+            } else {
+                character.to_ascii_uppercase()
+            }
+            .to_string(),
+        );
+        let alternative = parent.join(alternative);
+        match std::fs::metadata(&alternative) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Ok(other) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if let Ok(original) = std::fs::metadata(entry.path()) {
+                        return original.dev() == other.dev() && original.ino() == other.ino();
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = other;
+                    return true;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    true
+}
+
 pub(crate) fn title_owns_folder(title: &Title, folder_path: &Path) -> bool {
     let Some(owned_path) = non_empty_folder_path(title.folder_path.as_deref()) else {
         return false;
@@ -294,12 +424,70 @@ pub(crate) async fn ensure_folder_move_available_to_title(
         return Err(AppError::Validation("title folder path is required".into()));
     }
     let folder_path = path_to_stored_string(folder_path);
-    if let Some(owner) = find_other_folder_owner(app, title, &folder_path).await? {
-        return Err(AppError::Validation(format!(
-            "folder {} is already owned by title {}",
-            owner.folder_path.as_deref().unwrap_or_default(),
-            owner.name
-        )));
+    for owner in app
+        .services
+        .catalog
+        .titles
+        .list_delete_preview_info()
+        .await?
+    {
+        if owner.title_id != title.id
+            && let Some(owned_path) = owner.folder_path.as_deref()
+            && !owned_path.is_empty()
+            && title_folders_overlap(&folder_path, owned_path)?
+            && !folder_spans_a_library_root(app, owned_path).await?
+        {
+            return Err(AppError::Validation(format!(
+                "folder {folder_path} overlaps the folder owned by title {}",
+                owner.title_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Recycle entries retain their original path even after a title is removed.
+/// Restoring one must not write into a folder another title has since claimed.
+pub(crate) async fn ensure_restore_ownership(
+    app: &AppUseCase,
+    title_id: Option<&str>,
+    destination: &Path,
+) -> AppResult<()> {
+    let owners = app
+        .services
+        .catalog
+        .titles
+        .list_delete_preview_info()
+        .await?;
+    let destination = path_to_stored_string(destination);
+    let current_folder = owners
+        .iter()
+        .find(|owner| Some(owner.title_id.as_str()) == title_id)
+        .and_then(|owner| owner.folder_path.as_deref())
+        .filter(|folder| !folder.is_empty());
+    if let Some(folder) = current_folder {
+        let resolved_folder = resolved_folder_identity(&stored_path_to_path_buf(folder))?;
+        let resolved_destination =
+            resolved_folder_identity(&stored_path_to_path_buf(&destination))?;
+        if !crate::title_folder_rules::path_is_strictly_within(&destination, folder)
+            || resolved_destination == resolved_folder
+            || !resolved_destination.starts_with(&resolved_folder)
+        {
+            return Err(AppError::Validation("recycle restore path is outside the title's current owned folder; resolve the folder change before restoring".into()));
+        }
+    }
+    for owner in &owners {
+        if Some(owner.title_id.as_str()) == title_id {
+            continue;
+        }
+        if let Some(folder) = owner
+            .folder_path
+            .as_deref()
+            .filter(|folder| !folder.is_empty())
+            && title_folders_overlap(current_folder.unwrap_or(&destination), folder)?
+        {
+            return Err(AppError::Validation("recycle restore destination overlaps another title's owned folder; recycled files were preserved".into()));
+        }
     }
     Ok(())
 }
@@ -348,6 +536,27 @@ pub(crate) async fn claim_title_folder_if_missing(
         return Ok(());
     }
 
+    ensure_folder_move_available_to_title(app, title, folder_path).await?;
+    // Imports reserve missing or empty destinations before writing media. A
+    // destination with contents must not hold other titles' folders; stray
+    // files or empty subfolders left by an earlier attempt do not block it.
+    let has_contents = match tokio::fs::symlink_metadata(folder_path).await {
+        Ok(_) => tokio::fs::read_dir(folder_path)
+            .await
+            .map_err(|error| AppError::Repository(error.to_string()))?
+            .next_entry()
+            .await
+            .map_err(|error| AppError::Repository(error.to_string()))?
+            .is_some(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(AppError::Repository(error.to_string())),
+    };
+    if has_contents {
+        let patterns = crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
+        crate::library_discovery::ensure_folder_holds_no_child_titles(folder_path, &patterns)
+            .await?;
+    }
+
     let folder_path = path_to_stored_string(folder_path);
     if folder_spans_a_library_root(app, &folder_path).await? {
         tracing::warn!(
@@ -392,6 +601,13 @@ pub(crate) async fn unlink_title_media_in_folder(
     // or an unmounted root; unlinking there turns a monitored title fileless
     // and exposes it to automatic re-download.
     let owned_path = title.folder_path.as_deref().unwrap_or_default();
+    if crate::title_folder_rules::path_is_strictly_within(
+        owned_path,
+        &path_to_stored_string(folder_path),
+    ) {
+        tracing::debug!(title_id = %title.id, "ignoring scan conflict at an ancestor of the owned title folder");
+        return Ok(0);
+    }
     if owned_folder_present(owned_path).await != Some(true) {
         return Ok(0);
     }
@@ -472,6 +688,46 @@ pub(crate) async fn detach_title_media_in_folder_except(
 mod tests {
     use super::*;
     use scryer_domain::MediaFacet;
+
+    #[test]
+    fn nested_title_overlap_checks_missing_destinations_and_shared_buckets() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("E/Emberfall");
+        for invalid_other in ["", "relative/old-folder", "../old-folder"] {
+            assert!(!title_folders_overlap(&path_to_stored_string(&first), invalid_other).unwrap());
+        }
+        let second = root.path().join("E/Echo");
+        assert!(
+            !title_folders_overlap(
+                &path_to_stored_string(&first),
+                &path_to_stored_string(&second)
+            )
+            .unwrap()
+        );
+        assert!(
+            title_folders_overlap(
+                &path_to_stored_string(&first),
+                &path_to_stored_string(first.join("Season 01"))
+            )
+            .unwrap()
+        );
+        assert!(resolved_folder_identity(&root.path().join("E/../Escape")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_title_overlap_resolves_symlinked_existing_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("E")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("E"), root.path().join("Alias")).unwrap();
+        assert!(
+            title_folders_overlap(
+                &path_to_stored_string(root.path().join("E/Example")),
+                &path_to_stored_string(root.path().join("Alias/Example/Season 01")),
+            )
+            .unwrap()
+        );
+    }
 
     fn title(folder_path: Option<&str>) -> Title {
         let facet = MediaFacet::Anime;

@@ -285,6 +285,12 @@ impl PluginLoadSource {
     fn can_use_first_party_host_bindings(self) -> bool {
         matches!(self, Self::Builtin | Self::External { first_party: true })
     }
+
+    fn can_resolve_indexer_endpoints(self, descriptor: &PluginDescriptor) -> bool {
+        self.can_use_first_party_host_bindings()
+            && descriptor.id == "cardigann-engine"
+            && descriptor.provider_type() == "cardigann"
+    }
 }
 
 enum LoadedPluginBacking {
@@ -641,9 +647,13 @@ impl WasmIndexerPluginProvider {
         ) {
             return Err("indexer descriptor rejected".to_string());
         }
-        Ok(LoadedPluginRecord::new(LoadedPlugin::from_owned(
-            descriptor, wasm_bytes,
-        )))
+        Ok(LoadedPluginRecord::new(
+            LoadedPlugin::from_owned(descriptor, wasm_bytes).with_load_source(
+                PluginLoadSource::External {
+                    first_party: plugin.first_party,
+                },
+            ),
+        ))
     }
 
     fn prepare_runtime_plugin_record(
@@ -660,6 +670,9 @@ impl WasmIndexerPluginProvider {
         }
         Ok(LoadedPluginRecord::new(
             LoadedPlugin::from_owned(descriptor, plugin.wasm_bytes)
+                .with_load_source(PluginLoadSource::External {
+                    first_party: plugin.first_party,
+                })
                 .with_installation_id(plugin.installation_id)
                 .with_settings(plugin.settings),
         ))
@@ -997,6 +1010,23 @@ impl IndexerPluginProvider for WasmIndexerPluginProvider {
                 return None;
             }
         };
+
+        // Endpoint resolution expands the network sandbox. Only host-verified
+        // Cardigann code may derive these grants from operator configuration.
+        if loaded
+            .descriptor
+            .indexer()
+            .is_some_and(|indexer| indexer.capabilities.resolve_network_endpoints)
+            && !loaded
+                .load_source
+                .can_resolve_indexer_endpoints(&loaded.descriptor)
+        {
+            warn!(
+                plugin = loaded.descriptor.id.as_str(),
+                "endpoint resolution requires verified first-party Cardigann"
+            );
+            return None;
+        }
 
         let built = match backing {
             PluginRuntimeBacking::Indexer => WasmIndexerClient::new_component_with_plugin_settings(
@@ -4770,6 +4800,58 @@ mod tests {
                 .builtin_provider_types()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn endpoint_resolution_requires_host_provenance_and_cardigann_identity() {
+        let mut descriptor = descriptor("indexer");
+        descriptor.id = "cardigann-engine".into();
+        let ProviderDescriptor::Indexer(indexer) = &mut descriptor.provider else {
+            panic!("indexer fixture")
+        };
+        indexer.provider_type = "cardigann".into();
+        indexer.capabilities.resolve_network_endpoints = true;
+        for first_party in [false, true] {
+            let record =
+                WasmIndexerPluginProvider::prepare_runtime_plugin_record(RuntimePluginLoad {
+                    installation_id: Some("endpoint-fixture".into()),
+                    descriptor: descriptor.clone(),
+                    wasm_bytes: vec![],
+                    first_party,
+                    settings: Default::default(),
+                })
+                .unwrap();
+            assert_eq!(
+                record.loaded.load_source,
+                PluginLoadSource::External { first_party }
+            );
+            assert_eq!(
+                record
+                    .loaded
+                    .load_source
+                    .can_resolve_indexer_endpoints(&record.loaded.descriptor),
+                first_party
+            );
+        }
+        assert!(
+            !PluginLoadSource::External { first_party: false }
+                .can_resolve_indexer_endpoints(&descriptor)
+        );
+        for source in [
+            PluginLoadSource::Builtin,
+            PluginLoadSource::External { first_party: true },
+        ] {
+            assert!(source.can_resolve_indexer_endpoints(&descriptor));
+            let mut wrong_id = descriptor.clone();
+            wrong_id.id = "other-indexer".into();
+            assert!(!source.can_resolve_indexer_endpoints(&wrong_id));
+            let mut wrong_provider = descriptor.clone();
+            let ProviderDescriptor::Indexer(indexer) = &mut wrong_provider.provider else {
+                unreachable!()
+            };
+            indexer.provider_type = "other-provider".into();
+            assert!(!source.can_resolve_indexer_endpoints(&wrong_provider));
+        }
     }
 
     #[test]

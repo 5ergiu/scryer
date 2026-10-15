@@ -90,10 +90,348 @@ pub(crate) struct MovieTopLevelEntry {
     pub(crate) is_dir: bool,
 }
 
-type LibraryPathBatch = Vec<PathBuf>;
-pub(crate) type LibraryPathBatchReceiver = tokio::sync::mpsc::Receiver<AppResult<LibraryPathBatch>>;
+#[cfg(test)]
 pub(crate) type MovieTopLevelEntryBatchReceiver =
     tokio::sync::mpsc::Receiver<AppResult<Vec<MovieTopLevelEntry>>>;
+
+#[derive(Debug)]
+pub(crate) struct TitleFolderBoundary {
+    pub(crate) path: PathBuf,
+    pub(crate) rejection: Option<String>,
+}
+
+pub(crate) struct TitleFolderBoundaryPolicy {
+    pub(crate) template_depth: usize,
+    pub(crate) stored_folders: Vec<PathBuf>,
+    pub(crate) other_roots: Vec<PathBuf>,
+    pub(crate) episode_folders: Vec<regex::Regex>,
+}
+
+impl TitleFolderBoundaryPolicy {
+    fn contains_stored_folder(root: &Path, folder: &Path) -> bool {
+        let root = crate::stored_paths::folder_path_identity_key(&path_to_stored_string(root));
+        let folder = crate::stored_paths::folder_path_identity_key(&path_to_stored_string(folder));
+        match (root, folder) {
+            (Some(root), Some(folder)) => root != folder && Path::new(&folder).starts_with(&root),
+            _ => false,
+        }
+    }
+
+    pub(crate) async fn load(
+        app: &AppUseCase,
+        facet: &MediaFacet,
+        library_id: &str,
+        root: &Path,
+    ) -> AppResult<Self> {
+        let default = match facet {
+            MediaFacet::Movie => DEFAULT_FOLDER_TEMPLATE_MOVIE,
+            MediaFacet::Series => DEFAULT_FOLDER_TEMPLATE_SERIES,
+            MediaFacet::Anime => DEFAULT_FOLDER_TEMPLATE_ANIME,
+        };
+        let template = crate::library::rename::normalize_title_folder_template_or_default(
+            app.read_setting_string_value(FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
+                .await?,
+            default,
+            facet.as_str(),
+        );
+        let titles = app
+            .services
+            .catalog
+            .titles
+            .list_delete_preview_info()
+            .await?;
+        let stored_folders = titles
+            .iter()
+            .filter(|title| title.library_id == library_id)
+            .filter_map(|title| title.folder_path.as_deref())
+            .map(stored_path_to_path_buf)
+            .filter(|path| Self::contains_stored_folder(root, path))
+            .collect();
+        let mut other_roots: Vec<_> = app
+            .services
+            .catalog
+            .libraries
+            .list(None)
+            .await?
+            .into_iter()
+            .flat_map(|library| library.roots)
+            .map(|root| stored_path_to_path_buf(&root.path))
+            .filter(|path| Self::contains_stored_folder(root, path))
+            .collect();
+        other_roots.extend(
+            titles
+                .into_iter()
+                .filter(|title| title.library_id != library_id)
+                .filter_map(|title| title.folder_path)
+                .map(|path| stored_path_to_path_buf(&path))
+                .filter(|path| {
+                    Self::contains_stored_folder(root, path)
+                        || crate::stored_paths::folder_paths_match(
+                            &path_to_stored_string(root),
+                            &path_to_stored_string(path),
+                        )
+                }),
+        );
+        let episode_folders = episode_folder_patterns(app, facet).await?;
+        Ok(Self {
+            template_depth: template.split('/').count(),
+            stored_folders,
+            other_roots,
+            episode_folders,
+        })
+    }
+}
+
+pub(crate) async fn episode_folder_patterns(
+    app: &AppUseCase,
+    facet: &MediaFacet,
+) -> AppResult<Vec<regex::Regex>> {
+    if *facet == MediaFacet::Movie {
+        return Ok(Vec::new());
+    }
+    let season = crate::library::rename::normalize_season_folder_template_or_default(
+        app.read_setting_string_value(SEASON_FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
+            .await?,
+    );
+    let specials = crate::library::rename::normalize_specials_folder_template_or_default(
+        app.read_setting_string_value(SPECIALS_FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
+            .await?,
+    );
+    // Naming changes do not rename existing library directories. Keep the
+    // conventional episode layouts recognizable alongside current templates.
+    [
+        season,
+        specials,
+        "S{season:00}".into(),
+        "Season {season}".into(),
+        "Specials".into(),
+    ]
+    .iter()
+    .map(|template| crate::library::rename::episode_folder_discovery_pattern(template))
+    .collect()
+}
+
+/// Enumerate ownership boundaries before invoking the media walker. The
+/// traversal retains only a stack of open directories and one bounded batch.
+pub(crate) fn stream_title_folder_boundaries(
+    root: PathBuf,
+    policy: TitleFolderBoundaryPolicy,
+    batch_size: usize,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::sync::mpsc::Receiver<AppResult<Vec<TitleFolderBoundary>>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(LIBRARY_SCAN_DISCOVERY_WORK_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        let result = async {
+            if batch_size == 0 || policy.template_depth == 0 {
+                return Err(AppError::Validation("title boundary depth and batch size must be positive".into()));
+            }
+            let resolved_root = tokio::fs::canonicalize(&root).await.map_err(|error| AppError::Repository(error.to_string()))?;
+            let mut stack = vec![(tokio::fs::read_dir(&root).await.map_err(|error| AppError::Repository(error.to_string()))?, 0usize)];
+            let mut batch = Vec::with_capacity(batch_size);
+            while let Some((entries, parent_depth)) = stack.last_mut() {
+                if cancel.is_cancelled() || sender.is_closed() { return Ok(()); }
+                let depth = *parent_depth + 1;
+                let Some(entry) = entries.next_entry().await.map_err(|error| AppError::Repository(error.to_string()))? else {
+                    stack.pop();
+                    continue;
+                };
+                let path = entry.path();
+                let kind = entry.file_type().await.map_err(|error| AppError::Repository(error.to_string()))?;
+                if kind.is_symlink() {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some("linked folder requires explicit ownership resolution before scanning".into()) }])) => if result.is_err() { return Ok(()); },
+                    }
+                    continue;
+                }
+                if !kind.is_dir() || should_skip_library_top_level_entry(&path, true) { continue; }
+                if policy.other_roots.iter().any(|other| crate::stored_paths::folder_paths_match(
+                    &path_to_stored_string(other), &path_to_stored_string(&path),
+                )) { continue; }
+                let resolved = tokio::fs::canonicalize(&path).await.map_err(|error| AppError::Repository(error.to_string()))?;
+                if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some("folder resolves outside its library root; resolve the link explicitly before scanning".into()) }])) => if result.is_err() { return Ok(()); },
+                    }
+                    continue;
+                }
+                let owned = policy.stored_folders.iter().any(|stored| crate::stored_paths::folder_paths_match(
+                    &path_to_stored_string(stored), &path_to_stored_string(&path),
+                ));
+                let contains_owner = policy.stored_folders.iter().any(|stored| TitleFolderBoundaryPolicy::contains_stored_folder(&path, stored));
+                let content = if owned {
+                    TitleBoundaryContent { has_media: true, has_child_titles: false }
+                } else {
+                    // Above title depth these are organizing folders, even if
+                    // their children happen to resemble season/specials names.
+                    let episode_folders = if depth < policy.template_depth { &[][..] } else { &policy.episode_folders[..] };
+                    match inspect_title_boundary_content(&path, episode_folders).await {
+                        Ok(content) => content,
+                        Err(error) => {
+                            tokio::select! {
+                                _ = cancel.cancelled() => return Ok(()),
+                                result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some(format!("cannot inspect title boundary: {error}")) }])) => if result.is_err() { return Ok(()); },
+                            }
+                            continue;
+                        }
+                    }
+                };
+                let eligible = depth == policy.template_depth && content.has_media && !content.has_child_titles && !contains_owner;
+                if owned || content.has_media || depth == policy.template_depth {
+                    // A folder at template depth with no media and no child titles is
+                    // an empty or junk title folder; it stays a resolvable unmatched
+                    // item exactly as the flat scanner recorded it.
+                    let rejection = if contains_owner || content.has_child_titles {
+                        Some("folder contains another title boundary; resolve the mixed layout explicitly".into())
+                    } else if !owned && depth != policy.template_depth && !content.has_media {
+                        Some("organizing folder has no eligible title media".into())
+                    } else if !owned && depth != policy.template_depth {
+                        Some(format!("folder is not at template depth (expected {}, found {depth})", policy.template_depth))
+                    } else { None };
+                    batch.push(TitleFolderBoundary { path: path.clone(), rejection });
+                }
+                if !owned && !eligible && (depth <= policy.template_depth || contains_owner) {
+                    stack.push((tokio::fs::read_dir(&path).await.map_err(|error| AppError::Repository(error.to_string()))?, depth));
+                }
+                if batch.len() >= batch_size {
+                    let items = std::mem::take(&mut batch);
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = sender.send(Ok(items)) => if result.is_err() { return Ok(()); },
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = sender.send(Ok(batch)) => {},
+                }
+            }
+            Ok::<(), AppError>(())
+        }.await;
+        if let Err(error) = result {
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = sender.send(Err(error)) => {},
+            }
+        }
+    });
+    receiver
+}
+
+struct TitleBoundaryContent {
+    has_media: bool,
+    has_child_titles: bool,
+}
+
+async fn directory_has_direct_media(path: &Path) -> AppResult<bool> {
+    Ok(count_series_loose_root_files(path).await? > 0)
+}
+
+async fn directory_has_episode_layout(
+    path: &Path,
+    episode_folders: &[regex::Regex],
+) -> AppResult<bool> {
+    if episode_folders.is_empty() {
+        return Ok(false);
+    }
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?
+    {
+        if entry
+            .file_type()
+            .await
+            .map_err(|error| AppError::Repository(error.to_string()))?
+            .is_dir()
+            && episode_folders
+                .iter()
+                .any(|pattern| pattern.is_match(&entry.file_name().to_string_lossy()))
+            && directory_has_direct_media(&entry.path()).await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn inspect_title_boundary_content(
+    path: &Path,
+    episode_folders: &[regex::Regex],
+) -> AppResult<TitleBoundaryContent> {
+    let mut content = TitleBoundaryContent {
+        has_media: directory_has_direct_media(path).await?,
+        has_child_titles: false,
+    };
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?
+    {
+        let child = entry.path();
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| AppError::Repository(error.to_string()))?
+            .is_dir()
+            || should_skip_library_top_level_entry(&child, true)
+            || child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    LIBRARY_IGNORED_MEDIA_SUBDIR_NAMES.contains(&name.to_ascii_lowercase().as_str())
+                })
+        {
+            continue;
+        }
+        if directory_has_direct_media(&child).await? {
+            let season = child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| episode_folders.iter().any(|pattern| pattern.is_match(name)));
+            if season {
+                content.has_media = true;
+            } else {
+                content.has_child_titles = true;
+            }
+        } else if directory_has_episode_layout(&child, episode_folders).await? {
+            content.has_child_titles = true;
+        }
+    }
+    Ok(content)
+}
+
+pub(crate) async fn ensure_existing_title_boundary(
+    path: &Path,
+    episode_folders: &[regex::Regex],
+) -> AppResult<()> {
+    let content = inspect_title_boundary_content(path, episode_folders).await?;
+    if !content.has_media || content.has_child_titles {
+        return Err(AppError::Validation("selected folder is an organizing folder or mixed title layout; select the title folder containing its media".into()));
+    }
+    Ok(())
+}
+
+/// An import may reserve a destination that already holds stray files or
+/// empty subfolders, but never one that holds other titles' folders.
+pub(crate) async fn ensure_folder_holds_no_child_titles(
+    path: &Path,
+    episode_folders: &[regex::Regex],
+) -> AppResult<()> {
+    let content = inspect_title_boundary_content(path, episode_folders).await?;
+    if content.has_child_titles {
+        return Err(AppError::Validation("destination folder already contains other title folders; it is an organizing folder, not a title folder".into()));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 fn extract_library_query_evidence(path: &str, library_root: &str) -> LibraryQueryEvidence {
@@ -119,6 +457,7 @@ pub(crate) fn elapsed_ms_u64(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
 pub(crate) async fn list_child_directories(root: &Path) -> AppResult<Vec<PathBuf>> {
     Ok(crate::filesystem_walk::FilesystemWalker::new()
         .list_child_directories(root)?
@@ -157,181 +496,49 @@ pub(crate) async fn count_series_loose_root_files(root: &Path) -> AppResult<usiz
     Ok(count)
 }
 
-pub(crate) async fn stream_child_directories_batched(
-    root: &Path,
-    batch_size: usize,
-) -> AppResult<LibraryPathBatchReceiver> {
-    if batch_size == 0 {
-        return Err(AppError::Validation(
-            "batch size must be greater than 0".into(),
-        ));
-    }
-
-    let root = root.to_path_buf();
-    let (sender, receiver) = tokio::sync::mpsc::channel(LIBRARY_SCAN_DISCOVERY_WORK_QUEUE_CAPACITY);
-
-    tokio::spawn(async move {
-        let sender_for_worker = sender.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut receiver_closed = false;
-            let mut batch = Vec::with_capacity(batch_size.min(256));
-
-            crate::filesystem_walk::FilesystemWalker::new().visit_child_directories(
-                &root,
-                |path| {
-                    if receiver_closed {
-                        return Ok(());
-                    }
-
-                    if should_skip_library_top_level_entry(&path, true) {
-                        return Ok(());
-                    }
-
-                    batch.push(path);
-                    if batch.len() >= batch_size {
-                        let next_batch = std::mem::take(&mut batch);
-                        if sender_for_worker.blocking_send(Ok(next_batch)).is_err() {
-                            receiver_closed = true;
-                        }
-                    }
-
-                    Ok(())
-                },
-            )?;
-
-            if !receiver_closed && !batch.is_empty() {
-                let _ = sender_for_worker.blocking_send(Ok(batch));
-            }
-
-            Ok::<(), AppError>(())
-        })
-        .await
-        .map_err(|error| AppError::Repository(error.to_string()))
-        .and_then(|result| result);
-
-        if let Err(error) = result {
-            let _ = sender.send(Err(error)).await;
-        }
-    });
-
-    Ok(receiver)
-}
-
+#[cfg(test)]
 pub(crate) async fn list_movie_top_level_entries(
     root: &Path,
 ) -> AppResult<Vec<MovieTopLevelEntry>> {
-    let mut entries = tokio::fs::read_dir(root).await.map_err(|error| {
-        AppError::Repository(format!("failed to read {}: {error}", root.display()))
-    })?;
-    let mut results = Vec::new();
-    let mut skipped_loose_media = 0_usize;
-
-    while let Some(entry) = entries.next_entry().await.map_err(|error| {
-        AppError::Repository(format!("failed to read {}: {error}", root.display()))
-    })? {
-        let path = entry.path();
-        let file_type = entry.file_type().await.map_err(|error| {
-            AppError::Repository(format!("failed to inspect {}: {error}", path.display()))
-        })?;
-        if file_type.is_dir() && !should_skip_library_top_level_entry(&path, true) {
-            results.push(MovieTopLevelEntry { path, is_dir: true });
-            continue;
-        }
-
-        if file_type.is_file()
-            && !should_skip_library_top_level_entry(&path, false)
-            && !path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(is_ignored_media_extra_file_name)
-            && is_allowed_video_path(&path)
-        {
-            skipped_loose_media += 1;
-        }
+    let mut receiver = stream_movie_top_level_entries_batched(root, 64).await?;
+    let mut entries = Vec::new();
+    while let Some(batch) = receiver.recv().await {
+        entries.extend(batch?);
     }
-
-    if skipped_loose_media > 0 {
-        tracing::warn!(
-            root = %root.display(),
-            files = skipped_loose_media,
-            "skipping loose media files in movie library root"
-        );
-    }
-
-    results.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(results)
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
 }
 
+#[cfg(test)]
 pub(crate) async fn stream_movie_top_level_entries_batched(
     root: &Path,
     batch_size: usize,
 ) -> AppResult<MovieTopLevelEntryBatchReceiver> {
-    if batch_size == 0 {
-        return Err(AppError::Validation(
-            "batch size must be greater than 0".into(),
-        ));
-    }
-
-    let root = root.to_path_buf();
-    let (sender, receiver) = tokio::sync::mpsc::channel(LIBRARY_SCAN_DISCOVERY_WORK_QUEUE_CAPACITY);
-
+    let policy = TitleFolderBoundaryPolicy {
+        template_depth: 1,
+        stored_folders: vec![],
+        other_roots: vec![],
+        episode_folders: vec![],
+    };
+    let mut boundaries =
+        stream_title_folder_boundaries(root.to_path_buf(), policy, batch_size, Default::default());
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
-        let result = async {
-            let mut entries = tokio::fs::read_dir(&root).await.map_err(|error| {
-                AppError::Repository(format!("failed to read {}: {error}", root.display()))
-            })?;
-            let mut batch = Vec::with_capacity(batch_size.min(256));
-            let mut skipped_loose_media = 0_usize;
-
-            while let Some(entry) = entries.next_entry().await.map_err(|error| {
-                AppError::Repository(format!("failed to read {}: {error}", root.display()))
-            })? {
-                let path = entry.path();
-                let file_type = entry.file_type().await.map_err(|error| {
-                    AppError::Repository(format!("failed to inspect {}: {error}", path.display()))
-                })?;
-                if file_type.is_dir() && !should_skip_library_top_level_entry(&path, true) {
-                    batch.push(MovieTopLevelEntry { path, is_dir: true });
-                } else if file_type.is_file()
-                    && !should_skip_library_top_level_entry(&path, false)
-                    && !path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(is_ignored_media_extra_file_name)
-                    && is_allowed_video_path(&path)
-                {
-                    skipped_loose_media += 1;
-                }
-
-                if batch.len() >= batch_size {
-                    let next_batch = std::mem::take(&mut batch);
-                    if sender.send(Ok(next_batch)).await.is_err() {
-                        return Ok(());
-                    }
-                }
+        while let Some(batch) = boundaries.recv().await {
+            let batch = batch.map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| MovieTopLevelEntry {
+                        path: entry.path,
+                        is_dir: true,
+                    })
+                    .collect()
+            });
+            if sender.send(batch).await.is_err() {
+                break;
             }
-
-            if !batch.is_empty() {
-                let _ = sender.send(Ok(batch)).await;
-            }
-
-            if skipped_loose_media > 0 {
-                tracing::warn!(
-                    root = %root.display(),
-                    files = skipped_loose_media,
-                    "skipping loose media files in movie library root"
-                );
-            }
-
-            Ok::<(), AppError>(())
-        }
-        .await;
-
-        if let Err(error) = result {
-            let _ = sender.send(Err(error)).await;
         }
     });
-
     Ok(receiver)
 }
 
@@ -751,6 +958,345 @@ fn metadata_probe_marker(metadata: &std::fs::Metadata) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn stored_folder_selection_uses_windows_path_identity() {
+        let root = Path::new(r"C:\Media");
+        assert!(TitleFolderBoundaryPolicy::contains_stored_folder(
+            root,
+            Path::new(r"c:\media\Movie"),
+        ));
+        for excluded in [r"c:\media", r"C:\Media-other\Movie", r"D:\Media\Movie"] {
+            assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+                root,
+                Path::new(excluded)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stored_folder_selection_preserves_case_sensitive_boundaries() {
+        assert!(TitleFolderBoundaryPolicy::contains_stored_folder(
+            Path::new("/media/"),
+            Path::new("/media/./Movie"),
+        ));
+        assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+            Path::new("/media"),
+            Path::new("/Media/Movie"),
+        ));
+        for excluded in ["/media", "/media-other/Movie", "/other/Movie"] {
+            assert!(!TitleFolderBoundaryPolicy::contains_stored_folder(
+                Path::new("/media"),
+                Path::new(excluded)
+            ));
+        }
+    }
+
+    #[test]
+    fn episode_discovery_requires_mandatory_structure() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        for template in [
+            "{title}",
+            "{tvdb_id}",
+            "{title} - {tvdb_id}",
+            "{?tvdb_id:Specials {tvdb_id}}",
+        ] {
+            let pattern = pattern(template).unwrap();
+            for name in [
+                "Show Alpha",
+                "12345",
+                "Show Alpha - 12345",
+                "Specials 12345",
+                "",
+            ] {
+                assert!(!pattern.is_match(name), "{template}: {name}");
+            }
+        }
+        for (template, name) in [
+            ("Season {season}", "Season 1"),
+            ("{season:02}", "01"),
+            ("Extras", "Extras"),
+            ("Specials {tvdb_id}", "Specials 12345"),
+        ] {
+            assert!(pattern(template).unwrap().is_match(name));
+        }
+    }
+
+    async fn collect_nested_boundaries(
+        root: &Path,
+        policy: TitleFolderBoundaryPolicy,
+    ) -> Vec<TitleFolderBoundary> {
+        let mut receiver =
+            stream_title_folder_boundaries(root.into(), policy, 1, Default::default());
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut entries = Vec::new();
+            while let Some(batch) = receiver.recv().await {
+                entries.extend(batch.unwrap());
+            }
+            entries
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nested_title_organizing_folders_never_become_episode_folders() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        let root = tempfile::tempdir().unwrap();
+        let titles = [
+            "A/Alpha",
+            "Example Network/Show Alpha",
+            "Example Network/Show Beta",
+            "GroupA/Release Show",
+            "Other Network/Extras",
+        ];
+        for title in titles {
+            let path = root.path().join(title).join("episode.mkv");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic media").unwrap();
+        }
+        for specials in ["{title}", "{tvdb_id}", "Extras"] {
+            let entries = collect_nested_boundaries(
+                root.path(),
+                TitleFolderBoundaryPolicy {
+                    template_depth: 2,
+                    stored_folders: vec![],
+                    other_roots: vec![],
+                    episode_folders: vec![
+                        pattern(specials).unwrap(),
+                        pattern("Season {season}").unwrap(),
+                    ],
+                },
+            )
+            .await;
+            let mut accepted = entries
+                .iter()
+                .filter(|entry| entry.rejection.is_none())
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>();
+            accepted.sort();
+            let mut expected = titles.map(|title| root.path().join(title)).to_vec();
+            expected.sort();
+            assert_eq!(accepted, expected, "specials template: {specials}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_ambiguous_specials_require_ownership() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "Network/Ambiguous/Ambiguous/special.mkv",
+            "Network/Conventional/Season 1/episode.mkv",
+            "Network/Custom/Specials 12345/special.mkv",
+        ] {
+            let path = root.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic media").unwrap();
+        }
+        for owned in [false, true] {
+            let entries = collect_nested_boundaries(
+                root.path(),
+                TitleFolderBoundaryPolicy {
+                    template_depth: 2,
+                    stored_folders: if owned {
+                        vec![root.path().join("Network/Ambiguous")]
+                    } else {
+                        vec![]
+                    },
+                    other_roots: vec![],
+                    episode_folders: vec![
+                        pattern("{title}").unwrap(),
+                        pattern("Season {season}").unwrap(),
+                        pattern("Specials {tvdb_id}").unwrap(),
+                    ],
+                },
+            )
+            .await;
+            for title in ["Conventional", "Custom", "Ambiguous"] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.path == root.path().join("Network").join(title))
+                    .unwrap();
+                assert_eq!(entry.rejection.is_none(), title != "Ambiguous" || owned);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_owned_layouts_survive_template_changes() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in ["Series/S01/episode.mkv", "Movie/Disc 1/movie.mkv"] {
+            let path = root.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"owned media").unwrap();
+        }
+        let policy = TitleFolderBoundaryPolicy {
+            template_depth: 3,
+            stored_folders: vec![root.path().join("Series"), root.path().join("Movie")],
+            other_roots: vec![],
+            episode_folders: vec![
+                crate::library::rename::episode_folder_discovery_pattern("Cycle {season:02}")
+                    .unwrap(),
+            ],
+        };
+        let mut receiver =
+            stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut accepted = Vec::new();
+            while let Some(batch) = receiver.recv().await {
+                for entry in batch.unwrap() {
+                    assert!(entry.rejection.is_none());
+                    accepted.push(entry.path);
+                }
+            }
+            accepted
+        })
+        .await
+        .unwrap();
+        assert_eq!(accepted.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_title_linked_folder_is_reported_without_walking_target() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("movie.mkv"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("Linked")).unwrap();
+        let policy = TitleFolderBoundaryPolicy {
+            template_depth: 1,
+            stored_folders: vec![],
+            other_roots: vec![],
+            episode_folders: vec![],
+        };
+        let mut receiver =
+            stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(
+            batch[0]
+                .rejection
+                .as_deref()
+                .unwrap()
+                .contains("linked folder")
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("movie.mkv")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_title_boundaries_keep_siblings_separate_and_stored_depth_authoritative() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = [
+            "E/Emberfall/movie.mkv",
+            "E/Echo/movie.mkv",
+            "Legacy/movie.mkv",
+            "Flat/movie.mkv",
+        ];
+        let mut before = Vec::new();
+        for path in paths {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"fixture media").unwrap();
+            before.push((path.clone(), blake3::hash(&std::fs::read(path).unwrap())));
+        }
+        let policy = TitleFolderBoundaryPolicy {
+            template_depth: 2,
+            stored_folders: vec![root.path().join("Legacy")],
+            other_roots: vec![],
+            episode_folders: vec![],
+        };
+        let mut receiver =
+            stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
+        let results = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut results = Vec::new();
+            while let Some(batch) = receiver.recv().await {
+                results.extend(batch.unwrap());
+            }
+            results
+        })
+        .await
+        .unwrap();
+        let mut accepted = results
+            .iter()
+            .filter(|entry| entry.rejection.is_none())
+            .map(|entry| entry.path.strip_prefix(root.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+        accepted.sort();
+        assert_eq!(
+            accepted,
+            vec![
+                PathBuf::from("E/Echo"),
+                PathBuf::from("E/Emberfall"),
+                PathBuf::from("Legacy")
+            ]
+        );
+        assert!(results.iter().any(|entry| {
+            entry.path == root.path().join("Flat")
+                && entry
+                    .rejection
+                    .as_deref()
+                    .unwrap()
+                    .contains("not at template depth")
+        }));
+        for (path, hash) in before {
+            assert_eq!(blake3::hash(&std::fs::read(path).unwrap()), hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_boundaries_use_configured_season_layout_and_skip_other_roots() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            "E/Emberfall/Cycle 01/episode.mkv",
+            "E/Echo/Specials/episode.mkv",
+            "Other/Hidden/movie.mkv",
+        ] {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"media").unwrap();
+        }
+        let policy = TitleFolderBoundaryPolicy {
+            template_depth: 2,
+            stored_folders: vec![],
+            other_roots: vec![root.path().join("Other")],
+            episode_folders: vec![
+                crate::library::rename::episode_folder_discovery_pattern("Cycle {season:02}")
+                    .unwrap(),
+                crate::library::rename::episode_folder_discovery_pattern("Specials").unwrap(),
+            ],
+        };
+        let mut receiver =
+            stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
+        let mut accepted = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while let Some(batch) = receiver.recv().await {
+                accepted.extend(
+                    batch
+                        .unwrap()
+                        .into_iter()
+                        .filter(|entry| entry.rejection.is_none())
+                        .map(|entry| entry.path),
+                );
+            }
+        })
+        .await
+        .unwrap();
+        accepted.sort();
+        assert_eq!(
+            accepted,
+            vec![root.path().join("E/Echo"), root.path().join("E/Emberfall")]
+        );
+    }
 
     #[test]
     fn library_title_walk_extracts_simple_title_year_and_ids() {
