@@ -35,6 +35,15 @@ import { ratingSourceInfo } from "./title-ratings.ts";
 
 export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "accent" | "outline";
 
+export function listTitleWithoutYear(title: string, year: number | null | undefined): string {
+  if (!year) return title;
+  const suffix = ` (${year})`;
+  const trimmed = title.trimEnd();
+  if (!trimmed.endsWith(suffix)) return title;
+  const name = trimmed.slice(0, -suffix.length).trimEnd();
+  return name || title;
+}
+
 export function listMembershipTitleHref(kind: Facet, titleId: string | null, seriesMovieLinkId?: string | null): string | null {
   const facet = facetById(kind);
   const id = titleId?.trim();

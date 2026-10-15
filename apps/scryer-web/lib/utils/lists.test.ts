@@ -2,11 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   listMembershipMetadataLookup,
+  listTitleWithoutYear,
   listMembershipReasonKey,
   listPreviewMetadataLookup,
   listMembershipTitleHref,
   sortListSubscriptions,
 } from "./lists.ts";
+
+test("list titles remove only a matching year suffix before rendering the separate year", () => {
+  assert.equal(listTitleWithoutYear("The Grand Tour (2016)", 2016), "The Grand Tour");
+  assert.equal(listTitleWithoutYear("INVINCIBLE (2021) ", 2021), "INVINCIBLE");
+  assert.equal(listTitleWithoutYear("Example (2021)", 2022), "Example (2021)");
+  assert.equal(listTitleWithoutYear("Example (2021)", null), "Example (2021)");
+  assert.equal(listTitleWithoutYear("1917", 2019), "1917");
+  assert.equal(listTitleWithoutYear("Example (Part 2)", 2021), "Example (Part 2)");
+  assert.equal(listTitleWithoutYear("(2021)", 2021), "(2021)");
+});
 
 test("a list entry's reason code resolves to its sentence, and an unknown code to none", () => {
   assert.equal(listMembershipReasonKey("media_type_not_included"), "lists.reason.mediaTypeNotIncluded");
