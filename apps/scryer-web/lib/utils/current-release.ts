@@ -18,7 +18,7 @@ export function currentReleaseNames(files: readonly CurrentReleaseFile[]): Set<s
     // never make another release with the same quality appear owned.
     const releaseName = file.grabbedReleaseTitle?.trim() || file.sceneName?.trim();
     const originalName = (file.originalFilePath || file.filePath).split(/[\\/]/).pop() ?? "";
-    const name = releaseName || originalName.replace(/\.(mkv|mp4|avi|m4v|ts|m2ts|webm|mov)$/i, "");
+    const name = releaseName || originalName.replace(/\.(mkv|mp4|avi|wmv|mov|m4v|ts|m2ts|webm|flv|ogv|strm|mpg|mpeg|vob|iso)$/i, "");
     if (name) names.add(releaseIdentityName(name));
   }
   return names;
