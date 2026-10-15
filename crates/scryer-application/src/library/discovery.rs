@@ -263,7 +263,10 @@ pub(crate) fn stream_title_folder_boundaries(
                 let content = if owned {
                     TitleBoundaryContent { has_media: true, has_child_titles: false }
                 } else {
-                    match inspect_title_boundary_content(&path, &policy.episode_folders).await {
+                    // Above title depth these are organizing folders, even if
+                    // their children happen to resemble season/specials names.
+                    let episode_folders = if depth < policy.template_depth { &[][..] } else { &policy.episode_folders[..] };
+                    match inspect_title_boundary_content(&path, episode_folders).await {
                         Ok(content) => content,
                         Err(error) => {
                             tokio::select! {
@@ -274,7 +277,7 @@ pub(crate) fn stream_title_folder_boundaries(
                         }
                     }
                 };
-                let eligible = content.has_media && !content.has_child_titles && !contains_owner;
+                let eligible = depth == policy.template_depth && content.has_media && !content.has_child_titles && !contains_owner;
                 if owned || content.has_media || depth == policy.template_depth {
                     // A folder at template depth with no media and no child titles is
                     // an empty or junk title folder; it stays a resolvable unmatched
@@ -988,6 +991,137 @@ mod tests {
                 Path::new("/media"),
                 Path::new(excluded)
             ));
+        }
+    }
+
+    #[test]
+    fn episode_discovery_requires_mandatory_structure() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        for template in [
+            "{title}",
+            "{tvdb_id}",
+            "{title} - {tvdb_id}",
+            "{?tvdb_id:Specials {tvdb_id}}",
+        ] {
+            let pattern = pattern(template).unwrap();
+            for name in [
+                "Show Alpha",
+                "12345",
+                "Show Alpha - 12345",
+                "Specials 12345",
+                "",
+            ] {
+                assert!(!pattern.is_match(name), "{template}: {name}");
+            }
+        }
+        for (template, name) in [
+            ("Season {season}", "Season 1"),
+            ("{season:02}", "01"),
+            ("Extras", "Extras"),
+            ("Specials {tvdb_id}", "Specials 12345"),
+        ] {
+            assert!(pattern(template).unwrap().is_match(name));
+        }
+    }
+
+    async fn collect_nested_boundaries(
+        root: &Path,
+        policy: TitleFolderBoundaryPolicy,
+    ) -> Vec<TitleFolderBoundary> {
+        let mut receiver =
+            stream_title_folder_boundaries(root.into(), policy, 1, Default::default());
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut entries = Vec::new();
+            while let Some(batch) = receiver.recv().await {
+                entries.extend(batch.unwrap());
+            }
+            entries
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nested_title_organizing_folders_never_become_episode_folders() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        let root = tempfile::tempdir().unwrap();
+        let titles = [
+            "A/Alpha",
+            "Example Network/Show Alpha",
+            "Example Network/Show Beta",
+            "GroupA/Release Show",
+            "Other Network/Extras",
+        ];
+        for title in titles {
+            let path = root.path().join(title).join("episode.mkv");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic media").unwrap();
+        }
+        for specials in ["{title}", "{tvdb_id}", "Extras"] {
+            let entries = collect_nested_boundaries(
+                root.path(),
+                TitleFolderBoundaryPolicy {
+                    template_depth: 2,
+                    stored_folders: vec![],
+                    other_roots: vec![],
+                    episode_folders: vec![
+                        pattern(specials).unwrap(),
+                        pattern("Season {season}").unwrap(),
+                    ],
+                },
+            )
+            .await;
+            let mut accepted = entries
+                .iter()
+                .filter(|entry| entry.rejection.is_none())
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>();
+            accepted.sort();
+            let mut expected = titles.map(|title| root.path().join(title)).to_vec();
+            expected.sort();
+            assert_eq!(accepted, expected, "specials template: {specials}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_ambiguous_specials_require_ownership() {
+        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "Network/Ambiguous/Ambiguous/special.mkv",
+            "Network/Conventional/Season 1/episode.mkv",
+            "Network/Custom/Specials 12345/special.mkv",
+        ] {
+            let path = root.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic media").unwrap();
+        }
+        for owned in [false, true] {
+            let entries = collect_nested_boundaries(
+                root.path(),
+                TitleFolderBoundaryPolicy {
+                    template_depth: 2,
+                    stored_folders: if owned {
+                        vec![root.path().join("Network/Ambiguous")]
+                    } else {
+                        vec![]
+                    },
+                    other_roots: vec![],
+                    episode_folders: vec![
+                        pattern("{title}").unwrap(),
+                        pattern("Season {season}").unwrap(),
+                        pattern("Specials {tvdb_id}").unwrap(),
+                    ],
+                },
+            )
+            .await;
+            for title in ["Conventional", "Custom", "Ambiguous"] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.path == root.path().join("Network").join(title))
+                    .unwrap();
+                assert_eq!(entry.rejection.is_none(), title != "Ambiguous" || owned);
+            }
         }
     }
 

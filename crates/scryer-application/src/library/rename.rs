@@ -2965,10 +2965,11 @@ pub(crate) fn validate_specials_folder_template(template: &str) -> AppResult<()>
 }
 
 pub(crate) fn episode_folder_discovery_pattern(template: &str) -> AppResult<regex::Regex> {
-    fn fragment(template: &str) -> AppResult<String> {
+    fn fragment(template: &str) -> AppResult<(String, bool)> {
         let chars: Vec<char> = template.chars().collect();
         let mut cursor = 0;
         let mut pattern = String::new();
+        let mut has_boundary_evidence = false;
         let mut literal_braces = 0usize;
         while cursor < chars.len() {
             let ch = chars[cursor];
@@ -2980,7 +2981,8 @@ pub(crate) fn episode_folder_discovery_pattern(template: &str) -> AppResult<rege
                 let group = parse_rename_template_optional_group(&chars, cursor).map_err(|_| {
                     AppError::Validation("invalid episode folder optional group".into())
                 })?;
-                pattern.push_str(&format!("(?:{})?", fragment(&group.body)?));
+                // Optional text cannot establish a folder boundary when absent.
+                pattern.push_str(&format!("(?:{})?", fragment(&group.body)?.0));
                 cursor = group.end_index + 1;
             } else if ch == '{' {
                 let end = chars[cursor + 1..]
@@ -2991,6 +2993,7 @@ pub(crate) fn episode_folder_discovery_pattern(template: &str) -> AppResult<rege
                     + 1;
                 let token: String = chars[cursor + 1..end].iter().collect();
                 let name = token.split([':', '|']).next().unwrap_or_default().trim();
+                has_boundary_evidence |= name == "season";
                 pattern.push_str(if name == "season" {
                     r"[0-9]+"
                 } else {
@@ -3007,12 +3010,21 @@ pub(crate) fn episode_folder_discovery_pattern(template: &str) -> AppResult<rege
                 };
             } else {
                 pattern.push_str(&regex::escape(&ch.to_string()));
+                has_boundary_evidence |= ch.is_alphanumeric();
                 cursor += 1;
             }
         }
-        Ok(pattern)
+        Ok((pattern, has_boundary_evidence))
     }
-    regex::Regex::new(&format!("(?i)^{}$", fragment(template)?))
+    let (pattern, has_boundary_evidence) = fragment(template)?;
+    // Metadata-only names remain valid for rendering and owned titles, but
+    // cannot identify an unowned episode folder. Match nothing in that case.
+    let pattern = if has_boundary_evidence {
+        format!("(?i)^{pattern}$")
+    } else {
+        r"\b\B".to_owned()
+    };
+    regex::Regex::new(&pattern)
         .map_err(|error| AppError::Validation(format!("invalid episode folder pattern: {error}")))
 }
 
