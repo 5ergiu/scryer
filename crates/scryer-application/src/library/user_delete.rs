@@ -2007,7 +2007,7 @@ mod tests {
         context.other_titles.push(TrackedTitleFolder {
             title_id: "other".into(),
             title_name: "Other".into(),
-            folder_path: path_to_stored_string(&root.path().join("Movie/Disc 1")),
+            folder_path: path_to_stored_string(root.path().join("Movie/Disc 1")),
         });
         assert!(build_title_delete_manifest(context.clone()).is_err());
         context.other_titles.clear();
