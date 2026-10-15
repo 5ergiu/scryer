@@ -2664,7 +2664,14 @@ async fn graphql_delete_download_marks_import_item_delete_completed_after_poller
                     // and hidden from import activity by design; the delete
                     // status is only observable on an admitted item.
                     "Category": "series",
-                    "Status": "SUCCESS",
+                    "Status": "SUCCESS/ALL",
+                    "ParStatus": "SUCCESS",
+                    "UnpackStatus": "SUCCESS",
+                    "MoveStatus": "SUCCESS",
+                    "ScriptStatus": "NONE",
+                    "DeleteStatus": "NONE",
+                    "MarkStatus": "NONE",
+                    "UrlStatus": "NONE",
                     "HistoryTime": Utc::now().timestamp(),
                     "FileSizeMB": 10
                 }]

@@ -8,6 +8,7 @@ use scryer_application::lists::catalog::{
     ListProviderGroup, ListProviderManifest, ListProviderNote, ListProviderTile, ListSourceParam,
     ListUrlPattern, facet_of,
 };
+use scryer_application::lists::refusal::{self, refused};
 use scryer_application::lists::{
     ListExclusionView, ListMembershipPage, ListPreview, ListPreviewItem, ListProviderSettingField,
     ListProviderSettings, ListSourceDraft, MemberListPolicy, NewListExclusionInput,
@@ -58,7 +59,7 @@ fn id_or_none(value: Option<ID>) -> Option<String> {
 
 fn cap_from_input(value: i32) -> Result<u32, AppError> {
     u32::try_from(value)
-        .map_err(|_| AppError::Validation("maxPerSync must not be negative".to_string()))
+        .map_err(|_| refused(refusal::SYNC_CAP_INVALID, "maxPerSync must not be negative"))
 }
 
 /// A media request's origin. A personal list is named by kind only, so every
@@ -175,6 +176,12 @@ pub fn from_list_provider(manifest: ListProviderManifest) -> ListProviderPayload
                 ..from_list_provider_setting_field(field)
             })
             .collect(),
+        member_key: manifest.member_key.map(|key| ListMemberKeyPayload {
+            label: key.label,
+            help_text: key.help_text,
+            help_url: key.help_url,
+            approval: key.approval,
+        }),
     }
 }
 
@@ -256,8 +263,9 @@ fn from_route(route: ListRoute) -> ListRoutePayload {
 fn route_from_input(input: ListRouteInput) -> Result<ListRoute, AppError> {
     let library_id = input.library_id.to_string().trim().to_string();
     if library_id.is_empty() {
-        return Err(AppError::Validation(
-            "a list route needs a library".to_string(),
+        return Err(refused(
+            refusal::ROUTE_LIBRARY_REQUIRED,
+            "a list route needs a library",
         ));
     }
     Ok(ListRoute {
@@ -275,6 +283,10 @@ fn route_from_input(input: ListRouteInput) -> Result<ListRoute, AppError> {
 
 fn from_filter(filter: ListFilter) -> ListFilterPayload {
     let empty = |kind| ListFilterPayload {
+        facet: None,
+        match_any: false,
+        minimums: Vec::new(),
+        unresolved_labels: Vec::new(),
         kind,
         scale: None,
         value: None,
@@ -283,6 +295,51 @@ fn from_filter(filter: ListFilter) -> ListFilterPayload {
         values: Vec::new(),
     };
     match filter {
+        ListFilter::MonitorSpecials { facet, enabled } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            values: vec![enabled.to_string()],
+            ..empty(ListFilterKindValue::MonitorSpecials)
+        },
+        ListFilter::FillerPolicy { facet, skip } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            values: vec![if skip { "SKIP_FILLER" } else { "DOWNLOAD_ALL" }.into()],
+            ..empty(ListFilterKindValue::FillerPolicy)
+        },
+        ListFilter::RecapPolicy { facet, skip } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            values: vec![if skip { "SKIP_RECAP" } else { "DOWNLOAD_ALL" }.into()],
+            ..empty(ListFilterKindValue::RecapPolicy)
+        },
+        ListFilter::Ratings {
+            facet,
+            match_any,
+            minimums,
+        } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            match_any,
+            minimums: minimums
+                .into_iter()
+                .map(|minimum| ListRatingMinimumPayload {
+                    source: minimum.source,
+                    value: minimum.value,
+                })
+                .collect(),
+            ..empty(ListFilterKindValue::Ratings)
+        },
+        ListFilter::ExcludeCanonicalTags {
+            facet,
+            keys,
+            unresolved_labels,
+        } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            values: keys,
+            unresolved_labels,
+            ..empty(ListFilterKindValue::ExcludeCanonicalTags)
+        },
+        ListFilter::ExcludeAdult { facet } => ListFilterPayload {
+            facet: Some(MediaFacetValue::from_domain(facet)),
+            ..empty(ListFilterKindValue::ExcludeAdult)
+        },
         ListFilter::RatingAtLeast { scale, value } => ListFilterPayload {
             scale: Some(scale),
             value: Some(value),
@@ -324,6 +381,116 @@ fn filter_from_input(input: ListFilterInput) -> Result<ListFilter, AppError> {
             .collect::<Vec<_>>()
     };
     Ok(match input.kind {
+        ListFilterKindValue::MonitorSpecials
+        | ListFilterKindValue::FillerPolicy
+        | ListFilterKindValue::RecapPolicy => {
+            let facet = input
+                .facet
+                .ok_or_else(|| AppError::Validation("episode policies need a facet".into()))?
+                .into_domain();
+            let selected = values();
+            if selected.len() != 1 || facet == MediaFacet::Movie {
+                return Err(AppError::Validation(
+                    "episode policies need one value and a series or anime facet".into(),
+                ));
+            }
+            match (input.kind, facet.clone(), selected[0].as_str()) {
+                (ListFilterKindValue::MonitorSpecials, _, "true" | "false") => {
+                    ListFilter::MonitorSpecials {
+                        facet,
+                        enabled: selected[0] == "true",
+                    }
+                }
+                (
+                    ListFilterKindValue::FillerPolicy,
+                    MediaFacet::Anime,
+                    "DOWNLOAD_ALL" | "SKIP_FILLER",
+                ) => ListFilter::FillerPolicy {
+                    facet,
+                    skip: selected[0] == "SKIP_FILLER",
+                },
+                (
+                    ListFilterKindValue::RecapPolicy,
+                    MediaFacet::Anime,
+                    "DOWNLOAD_ALL" | "SKIP_RECAP",
+                ) => ListFilter::RecapPolicy {
+                    facet,
+                    skip: selected[0] == "SKIP_RECAP",
+                },
+                _ => {
+                    return Err(AppError::Validation(
+                        "invalid episode policy for this facet".into(),
+                    ));
+                }
+            }
+        }
+        ListFilterKindValue::Ratings => {
+            let facet = input
+                .facet
+                .ok_or_else(|| AppError::Validation("ratings need a facet".into()))?
+                .into_domain();
+            if input.minimums.len() > 32 {
+                return Err(AppError::Validation("too many rating minimums".into()));
+            }
+            let minimums = input
+                .minimums
+                .into_iter()
+                .map(|minimum| {
+                    let (source, scale) =
+                        scryer_application::lists::evaluate::rating_source(&minimum.source)
+                            .ok_or_else(|| {
+                                AppError::Validation("unsupported rating source".into())
+                            })?;
+                    if !minimum.value.is_finite() || !(0.0..=scale).contains(&minimum.value) {
+                        return Err(AppError::Validation(
+                            "rating minimum is outside its source scale".into(),
+                        ));
+                    }
+                    Ok(scryer_domain::ListRatingMinimum {
+                        source: source.into(),
+                        value: minimum.value,
+                    })
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            ListFilter::Ratings {
+                facet,
+                match_any: input.match_any,
+                minimums,
+            }
+        }
+        ListFilterKindValue::ExcludeCanonicalTags => {
+            let keys = values();
+            if keys.len() > 10_000
+                || keys.iter().any(|key| {
+                    key.len() > 256
+                        || !(key.starts_with("canonical:genre:")
+                            || key.starts_with("canonical:theme:"))
+                })
+                || input.unresolved_labels.len() > 10_000
+                || input
+                    .unresolved_labels
+                    .iter()
+                    .any(|label| label.len() > 256)
+            {
+                return Err(AppError::Validation("invalid canonical exclusions".into()));
+            }
+            ListFilter::ExcludeCanonicalTags {
+                facet: input
+                    .facet
+                    .ok_or_else(|| {
+                        AppError::Validation("canonical exclusions need a facet".into())
+                    })?
+                    .into_domain(),
+                keys,
+                unresolved_labels: input.unresolved_labels,
+            }
+        }
+        ListFilterKindValue::ExcludeAdult => ListFilter::ExcludeAdult {
+            facet: input
+                .facet
+                .ok_or_else(|| AppError::Validation("the adult exclusion needs a facet".into()))?
+                .into_domain(),
+        },
         ListFilterKindValue::RatingAtLeast => {
             let scale = input
                 .scale
@@ -347,7 +514,13 @@ fn filter_from_input(input: ListFilterInput) -> Result<ListFilter, AppError> {
         ListFilterKindValue::ExcludeGenres => ListFilter::ExcludeGenres { genres: values() },
         ListFilterKindValue::Format => ListFilter::Format { formats: values() },
         ListFilterKindValue::Language => ListFilter::Language {
-            languages: values(),
+            languages: values()
+                .into_iter()
+                .map(|language| {
+                    scryer_application::normalize_search_language_code(&language)
+                        .ok_or_else(|| AppError::Validation("unsupported original language".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         },
         ListFilterKindValue::SkipOnMyStreamingServices => ListFilter::SkipOnMyStreamingServices,
         ListFilterKindValue::ReleasedOnly => ListFilter::ReleasedOnly,
@@ -360,8 +533,111 @@ fn routes_from_input(routes: Vec<ListRouteInput>) -> Result<Vec<ListRoute>, AppE
     routes.into_iter().map(route_from_input).collect()
 }
 
-fn filters_from_input(filters: Vec<ListFilterInput>) -> Result<Vec<ListFilter>, AppError> {
+pub fn filters_from_input(filters: Vec<ListFilterInput>) -> Result<Vec<ListFilter>, AppError> {
     filters.into_iter().map(filter_from_input).collect()
+}
+
+#[cfg(test)]
+mod episode_policy_tests {
+    use super::*;
+
+    #[test]
+    fn list_episode_policy_transport_round_trips_and_rejects_invalid_facets() {
+        for filter in [
+            ListFilter::MonitorSpecials {
+                facet: MediaFacet::Series,
+                enabled: false,
+            },
+            ListFilter::MonitorSpecials {
+                facet: MediaFacet::Anime,
+                enabled: true,
+            },
+            ListFilter::FillerPolicy {
+                facet: MediaFacet::Anime,
+                skip: true,
+            },
+            ListFilter::RecapPolicy {
+                facet: MediaFacet::Anime,
+                skip: false,
+            },
+        ] {
+            let payload = from_filter(filter.clone());
+            let input = ListFilterInput {
+                facet: payload.facet,
+                kind: payload.kind,
+                values: payload.values,
+                match_any: false,
+                minimums: vec![],
+                unresolved_labels: vec![],
+                scale: None,
+                value: None,
+                from: None,
+                to: None,
+            };
+            assert_eq!(filter_from_input(input.clone()).unwrap(), filter);
+            assert!(
+                filter_from_input(ListFilterInput {
+                    facet: Some(MediaFacetValue::Movie),
+                    ..input.clone()
+                })
+                .is_err()
+            );
+            if matches!(
+                filter,
+                ListFilter::FillerPolicy { .. } | ListFilter::RecapPolicy { .. }
+            ) {
+                assert!(
+                    filter_from_input(ListFilterInput {
+                        facet: Some(MediaFacetValue::Series),
+                        ..input
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn list_adult_exclusion_transport_round_trips_and_needs_a_facet() {
+        for facet in [MediaFacet::Anime, MediaFacet::Series, MediaFacet::Movie] {
+            let filter = ListFilter::ExcludeAdult { facet };
+            let payload = from_filter(filter.clone());
+            assert!(payload.kind == ListFilterKindValue::ExcludeAdult);
+            assert!(payload.values.is_empty());
+            let input = ListFilterInput {
+                facet: payload.facet,
+                kind: payload.kind,
+                values: payload.values,
+                match_any: false,
+                minimums: vec![],
+                unresolved_labels: vec![],
+                scale: None,
+                value: None,
+                from: None,
+                to: None,
+            };
+            assert_eq!(filter_from_input(input.clone()).unwrap(), filter);
+            assert!(
+                filter_from_input(ListFilterInput {
+                    facet: None,
+                    ..input
+                })
+                .is_err()
+            );
+        }
+        // The stored form is the tagged filter, so a saved list reads back.
+        let stored = serde_json::to_value(ListFilter::ExcludeAdult {
+            facet: MediaFacet::Anime,
+        })
+        .unwrap();
+        assert_eq!(stored["filter"], "exclude_adult");
+        assert_eq!(
+            serde_json::from_value::<ListFilter>(stored).unwrap(),
+            ListFilter::ExcludeAdult {
+                facet: MediaFacet::Anime
+            }
+        );
+    }
 }
 
 fn from_sync_status(sync: ListSyncStatus) -> ListSyncStatusPayload {
@@ -414,11 +690,16 @@ pub fn from_list_subscription(subscription: ListSubscription) -> ListSubscriptio
         counts: from_counts(subscription.counts),
         created_at: subscription.created_at,
         updated_at: subscription.updated_at,
+        account_id: subscription.credential_id.map(Into::into),
     }
 }
 
 fn from_membership(row: ListMembership) -> ListMembershipPayload {
     ListMembershipPayload {
+        series_movie_link_id: row
+            .series_movie
+            .and_then(|target| target.link_id)
+            .map(Into::into),
         item_key: row.item_key,
         rank: row.rank.map(|rank| i32::try_from(rank).unwrap_or(i32::MAX)),
         season: row.season,
@@ -427,6 +708,16 @@ fn from_membership(row: ListMembership) -> ListMembershipPayload {
         state_reason: row.state_reason,
         display_title: row.display_title,
         year: row.year,
+        smg_title_id: row.smg_title_id,
+        external_ids: row
+            .external_ids
+            .into_iter()
+            .map(|id| ExternalIdPayload {
+                source: id.source,
+                kind: id.kind,
+                value: id.value,
+            })
+            .collect(),
         title_id: row.title_id.map(Into::into),
         request_id: row.request_id.map(Into::into),
         added_by_list: row.added_by_list,
@@ -454,13 +745,41 @@ pub fn from_list_sync_run(run: ListSyncRun) -> ListSyncRunPayload {
 }
 
 fn from_preview_item(item: ListPreviewItem) -> ListPreviewItemPayload {
+    let facts = item.facts.unwrap_or_default();
     ListPreviewItemPayload {
+        canonical_smg_id: item.canonical_smg_id,
+        series_movie_parent_smg_id: item
+            .series_movie
+            .as_ref()
+            .map(|target| target.parent_smg_id),
+        external_ratings: facts
+            .ratings
+            .into_iter()
+            .map(|rating| crate::types::DiscoveryExternalRatingPayload {
+                source: rating.source,
+                value: rating.value,
+                score: rating.score,
+                normalized: rating.normalized,
+                votes: rating.votes,
+                url: rating.url,
+            })
+            .collect(),
+        genres_and_themes: facts.canonical_names,
+        original_language: facts.original_language,
+        release_date: facts.release_date.map(Date),
         display_title: item.display_title.unwrap_or_else(|| item.item_key.clone()),
         item_key: item.item_key,
         year: item.year,
         kind: item.kind.map(MediaFacetValue::from_domain),
-        poster_url: item.poster_url,
+        poster_url: item.poster_url.map(preview_poster_url),
     }
+}
+
+/// A previewed title's poster is loaded by the browser from where it is
+/// published, at the size a poster is shown rather than the original.
+fn preview_poster_url(url: String) -> String {
+    scryer_application::image_upstream_variant_url(&url, ImageProxyKind::Poster.as_str(), "w250")
+        .unwrap_or(url)
 }
 
 pub fn from_list_preview(preview: ListPreview) -> ListPreviewPayload {
@@ -523,6 +842,10 @@ pub fn from_member_list_policy(entry: MemberListPolicy) -> MemberListPolicyPaylo
 
 pub fn list_source_draft_from_input(input: ListSourceInput) -> ListSourceDraft {
     ListSourceDraft {
+        preview_filters: Vec::new(),
+        preview_kinds: None,
+        preview_max_per_sync: None,
+        credential_id: input.credential_id.map(|id| id.to_string()),
         provider: input.provider,
         source_type: input.source_type,
         params: params_from_input(input.params),

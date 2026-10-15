@@ -20,6 +20,12 @@ export type ListMembershipState =
   | "DISCOVER"
   | "PENDING";
 export type ListFilterKind =
+  | "MONITOR_SPECIALS"
+  | "FILLER_POLICY"
+  | "RECAP_POLICY"
+  | "RATINGS"
+  | "EXCLUDE_CANONICAL_TAGS"
+  | "EXCLUDE_ADULT"
   | "RATING_AT_LEAST"
   | "RELEASE_YEAR"
   | "EXCLUDE_GENRES"
@@ -83,6 +89,16 @@ export type ListProviderManifest = {
   notes: Array<{ tone: ListNoteTone; textKey: string }>;
   urlPatterns: ListUrlPattern[];
   configFields: ListProviderSettingField[];
+  /** The key each member supplies to connect their own account, when the provider takes one. */
+  memberKey: ListMemberKey | null;
+};
+
+export type ListMemberKey = {
+  label: string;
+  helpText: string | null;
+  helpUrl: string | null;
+  /** The member still approves at the provider once the key is accepted. */
+  approval: boolean;
 };
 
 export type ListProviderSettingFieldType =
@@ -137,6 +153,10 @@ export type ListRoute = {
 };
 
 export type ListFilter = {
+  facet?: Facet | null;
+  matchAny?: boolean;
+  minimums?: Array<{ source: string; value: number }>;
+  unresolvedLabels?: string[];
   kind: ListFilterKind;
   scale: string | null;
   value: number | null;
@@ -187,9 +207,17 @@ export type ListSubscription = {
   counts: ListCounts;
   createdAt: string;
   updatedAt: string;
+  /** The linked account a personal list is read through; null for a public list. */
+  accountId: string | null;
 };
 
 export type ListPreviewItem = {
+  canonicalSmgId: number | null;
+  seriesMovieParentSmgId: number | null;
+  externalRatings: import("@/lib/utils/title-ratings").TitleExternalRating[];
+  genresAndThemes: string[];
+  originalLanguage: string | null;
+  releaseDate: string | null;
   itemKey: string;
   displayTitle: string;
   year: number | null;
@@ -213,6 +241,7 @@ export type ListPreview = {
 };
 
 export type ListMembership = {
+  seriesMovieLinkId: string | null;
   itemKey: string;
   rank: number | null;
   season: number | null;
@@ -221,6 +250,9 @@ export type ListMembership = {
   stateReason: string | null;
   displayTitle: string | null;
   year: number | null;
+  /** Metadata service title the entry was matched to. */
+  smgTitleId: number | null;
+  externalIds: ExternalId[];
   titleId: string | null;
   requestId: string | null;
   addedByList: boolean;
@@ -273,8 +305,45 @@ export type ListSubscriptionDraft = {
 
 /** Where a new subscription reads from: a manifest item or a recognised URL. */
 export type ListSourceDraft = {
+  /** An account-discovered source already supplies its identity parameters. */
+  fixedParams?: boolean;
+  previewFilters?: ListFilter[];
+  previewKinds?: Facet[];
+  previewMaxPerSync?: number | null;
   provider: string;
   sourceType: string;
   params: ListParam[];
   url: string | null;
+  credentialId?: string;
+};
+
+export type ListAccount = {
+  id: string;
+  provider: string;
+  externalUserId: string;
+  username: string | null;
+  displayName: string | null;
+  status: "ACTIVE" | "EXPIRED" | "REVOKED";
+  errorMessage: string | null;
+  linkedAt: string;
+  lastUsedAt: string | null;
+  ownedLists: Array<{ id: string; name: string; kinds: Facet[]; sourceType: string; params: ListParam[] }>;
+  statuses: Array<{ key: string; label: string; kinds: Facet[]; sourceType: string; params: ListParam[] }>;
+};
+
+export type ListAccountLinkSession = {
+  sessionId: string;
+  state: string;
+  authorizeUrl: string;
+  authorizationOrigin: string;
+  expiresAt: string;
+  pollRequired: boolean;
+};
+
+export type ListProviderApp = {
+  provider: string;
+  clientId: string | null;
+  redirectUri: string | null;
+  clientSecretSet: boolean;
+  enabled: boolean;
 };

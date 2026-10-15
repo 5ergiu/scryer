@@ -1,11 +1,14 @@
 import type {
+  ListAccount,
   ListCounts,
   ListExclusionScopeKind,
   ListFilter,
+  ListMembership,
   ListMembershipState,
   ListMode,
   ListOnLeave,
   ListParam,
+  ListPreviewItem,
   ListProviderGroup,
   ListProviderItem,
   ListProviderManifest,
@@ -23,22 +26,111 @@ import type {
   TitleListMembership,
 } from "../types/lists.ts";
 import type { ExternalId, Facet } from "../types/titles.ts";
-import { allOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
+import { allOf, anyOf, forEventTypes, forTitle, type DomainEventPredicate } from "../reactive/domain-event-feed.ts";
 import { selectorToken } from "./dom-ids.ts";
+import { facetById } from "../facets/registry.ts";
+import { metadataResultExternalIds, type MetadataResultIdentity } from "./metadata-result-external-ids.ts";
+import { getPluginLogoSources } from "./plugin-logos.ts";
+import { ratingSourceInfo } from "./title-ratings.ts";
 
-export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "outline";
+export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "accent" | "outline";
+
+export function listMembershipTitleHref(kind: Facet, titleId: string | null, seriesMovieLinkId?: string | null): string | null {
+  const facet = facetById(kind);
+  const id = titleId?.trim();
+  if (!facet || !id) return null;
+  const params = new URLSearchParams({ id });
+  if (seriesMovieLinkId) params.set("seriesMovie", seriesMovieLinkId);
+  return `/${facet.viewId}?${params}`;
+}
+
+export type ListTitleMetadataLookup = {
+  movie: boolean;
+  input: { smgId?: number; tvdbId?: string; tmdbId?: number; imdbId?: string };
+};
+
+/**
+ * How to ask the metadata service about a list entry, or null when the list
+ * gives nothing the service can be asked by. The matched title is asked for
+ * first; otherwise the first id the service takes, skipping one that names
+ * the other kind of title (an anime's own movie id is not the series').
+ */
+export function listMembershipMetadataLookup(
+  membership: Pick<ListMembership, "kind" | "smgTitleId" | "externalIds">,
+): ListTitleMetadataLookup | null {
+  const movie = membership.kind === "MOVIE";
+  if (membership.smgTitleId != null) return { movie, input: { smgId: membership.smgTitleId } };
+  const idOf = (source: string): string | null => {
+    for (const id of membership.externalIds) {
+      const kind = id.kind?.trim().toLowerCase();
+      const otherKind = movie ? kind === "series" || kind === "anime" : kind === "movie";
+      const value = id.value.trim();
+      if (id.source.trim().toLowerCase() === source && !otherKind && value) return value;
+    }
+    return null;
+  };
+  const whole = (value: string | null): number | null => (value && /^\d+$/.test(value) ? Number(value) : null);
+  const smgId = whole(idOf("smg"));
+  if (smgId !== null) return { movie, input: { smgId } };
+  const tvdbId = idOf("tvdb");
+  if (tvdbId) return { movie, input: { tvdbId } };
+  const tmdbId = whole(idOf("tmdb"));
+  if (tmdbId !== null) return { movie, input: { tmdbId } };
+  const imdbId = idOf("imdb");
+  return imdbId ? { movie, input: { imdbId } } : null;
+}
+
+/** How to ask the metadata service about a previewed title, or null when it was not matched to one. */
+export function listPreviewMetadataLookup(
+  item: Pick<ListPreviewItem, "kind" | "canonicalSmgId">,
+): ListTitleMetadataLookup | null {
+  if (item.canonicalSmgId == null || !item.kind) return null;
+  return { movie: item.kind === "MOVIE", input: { smgId: item.canonicalSmgId } };
+}
 
 /** Modes offered for public lists. `REQUEST` belongs to personal lists only. */
 export const PUBLIC_LIST_MODES: readonly ListMode[] = ["SEARCH", "ADD", "HOLD", "DISCOVER"];
 
 /** Discover-only membership has no destination yet, so it cannot be chosen. */
 export function isListModeSelectable(mode: ListMode): boolean {
-  return mode === "SEARCH" || mode === "ADD" || mode === "HOLD";
+  return mode === "SEARCH" || mode === "ADD" || mode === "HOLD" || mode === "REQUEST";
 }
 
 export const LIST_ON_LEAVE_OPTIONS: readonly ListOnLeave[] = ["KEEP", "LOG", "UNMONITOR", "TAG"];
 
 export const LIST_KINDS: readonly Facet[] = ["MOVIE", "SERIES", "ANIME"];
+
+/** Only media enums duplicate Include; status, credits and order remain source options. */
+export function isListMediaParam(param: ListSourceParamDefinition): boolean {
+  return param.type === "ENUM" && ["type", "kind"].includes(param.key)
+    && param.options.length > 0
+    && param.options.every((option) => ["all", "movie", "movies", "series", "shows", "anime"].includes(option));
+}
+
+/** A source option that picks the order the list's titles are read in. */
+export function isListOrderParam(param: ListSourceParamDefinition): boolean {
+  return param.type === "ENUM" && param.key === "sort" && param.options.length > 0;
+}
+
+/** Wording for the orders providers offer; any other order shows as the provider names it. */
+export const LIST_ORDER_LABEL_KEYS: Readonly<Record<string, string>> = {
+  rank: "lists.follow.order.rank",
+  added: "lists.follow.order.added",
+  title: "label.title",
+  released: "lists.follow.order.released",
+};
+
+/** Preserve the effective scope of older follows that saved both selectors. */
+export function listKindsFromSourceParams(kinds: readonly Facet[], definitions: readonly ListSourceParamDefinition[], params: readonly ListParam[], legacy = false): Facet[] {
+  const selector = definitions.find(isListMediaParam);
+  const selected = selector && (params.find((param) => param.key === selector.key)?.value
+    ?? (legacy && !selector.options.includes("all") ? selector.options[0] : undefined));
+  if (!selected || selected === "all" || selected === "__include__") return [...kinds];
+  const allowed: readonly Facet[] = selected === "anime" ? ["ANIME", "MOVIE"]
+    : ["movie", "movies"].includes(selected) ? ["MOVIE"]
+      : selector?.options.includes("anime") ? ["SERIES"] : ["SERIES", "ANIME"];
+  return kinds.filter((kind) => allowed.includes(kind));
+}
 
 function camel(value: string): string {
   return value.toLowerCase().replace(/_([a-z0-9])/g, (_match, next: string) => next.toUpperCase());
@@ -56,7 +148,10 @@ export function listOnLeaveLabelKey(onLeave: ListOnLeave): string {
   return `lists.onLeave.${camel(onLeave)}`;
 }
 
-export function listSyncStateLabelKey(state: ListSyncState): string {
+export function listSyncStateLabelKey(state: ListSyncState, lastAt?: string | null): string {
+  // Switching a list back on makes it new to the scheduler again; one that has
+  // synced before is only waiting for its next sync.
+  if (state === "NEW" && lastAt) return "lists.syncState.waiting";
   return `lists.syncState.${camel(state)}`;
 }
 
@@ -73,13 +168,98 @@ export function listSyncStateTone(state: ListSyncState): ListTone {
   }
 }
 
+/** The sync state a list's row shows: a switched-off list is off whatever its last sync was. */
+export function shownListSyncState(subscription: Pick<ListSubscription, "enabled" | "sync">): ListSyncState {
+  return subscription.enabled ? subscription.sync.state : "OFF";
+}
+
+export type ListSortKey = "name" | "account" | "sync";
+export type ListSort = { key: ListSortKey; descending: boolean };
+
+/** Sorting by last sync groups lists by how it went: failed, waiting, synced, then switched off. */
+const LIST_SYNC_STATE_ORDER: Record<ListSyncState, number> = { FAIL: 0, NEW: 1, OK: 2, OFF: 3 };
+
+function listSyncTime(subscription: Pick<ListSubscription, "sync">): number {
+  const time = subscription.sync.lastAt ? Date.parse(subscription.sync.lastAt) : Number.NaN;
+  return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time;
+}
+
+/**
+ * The followed lists in the order the table shows them; with no sort chosen
+ * they keep the order they came in. Within one sync state the most recently
+ * synced list comes first, and lists that tie fall back to their names.
+ */
+export function sortListSubscriptions<T extends Pick<ListSubscription, "name" | "enabled" | "sync">>(
+  subscriptions: readonly T[],
+  sort: ListSort | null,
+  accountLabel: (subscription: T) => string = () => "",
+): T[] {
+  if (!sort) return [...subscriptions];
+  const factor = sort.descending ? -1 : 1;
+  const compare = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+  const byName = (a: T, b: T) => compare(a.name, b.name);
+  return [...subscriptions].sort((a, b) => {
+    if (sort.key === "name") return byName(a, b) * factor;
+    if (sort.key === "account") {
+      const account = compare(accountLabel(a), accountLabel(b));
+      return account !== 0 ? account * factor : byName(a, b);
+    }
+    const state = LIST_SYNC_STATE_ORDER[shownListSyncState(a)] - LIST_SYNC_STATE_ORDER[shownListSyncState(b)];
+    if (state !== 0) return state * factor;
+    const time = listSyncTime(b) - listSyncTime(a);
+    if (time !== 0 && !Number.isNaN(time)) return time * factor;
+    return byName(a, b);
+  });
+}
+
 export function listMembershipStateLabelKey(state: ListMembershipState): string {
   return `lists.membershipState.${camel(state)}`;
+}
+
+/**
+ * Why a list entry is in its state, as the server records it: a short code
+ * naming the filter it failed or the action that did not go through.
+ */
+const LIST_MEMBERSHIP_REASON_KEYS: Readonly<Record<string, string>> = {
+  media_type_not_included: "lists.reason.mediaTypeNotIncluded",
+  no_route: "lists.reason.noRoute",
+  duplicate_target: "lists.reason.duplicateTarget",
+  specials: "lists.reason.specials",
+  filler: "lists.reason.filler",
+  recap: "lists.reason.recap",
+  rating: "lists.reason.rating",
+  missing_rating: "lists.reason.missingRating",
+  genre: "lists.reason.genre",
+  missing_genre: "lists.reason.missingGenre",
+  adult: "lists.reason.adult",
+  missing_adult: "lists.reason.missingAdult",
+  release_year: "lists.reason.releaseYear",
+  missing_release_year: "lists.reason.missingReleaseYear",
+  format: "lists.reason.format",
+  language: "lists.reason.language",
+  missing_language: "lists.reason.missingLanguage",
+  streaming_service: "lists.reason.streamingService",
+  unreleased: "lists.reason.unreleased",
+  missing_unreleased: "lists.reason.missingReleaseDate",
+  director_credit: "lists.reason.directorCredit",
+  sequel_without_base: "lists.reason.sequelWithoutBase",
+  ambiguous_series_movie: "lists.reason.ambiguousSeriesMovie",
+  not_permitted: "lists.reason.notPermitted",
+  rejected: "lists.reason.refused",
+  not_found: "lists.reason.notFound",
+  action_failed: "lists.reason.actionFailed",
+  request_rejected: "lists.reason.requestRejected",
+};
+
+/** The translation key for a list entry's reason, or null for one this client does not know. */
+export function listMembershipReasonKey(reason: string | null | undefined): string | null {
+  return reason && Object.hasOwn(LIST_MEMBERSHIP_REASON_KEYS, reason) ? LIST_MEMBERSHIP_REASON_KEYS[reason] : null;
 }
 
 export function listMembershipStateTone(state: ListMembershipState): ListTone {
   switch (state) {
     case "IN_LIBRARY":
+      return "accent";
     case "ADDED":
       return "positive";
     case "REQUESTED":
@@ -160,6 +340,24 @@ export function listCoverageSegments(counts: ListCounts): ListCoverageSegment[] 
     .map((entry) => ({ ...entry, fraction: entry.count / denominator }));
 }
 
+const COVERAGE_MEMBERSHIP_STATE: Record<ListCoverageSegmentKey, ListMembershipState> = {
+  inLibrary: "IN_LIBRARY",
+  added: "ADDED",
+  requested: "REQUESTED",
+  held: "HELD",
+  filtered: "FILTERED",
+  excluded: "EXCLUDED",
+  unresolved: "UNRESOLVED",
+};
+
+/**
+ * A coverage segment takes the tone of the pill a title in that state wears,
+ * so the bar and the rows under it cannot drift apart.
+ */
+export function listCoverageSegmentTone(key: ListCoverageSegmentKey): ListTone {
+  return listMembershipStateTone(COVERAGE_MEMBERSHIP_STATE[key]);
+}
+
 export function listCoverageSegmentLabelKey(key: ListCoverageSegmentKey): string {
   return `lists.counts.${key}`;
 }
@@ -193,6 +391,33 @@ export function publicProviders(manifests: readonly ListProviderManifest[]): Lis
   return manifests
     .map((manifest) => ({ ...manifest, groups: publicProviderGroups(manifest) }))
     .filter((manifest) => manifest.groups.length > 0);
+}
+
+/**
+ * Whether a followed list already reads this exact source. The server refuses
+ * a second follow of the same provider, source type and parameters.
+ */
+/** The name a linked account goes by: the provider's display name, else its username, else its id. */
+export function listAccountLabel(account: Pick<ListAccount, "displayName" | "username" | "externalUserId">): string {
+  return account.displayName ?? account.username ?? account.externalUserId;
+}
+
+export function isListSourceFollowed(
+  subscriptions: readonly (Pick<ListSubscription, "source"> & Partial<Pick<ListSubscription, "accountId">>)[],
+  source: { provider: string; sourceType: string; params: readonly ListParam[]; accountId?: string | null },
+): boolean {
+  const paramsKey = (params: readonly ListParam[]) =>
+    params.map((param) => `${param.key}\u0000${param.value.trim()}`).sort().join("\u0001");
+  const wanted = paramsKey(source.params);
+  // The same list on two linked accounts is two lists, and neither is a public one.
+  const account = source.accountId ?? null;
+  return subscriptions.some(
+    (subscription) =>
+      (subscription.accountId ?? null) === account &&
+      subscription.source.provider === source.provider &&
+      subscription.source.sourceType === source.sourceType &&
+      paramsKey(subscription.source.params) === wanted,
+  );
 }
 
 export function findProviderItem(
@@ -328,6 +553,16 @@ export function providerTileStyle(tile: ListProviderTile | null): { background: 
   return { background: tile.bg, color: tile.ink };
 }
 
+/**
+ * The shipped logo for a list provider, or null when none exists and the tile
+ * keeps its abbreviation. Metadata sites resolve through the rating-source
+ * logos; everything else (Plex, plugin providers) through the plugin logos.
+ */
+export function providerLogoSrc(providerType: string): string | null {
+  if (!providerType.trim()) return null;
+  return ratingSourceInfo(providerType).logoSrc ?? getPluginLogoSources({ providerType })?.src ?? null;
+}
+
 export function providerTileAbbreviation(manifest: Pick<ListProviderManifest, "name" | "tile">): string {
   if (manifest.tile?.abbr) return manifest.tile.abbr;
   return manifest.name.slice(0, 2).toUpperCase();
@@ -361,6 +596,42 @@ export function defaultListRoute(
     releaseNumbering: kind === "MOVIE" ? null : "AUTO",
     tags: [],
   };
+}
+
+export type ListEpisodePolicyKind = "MONITOR_SPECIALS" | "FILLER_POLICY" | "RECAP_POLICY";
+
+/**
+ * The label key for what a route's "inherit" choice resolves to in its library,
+ * or null when that cannot be told. Only Anime libraries carry these settings;
+ * a Series title that inherits never monitors specials.
+ */
+export function inheritedListEpisodePolicyLabelKey(
+  kind: ListEpisodePolicyKind,
+  facet: Facet,
+  library:
+    | {
+        settings?: {
+          monitorSpecials?: boolean | null;
+          fillerPolicy?: string | null;
+          recapPolicy?: string | null;
+        } | null;
+      }
+    | null
+    | undefined,
+): string | null {
+  if (kind === "MONITOR_SPECIALS") {
+    const enabled = facet === "SERIES" ? false : library?.settings?.monitorSpecials;
+    if (enabled == null) return null;
+    return enabled ? "search.seasonFolder.enabled" : "search.seasonFolder.disabled";
+  }
+  if (kind === "FILLER_POLICY") {
+    const policy = library?.settings?.fillerPolicy;
+    if (!policy) return null;
+    return policy === "SKIP_FILLER" ? "settings.fillerPolicySkipFiller" : "settings.fillerPolicyDownloadAll";
+  }
+  const policy = library?.settings?.recapPolicy;
+  if (!policy) return null;
+  return policy === "SKIP_RECAP" ? "settings.recapPolicySkipRecap" : "settings.recapPolicyDownloadAll";
 }
 
 /**
@@ -439,6 +710,10 @@ export function listRouteInput(route: ListRoute): ListRouteInput {
 
 export function listFilterInput(filter: ListFilter): ListFilterInput {
   return {
+    facet: filter.facet ?? null,
+    matchAny: filter.matchAny ?? false,
+    minimums: (filter.minimums ?? []).map(({ source, value }) => ({ source, value })),
+    unresolvedLabels: [...(filter.unresolvedLabels ?? [])],
     kind: filter.kind,
     scale: filter.scale,
     value: filter.value,
@@ -459,7 +734,8 @@ export type UpdateListSubscriptionInput = {
 };
 
 export type SubscribeListInput = UpdateListSubscriptionInput & {
-  scope: "PUBLIC";
+  scope: "PUBLIC" | "PERSONAL";
+  credentialId?: string;
   provider: string;
   sourceType: string;
   params: ListParam[];
@@ -483,7 +759,8 @@ export function draftToUpdateInput(draft: ListSubscriptionDraft): UpdateListSubs
 
 export function draftToSubscribeInput(source: ListSourceDraft, draft: ListSubscriptionDraft): SubscribeListInput {
   return {
-    scope: "PUBLIC",
+    scope: source.credentialId ? "PERSONAL" : "PUBLIC",
+    ...(source.credentialId ? { credentialId: source.credentialId } : {}),
     provider: source.provider,
     sourceType: source.sourceType,
     params: source.params.filter((param) => param.value.trim()).map(listParamInput),
@@ -522,16 +799,57 @@ export function exclusionInputFromTitle(title: {
   };
 }
 
-/** Parse "tmdb:603, imdb:tt0133093" into external ids; unknown shapes are skipped. */
+/**
+ * External ids as the exclusion form's field shows them: "tmdb:movie:603,
+ * imdb:tt0133093". A kinded id keeps its kind as the middle part.
+ */
+export function formatExternalIdList(ids: readonly ExternalId[]): string {
+  return ids
+    .map((id) => {
+      const kind = id.kind?.trim();
+      return kind ? `${id.source}:${kind}:${id.value}` : `${id.source}:${id.value}`;
+    })
+    .join(", ");
+}
+
+/**
+ * What the exclusion form takes from a metadata search result: its name, its
+ * year and every id it is known by.
+ */
+export function exclusionFieldsFromMetadataResult(
+  result: MetadataResultIdentity & { name: string; year: number | null },
+  kind: Facet,
+): { title: string; year: string; ids: string } {
+  return {
+    title: result.name,
+    year: result.year ? String(result.year) : "",
+    ids: formatExternalIdList(metadataResultExternalIds(result, kind)),
+  };
+}
+
+/**
+ * Parse "tmdb:movie:603, imdb:tt0133093" into external ids. A two-part token
+ * is kindless; a three-part token names the kind in the middle. Unknown shapes
+ * are skipped.
+ */
 export function parseExternalIdList(raw: string): ExternalId[] {
   return raw
     .split(/[\s,]+/)
     .map((token) => token.trim())
     .filter(Boolean)
-    .map((token) => {
-      const separator = token.indexOf(":");
-      if (separator <= 0 || separator === token.length - 1) return null;
-      return { source: token.slice(0, separator).toLowerCase(), value: token.slice(separator + 1) };
+    .map((token): ExternalId | null => {
+      const parts = token.split(":");
+      if (parts.length === 2) {
+        const [source, value] = parts;
+        if (!source || !value) return null;
+        return { source: source.toLowerCase(), value };
+      }
+      if (parts.length === 3) {
+        const [source, kind, value] = parts;
+        if (!source || !kind || !value) return null;
+        return { source: source.toLowerCase(), kind: kind.toLowerCase(), value };
+      }
+      return null;
     })
     .filter((entry): entry is ExternalId => entry !== null);
 }
@@ -575,66 +893,18 @@ export function listMembershipRowId(subscriptionId: string, itemKey: string): st
   return `list-membership-${selectorToken(subscriptionId)}-${selectorToken(itemKey)}`;
 }
 
-/** What a "Sync now" click is waiting to see change. */
-export type ListSyncWatchSnapshot = {
-  lastAt: string | null;
-  state: ListSyncState | null;
-  /** Sync run ids the detail panel showed; null when the panel was not loaded. */
-  runIds: readonly string[] | null;
-};
+/** How many syncs a list's history shows before the reader asks for the rest. */
+export const LIST_SYNC_RUNS_SHOWN = 20;
+/** The most syncs one read returns; the week of history the server keeps fits in it. */
+export const LIST_SYNC_RUNS_MAX = 1000;
 
 /**
- * Whether a requested sync has visibly finished: a run id the baseline did not
- * have, or a change to the subscription's last sync time or sync state.
+ * The slice of a list's sync history to show. A collapsed history is read one
+ * run past what it shows, which is how it learns that older runs exist.
  */
-export function listSyncWatchSettled(
-  baseline: ListSyncWatchSnapshot,
-  current: ListSyncWatchSnapshot,
-): boolean {
-  if (baseline.runIds && current.runIds) {
-    const known = new Set(baseline.runIds);
-    if (current.runIds.some((id) => !known.has(id))) return true;
-  }
-  if (current.lastAt !== null && current.lastAt !== baseline.lastAt) return true;
-  if (current.state !== null && baseline.state !== null && current.state !== baseline.state) return true;
-  return false;
-}
-
-const LIST_SYNC_POLL_DELAYS_MS = [1_000, 2_000, 3_000, 5_000, 8_000] as const;
-const LIST_SYNC_POLL_MAX_DELAY_MS = 10_000;
-/** How long a "Sync now" click keeps refreshing before leaving it to the next visit. */
-export const LIST_SYNC_POLL_BUDGET_MS = 180_000;
-
-/**
- * Delay before the next refresh after a "Sync now" click, backing off to a
- * ceiling. Returns null once the polling budget is spent.
- */
-export function listSyncPollDelayMs(attempt: number, elapsedMs: number): number | null {
-  const delay =
-    LIST_SYNC_POLL_DELAYS_MS[Math.max(0, attempt)] ?? LIST_SYNC_POLL_MAX_DELAY_MS;
-  if (elapsedMs + delay > LIST_SYNC_POLL_BUDGET_MS) return null;
-  return delay;
-}
-
-/**
- * The next refresh of the one poll that follows every queued sync, however
- * many lists were queued. Each watched list keeps its own budget, counted from
- * when its sync was queued; lists past it are dropped. Null once none is left.
- */
-export function listSyncWatchSchedule(
-  attempt: number,
-  startedAtById: ReadonlyMap<string, number>,
-  now: number,
-): { delay: number; keep: string[] } | null {
-  let delay: number | null = null;
-  const keep: string[] = [];
-  for (const [id, startedAt] of startedAtById) {
-    const next = listSyncPollDelayMs(attempt, now - startedAt);
-    if (next === null) continue;
-    delay = next;
-    keep.push(id);
-  }
-  return delay === null ? null : { delay, keep };
+export function shownListSyncRuns<T>(runs: readonly T[], expanded: boolean): { runs: T[]; more: boolean } {
+  if (expanded) return { runs: [...runs], more: false };
+  return { runs: runs.slice(0, LIST_SYNC_RUNS_SHOWN), more: runs.length > LIST_SYNC_RUNS_SHOWN };
 }
 
 /** What the settings form holds for one field the user touched. */
@@ -691,6 +961,73 @@ export function listProviderSettingsMissing(
  */
 export function titleListMembershipChanged(titleId: string | null | undefined): DomainEventPredicate {
   return allOf(forTitle(titleId), forEventTypes("LIST_TITLE_ADDED", "LIST_TITLE_LEFT"));
+}
+
+/**
+ * A list setting of one of the given kinds was saved. Each list setting
+ * writes a configuration event naming what changed.
+ */
+function listSettingChanged(...resourceTypes: ReadonlyArray<string>): DomainEventPredicate {
+  const wanted = new Set(resourceTypes);
+  return (event) => {
+    if (event.eventType !== "CONFIGURATION_CHANGED") return false;
+    const payload = event.payloadJson as { data?: { resource_type?: unknown } } | null | undefined;
+    const resourceType = payload?.data?.resource_type;
+    return typeof resourceType === "string" && wanted.has(resourceType);
+  };
+}
+
+// The live events after which each part of a lists surface may read
+// differently, here or in another session. Every one is written once the
+// change it names is stored, so a read started on hearing it sees that change.
+
+/**
+ * The followed lists and their sync results: a sync ended, a list was
+ * followed, changed, turned on or off, or unfollowed, or something that turns
+ * a member's lists off happened (an account unlinked, a policy changed).
+ */
+export const followedListsChanged: DomainEventPredicate = anyOf(
+  forEventTypes("LIST_SYNC_FINISHED", "LIST_SUBSCRIPTION_CHANGED"),
+  listSettingChanged("list_account", "list_member_policy"),
+);
+/** The member's linked list accounts. */
+export const listAccountsChanged: DomainEventPredicate = listSettingChanged("list_account");
+export const listExclusionsChanged: DomainEventPredicate = listSettingChanged("list_exclusion");
+/** What the list providers offer and how they are set up. */
+export const listProvidersChanged: DomainEventPredicate = listSettingChanged(
+  "list_provider_settings",
+  "list_provider_app",
+);
+export const listProviderAppsChanged: DomainEventPredicate = listSettingChanged("list_provider_app");
+export const memberListPoliciesChanged: DomainEventPredicate = listSettingChanged("list_member_policy");
+/** The counts on the lists page's tabs. */
+export const listTabCountsChanged: DomainEventPredicate = anyOf(
+  followedListsChanged,
+  listExclusionsChanged,
+);
+
+/**
+ * Lets only the newest of a loader's reads land. A read takes a ticket when
+ * it starts and applies its answer only while the ticket is still the newest;
+ * `invalidate` turns every read in flight stale, for a local change they
+ * could not have seen.
+ */
+export type LatestRead = {
+  begin: () => () => boolean;
+  invalidate: () => void;
+};
+
+export function latestRead(): LatestRead {
+  let newest = 0;
+  return {
+    begin() {
+      const ticket = ++newest;
+      return () => ticket === newest;
+    },
+    invalidate() {
+      newest += 1;
+    },
+  };
 }
 
 export type TitleListProvenance = { kind: "added" | "left"; name: string };

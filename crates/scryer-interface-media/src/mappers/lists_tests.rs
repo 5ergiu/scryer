@@ -3,6 +3,10 @@ use super::*;
 fn filter_input(kind: ListFilterKindValue) -> ListFilterInput {
     ListFilterInput {
         kind,
+        facet: None,
+        match_any: false,
+        minimums: Vec::new(),
+        unresolved_labels: Vec::new(),
         scale: None,
         value: None,
         from: None,
@@ -13,6 +17,7 @@ fn filter_input(kind: ListFilterKindValue) -> ListFilterInput {
 
 fn subscribe_input(scope: ListScopeValue) -> SubscribeListInput {
     SubscribeListInput {
+        credential_id: None,
         scope,
         provider: Some("fixture".to_string()),
         source_type: Some("chart".to_string()),
@@ -44,6 +49,19 @@ fn subscribe_input(scope: ListScopeValue) -> SubscribeListInput {
 #[test]
 fn filters_round_trip_through_their_graphql_shape() {
     let filters = vec![
+        ListFilter::Ratings {
+            facet: MediaFacet::Anime,
+            match_any: true,
+            minimums: vec![scryer_domain::ListRatingMinimum {
+                source: "anilist".into(),
+                value: 80.0,
+            }],
+        },
+        ListFilter::ExcludeCanonicalTags {
+            facet: MediaFacet::Movie,
+            keys: vec!["canonical:genre:action".into()],
+            unresolved_labels: vec!["retired label".into()],
+        },
         ListFilter::RatingAtLeast {
             scale: "ten".to_string(),
             value: 7.5,
@@ -59,7 +77,7 @@ fn filters_round_trip_through_their_graphql_shape() {
             formats: vec!["fixture-format".to_string()],
         },
         ListFilter::Language {
-            languages: vec!["xx".to_string()],
+            languages: vec!["eng".to_string()],
         },
         ListFilter::ReleasedOnly,
         ListFilter::NotSequelWithoutBase,
@@ -68,6 +86,17 @@ fn filters_round_trip_through_their_graphql_shape() {
         let payload = from_filter(filter.clone());
         let input = ListFilterInput {
             kind: payload.kind,
+            facet: payload.facet,
+            match_any: payload.match_any,
+            minimums: payload
+                .minimums
+                .into_iter()
+                .map(|minimum| ListRatingMinimumInput {
+                    source: minimum.source,
+                    value: minimum.value,
+                })
+                .collect(),
+            unresolved_labels: payload.unresolved_labels,
             scale: payload.scale,
             value: payload.value,
             from: payload.from,
@@ -84,6 +113,29 @@ fn a_rating_filter_without_a_scale_or_value_is_refused() {
     let mut missing_value = filter_input(ListFilterKindValue::RatingAtLeast);
     missing_value.scale = Some("ten".to_string());
     assert!(filter_from_input(missing_value).is_err());
+}
+
+#[test]
+fn facet_filter_inputs_validate_scales_keys_and_normalize_languages() {
+    let mut rating = filter_input(ListFilterKindValue::Ratings);
+    rating.facet = Some(MediaFacetValue::Movie);
+    rating.minimums = vec![ListRatingMinimumInput {
+        source: "letterboxd".into(),
+        value: 6.0,
+    }];
+    assert!(filter_from_input(rating).is_err());
+    let mut tags = filter_input(ListFilterKindValue::ExcludeCanonicalTags);
+    tags.facet = Some(MediaFacetValue::Anime);
+    tags.values = vec!["Action".into()];
+    assert!(filter_from_input(tags).is_err());
+    let mut language = filter_input(ListFilterKindValue::Language);
+    language.values = vec!["en".into(), "ja".into()];
+    assert_eq!(
+        filter_from_input(language).unwrap(),
+        ListFilter::Language {
+            languages: vec!["eng".into(), "jpn".into()]
+        }
+    );
 }
 
 #[test]
@@ -172,4 +224,31 @@ fn a_list_exclusion_needs_its_list() {
             subscription_id: "sub-public".to_string()
         }
     );
+}
+
+#[test]
+fn a_previewed_poster_is_sized_on_tmdb_and_left_alone_elsewhere() {
+    let poster_of = |url: &str| {
+        from_preview_item(ListPreviewItem {
+            canonical_smg_id: None,
+            series_movie: None,
+            facts: None,
+            item_key: "fixture:1".to_string(),
+            display_title: None,
+            year: None,
+            kind: None,
+            poster_url: Some(url.to_string()),
+        })
+        .poster_url
+    };
+
+    assert_eq!(
+        poster_of("https://image.tmdb.org/t/p/original/fixture.jpg").as_deref(),
+        Some("https://image.tmdb.org/t/p/w300/fixture.jpg")
+    );
+    assert_eq!(
+        poster_of("https://artworks.thetvdb.com/banners/posters/fixture.jpg").as_deref(),
+        Some("https://artworks.thetvdb.com/banners/posters/fixture.jpg")
+    );
+    assert_eq!(poster_of("not a url").as_deref(), Some("not a url"));
 }

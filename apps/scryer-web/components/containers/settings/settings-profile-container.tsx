@@ -3,6 +3,7 @@ import { useClient } from "urql";
 import { notifyExternalAccountInviteSourcesChanged } from "@/components/containers/settings/external-account-invites-container";
 import { sanitizeTotpCode } from "@/components/auth/totp-code-form";
 import { ApiKeysPanel } from "@/components/containers/settings/api-keys-panel";
+import { ProfileListAccounts } from "@/components/containers/settings/profile-list-accounts";
 import { SettingsProfileSection } from "@/components/views/settings/settings-profile-section";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,7 +22,6 @@ import {
   linkPlexAccountMutation,
   mfaVerifyStepUpMutation,
   revokeMyOauthAppMutation,
-  setMyUiSettingsMutation,
   setUserPasswordMutation,
   totpDisableMutation,
   totpEnrollmentCompleteMutation,
@@ -44,7 +44,7 @@ import {
   isVisibleExternalAccountProvider,
 } from "@/lib/constants/integration-providers";
 import { useTranslate } from "@/lib/context/translate-context";
-import { useGlobalStatus } from "@/lib/context/global-status-context";
+import { type GlobalStatusOptions, useGlobalStatus } from "@/lib/context/global-status-context";
 import {
   useUiSettings,
   uiSettingsInputFromSettings,
@@ -142,6 +142,14 @@ function isPasskeyFormLoginDisabledError(message: string): boolean {
   return normalizeGraphQlErrorMessage(message) === PASSKEY_FORM_LOGIN_DISABLED_ERROR;
 }
 
+// Dismissing the browser's passkey prompt is a choice, not a failure, so it
+// stays out of the toasts.
+function passkeyFailureOptions(error: unknown): GlobalStatusOptions | undefined {
+  return error instanceof PasskeyClientError && error.code === "cancelled"
+    ? undefined
+    : { level: "ERROR" };
+}
+
 export function SettingsProfileContainer({ userId, username }: Props) {
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
@@ -154,7 +162,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     effectiveFormLoginEnabled,
     passkeyEnabled,
   } = useAuth();
-  const { uiSettings, setUiSettings, uiSettingsLoaded, uiSettingsLoading } =
+  const { uiSettings, setUiSettings, saveUiSettings, uiSettingsLoaded, uiSettingsLoading } =
     useUiSettings();
   const [savingHighlightColor, setSavingHighlightColor] = useState<string | null>(
     null,
@@ -280,13 +288,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       const login = result.data?.accountSecurityPasswordVerify;
       if (result.error || !login) {
-        setGlobalStatus(result.error?.message ?? "Account security verification failed.");
+        setGlobalStatus(result.error?.message ?? "Account security verification failed.", { level: "ERROR" });
         return;
       }
       finishSecurityReauthentication(login);
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : "Account security verification failed.",
+        { level: "ERROR" },
       );
     } finally {
       setSecurityReauthenticationBusy(false);
@@ -306,7 +315,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       );
     } catch (error) {
       if (requestSecurityReauthentication(error)) return;
-      setGlobalStatus(formatPasskeyError(error));
+      setGlobalStatus(formatPasskeyError(error), passkeyFailureOptions(error));
     } finally {
       setSecurityReauthenticationBusy(false);
     }
@@ -333,13 +342,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       const login = result.data?.mfaVerifyStepUp;
       if (result.error || !login) {
-        setGlobalStatus(result.error?.message ?? "Account security verification failed.");
+        setGlobalStatus(result.error?.message ?? "Account security verification failed.", { level: "ERROR" });
         return;
       }
       finishSecurityReauthentication(login);
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : "Account security verification failed.",
+        { level: "ERROR" },
       );
     } finally {
       setSecurityReauthenticationBusy(false);
@@ -367,7 +377,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
 
       if (result.error) {
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
 
@@ -382,9 +392,9 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      setGlobalStatus(t("profile.passwordUpdated"));
+      setGlobalStatus(t("profile.passwordUpdated"), { level: "SUCCESS" });
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("status.failedToUpdate"));
+      setGlobalStatus(error instanceof Error ? error.message : t("status.failedToUpdate"), { level: "ERROR" });
     } finally {
       setSaving(false);
     }
@@ -407,34 +417,33 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       // Apply the accent live while the mutation persists through the interface.
       setUiSettings(next);
       try {
-        const result = await client
-          .mutation<{ setMyUiSettings?: UiSettings }, { input: UiSettings }>(
-            setMyUiSettingsMutation,
-            { input: uiSettingsInputFromSettings(next) },
-          )
-          .toPromise();
+        const result = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, highlightColor }),
+        );
         if (result.error || !result.data?.setMyUiSettings) {
           setUiSettings(previous);
           setGlobalStatus(
             result.error?.message ?? t("profile.highlightColorSaveFailed"),
+            { level: "ERROR" },
           );
           return;
         }
         setUiSettings(result.data.setMyUiSettings);
-        setGlobalStatus(t("profile.highlightColorSaved"));
+        setGlobalStatus(t("profile.highlightColorSaved"), { level: "SUCCESS" });
       } catch (error) {
         setUiSettings(previous);
         setGlobalStatus(
           error instanceof Error
             ? error.message
             : t("profile.highlightColorSaveFailed"),
+          { level: "ERROR" },
         );
       } finally {
         setSavingHighlightColor(null);
       }
     },
     [
-      client,
+      saveUiSettings,
       savingHighlightColor,
       setGlobalStatus,
       setUiSettings,
@@ -461,32 +470,30 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setSavingSponsorPreference(true);
       setUiSettings(next);
       try {
-        const result = await client
-          .mutation<{ setMyUiSettings?: UiSettings }, { input: UiSettings }>(
-            setMyUiSettingsMutation,
-            { input: uiSettingsInputFromSettings(next) },
-          )
-          .toPromise();
+        const result = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, hideSponsorButton }),
+        );
         if (result.error || !result.data?.setMyUiSettings) {
           setUiSettings(previous);
-          setGlobalStatus(result.error?.message ?? "Failed to update Sponsor preference.");
+          setGlobalStatus(result.error?.message ?? "Failed to update Sponsor preference.", { level: "ERROR" });
           return;
         }
         setUiSettings(result.data.setMyUiSettings);
-        setGlobalStatus("Sponsor preference saved.");
+        setGlobalStatus("Sponsor preference saved.", { level: "SUCCESS" });
       } catch (error) {
         setUiSettings(previous);
         setGlobalStatus(
           error instanceof Error
             ? error.message
             : "Failed to update Sponsor preference.",
+          { level: "ERROR" },
         );
       } finally {
         setSavingSponsorPreference(false);
       }
     },
     [
-      client,
+      saveUiSettings,
       savingSponsorPreference,
       setGlobalStatus,
       setUiSettings,
@@ -518,7 +525,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         if (cancelled) return;
 
         if (result.error) {
-          setGlobalStatus(result.error.message);
+          setGlobalStatus(result.error.message, { level: "ERROR" });
           setHasPassword(false);
           setAccountKind(null);
           return;
@@ -532,7 +539,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         if (!cancelled) {
           setHasPassword(false);
           setAccountKind(null);
-          setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyOperationFailed"));
+          setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyOperationFailed"), { level: "ERROR" });
         }
       }
     })();
@@ -567,14 +574,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
           return;
         }
 
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
 
       setPasskeys(result.data?.myPasskeys ?? []);
     } catch (error) {
       if (generation === passkeyLoadGenerationRef.current) {
-        setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyOperationFailed"));
+        setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyOperationFailed"), { level: "ERROR" });
       }
     } finally {
       if (generation === passkeyLoadGenerationRef.current) {
@@ -611,12 +618,12 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .query<{ myOauthApps?: OAuthConnectedApp[] }>(myOauthAppsQuery, {})
         .toPromise();
       if (result.error) {
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
       setOauthApps(result.data?.myOauthApps ?? []);
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : "Connected apps could not be loaded.");
+      setGlobalStatus(error instanceof Error ? error.message : "Connected apps could not be loaded.", { level: "ERROR" });
     } finally {
       setLoadingOauthApps(false);
     }
@@ -637,12 +644,12 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     try {
       const result = await client.query<{ myTotp?: TotpStatus }>(myTotpQuery, {}).toPromise();
       if (result.error) {
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
       setTotpStatus(result.data?.myTotp ?? null);
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"), { level: "ERROR" });
     } finally {
       setLoadingTotp(false);
     }
@@ -665,7 +672,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .query<{ linkedAccounts?: LinkedAccount[] }>(linkedAccountsQuery, { userId })
         .toPromise();
       if (result.error) {
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
       setLinkedAccounts(
@@ -674,7 +681,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         ),
       );
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.linkedAccountsLoadFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.linkedAccountsLoadFailed"), { level: "ERROR" });
     } finally {
       setLoadingLinkedAccounts(false);
     }
@@ -701,14 +708,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         )
         .toPromise();
       if (result.error) {
-        setGlobalStatus(result.error.message);
+        setGlobalStatus(result.error.message, { level: "ERROR" });
         return;
       }
       setExternalAuthSettings(
         result.data?.externalAuthRuntimeSettings ?? DEFAULT_EXTERNAL_AUTH_RUNTIME_SETTINGS,
       );
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.linkAccountLoadFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.linkAccountLoadFailed"), { level: "ERROR" });
     } finally {
       setLoadingLinkOptions(false);
     }
@@ -764,7 +771,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setGlobalStatus(t("profile.passkeyAdded"));
     } catch (error) {
       if (requestSecurityReauthentication(error, { kind: "add-passkey" })) return;
-      setGlobalStatus(formatPasskeyError(error));
+      setGlobalStatus(formatPasskeyError(error), passkeyFailureOptions(error));
     } finally {
       setAddingPasskey(false);
     }
@@ -792,15 +799,15 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       const deleted = result.data?.deleteMyPasskey;
       if (result.error || !deleted?.id) {
         if (requestSecurityReauthentication(result.error, { kind: "delete-passkey", id })) return;
-        setGlobalStatus(result.error?.message ?? t("profile.passkeyDeleteFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.passkeyDeleteFailed"), { level: "ERROR" });
         return;
       }
 
       setPasskeys((current) => current.filter((passkey) => passkey.id !== id));
-      setGlobalStatus(t("profile.passkeyDeleted"));
+      setGlobalStatus(t("profile.passkeyDeleted"), { level: "SUCCESS" });
     } catch (error) {
       if (requestSecurityReauthentication(error, { kind: "delete-passkey", id })) return;
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyDeleteFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.passkeyDeleteFailed"), { level: "ERROR" });
     } finally {
       setDeletingPasskeyId(null);
     }
@@ -816,14 +823,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         )
         .toPromise();
       if (result.error || result.data?.revokeMyOauthApp?.revoked !== true) {
-        setGlobalStatus(result.error?.message ?? "Connected app could not be revoked.");
+        setGlobalStatus(result.error?.message ?? "Connected app could not be revoked.", { level: "ERROR" });
         return;
       }
 
       setOauthApps((current) => current.filter((app) => app.grantId !== grantId));
       setGlobalStatus("Connected app revoked.");
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : "Connected app could not be revoked.");
+      setGlobalStatus(error instanceof Error ? error.message : "Connected app could not be revoked.", { level: "ERROR" });
     } finally {
       setRevokingOauthGrantId(null);
     }
@@ -838,14 +845,14 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       if (result.error || !result.data?.totpEnrollmentStart) {
         if (requestSecurityReauthentication(result.error, { kind: "start-totp-enrollment" })) return;
-        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"), { level: "ERROR" });
         return;
       }
       setTotpEnrollment(result.data.totpEnrollmentStart);
       setTotpEnrollmentCode("");
     } catch (error) {
       if (requestSecurityReauthentication(error, { kind: "start-totp-enrollment" })) return;
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"), { level: "ERROR" });
     } finally {
       setTotpBusy(false);
     }
@@ -869,7 +876,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       const completed = result.data?.totpEnrollmentComplete;
       if (result.error || !completed) {
-        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"), { level: "ERROR" });
         return;
       }
       setTotpStatus(completed.status);
@@ -878,7 +885,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setTotpEnrollmentCode("");
       setGlobalStatus(t("profile.totpEnabled"));
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"), { level: "ERROR" });
     } finally {
       setTotpBusy(false);
     }
@@ -906,7 +913,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       const disabled = result.data?.totpDisable;
       if (result.error || !disabled) {
-        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"), { level: "ERROR" });
         return;
       }
       setTotpStatus(disabled);
@@ -914,7 +921,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setTotpRecoveryCodes([]);
       setGlobalStatus(t("profile.totpDisabled"));
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"), { level: "ERROR" });
     } finally {
       setTotpBusy(false);
     }
@@ -933,7 +940,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         .toPromise();
       const regenerated = result.data?.totpRegenerateRecoveryCodes;
       if (result.error || !regenerated) {
-        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.totpOperationFailed"), { level: "ERROR" });
         return;
       }
       setTotpStatus(regenerated.status);
@@ -941,7 +948,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       setTotpActionCode("");
       setGlobalStatus(t("profile.totpRecoveryCodesRegenerated"));
     } catch (error) {
-      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"));
+      setGlobalStatus(error instanceof Error ? error.message : t("profile.totpOperationFailed"), { level: "ERROR" });
     } finally {
       setTotpBusy(false);
     }
@@ -987,7 +994,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
         )
         .toPromise();
       if (result.error || !result.data?.unlinkExternalAccount?.linkedAccountId) {
-        setGlobalStatus(result.error?.message ?? t("profile.linkedAccountUnlinkFailed"));
+        setGlobalStatus(result.error?.message ?? t("profile.linkedAccountUnlinkFailed"), { level: "ERROR" });
         return;
       }
 
@@ -997,6 +1004,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     } catch (error) {
       setGlobalStatus(
         error instanceof Error ? error.message : t("profile.linkedAccountUnlinkFailed"),
+        { level: "ERROR" },
       );
     } finally {
       setUnlinkingAccountId(null);
@@ -1086,7 +1094,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       if (result.error || !result.data?.linkJellyfinAccount) {
         const message = result.error?.message ?? t("profile.linkAccountFailed");
         setLinkAccountError(message);
-        setGlobalStatus(message);
+        setGlobalStatus(message, { level: "ERROR" });
         return;
       }
 
@@ -1098,7 +1106,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     } catch (error) {
       const message = error instanceof Error ? error.message : t("profile.linkAccountFailed");
       setLinkAccountError(message);
-      setGlobalStatus(message);
+      setGlobalStatus(message, { level: "ERROR" });
     } finally {
       setLinkAccountDraft((current) => ({ ...current, jellyfinPassword: "" }));
       setLinkAccountBusy(false);
@@ -1153,7 +1161,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     } catch (error) {
       const message = error instanceof Error ? error.message : t("profile.linkAccountFailed");
       setLinkAccountError(message);
-      setGlobalStatus(message);
+      setGlobalStatus(message, { level: "ERROR" });
     } finally {
       setLinkAccountDraft((current) => ({ ...current, jellyfinPassword: "" }));
       setLinkAccountBusy(false);
@@ -1177,7 +1185,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     setLinkAccountBusy(true);
     setLinkAccountError(null);
     try {
-      setGlobalStatus(t("auth.plexPinFlowPending"));
+      setGlobalStatus(t("auth.plexPinFlowPending"), { level: "SUCCESS" });
       const plexAuthToken = await authenticateWithPlexPin();
       const result = await client
         .mutation<{ linkPlexAccount?: LinkedAccount }, {
@@ -1193,7 +1201,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       if (result.error || !result.data?.linkPlexAccount) {
         const message = result.error?.message ?? t("profile.linkAccountFailed");
         setLinkAccountError(message);
-        setGlobalStatus(message);
+        setGlobalStatus(message, { level: "ERROR" });
         return;
       }
 
@@ -1204,7 +1212,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     } catch (error) {
       const message = error instanceof Error ? error.message : t("profile.linkAccountFailed");
       setLinkAccountError(message);
-      setGlobalStatus(message);
+      setGlobalStatus(message, { level: "ERROR" });
     } finally {
       setLinkAccountBusy(false);
     }
@@ -1283,6 +1291,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       onSubmitPlexLink={handleSubmitPlexLink}
       onUnlinkExternalAccount={handleUnlinkExternalAccount}
     />
+    {userId ? <ProfileListAccounts key={userId} /> : null}
     <ApiKeysPanel adoptSession={adoptSession} />
     <Dialog
       open={securityReauthenticationOpen}

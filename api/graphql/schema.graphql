@@ -1317,6 +1317,11 @@ type CalendarEpisodePayload {
 	"""
 	imageUrl: String
 	"""
+	Proxied background of an episode's parent title, shown when the episode
+	has no still of its own. Null for a movie or a title without one.
+	"""
+	titleBackgroundUrl: String
+	"""
 	Air date, or null when unavailable.
 	"""
 	airDate: Date
@@ -1443,6 +1448,20 @@ type CanonicalMediaTagPayload {
 }
 
 """
+Registry category of a canonical tag.
+"""
+enum CanonicalTagCategoryValue {
+	"""
+	A genre.
+	"""
+	GENRE
+	"""
+	A theme.
+	"""
+	THEME
+}
+
+"""
 Canonical tag key and display name used by discovery filters.
 """
 type CanonicalTagFilterOptionPayload {
@@ -1454,6 +1473,42 @@ type CanonicalTagFilterOptionPayload {
 	Display name associated with the canonical key.
 	"""
 	name: String!
+}
+
+"""
+A registered canonical genre or theme available to list filters.
+"""
+type CanonicalTagVocabularyEntryPayload {
+	"""
+	Stable canonical key stored in saved filters.
+	"""
+	key: String!
+	"""
+	Registry category.
+	"""
+	category: CanonicalTagCategoryValue!
+	"""
+	Display name of the canonical entry.
+	"""
+	name: String!
+	"""
+	Registered aliases usable for search and unambiguous legacy-label conversion.
+	"""
+	aliases: [String!]!
+}
+
+"""
+Cached canonical genre and theme vocabulary supplied by the metadata gateway.
+"""
+type CanonicalTagVocabularyPayload {
+	"""
+	BLAKE3 content version of the canonical registry snapshot.
+	"""
+	version: String!
+	"""
+	Complete canonical vocabulary in deterministic order.
+	"""
+	entries: [CanonicalTagVocabularyEntryPayload!]!
 }
 
 """
@@ -1873,6 +1928,24 @@ type CompleteSetupPayload {
 	Whether setup is now complete.
 	"""
 	completed: Boolean!
+}
+
+"""
+Where an effective addressing value comes from.
+"""
+enum ConfigValueSourceValue {
+	"""
+	An environment variable.
+	"""
+	ENVIRONMENT
+	"""
+	The saved setting.
+	"""
+	SETTINGS
+	"""
+	The built-in default.
+	"""
+	DEFAULT
 }
 
 """
@@ -2375,6 +2448,26 @@ input CreatePostProcessingScriptInput {
 	Whether debug output is enabled, or null for the service default.
 	"""
 	debug: Boolean
+	"""
+	Whether the script starts enabled, or null for true.
+	"""
+	enabled: Boolean
+	"""
+	Language of inline script content, or null for `SHELL`.
+	"""
+	language: ScriptLanguageValue
+	"""
+	What starts the script, or null for `POST_IMPORT`.
+	"""
+	trigger: ScriptTriggerValue
+	"""
+	Schedule, required when the trigger is `SCHEDULE`.
+	"""
+	schedule: ScriptScheduleInput
+	"""
+	Whether a scheduled script also runs once at host start, or null for false.
+	"""
+	runOnStartup: Boolean
 }
 
 """
@@ -4594,6 +4687,10 @@ enum DomainEventTypeValue {
 	"""
 	MEDIA_REQUEST_UPDATED
 	"""
+	A dismissed media request was reopened.
+	"""
+	MEDIA_REQUEST_REOPENED
+	"""
 	A media request was approved.
 	"""
 	MEDIA_REQUEST_APPROVED
@@ -4797,6 +4894,14 @@ enum DomainEventTypeValue {
 	A public list was unfollowed.
 	"""
 	LIST_UNFOLLOWED
+	"""
+	A sync of a list ended and its run was recorded, whatever the outcome.
+	"""
+	LIST_SYNC_FINISHED
+	"""
+	A list was followed, changed, turned on or off, or unfollowed.
+	"""
+	LIST_SUBSCRIPTION_CHANGED
 }
 
 """
@@ -5247,6 +5352,52 @@ type DownloadImportPagePayload {
 }
 
 """
+Password-related reason a download failed; never contains credentials.
+"""
+enum DownloadPasswordFailureCodeValue {
+	"""
+	The archive needs a new password.
+	"""
+	ARCHIVE_PASSWORD_REQUIRED
+	"""
+	The password may be incorrect or the archive may be damaged.
+	"""
+	ARCHIVE_PASSWORD_OR_CORRUPTION
+}
+
+"""
+Result of a download password retry.
+"""
+type DownloadPasswordRetryPayload {
+	"""
+	Whether the download client accepted, refused, or has not confirmed the retry.
+	"""
+	status: DownloadPasswordRetryStatusValue!
+	"""
+	Client-side item ID of the retried job when the client accepted it; null otherwise.
+	"""
+	downloadClientItemId: String
+}
+
+"""
+Outcome of a single password retry dispatch to the download client.
+"""
+enum DownloadPasswordRetryStatusValue {
+	"""
+	The download client accepted the retry.
+	"""
+	ACCEPTED
+	"""
+	The download client refused the retry.
+	"""
+	REFUSED
+	"""
+	The outcome is unknown; the retry stays claimed until reconciliation resolves it.
+	"""
+	AWAITING_RECONCILIATION
+}
+
+"""
 Action represented by a download queue mutation response.
 """
 enum DownloadQueueActionKindValue {
@@ -5445,6 +5596,10 @@ type DownloadQueueItemPayload {
 	"""
 	attentionReason: String
 	"""
+	Stable password-related download failure classification; never contains credentials.
+	"""
+	passwordFailureCode: DownloadPasswordFailureCodeValue
+	"""
 	Client-local item identifier; together with `client_id` it identifies the remote item.
 	"""
 	downloadClientItemId: String!
@@ -5520,6 +5675,14 @@ type DownloadQueueItemPayload {
 	Import actions this download currently offers; every client surface renders from this.
 	"""
 	importActions: DownloadImportActionsPayload!
+	"""
+	Failed local extraction attempt that can accept a replacement password.
+	"""
+	passwordRetryImportId: ID
+	"""
+	Held sources of this download, with every title and the reason they are held, when the viewer may release them.
+	"""
+	heldImportSources: HeldImportSourcesPayload
 	"""
 	Acquisition scope for this queue item, or its episode scope when no more specific scope is available.
 	"""
@@ -7412,6 +7575,178 @@ type GeneralSettingsPayload {
 }
 
 """
+What the download client's removal policy does with the download after release.
+"""
+enum HeldDownloadClientPolicyValue {
+	"""
+	The client removes the completed download.
+	"""
+	REMOVES
+	"""
+	The client removes the completed download once its seeding requirements are met.
+	"""
+	REMOVES_AFTER_SEEDING
+	"""
+	The policy keeps the download, or no configured client can act on it.
+	"""
+	KEEPS
+	"""
+	The download's title could not be resolved, so the policy is unknown.
+	"""
+	UNKNOWN
+}
+
+"""
+Held sources of a download the viewer may release.
+"""
+type HeldImportSourcesPayload {
+	"""
+	Completed import record ID the release is requested through.
+	"""
+	importId: ID!
+	"""
+	Every import of the download the release covers.
+	"""
+	importIds: [ID!]!
+	"""
+	Distinct titles those imports belong to.
+	"""
+	titleNames: [String!]!
+	"""
+	The most severe reason the sources are held.
+	"""
+	reason: HeldImportSourcesReasonValue!
+	"""
+	What the download client's removal policy does with the download after release.
+	"""
+	clientPolicy: HeldDownloadClientPolicyValue!
+}
+
+"""
+Why a completed import kept its download's sources.
+"""
+enum HeldImportSourcesReasonValue {
+	"""
+	Subtitle discovery or delivery is still pending.
+	"""
+	SUBTITLES_PENDING
+	"""
+	The import finished, but removing its replaced sources did not.
+	"""
+	SOURCE_CLEANUP_INCOMPLETE
+	"""
+	The hold has no recorded reason.
+	"""
+	UNKNOWN
+	"""
+	Archive extraction failed; the unextracted archives were never imported.
+	"""
+	ARCHIVE_EXTRACTION_FAILED
+}
+
+"""
+Outcome of releasing a download's held sources.
+"""
+type HeldImportSourcesReleasedPayload {
+	"""
+	Import record ID the release was requested through.
+	"""
+	importId: ID!
+	"""
+	Every import of the download whose hold was released.
+	"""
+	releasedImportIds: [ID!]!
+	"""
+	What the release did to the tracked download.
+	"""
+	settlement: HeldImportSourcesSettlementValue!
+	"""
+	The download client's removal policy that now applies.
+	"""
+	clientPolicy: HeldDownloadClientPolicyValue!
+	"""
+	Whether every identified extraction workspace was removed and none could have been missed.
+	"""
+	workspaceRemoved: Boolean!
+	"""
+	Number of extraction workspaces removed.
+	"""
+	workspacesRemoved: Int!
+	"""
+	Distinct reasons extraction workspaces were preserved; preserved workspaces are never removed later by inference.
+	"""
+	preservedWorkspaceReasons: [HeldWorkspacePreservedValue!]!
+	"""
+	Whether a released import's workspaces could not be searched for in full; any not found are preserved.
+	"""
+	workspaceLookupIncomplete: Boolean!
+}
+
+"""
+What releasing held sources did to the tracked download.
+"""
+enum HeldImportSourcesSettlementValue {
+	"""
+	Verification proved the download complete; it is imported and the client's policy applies.
+	"""
+	IMPORTED
+	"""
+	Verification did not prove the download complete; it returned to import and nothing was cleaned up.
+	"""
+	AWAITING_IMPORT
+	"""
+	The download was not blocked on the hold; its own workflow decides.
+	"""
+	UNCHANGED
+	"""
+	The download is no longer tracked; it is settled when next observed.
+	"""
+	UNTRACKED
+	"""
+	The holds were released but the tracked download could not be reached; releasing again resumes.
+	"""
+	NOT_SETTLED
+	"""
+	A held import may hold content never extracted or imported, and nothing proved every expected file imported; not marked imported, no retry scheduled and nothing cleaned up.
+	"""
+	UNPROVEN
+}
+
+"""
+Why a released import's extraction workspace was preserved.
+"""
+enum HeldWorkspacePreservedValue {
+	"""
+	The workspace's ownership marker could not be authenticated.
+	"""
+	NOT_OWNED
+	"""
+	It contains a symlink, special file, unreadable entry, or too many entries.
+	"""
+	UNSAFE
+	"""
+	A video in it is not recorded, by its path, as imported by the import that owns it.
+	"""
+	HOLDS_UNIMPORTED_VIDEO
+	"""
+	An unfinished import or open manual-import selection may still need it.
+	"""
+	IN_USE
+	"""
+	What was imported from it could not be established.
+	"""
+	UNVERIFIED
+	"""
+	Removal was attempted and the workspace remains.
+	"""
+	REMOVAL_FAILED
+	"""
+	The download was not proven imported, so nothing of it was removed.
+	"""
+	DOWNLOAD_NOT_IMPORTED
+}
+
+"""
 Result of ignoring one pending import.
 """
 type IgnorePendingImportPayload {
@@ -7665,6 +8000,10 @@ enum ImportSkipReasonValue {
 	No video files were found.
 	"""
 	NO_VIDEO_FILES
+	"""
+	No video files were found and the download held only executables.
+	"""
+	UNWANTED_EXECUTABLES
 	"""
 	The download client is still writing or unpacking the source file.
 	"""
@@ -8617,7 +8956,9 @@ type InteractiveReleaseSearchIndexerPayload {
 	"""
 	status: InteractiveReleaseSearchIndexerStatusValue!
 	"""
-	The indexer's own result count (before cross-indexer dedup).
+	The indexer's result count. A title search counts its own batch, before
+	cross-indexer dedup; a query search counts what it contributed to the
+	listing, after exact duplicates are removed.
 	"""
 	resultCount: Int!
 	"""
@@ -8633,6 +8974,14 @@ type InteractiveReleaseSearchIndexerPayload {
 	Searching resumes on its own, so this reads as a cooldown, not an error.
 	"""
 	rateLimited: Boolean!
+	"""
+	Why a skipped indexer was not asked, or null when it was not skipped.
+	"""
+	skipReason: InteractiveReleaseSearchSkipReasonValue
+	"""
+	UTC time a skip that lifts on its own ends, when known.
+	"""
+	skippedUntil: DateTime
 }
 
 """
@@ -8692,6 +9041,28 @@ type InteractiveReleaseSearchPayload {
 }
 
 """
+Why an interactive release search did not ask an indexer.
+"""
+enum InteractiveReleaseSearchSkipReasonValue {
+	"""
+	The indexer is switched off.
+	"""
+	INDEXER_DISABLED
+	"""
+	The indexer's configuration disables it for a while.
+	"""
+	TEMPORARILY_DISABLED
+	"""
+	The indexer is in a backoff after recent failures.
+	"""
+	BACKED_OFF
+	"""
+	The indexer takes no text query.
+	"""
+	NO_TEXT_SEARCH
+}
+
+"""
 Lifecycle state of a background interactive release search.
 """
 enum InteractiveReleaseSearchStateValue {
@@ -8707,29 +9078,6 @@ enum InteractiveReleaseSearchStateValue {
 	Search was canceled before completion.
 	"""
 	CANCELLED
-}
-
-"""
-What a title-less interactive search looks for; picks the search facet and
-the default newznab categories.
-"""
-enum InteractiveSearchKindValue {
-	"""
-	Movie facet search.
-	"""
-	MOVIE
-	"""
-	Series facet search.
-	"""
-	SERIES
-	"""
-	Anime facet search.
-	"""
-	ANIME
-	"""
-	Plain text search with no facet.
-	"""
-	RAW
 }
 
 """
@@ -8819,6 +9167,11 @@ type JobDefinitionPayload {
 	Stable job key.
 	"""
 	key: JobKeyValue!
+	"""
+	ID of the scheduled script behind a `CUSTOM_JOB` definition, or null
+	for built-in jobs.
+	"""
+	customJobId: ID
 	"""
 	Display name of the job.
 	"""
@@ -8977,6 +9330,11 @@ enum JobKeyValue {
 	Location operation: a root move, transfer, or other placement change.
 	"""
 	LOCATION_OPERATION
+	"""
+	A user-defined scheduled script; each script is told apart by its
+	`customJobId`.
+	"""
+	CUSTOM_JOB
 }
 
 """
@@ -8991,6 +9349,11 @@ type JobRunPayload {
 	Stable key of the job being run.
 	"""
 	jobKey: JobKeyValue!
+	"""
+	ID of the scheduled script a `CUSTOM_JOB` run executes, or null for
+	built-in jobs.
+	"""
+	customJobId: ID
 	"""
 	Display name of the job.
 	"""
@@ -9117,6 +9480,14 @@ enum JobScheduleKindValue {
 	Runs once per day at a configured local time.
 	"""
 	DAILY_AT_TIME
+	"""
+	Runs on a five-field crontab expression in host-local time.
+	"""
+	CRON
+	"""
+	Runs on chosen weekdays at a configured local time.
+	"""
+	WEEKLY_AT_TIME
 }
 
 """
@@ -9453,6 +9824,10 @@ Acquisition, import, routing, and filesystem settings for a library.
 """
 input LibrarySettingsInput {
 	"""
+	Ordered release-search languages, independent of metadata and audio.
+	"""
+	searchLanguages: [String!]
+	"""
 	Required audio-language codes; use `original` to resolve per title.
 	"""
 	requiredAudioLanguages: [String!]
@@ -9538,6 +9913,10 @@ input LibrarySettingsInput {
 Effective library settings together with nullable per-library overrides.
 """
 type LibrarySettingsPayload {
+	"""
+	Ordered release-search languages whose localized titles are also queried; empty searches only the primary name.
+	"""
+	searchLanguages: [String!]!
 	"""
 	Library override for required audio language codes; `original` resolves per title.
 	"""
@@ -9868,6 +10247,193 @@ type LinkedAccountPayload {
 }
 
 """
+Where linking with a member's own key left the member: linked, or waiting
+for their approval at the provider. Exactly one field is set.
+"""
+type ListAccountKeyLinkPayload {
+	"""
+	The linked account, when the key alone connects it.
+	"""
+	account: ListAccountPayload
+	"""
+	The session to continue, when the provider still wants the member's approval.
+	"""
+	link: ListAccountLinkPayload
+}
+
+"""
+A short-lived account-link session bound to the current member.
+"""
+type ListAccountLinkPayload {
+	"""
+	Opaque local session identifier.
+	"""
+	sessionId: ID!
+	"""
+	State that must match the callback before completion.
+	"""
+	state: String!
+	"""
+	Provider authorization URL to open.
+	"""
+	authorizeUrl: String!
+	"""
+	Exact origin allowed to send the authorization result.
+	"""
+	authorizationOrigin: String!
+	"""
+	Session expiry time.
+	"""
+	expiresAt: DateTime!
+	"""
+	Whether this provider completes by polling.
+	"""
+	pollRequired: Boolean!
+}
+
+"""
+A linked account visible only to its owner, without credentials.
+"""
+type ListAccountPayload {
+	"""
+	Local account identifier.
+	"""
+	id: ID!
+	"""
+	Provider identifier.
+	"""
+	provider: String!
+	"""
+	Stable account identity returned by the provider.
+	"""
+	externalUserId: String!
+	"""
+	Provider username.
+	"""
+	username: String!
+	"""
+	Optional provider display name.
+	"""
+	displayName: String
+	"""
+	Account health; anything other than ACTIVE needs a reconnect.
+	"""
+	status: UserListAccountStatusValue!
+	"""
+	Safe explanation of an account problem.
+	"""
+	errorMessage: String
+	"""
+	When this account was first linked.
+	"""
+	linkedAt: DateTime!
+	"""
+	When a list last used this account.
+	"""
+	lastUsedAt: DateTime
+	"""
+	Lists owned by this account, populated by the account detail query.
+	"""
+	ownedLists: [ListAccountSourcePayload!]!
+	"""
+	Personal status collections, populated by the account detail query.
+	"""
+	statuses: [ListAccountStatusPayload!]!
+}
+
+"""
+The result of polling a personal account-link session.
+"""
+type ListAccountPollPayload {
+	"""
+	Whether the link completed, is still pending, or should be polled again later.
+	"""
+	status: ListAccountPollStatusValue!
+	"""
+	The linked account when authorization completed.
+	"""
+	account: ListAccountPayload
+}
+
+"""
+The answer to one poll of an account-link session.
+"""
+enum ListAccountPollStatusValue {
+	"""
+	The member has not finished authorizing yet; poll again.
+	"""
+	PENDING
+	"""
+	The account is linked and returned with this answer.
+	"""
+	LINKED
+	"""
+	Another request for the same link is checking the provider; poll again.
+	"""
+	BUSY
+	"""
+	The provider or this instance could not answer just now; poll again more slowly.
+	"""
+	UNAVAILABLE
+	"""
+	The provider asked for fewer requests; poll again later.
+	"""
+	RATE_LIMITED
+}
+
+"""
+One list owned by the linked provider account.
+"""
+type ListAccountSourcePayload {
+	"""
+	The provider's list identifier.
+	"""
+	id: String!
+	"""
+	Display name of the list.
+	"""
+	name: String!
+	"""
+	Media kinds the list contains.
+	"""
+	kinds: [MediaFacetValue!]!
+	"""
+	Source type to use when following this list.
+	"""
+	sourceType: String!
+	"""
+	Provider parameters to use when following this list.
+	"""
+	params: [ListParamPayload!]!
+}
+
+"""
+A personal status collection offered by a provider account.
+"""
+type ListAccountStatusPayload {
+	"""
+	The provider's status identifier.
+	"""
+	key: String!
+	"""
+	Display name of the status.
+	"""
+	label: String!
+	"""
+	Media kinds the status contains.
+	"""
+	kinds: [MediaFacetValue!]!
+	"""
+	Source type to use when following this status.
+	"""
+	sourceType: String!
+	"""
+	Provider parameters to use when following this status.
+	"""
+	params: [ListParamPayload!]!
+}
+
+"""
 The account a provider group's lists need.
 """
 enum ListAuthBadge {
@@ -9988,6 +10554,22 @@ One list filter, as entered. Fields its kind does not use are ignored.
 """
 input ListFilterInput {
 	"""
+	Required Movie, Series, or Anime scope for ratings and canonical exclusions.
+	"""
+	facet: MediaFacetValue
+	"""
+	Whether any rating minimum may pass; defaults to requiring every minimum.
+	"""
+	matchAny: Boolean! = false
+	"""
+	Attributed minimum ratings; an empty group imposes no restriction.
+	"""
+	minimums: [ListRatingMinimumInput!]! = []
+	"""
+	Legacy genre labels without an unambiguous canonical match, retained for correction.
+	"""
+	unresolvedLabels: [String!]! = []
+	"""
 	The filter's kind.
 	"""
 	kind: ListFilterKind!
@@ -10017,6 +10599,30 @@ input ListFilterInput {
 The kind of one list filter.
 """
 enum ListFilterKind {
+	"""
+	Existing specials monitoring policy for new Series or Anime titles.
+	"""
+	MONITOR_SPECIALS
+	"""
+	Existing Anime filler policy: DOWNLOAD_ALL or SKIP_FILLER in values.
+	"""
+	FILLER_POLICY
+	"""
+	Existing Anime recap policy: DOWNLOAD_ALL or SKIP_RECAP in values.
+	"""
+	RECAP_POLICY
+	"""
+	Per-facet rating minimums, matching all sources or at least one source.
+	"""
+	RATINGS
+	"""
+	Exclude titles matching selected canonical genre or theme keys in a facet.
+	"""
+	EXCLUDE_CANONICAL_TAGS
+	"""
+	Exclude titles SMG marks adult in a facet.
+	"""
+	EXCLUDE_ADULT
 	"""
 	The provider's rating is at least `value` on `scale`.
 	"""
@@ -10060,6 +10666,22 @@ One list filter. Only the fields its kind uses are set.
 """
 type ListFilterPayload {
 	"""
+	Movie, Series, or Anime scope for ratings and canonical exclusions.
+	"""
+	facet: MediaFacetValue
+	"""
+	Whether any rating minimum may pass; false requires every minimum.
+	"""
+	matchAny: Boolean!
+	"""
+	Attributed minimum ratings; an empty group imposes no restriction.
+	"""
+	minimums: [ListRatingMinimumPayload!]!
+	"""
+	Legacy genre labels without an unambiguous canonical match, retained for correction.
+	"""
+	unresolvedLabels: [String!]!
+	"""
 	The filter's kind.
 	"""
 	kind: ListFilterKind!
@@ -10083,6 +10705,29 @@ type ListFilterPayload {
 	Genres, formats or languages, for the kinds that take a set.
 	"""
 	values: [String!]!
+}
+
+"""
+The key a member supplies to connect their own account at a provider. The
+key itself is write-only and never returned.
+"""
+type ListMemberKeyPayload {
+	"""
+	Label shown next to the key field.
+	"""
+	label: String!
+	"""
+	Help text, or null.
+	"""
+	helpText: String
+	"""
+	Where the member finds the key at the provider, or null.
+	"""
+	helpUrl: String
+	"""
+	Whether the member still approves at the provider after the key is accepted.
+	"""
+	approval: Boolean!
 }
 
 """
@@ -10118,6 +10763,10 @@ One title on a followed list.
 """
 type ListMembershipPayload {
 	"""
+	Movie entry within the parent library title, when hydrated.
+	"""
+	seriesMovieLinkId: ID
+	"""
 	The provider's own key for the title.
 	"""
 	itemKey: String!
@@ -10142,13 +10791,21 @@ type ListMembershipPayload {
 	"""
 	stateReason: String
 	"""
-	The title as the list names it, or null.
+	The library title's name once the entry is in a library; otherwise the title as the list names it, or null.
 	"""
 	displayTitle: String
 	"""
 	Year as the list gives it, or null.
 	"""
 	year: Int
+	"""
+	Metadata service title the entry was matched to, or null.
+	"""
+	smgTitleId: Int
+	"""
+	Identifiers the list gives for the title.
+	"""
+	externalIds: [ExternalIdPayload!]!
 	"""
 	Library title, or null.
 	"""
@@ -10339,6 +10996,30 @@ One title the next sync would act on.
 """
 type ListPreviewItemPayload {
 	"""
+	Canonical identity of the listed title, independent of its destination.
+	"""
+	canonicalSmgId: Int
+	"""
+	Parent series for an associated movie, or null for a standalone title.
+	"""
+	seriesMovieParentSmgId: Int
+	"""
+	Provider-attributed ratings for the preview flyout.
+	"""
+	externalRatings: [DiscoveryExternalRatingPayload!]!
+	"""
+	Canonical genre and theme display names.
+	"""
+	genresAndThemes: [String!]!
+	"""
+	Original language, when known.
+	"""
+	originalLanguage: String
+	"""
+	Release or first-air date, when known.
+	"""
+	releaseDate: Date
+	"""
 	The provider's own key for the title.
 	"""
 	itemKey: String!
@@ -10415,6 +11096,32 @@ type ListPreviewPayload {
 }
 
 """
+Write-only provider application settings, with secret presence only.
+"""
+type ListProviderAppPayload {
+	"""
+	Provider identifier.
+	"""
+	provider: String!
+	"""
+	Configured OAuth application client identifier.
+	"""
+	clientId: String
+	"""
+	Configured callback URL on this instance.
+	"""
+	redirectUri: String
+	"""
+	Whether a secret is configured; its value is never returned.
+	"""
+	clientSecretSet: Boolean!
+	"""
+	Whether the operator's application overrides the default linking flow.
+	"""
+	enabled: Boolean!
+}
+
+"""
 A group of a provider's lists that need the same account.
 """
 type ListProviderGroupPayload {
@@ -10485,7 +11192,7 @@ type ListProviderNotePayload {
 }
 
 """
-A provider public lists can be followed from.
+A provider public or personal lists can be followed from.
 """
 type ListProviderPayload {
 	"""
@@ -10530,6 +11237,11 @@ type ListProviderPayload {
 	is never included here.
 	"""
 	configFields: [ListProviderSettingFieldPayload!]!
+	"""
+	The key each member supplies to connect their own account, or null
+	when accounts are connected by signing in at the provider.
+	"""
+	memberKey: ListMemberKeyPayload
 }
 
 """
@@ -10620,6 +11332,34 @@ type ListProviderTilePayload {
 	Short label shown on the tile.
 	"""
 	abbr: String!
+}
+
+"""
+A minimum rating to require from one supported rating source.
+"""
+input ListRatingMinimumInput {
+	"""
+	Supported rating source identifier; registered aliases are normalized.
+	"""
+	source: String!
+	"""
+	Inclusive minimum on the named source's native rating scale.
+	"""
+	value: Float!
+}
+
+"""
+A minimum rating from one attributed rating source.
+"""
+type ListRatingMinimumPayload {
+	"""
+	Canonical identifier of the rating source.
+	"""
+	source: String!
+	"""
+	Inclusive minimum on the named source's native rating scale.
+	"""
+	value: Float!
 }
 
 """
@@ -10726,6 +11466,10 @@ A list source to preview.
 """
 input ListSourceInput {
 	"""
+	Linked account owned by the caller, required for personal source previews.
+	"""
+	credentialId: ID
+	"""
 	Provider key; with `sourceType`, names the source directly.
 	"""
 	provider: String
@@ -10810,7 +11554,7 @@ type ListSourcePayload {
 }
 
 """
-A followed public list.
+A followed public list or a personal list owned by the current member.
 """
 type ListSubscriptionPayload {
 	"""
@@ -10818,7 +11562,7 @@ type ListSubscriptionPayload {
 	"""
 	id: ID!
 	"""
-	Always `PUBLIC` here.
+	`PUBLIC` for an instance list or `PERSONAL` for the current member's list.
 	"""
 	scope: ListScope!
 	"""
@@ -10881,6 +11625,10 @@ type ListSubscriptionPayload {
 	When the list's settings last changed.
 	"""
 	updatedAt: DateTime!
+	"""
+	The linked account a personal list is read through; null for a public list.
+	"""
+	accountId: ID
 }
 
 """
@@ -15671,6 +16419,11 @@ type MediaRenamePlanPayload {
 	"""
 	errors: Int!
 	"""
+	Number of titles with nothing to move whose recorded folder is not a
+	title folder; applying the plan records the planned folder for them.
+	"""
+	folderRepairs: Int!
+	"""
 	Plan items in deterministic service order.
 	"""
 	items: [MediaRenamePlanItemPayload!]!
@@ -16959,6 +17712,18 @@ type MetadataMoviePayload {
 	TMDB release date, or null when unavailable.
 	"""
 	tmdbReleaseDate: Date
+	"""
+	Host address of the backdrop image, or null when the title has none.
+	"""
+	backgroundUrl: String
+	"""
+	Ratings from external sources; empty when none are known.
+	"""
+	externalRatings: [DiscoveryExternalRatingPayload!]!
+	"""
+	Genre and theme names; empty when none are known.
+	"""
+	genresAndThemes: [String!]!
 }
 
 """
@@ -17195,6 +17960,18 @@ type MetadataSeriesPayload {
 	Companion movies reported for an anime series; empty for other series.
 	"""
 	animeMovies: [MetadataAnimeMoviePayload!]!
+	"""
+	Host address of the backdrop image, or null when the title has none.
+	"""
+	backgroundUrl: String
+	"""
+	Ratings from external sources; empty when none are known.
+	"""
+	externalRatings: [DiscoveryExternalRatingPayload!]!
+	"""
+	Genre and theme names; empty when none are known.
+	"""
+	genresAndThemes: [String!]!
 }
 
 """
@@ -17547,6 +18324,15 @@ type MutationRoot {
 		input: UpdateSeriesMovieTagsInput!
 	): [SeriesMovieLinkPayload!]!
 	"""
+	Retry a failed download client job once with a new archive password; requires import-resolution permission on the download's library.
+	"""
+	retryDownloadPassword(
+		"""
+		Download and client job to retry, with the replacement password.
+		"""
+		input: RetryDownloadPasswordInput!
+	): DownloadPasswordRetryPayload!
+	"""
 	Evaluate an external announcement using normal automatic acquisition rules.
 	"""
 	submitExternalRelease(
@@ -17631,6 +18417,15 @@ type MutationRoot {
 		input: RetryImportInput!
 	): ImportResultPayload!
 	"""
+	Release the sources a completed import is holding.
+	"""
+	releaseHeldImportSources(
+		"""
+		Completed import that is holding its download's sources. Clears the holds of every import of that download together, settles the download through import verification so the download client's removal policy applies only once it is proven imported, and removes the released imports' extraction workspaces only when every video in them was imported and nothing else uses them; any other workspace is preserved.
+		"""
+		input: ReleaseHeldImportSourcesInput!
+	): HeldImportSourcesReleasedPayload!
+	"""
 	Cancel a queued or copying import operation by its server-issued stream identity.
 	"""
 	cancelActiveImport(
@@ -17694,13 +18489,18 @@ type MutationRoot {
 		input: DeleteDownloadInput!
 	): DownloadQueueActionPayload!
 	"""
-	Start the configured background job and return its accepted run snapshot.
+	Start the configured background job, or a scheduled script when the key is
+	`CUSTOM_JOB`, and return its accepted run snapshot.
 	"""
 	triggerJob(
 		"""
 		Job key identifying the server-side job to start.
 		"""
-		jobKey: JobKeyValue!
+		jobKey: JobKeyValue!,
+		"""
+		Scheduled script to run; required with `CUSTOM_JOB` and rejected with any other key.
+		"""
+		customJobId: ID
 	): JobRunPayload!
 	"""
 	Create an indexer configuration with provider, routing, and search defaults.
@@ -17949,9 +18749,18 @@ type MutationRoot {
 	"""
 	setMyUiSettings(
 		"""
-		Complete UI settings to save; omitted or null date_time_format keeps its current value.
+		Complete UI settings to save; omitted or null date_time_format, language or table_columns keeps its current value.
 		"""
 		input: SetMyUiSettingsInput!
+	): UiSettingsPayload!
+	"""
+	Saves the authenticated actor's catalog view mode and columns for one device class and facet, leaving every other layout unchanged.
+	"""
+	setMyCatalogView(
+		"""
+		Layout to save; a null view mode or column list keeps the saved value.
+		"""
+		input: SetMyCatalogViewInput!
 	): UiSettingsPayload!
 	"""
 	Saves subtitle preferences after checking the catalog-settings permission.
@@ -18876,6 +19685,15 @@ type MutationRoot {
 		requestId: ID!
 	): MediaRequestActionPayload!
 	"""
+	Put a dismissed media request back into the queue as pending, keeping its requester and creation date.
+	"""
+	reopenMediaRequest(
+		"""
+		Request identity to reopen.
+		"""
+		requestId: ID!
+	): MediaRequestActionPayload!
+	"""
 	Update the caller's pending request preferences and return the current request.
 	"""
 	updateMyMediaRequest(
@@ -19383,6 +20201,19 @@ type MutationRoot {
 		input: ReleaseTitleClaimInput!
 	): TitleClaim!
 	"""
+	Replace or clear explicitly supplied installation-wide settings.
+	"""
+	updateInstalledPluginSettings(
+		"""
+		Installed plugin ID whose settings are changed.
+		"""
+		pluginId: ID!,
+		"""
+		Object mapping declared setting keys to a new value, or null to clear the stored value; omitted keys are unchanged and unknown keys are rejected.
+		"""
+		changes: JSON!
+	): JSON!
+	"""
 	Refresh the configured plugin registry catalogs and return the available plugins.
 	"""
 	refreshPluginCatalog: [RegistryPluginPayload!]!
@@ -19644,7 +20475,7 @@ type MutationRoot {
 		input: ExecuteExternalImportInput!
 	): ExternalImportResultPayload!
 	"""
-	Create an enabled post-processing script after validating its type and content.
+	Create a post-processing script, enabled unless the input says otherwise, after validating its type, content, and schedule.
 	"""
 	createPostProcessingScript(
 		"""
@@ -19683,6 +20514,15 @@ type MutationRoot {
 		"""
 		inlineShellAcknowledged: Boolean
 	): PostProcessingScriptPayload!
+	"""
+	Replace the interpreters operator scripts are launched with; null or an empty string restores the default command.
+	"""
+	updateScriptInterpreterSettings(
+		"""
+		Interpreter path or command for each script language.
+		"""
+		input: ScriptInterpreterSettingsInput!
+	): ScriptInterpreterSettingsPayload!
 	"""
 	Search configured providers for subtitles matching a media file, and
 	report why the search returned what it did.
@@ -19772,7 +20612,7 @@ type MutationRoot {
 	"""
 	startInteractiveReleaseSearch(
 		"""
-		Either a title (with an optional series-movie link, a season alone for the whole season, or a season and episode) or a raw query and kind, plus an optional indexer restriction, categories and result limit.
+		Either a title (with an optional series-movie link, a season alone for the whole season, or a season and episode) or a raw query, plus an optional indexer restriction, categories and limit.
 		"""
 		input: SearchReleasesInput!
 	): InteractiveReleaseSearchPayload!
@@ -19805,21 +20645,131 @@ type MutationRoot {
 		input: QueueUnlinkedReleaseInput!
 	): QueueUnlinkedReleasePayload!
 	"""
-	Follow a public list. Its first sync is due at once.
+	Start linking a provider account to the current member from an approved instance origin.
+	"""
+	startListAccountLink(
+		"""
+		Provider whose account is being linked.
+		"""
+		provider: String!,
+		"""
+		Exact browser origin approved by the instance public URL or local listening address.
+		"""
+		origin: String!
+	): ListAccountLinkPayload!
+	"""
+	Link the current member's account with a key they supply, for a provider whose manifest
+	declares a member key. The key is stored encrypted on that member's account and is never
+	returned.
+	"""
+	linkListAccountWithKey(
+		"""
+		Provider whose account is being linked.
+		"""
+		provider: String!,
+		"""
+		Write-only key the member copied from the provider.
+		"""
+		key: String!,
+		"""
+		Exact browser origin approved by the instance public URL or local listening address. Needed when the provider still asks for the member's approval.
+		"""
+		origin: String
+	): ListAccountKeyLinkPayload!
+	"""
+	Poll an account authorization session owned by the current member.
+	"""
+	pollListAccountLink(
+		"""
+		Opaque session returned when linking started.
+		"""
+		sessionId: ID!
+	): ListAccountPollPayload!
+	"""
+	Abandon an account authorization session owned by the current member.
+	Answers true whether or not the session still existed.
+	"""
+	cancelListAccountLink(
+		"""
+		Opaque session returned when linking started.
+		"""
+		sessionId: ID!
+	): Boolean!
+	"""
+	Consume an owned authorization session and link the verified provider identity.
+	"""
+	completeListAccountLink(
+		"""
+		Opaque session returned when linking started.
+		"""
+		sessionId: ID!,
+		"""
+		State returned by authorization.
+		"""
+		state: String!,
+		"""
+		Provider bound to this session.
+		"""
+		provider: String!,
+		"""
+		One-use authorization code or sealed exchange receipt.
+		"""
+		code: String!,
+		"""
+		Provider issuer, required for Simkl.
+		"""
+		issuer: String
+	): ListAccountPayload!
+	"""
+	Remove an owned account and its follows while preserving library media.
+	"""
+	unlinkListAccount(
+		"""
+		ID of an account owned by the current member.
+		"""
+		id: ID!
+	): ID!
+	"""
+	Save an optional OAuth application for Trakt, AniList or MyAnimeList.
+	"""
+	updateListProviderApp(
+		"""
+		Provider whose OAuth application is being configured.
+		"""
+		provider: String!,
+		"""
+		Application client identifier; omitted retains the current value.
+		"""
+		clientId: String,
+		"""
+		Write-only application secret; omitted retains the current value.
+		"""
+		clientSecret: String,
+		"""
+		Callback URL on this instance.
+		"""
+		redirectUri: String,
+		"""
+		Whether to use this application instead of the default flow.
+		"""
+		enabled: Boolean!
+	): ListProviderAppPayload!
+	"""
+	Follow a public list or a personal list from an owned account. Its first sync is due at once.
 	"""
 	subscribeList(
 		"""
-		The list to follow and how its titles are handled.
+		The public or personal list to follow and how its titles are handled.
 		"""
 		input: SubscribeListInput!
 	): ListSubscriptionPayload!
 	"""
-	Change a followed public list's settings. Omitted fields stay as they
+	Change a followed public list or an owned personal list. Omitted fields stay as they
 	are.
 	"""
 	updateListSubscription(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!,
 		"""
@@ -19828,12 +20778,12 @@ type MutationRoot {
 		input: UpdateListSubscriptionInput!
 	): ListSubscriptionPayload!
 	"""
-	Turn a followed public list off or back on. Turning it on makes it due
+	Turn a followed public list or an owned personal list off or back on. Turning it on makes it due
 	at once.
 	"""
 	setListSubscriptionEnabled(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!,
 		"""
@@ -19842,30 +20792,31 @@ type MutationRoot {
 		enabled: Boolean!
 	): ListSubscriptionPayload!
 	"""
-	Make one followed public list due now and start a sync.
+	Make one followed public list or an owned personal list due now and start a sync.
 	"""
 	syncListSubscription(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!
 	): ListSyncEnqueuedPayload!
 	"""
-	Make every enabled public list due now and start a sync.
+	Make every enabled list in the selected scope due now and start a sync.
+	Personal scope includes only lists owned by the current member.
 	"""
 	syncAllLists(
 		"""
-		Must be `PUBLIC` or omitted.
+		PUBLIC or omitted syncs instance public lists; PERSONAL syncs only the current member's personal lists.
 		"""
 		scope: ListScope
 	): ListSyncEnqueuedPayload!
 	"""
-	Stop following a public list. Every title and request it made stays.
+	Stop following a public list or an owned personal list. Every title and request it made stays.
 	Returns the ID of the list.
 	"""
 	unsubscribeList(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!
 	): ID!
@@ -20327,6 +21278,46 @@ type ParsedStereoscopyPayload {
 	Optional stereoscopic encoding, independent of packing layout.
 	"""
 	encoding: StereoEncodingValue
+}
+
+"""
+What saving a public URL would do to passkeys after the next restart.
+"""
+enum PasskeyImpactValue {
+	"""
+	Passkeys do not come from the public URL, so the change cannot affect them.
+	"""
+	UNAFFECTED
+	"""
+	The relying party stays the same.
+	"""
+	UNCHANGED
+	"""
+	Passkeys move to a different domain; existing passkeys stop working.
+	"""
+	CHANGED
+	"""
+	The new value cannot carry passkeys; passkeys turn off.
+	"""
+	DISABLED
+}
+
+"""
+Where the running passkey relying party comes from.
+"""
+enum PasskeyRelyingPartySourceValue {
+	"""
+	The SCRYER_WEBAUTHN_RP_ID and SCRYER_WEBAUTHN_RP_ORIGIN variables.
+	"""
+	ENVIRONMENT
+	"""
+	Derived from the public URL because both variables were unset.
+	"""
+	PUBLIC_URL
+	"""
+	Passkeys are not configured.
+	"""
+	NONE
 }
 
 """
@@ -21294,6 +22285,26 @@ type PostProcessingScriptPayload {
 	"""
 	debug: Boolean!
 	"""
+	Language of inline script content.
+	"""
+	language: ScriptLanguageValue!
+	"""
+	What starts the script.
+	"""
+	trigger: ScriptTriggerValue!
+	"""
+	Schedule of a scheduled script, or null for import-triggered scripts.
+	"""
+	schedule: ScriptSchedulePayload
+	"""
+	Whether a scheduled script also runs once when the host starts.
+	"""
+	runOnStartup: Boolean!
+	"""
+	Short description of the schedule, or null when the script has none.
+	"""
+	scheduleDescription: String
+	"""
 	Creation time in UTC.
 	"""
 	createdAt: DateTime!
@@ -21797,6 +22808,90 @@ type ProxyTestResultPayload {
 }
 
 """
+What saving a proposed public URL would do, without saving it.
+"""
+type PublicUrlChangePreviewPayload {
+	"""
+	The value as it would be stored; null for a reset or a rejected value.
+	"""
+	normalizedPublicUrl: String
+	"""
+	Why the value would be refused.
+	"""
+	error: String
+	"""
+	Stable reason for error, for localized messages.
+	"""
+	errorCode: PublicUrlErrorCodeValue
+	"""
+	Effect on passkeys after the next restart.
+	"""
+	passkeyImpact: PasskeyImpactValue!
+	"""
+	Passkey relying-party ID in effect now.
+	"""
+	currentPasskeyRpId: String
+	"""
+	Passkey relying-party ID after the next restart; null when passkeys would be off.
+	"""
+	nextPasskeyRpId: String
+	"""
+	Users with at least one passkey; null when the count could not be read.
+	"""
+	passkeyUserCount: Int
+	"""
+	Users whose only second factor is a passkey; null when unknown.
+	"""
+	passkeyOnlyUserCount: Int
+	"""
+	Whether the save must set acknowledgePasskeyImpact.
+	"""
+	acknowledgementRequired: Boolean!
+}
+
+"""
+Stable reason a public URL is rejected, for localized messages.
+"""
+enum PublicUrlErrorCodeValue {
+	"""
+	Not an absolute http or https URL with a host.
+	"""
+	INVALID_URL
+	"""
+	The host contains a wildcard.
+	"""
+	WILDCARD_HOST
+	"""
+	The URL carries a username or password.
+	"""
+	CREDENTIALS
+	"""
+	The URL carries a query or fragment.
+	"""
+	QUERY_OR_FRAGMENT
+	"""
+	A path was given while the instance is served at the root.
+	"""
+	PATH_NOT_ALLOWED
+	"""
+	The path differs from the base path the instance serves under.
+	"""
+	PATH_MISMATCH
+	"""
+	SCRYER_PUBLIC_URL sets the public URL, so it cannot be changed here.
+	"""
+	ENVIRONMENT_LOCKED
+	"""
+	A save and a reset were requested together.
+	"""
+	SAVE_AND_RESET
+	"""
+	The change breaks registered passkeys and was not acknowledged.
+	"""
+	PASSKEY_ACKNOWLEDGEMENT_REQUIRED
+}
+
+"""
 Quality constraints and scoring rules for release selection.
 """
 input QualityProfileCriteriaInput {
@@ -22170,7 +23265,11 @@ type QueryRoot {
 		"""
 		Restrict requests to one status; omitted includes all statuses.
 		"""
-		status: MediaRequestStatusValue
+		status: MediaRequestStatusValue,
+		"""
+		Restrict requests to those this user is a requester on; omitted includes every requester.
+		"""
+		requesterUserId: ID
 	): [MediaRequestPayload!]!
 	"""
 	List only the caller's media requests, optionally filtered by facet, libraries, and status.
@@ -22728,13 +23827,18 @@ type QueryRoot {
 	"""
 	activeJobRuns: [JobRunPayload!]!
 	"""
-	List recent runs for one job key; the limit defaults to 10 and values below 1 become 1.
+	List recent runs for one job key, or for one scheduled script when the key is
+	`CUSTOM_JOB`; the limit defaults to 10 and values below 1 become 1.
 	"""
 	jobRuns(
 		"""
 		Job key whose runs should be listed.
 		"""
 		jobKey: JobKeyValue!,
+		"""
+		Scheduled script whose runs should be listed; required with `CUSTOM_JOB` and rejected with any other key.
+		"""
+		customJobId: ID,
 		"""
 		Maximum runs to return; defaults to 10 and values below 1 become 1.
 		"""
@@ -23072,6 +24176,21 @@ type QueryRoot {
 	Returns service TLS configuration and related settings.
 	"""
 	serviceSettings: ServiceSettingsPayload!
+	"""
+	Previews saving a public URL, or clearing it, without saving: the
+	stored form, any refusal, and the effect on passkeys after the next
+	restart.
+	"""
+	publicUrlChangePreview(
+		"""
+		Proposed public URL; omit it and set reset to preview clearing.
+		"""
+		publicUrl: String,
+		"""
+		Preview clearing the saved public URL.
+		"""
+		reset: Boolean
+	): PublicUrlChangePreviewPayload!
 	"""
 	Returns quality profiles and the current global and facet selections.
 	"""
@@ -23525,9 +24644,23 @@ type QueryRoot {
 		titleId: ID!
 	): [TitleClaim!]!
 	"""
-	List post-processing scripts visible to the caller.
+	List post-processing scripts visible to the caller, optionally only those with one trigger.
 	"""
-	postProcessingScripts: [PostProcessingScriptPayload!]!
+	postProcessingScripts(
+		"""
+		Only return scripts started by this trigger; null returns every script.
+		"""
+		trigger: ScriptTriggerValue
+	): [PostProcessingScriptPayload!]!
+	"""
+	Check a script schedule before saving it and preview its next three fire times.
+	"""
+	validateScriptSchedule(
+		"""
+		Schedule to check.
+		"""
+		schedule: ScriptScheduleInput!
+	): ScriptScheduleValidationPayload!
 	"""
 	List runs for one post-processing script; the limit defaults to 50 and is clamped to 1 through 500.
 	"""
@@ -23541,6 +24674,19 @@ type QueryRoot {
 		"""
 		limit: Int
 	): [PostProcessingScriptRunPayload!]!
+	"""
+	Interpreters operator scripts are launched with; null fields use the default command.
+	"""
+	scriptInterpreterSettings: ScriptInterpreterSettingsPayload!
+	"""
+	Read the installed plugin's settings declaration and redacted values.
+	"""
+	installedPluginSettings(
+		"""
+		Installed plugin ID whose settings are returned.
+		"""
+		pluginId: ID!
+	): JSON!
 	"""
 	List available registry plugins visible to the caller.
 	"""
@@ -23767,7 +24913,37 @@ type QueryRoot {
 		id: ID!
 	): IndexerErrorDetailPayload
 	"""
-	Every provider a public list can be followed from, with the lists each
+	Read the canonical vocabulary, refreshing stale snapshots on demand.
+	"""
+	canonicalTagVocabulary(
+		"""
+		Explicitly refresh the snapshot, bypassing retry delay while sharing any in-flight request.
+		"""
+		retry: Boolean! = false
+	): CanonicalTagVocabularyPayload!
+	"""
+	Linked accounts owned by the current member. Credentials are never returned.
+	"""
+	myListAccounts: [ListAccountPayload!]!
+	"""
+	Refresh an owned account's provider identity and available personal lists.
+	"""
+	listAccount(
+		"""
+		ID of an account owned by the current member.
+		"""
+		id: ID!
+	): ListAccountPayload!
+	"""
+	Optional operator-owned OAuth applications. Secrets are write-only.
+	"""
+	listProviderApps: [ListProviderAppPayload!]!
+	"""
+	Personal lists followed by the current member.
+	"""
+	myListSubscriptions: [ListSubscriptionPayload!]!
+	"""
+	Every provider public or personal lists can be followed from, with the lists each
 	offers and the link shapes it is recognised by.
 	"""
 	listProviders: [ListProviderPayload!]!
@@ -23783,20 +24959,21 @@ type QueryRoot {
 	"""
 	listSubscriptions: [ListSubscriptionPayload!]!
 	"""
-	One followed public list, or null when there is none with that ID.
+	One followed public list or a personal list owned by the current member.
+	Returns null when no list has that ID.
 	"""
 	listSubscription(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!
 	): ListSubscriptionPayload
 	"""
-	A page of the titles currently on a followed public list, in list order.
+	A page of titles on a followed public list or an owned personal list, in list order.
 	"""
 	listSubscriptionMemberships(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		id: ID!,
 		"""
@@ -23809,27 +24986,39 @@ type QueryRoot {
 		offset: Int
 	): ListMembershipPagePayload!
 	"""
-	A followed public list's recent syncs, newest first.
+	Recent syncs of a followed public list or an owned personal list, newest first.
 	"""
 	listSyncRuns(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
 		subscriptionId: ID!,
 		"""
-		Most syncs to return, from 1 through 100; defaults to 20.
+		Most syncs to return, from 1 through 1000; defaults to 20.
 		"""
 		limit: Int
 	): [ListSyncRunPayload!]!
 	"""
-	What the next sync of a followed public list would do. Requires list
-	management permission.
+	What the next sync of a followed public list or an owned personal list would do.
+	Public-list previews require list management permission.
 	"""
 	listSubscriptionPreview(
 		"""
-		ID of the followed public list.
+		ID of a public list or a personal list owned by the current member.
 		"""
-		id: ID!
+		id: ID!,
+		"""
+		Draft filter override for this preview; omitted uses the saved filters.
+		"""
+		filters: [ListFilterInput!],
+		"""
+		Draft facet override for this preview; omitted uses the saved facets.
+		"""
+		kinds: [MediaFacetValue!],
+		"""
+		Draft per-sync cap; omitted keeps the saved cap, null removes it.
+		"""
+		maxPerSync: Int
 	): ListPreviewPayload!
 	"""
 	What following the list at a link would do. An unknown link answers
@@ -23842,14 +25031,26 @@ type QueryRoot {
 		url: String!
 	): ListPreviewPayload!
 	"""
-	What following a list source would do. Requires list management
-	permission.
+	What following a public source or a source from an owned account would do.
+	Public-source previews require list management permission.
 	"""
 	listSourcePreview(
 		"""
-		The provider, source type and parameters, or a link.
+		The provider, source type and parameters, or a link; personal sources also require an owned linked account.
 		"""
-		input: ListSourceInput!
+		input: ListSourceInput!,
+		"""
+		Draft filters to evaluate before following the list; defaults to no filters.
+		"""
+		filters: [ListFilterInput!]! = [],
+		"""
+		Draft facets to preview; omitted uses the source's available facets.
+		"""
+		kinds: [MediaFacetValue!],
+		"""
+		Draft per-sync cap; omitted or null means unlimited.
+		"""
+		maxPerSync: Int
 	): ListPreviewPayload!
 	"""
 	Titles no list may add.
@@ -24523,6 +25724,16 @@ type ReleaseDecisionsPagePayload {
 	Whether another page exists after this page.
 	"""
 	hasMore: Boolean!
+}
+
+"""
+Requests releasing the sources a completed import is holding.
+"""
+input ReleaseHeldImportSourcesInput {
+	"""
+	Completed import record ID whose held sources are released.
+	"""
+	importId: ID!
 }
 
 """
@@ -25307,6 +26518,32 @@ type ResumeWantedItemPayload {
 }
 
 """
+Replacement archive password for one failed download client job.
+"""
+input RetryDownloadPasswordInput {
+	"""
+	Canonical Scryer download ID of the submission whose job is retried.
+	"""
+	downloadId: ID!
+	"""
+	Download client ID that owns the failed job; required for a retry.
+	"""
+	clientId: ID!
+	"""
+	Download client type; only `sabnzbd`, `nzbget`, and `weaver` support password retries.
+	"""
+	clientType: String!
+	"""
+	Client-side item ID of the failed job.
+	"""
+	downloadClientItemId: String!
+	"""
+	New archive password to try; must not be empty. Write-only: it is never returned or logged.
+	"""
+	password: String!
+}
+
+"""
 Requests retrying one import record, optionally supplying an archive password.
 """
 input RetryImportInput {
@@ -25944,6 +27181,40 @@ input ScanLibraryInput {
 }
 
 """
+Day of the week for weekly schedules.
+"""
+enum ScheduleWeekdayValue {
+	"""
+	Monday.
+	"""
+	MONDAY
+	"""
+	Tuesday.
+	"""
+	TUESDAY
+	"""
+	Wednesday.
+	"""
+	WEDNESDAY
+	"""
+	Thursday.
+	"""
+	THURSDAY
+	"""
+	Friday.
+	"""
+	FRIDAY
+	"""
+	Saturday.
+	"""
+	SATURDAY
+	"""
+	Sunday.
+	"""
+	SUNDAY
+}
+
+"""
 One scoring rule contribution used in a quality decision.
 """
 type ScoringEntryPayload {
@@ -26044,6 +27315,191 @@ enum ScoringPersonaValue {
 }
 
 """
+Interpreter pin changes for operator scripts. An omitted field keeps the
+current pin; null or an empty string clears it.
+"""
+input ScriptInterpreterSettingsInput {
+	"""
+	Python interpreter path or command, or null to use `python3`.
+	"""
+	python: String
+	"""
+	PowerShell interpreter path or command, or null to use `pwsh`.
+	"""
+	powershell: String
+	"""
+	Batch interpreter path or command, or null to use `COMSPEC` or `cmd.exe`.
+	"""
+	batch: String
+	"""
+	Go toolchain path or command, or null to use `go`.
+	"""
+	go: String
+}
+
+"""
+Interpreters operator scripts are launched with.
+"""
+type ScriptInterpreterSettingsPayload {
+	"""
+	Python interpreter path or command, or null to use `python3`.
+	"""
+	python: String
+	"""
+	PowerShell interpreter path or command, or null to use `pwsh`.
+	"""
+	powershell: String
+	"""
+	Batch interpreter path or command, or null to use `COMSPEC` or `cmd.exe`.
+	"""
+	batch: String
+	"""
+	Go toolchain path or command, or null to use `go`.
+	"""
+	go: String
+}
+
+"""
+Language an inline script is written in; selects its interpreter.
+"""
+enum ScriptLanguageValue {
+	"""
+	Shell script.
+	"""
+	SHELL
+	"""
+	Python 3.
+	"""
+	PYTHON
+	"""
+	PowerShell.
+	"""
+	POWERSHELL
+	"""
+	Windows batch file.
+	"""
+	BATCH
+	"""
+	Go source file.
+	"""
+	GO
+}
+
+"""
+Schedule for a scheduled script. Only the fields of the chosen kind are read.
+"""
+input ScriptScheduleInput {
+	"""
+	Schedule shape.
+	"""
+	kind: ScriptScheduleKindValue!
+	"""
+	Interval length in seconds, at least 60. Required for `INTERVAL`.
+	"""
+	everySeconds: Int
+	"""
+	Host-local time of day as 24-hour `HH:MM`. Required for `DAILY` and `WEEKLY`.
+	"""
+	timeLocal: String
+	"""
+	Days to run on. Required for `WEEKLY`.
+	"""
+	days: [ScheduleWeekdayValue!]
+	"""
+	Five-field crontab expression in host-local time. Required for `CRON`.
+	"""
+	expression: String
+}
+
+"""
+Shape of a script schedule.
+"""
+enum ScriptScheduleKindValue {
+	"""
+	Runs only when started by hand.
+	"""
+	MANUAL
+	"""
+	Repeats every `everySeconds` seconds.
+	"""
+	INTERVAL
+	"""
+	Runs once a day at `timeLocal`.
+	"""
+	DAILY
+	"""
+	Runs on each of `days` at `timeLocal`.
+	"""
+	WEEKLY
+	"""
+	Runs on a five-field crontab `expression`.
+	"""
+	CRON
+}
+
+"""
+Stored schedule of a scheduled script.
+"""
+type ScriptSchedulePayload {
+	"""
+	Schedule shape.
+	"""
+	kind: ScriptScheduleKindValue!
+	"""
+	Interval length in seconds, for `INTERVAL`.
+	"""
+	everySeconds: Int
+	"""
+	Host-local time of day as `HH:MM`, for `DAILY` and `WEEKLY`.
+	"""
+	timeLocal: String
+	"""
+	Days to run on, for `WEEKLY`.
+	"""
+	days: [ScheduleWeekdayValue!]
+	"""
+	Crontab expression, for `CRON`.
+	"""
+	expression: String
+}
+
+"""
+Result of checking a schedule before saving it.
+"""
+type ScriptScheduleValidationPayload {
+	"""
+	Whether the schedule can be saved.
+	"""
+	valid: Boolean!
+	"""
+	Why the schedule is invalid, or null when it is valid.
+	"""
+	error: String
+	"""
+	Short description of the schedule; the raw expression for cron schedules.
+	"""
+	description: String
+	"""
+	The next three fire times, empty for manual or invalid schedules.
+	"""
+	nextRuns: [DateTime!]!
+}
+
+"""
+What starts a script.
+"""
+enum ScriptTriggerValue {
+	"""
+	The import pipeline, after a file lands in the library.
+	"""
+	POST_IMPORT
+	"""
+	The job scheduler, on the script's own schedule.
+	"""
+	SCHEDULE
+}
+
+"""
 Filters for an interactive release search. Exactly one of `titleId` and
 `query` names the subject.
 """
@@ -26067,23 +27523,21 @@ input SearchReleasesInput {
 	"""
 	episode: String
 	"""
-	Optional result limit; the resolver applies its own default and cap.
+	Optional limit. A title search lists at most this many results
+	(default 50, max 200); a `query` search asks each indexer for this many
+	(default 100, 1 to 500) and lists everything returned.
 	"""
 	limit: Int
 	"""
-	Raw operator query searched without a catalog title.
+	Raw operator query sent as typed to each indexer, without a catalog title.
 	"""
 	query: String
-	"""
-	Search kind; required with `query`.
-	"""
-	kind: InteractiveSearchKindValue
 	"""
 	Optional indexer configuration identities to restrict the search to.
 	"""
 	indexerIds: [ID!]
 	"""
-	Optional newznab categories; the kind's defaults apply when omitted.
+	Optional newznab categories a `query` search sends as given; none when omitted.
 	"""
 	categories: [String!]
 }
@@ -26379,6 +27833,66 @@ type ServiceSettingsPayload {
 	Whether the effective policy comes from settings or environment.
 	"""
 	trustedProxySource: String!
+	"""
+	Effective public URL; null when unset or invalid.
+	"""
+	publicUrl: String
+	"""
+	Where the public URL comes from.
+	"""
+	publicUrlSource: ConfigValueSourceValue!
+	"""
+	Saved public URL, shown even while the environment overrides it.
+	"""
+	publicUrlSaved: String
+	"""
+	Why the configured public URL is not in effect, when it is invalid.
+	"""
+	publicUrlError: String
+	"""
+	Stable reason for public_url_error, for localized messages.
+	"""
+	publicUrlErrorCode: PublicUrlErrorCodeValue
+	"""
+	False while SCRYER_PUBLIC_URL is set, because the environment wins.
+	"""
+	publicUrlEditable: Boolean!
+	"""
+	Base path the instance serves under; empty at the root.
+	"""
+	basePath: String!
+	"""
+	Where the base path comes from; never the saved settings.
+	"""
+	basePathSource: ConfigValueSourceValue!
+	"""
+	Listening address and port.
+	"""
+	bindAddress: String!
+	"""
+	Where the listening address comes from; never the saved settings.
+	"""
+	bindSource: ConfigValueSourceValue!
+	"""
+	Passkey relying-party ID in effect since startup.
+	"""
+	passkeyRpId: String
+	"""
+	Passkey relying-party origin in effect since startup.
+	"""
+	passkeyRpOrigin: String
+	"""
+	Where the passkey relying party comes from.
+	"""
+	passkeyRpSource: PasskeyRelyingPartySourceValue!
+	"""
+	Users with at least one passkey; null when the count could not be read.
+	"""
+	passkeyUserCount: Int
+	"""
+	Users whose only second factor is a passkey; null when unknown.
+	"""
+	passkeyOnlyUserCount: Int
 }
 
 """
@@ -26550,6 +28064,28 @@ input SetMinimumSeedersFloorInput {
 }
 
 """
+The caller's catalog layout for one device class and facet.
+"""
+input SetMyCatalogViewInput {
+	"""
+	Device class the layout was chosen on.
+	"""
+	deviceClass: UiDeviceClassValue!
+	"""
+	Media facet the layout applies to.
+	"""
+	facet: UiSettingsFacetValue!
+	"""
+	Optional view mode; null preserves the saved value.
+	"""
+	viewMode: UiCatalogViewModeValue
+	"""
+	Optional complete column list for this device class and facet; null preserves the saved columns.
+	"""
+	columns: [UiCatalogColumnInput!]
+}
+
+"""
 Complete caller presentation-preferences update.
 """
 input SetMyUiSettingsInput {
@@ -26594,9 +28130,13 @@ input SetMyUiSettingsInput {
 	"""
 	defaultLandingView: UiDefaultLandingViewValue!
 	"""
-	Complete table-column setting list; empty clears all saved column settings.
+	Optional interface language code; null preserves the saved value and an empty string clears it.
 	"""
-	tableColumns: [UiTableColumnSettingInput!]!
+	language: String
+	"""
+	Optional complete table-column setting list; null preserves the saved columns and an empty list clears them.
+	"""
+	tableColumns: [UiTableColumnSettingInput!]
 }
 
 """
@@ -27068,6 +28608,10 @@ enum StreamKindValue {
 	"""
 	GLOBAL
 	"""
+	Private events for the authenticated member.
+	"""
+	USER
+	"""
 	Events for one title.
 	"""
 	TITLE
@@ -27231,11 +28775,15 @@ type SubmitMediaRequestPayload {
 }
 
 """
-A public list to follow.
+A public or owner-linked personal list to follow.
 """
 input SubscribeListInput {
 	"""
-	Must be `PUBLIC`.
+	Linked account owned by the caller, required when scope is PERSONAL.
+	"""
+	credentialId: ID
+	"""
+	`PERSONAL` requires an account owned by the caller.
 	"""
 	scope: ListScope!
 	"""
@@ -28530,6 +30078,10 @@ enum TitleHistoryEventTypeValue {
 	"""
 	IMPORT_SKIPPED
 	"""
+	A post-download rule refused the import.
+	"""
+	IMPORT_REJECTED_BY_RULE
+	"""
 	Existing file was upgraded.
 	"""
 	FILE_UPGRADED
@@ -28921,2948 +30473,11 @@ Optional title settings used when creating or updating a title.
 """
 input TitleOptionsInput {
 	"""
-	Movie minimum availability override; omission preserves it, null clears it to legacy Announced behavior, and a value replaces it. Other facets reject this field.
 	"""
-	minAvailability: String
+	Search-language override: omitted preserves, null inherits the library, empty searches only the primary name and custom aliases.
 	"""
-	Quality profile identity; omission preserves the current value, null clears it, and a value replaces it.
+	searchLanguages: [String!]
 	"""
-	qualityProfileId: ID
+	User-owned search aliases: omitted preserves, null or empty clears. Metadata refresh preserves these aliases.
 	"""
-	Root-folder identity used when a title is created; omission preserves the current value, null clears it, and a value replaces it. Changing the root of an existing title that has tracked files is refused: preview the change with locationOperationPreview and run it with startLocationOperation.
-	"""
-	rootFolderId: ID @deprecated(reason: "Retired for existing titles with tracked files: use locationOperationPreview and startLocationOperation to move a title. Still accepted at title creation and for titles with no tracked files.")
-	"""
-	Monitoring policy; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	monitorType: MonitorTypeValue
-	"""
-	Whether season folders are used for Series or Anime; omission preserves the current value, null clears it, and a value replaces it. Movies reject this field.
-	"""
-	useSeasonFolders: Boolean
-	"""
-	Metadata language; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	metadataLanguage: String
-	"""
-	Whether specials are monitored; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	monitorSpecials: Boolean
-	"""
-	Whether inter-season movies are monitored; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	interSeasonMovies: Boolean
-	"""
-	Filler policy; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	fillerPolicy: FillerPolicyValue
-	"""
-	Recap policy; omission preserves the current value, null clears it, and a value replaces it.
-	"""
-	recapPolicy: RecapPolicyValue
-	"""
-	Which episode numbering this title's releases are read in; omission preserves the current value, null clears it (back to `AUTO`), and a value replaces it. Movies reject this field.
-	"""
-	releaseNumbering: ReleaseNumberingValue
-	"""
-	Seasons and series movies to monitor under `ADVANCED`; omission preserves the current selection, null clears it, and a value replaces it. Required with `ADVANCED`, and rejected for movies.
-	"""
-	monitorSelection: MonitorSelectionInput
-}
-
-"""
-Catalog metadata, monitoring settings, and media identity for a title.
-"""
-type TitlePayload {
-	"""
-	Stable title identifier.
-	"""
-	id: ID!
-	"""
-	Identifier of the library containing this title.
-	"""
-	libraryId: ID!
-	"""
-	Display title from the catalog metadata.
-	"""
-	name: String!
-	"""
-	Media facet that determines the title's domain, such as movie or series.
-	"""
-	facet: MediaFacetValue!
-	"""
-	Whether acquisition and monitoring are enabled for the title.
-	"""
-	monitored: Boolean!
-	"""
-	User-defined tags plus reserved `scryer:` settings entries.
-	"""
-	tags: [String!]!
-	"""
-	External catalog identifiers attached to the title.
-	"""
-	externalIds: [ExternalIdPayload!]!
-	"""
-	Time when the title record was created, in UTC.
-	"""
-	createdAt: DateTime!
-	"""
-	Release year, when catalog metadata supplies one.
-	"""
-	year: Int
-	"""
-	Plot or synopsis text, or null before metadata provides it.
-	"""
-	overview: String
-	"""
-	Proxied poster URL, or null when no poster source is available.
-	"""
-	posterUrl: String
-	"""
-	Poster source URL exposed alongside `poster_url`, or null when unavailable.
-	"""
-	posterSourceUrl: String
-	"""
-	Proxied background URL, or null when no background source is available.
-	"""
-	backgroundUrl: String
-	"""
-	Background source URL exposed alongside `background_url`, or null when unavailable.
-	"""
-	backgroundSourceUrl: String
-	"""
-	Normalized title used for ordering, or null when not computed.
-	"""
-	sortTitle: String
-	"""
-	Stable URL-friendly title key, or null when not assigned.
-	"""
-	slug: String
-	"""
-	IMDb identifier, or null when the title has no IMDb match.
-	"""
-	imdbId: String
-	"""
-	Runtime in minutes, or null when unknown.
-	"""
-	runtimeMinutes: Int
-	"""
-	Catalog popularity score, or null when unavailable.
-	"""
-	popularity: Float
-	"""
-	Canonical genre and theme tags resolved from source metadata.
-	"""
-	canonicalTags: [CanonicalMediaTagPayload!]!
-	"""
-	Catalog content status, or null before metadata provides it.
-	"""
-	contentStatus: String
-	"""
-	Original content language code, or null when unknown.
-	"""
-	language: String
-	"""
-	First air date as a calendar date, or null when unavailable.
-	"""
-	firstAired: Date
-	"""
-	Broadcasting network, or null when unknown.
-	"""
-	network: String
-	"""
-	Production studio, or null when unknown.
-	"""
-	studio: String
-	"""
-	Production country, or null when unknown.
-	"""
-	country: String
-	"""
-	Alternate title strings from catalog metadata.
-	"""
-	aliases: [String!]!
-	"""
-	Language used for the latest metadata fetch, or null when not recorded.
-	"""
-	metadataLanguage: String
-	"""
-	Time of the latest metadata fetch in UTC, or null before a fetch completes.
-	"""
-	metadataFetchedAt: DateTime
-	"""
-	Explicit minimum availability override, or null for legacy Announced behavior.
-	"""
-	minAvailability: String
-	"""
-	Identifier of the selected quality profile, or null when the title uses no profile.
-	"""
-	qualityProfileId: ID
-	"""
-	Identifier of the root folder that stores this title's files.
-	"""
-	rootFolderId: ID!
-	"""
-	Monitoring mode, or null when no explicit mode is configured.
-	"""
-	monitorType: MonitorTypeValue
-	"""
-	Whether episodic files use season directories, or null when unset.
-	"""
-	useSeasonFolders: Boolean
-	"""
-	Whether specials are monitored, or null when unset.
-	"""
-	monitorSpecials: Boolean
-	"""
-	Whether movies between seasons are included, or null when unset.
-	"""
-	interSeasonMovies: Boolean
-	"""
-	Policy for filler episodes, or null when unset.
-	"""
-	fillerPolicy: FillerPolicyValue
-	"""
-	Policy for recap episodes, or null when unset.
-	"""
-	recapPolicy: RecapPolicyValue
-	"""
-	Which episode numbering this title's releases are read in, or null when
-	the title follows the default (`AUTO`).
-	"""
-	releaseNumbering: ReleaseNumberingValue
-	"""
-	Effective movie availability for the instance's configured market and delay.
-	"""
-	movieAvailability: MovieAvailabilityPayload
-	"""
-	Provider-native playback links for this title, when an exact catalog mapping exists.
-	"""
-	playbackLinks: [MediaServerPlaybackLinkPayload!]!
-	"""
-	Effective target quality-profile label for the title.
-	"""
-	qualityTier: String
-	"""
-	Lowest live media-file quality tier for the title.
-	"""
-	currentQualityTier: String
-	"""
-	Aggregated media-file size in bytes for the title.
-	"""
-	sizeBytes: Long
-	"""
-	Owned-vs-total episode progress, excluding specials.
-	"""
-	episodesOwned: Int
-	"""
-	Monitored episode count, excluding specials.
-	"""
-	episodesMonitored: Int
-	"""
-	Total episode count, excluding specials.
-	"""
-	episodesTotal: Int
-	"""
-	Primary movie media resolution.
-	"""
-	mediaResolution: String
-	"""
-	Primary movie media HDR format.
-	"""
-	mediaHdr: String
-	"""
-	Primary movie media audio codec.
-	"""
-	mediaAudioCodec: String
-	"""
-	Name of the title's library when it is visible to the caller, otherwise null.
-	"""
-	libraryName: String
-	"""
-	Stable slug of the title's caller-visible library, otherwise null.
-	"""
-	librarySlug: String
-	"""
-	Aggregated title ratings; the rating is null and source lists are empty when no rating exists.
-	"""
-	ratings: TitleRatingPayload!
-	"""
-	Public lists this title is on or has left, lists it is still on
-	first. Personal lists are never included.
-	"""
-	listMemberships: [TitleListMembershipPayload!]!
-	"""
-	Cast and crew cached from this title's last metadata hydration, ordered
-	by billing rank. Reads the local cache only; hydration refills it.
-	"""
-	credits(
-		"""
-		Credit kinds to include, e.g. ["actor", "voice_actor"] for cast. Omit or leave empty for every cached kind.
-		"""
-		kinds: [String!],
-		"""
-		Maximum credits to return; defaults to 15 and clamps to 0 through 50.
-		"""
-		limit: Int! = 15
-	): [TitleCreditPayload!]!
-	"""
-	Discovery items related to this title, limited to the requested count.
-	"""
-	moreLikeThis(
-		"""
-		Maximum related items to return; defaults to 12 and clamps to 0 through 100.
-		"""
-		limit: Int! = 12
-	): [DiscoveryItemPayload!]!
-	"""
-	Absolute root-folder path for this title; requires view permission on its library.
-	"""
-	rootFolderPath: String!
-	"""
-	Whether renaming is turned on for this title's media type. Rename preview
-	and rename requests for the title are refused while this is false.
-	"""
-	renameEnabled: Boolean!
-	"""
-	Explicit metadata-language override, or null when the global default is inherited.
-	"""
-	metadataLanguageOverride: String
-	"""
-	Metadata language after applying title and library overrides.
-	"""
-	effectiveMetadataLanguage: String!
-	"""
-	Whether this title inherits metadata language from its library or the global default.
-	"""
-	inheritsMetadataLanguage: Boolean!
-	"""
-	Explicit season-folder override, or null when library/facet settings are inherited.
-	"""
-	useSeasonFoldersOverride: Boolean
-	"""
-	Whether this title uses season folders after applying inheritance.
-	"""
-	effectiveUseSeasonFolders: Boolean!
-	"""
-	Whether this title inherits the season-folder setting from its library or facet.
-	"""
-	inheritsUseSeasonFolders: Boolean!
-	"""
-	Filler policy after applying the title override or library/facet default.
-	"""
-	effectiveFillerPolicy: FillerPolicyValue
-	"""
-	Recap policy after applying the title override or library/facet default.
-	"""
-	effectiveRecapPolicy: RecapPolicyValue
-	"""
-	Title-specific required audio-language override, or null when the facet setting is inherited.
-	"""
-	requiredAudioLanguagesOverride: [String!]
-	"""
-	Configured audio requirements after title, library, and facet inheritance.
-	The `original` token remains unresolved in this configuration field.
-	"""
-	effectiveRequiredAudioLanguages: [String!]!
-	"""
-	Whether the title uses the facet-level required audio-language setting without an override.
-	"""
-	inheritsRequiredAudioLanguages: Boolean!
-	"""
-	Collections belonging to this title, or an empty list when none are available.
-	"""
-	collections: [CollectionPayload!]!
-	"""
-	Series-movie links for this title, or an empty list when none exist.
-	"""
-	seriesMovieLinks: [SeriesMovieLinkPayload!]!
-	"""
-	Media files for this title that are visible to the caller, or an empty list when none are available.
-	"""
-	mediaFiles: [TitleMediaFilePayload!]!
-	"""
-	Wanted scopes for this title, optionally filtered by status and returned as a page without a total count.
-	"""
-	wantedItems(
-		"""
-		Optional wanted status filter; omitted includes all statuses.
-		"""
-		status: WantedStatusValue,
-		"""
-		Page size; defaults to 50 and clamps to 1 through 300.
-		"""
-		limit: Int! = 50,
-		"""
-		Zero-based page offset; defaults to 0 and negative values become 0.
-		"""
-		offset: Int! = 0
-	): WantedItemsPagePayload!
-	"""
-	Release decisions for this title with a total count and continuation flag.
-	"""
-	releaseDecisions(
-		"""
-		Page size; defaults to 50 and clamps to 1 through 300.
-		"""
-		limit: Int! = 50,
-		"""
-		Zero-based page offset; defaults to 0 and negative values become 0.
-		"""
-		offset: Int! = 0
-	): ReleaseDecisionsPagePayload!
-	"""
-	Queue items associated with this title after the supplied activity filters are applied.
-	"""
-	downloadQueueItems(
-		"""
-		Include all queue activity instead of only active activity; defaults to false.
-		"""
-		includeAllActivity: Boolean,
-		"""
-		Restrict results to history entries; defaults to false.
-		"""
-		includeHistoryOnly: Boolean,
-		"""
-		Include import activity; defaults to false.
-		"""
-		includeImportActivity: Boolean,
-		"""
-		Activity-state filter; omitted defaults to ALL.
-		"""
-		activityFilter: DownloadActivityFilterValue
-	): [DownloadQueueItemPayload!]!
-}
-
-"""
-Combined title rating and the sources that contributed it.
-"""
-type TitleRatingPayload {
-	"""
-	Combined rating, or null when no source supplied one.
-	"""
-	rating: Float
-	"""
-	Names of rating sources included in the combined value.
-	"""
-	ratingSources: [String!]!
-	"""
-	Per-provider ratings used to calculate or explain the combined value.
-	"""
-	externalRatings: [TitleExternalRatingPayload!]!
-}
-
-"""
-One blocked release for a title.
-"""
-type TitleReleaseBlocklistEntryPayload {
-	"""
-	Blocklist entry ID.
-	"""
-	id: ID!
-	"""
-	The blocked release's name, as the indexer presented it.
-	"""
-	releaseName: String!
-	"""
-	Failure or blocklist reason, or null when unavailable.
-	"""
-	errorMessage: String
-	"""
-	UTC time when the release was attempted.
-	"""
-	attemptedAt: DateTime!
-}
-
-"""
-Union member indicating the entire title is the acquisition scope.
-"""
-type TitleScopePayload {
-	"""
-	Always true when this marker is emitted.
-	"""
-	wholeTitle: Boolean!
-}
-
-"""
-Identity of a deleted title tag and what the deletion cleaned up.
-"""
-type TitleTagDefinitionDeletionPayload {
-	"""
-	Deleted title-tag definition ID.
-	"""
-	id: ID!
-	"""
-	Label the deleted tag carried.
-	"""
-	label: String!
-	"""
-	Rewrite and reference counts for the deletion.
-	"""
-	counts: TitleTagRewriteCountsPayload!
-}
-
-"""
-A saved title-tag definition together with what the save rewrote.
-"""
-type TitleTagDefinitionMutationPayload {
-	"""
-	The definition as it now stands.
-	"""
-	definition: TitleTagDefinitionPayload!
-	"""
-	Rewrite and reference counts; all zero when a tag is created or only its description changed.
-	"""
-	counts: TitleTagRewriteCountsPayload!
-}
-
-"""
-Administrator-defined title tag and how many titles currently carry it.
-"""
-type TitleTagDefinitionPayload {
-	"""
-	Title-tag definition ID.
-	"""
-	id: ID!
-	"""
-	Normalized label stored on every title carrying this tag; lowercase, with internal whitespace collapsed.
-	"""
-	label: String!
-	"""
-	Operator-facing note about what the tag is for, or null when none was written.
-	"""
-	description: String
-	"""
-	Number of titles currently carrying the label.
-	"""
-	titleCount: Int!
-	"""
-	Number of series movies currently carrying the label. Counted separately from `titleCount`: a series movie is a link inside a series, not a title of its own.
-	"""
-	seriesMovieCount: Int!
-	"""
-	Time the tag was defined, in UTC.
-	"""
-	createdAt: DateTime!
-	"""
-	Time the tag was last renamed or re-described, in UTC.
-	"""
-	updatedAt: DateTime!
-}
-
-"""
-What a title-tag rename or deletion rewrote, and what it only found.
-"""
-type TitleTagRewriteCountsPayload {
-	"""
-	Titles whose tag list was rewritten.
-	"""
-	titles: Int!
-	"""
-	Series movies whose tag list was rewritten.
-	"""
-	seriesMovies: Int!
-	"""
-	Delay profiles whose tag list was rewritten.
-	"""
-	delayProfiles: Int!
-	"""
-	Maintenance rule sets whose current rule source names the old label; rule sources are never rewritten, so these rules stop matching.
-	"""
-	maintenanceRuleSets: Int!
-	"""
-	Release rule sets whose rule source names the old label; rule sources are never rewritten, so these rules stop matching.
-	"""
-	releaseRuleSets: Int!
-	"""
-	Managed rule sets whose tag filter lists the old label; managed filters belong to their pack and are never rewritten.
-	"""
-	managedTagFilters: Int!
-	"""
-	Request rule sets whose current rule source emits the old label; rule sources are never rewritten, so those rules stop applying the tag.
-	"""
-	requestRuleSets: Int!
-}
-
-"""
-Enables or disables one installed plugin.
-"""
-input TogglePluginInput {
-	"""
-	ID of the installed plugin to enable or disable.
-	"""
-	pluginId: ID!
-	"""
-	Desired enabled state.
-	"""
-	enabled: Boolean!
-}
-
-"""
-Enables or disables one rule set.
-"""
-input ToggleRuleSetInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Desired enabled state.
-	"""
-	enabled: Boolean!
-}
-
-"""
-TOTP enrollment completion request.
-"""
-input TotpEnrollmentCompleteInput {
-	"""
-	ID of the pending TOTP enrollment challenge.
-	"""
-	challengeId: ID!
-	"""
-	Current TOTP code used to verify the enrollment.
-	"""
-	code: String!
-}
-
-"""
-Result of completing TOTP enrollment or regenerating recovery codes.
-"""
-type TotpEnrollmentCompletePayload {
-	"""
-	Updated TOTP status without the shared secret.
-	"""
-	status: TotpStatusPayload!
-	"""
-	Newly generated one-time recovery codes; they are not returned again.
-	"""
-	recoveryCodes: [String!]!
-}
-
-"""
-One-time values returned when TOTP enrollment starts.
-"""
-type TotpEnrollmentStartPayload {
-	"""
-	ID of the short-lived enrollment challenge.
-	"""
-	challengeId: ID!
-	"""
-	`otpauth` URI for authenticator setup; treat it as secret.
-	"""
-	otpauthUrl: String!
-	"""
-	Base32 TOTP secret; returned only for enrollment and must be protected as a secret.
-	"""
-	secretBase32: String!
-	"""
-	UTC time when the enrollment challenge expires.
-	"""
-	expiresAt: DateTime!
-}
-
-"""
-TOTP enrollment and usage status without exposing the shared secret.
-"""
-type TotpStatusPayload {
-	"""
-	Whether TOTP is enabled.
-	"""
-	enabled: Boolean!
-	"""
-	UTC time when TOTP was enrolled, or null when never enrolled.
-	"""
-	createdAt: DateTime
-	"""
-	UTC time when TOTP was last used, or null when unused.
-	"""
-	lastUsedAt: DateTime
-	"""
-	Number of unused recovery codes remaining.
-	"""
-	recoveryCodesRemaining: Int!
-}
-
-"""
-TOTP verification request.
-"""
-input TotpVerifyInput {
-	"""
-	Current TOTP code; never returned in a payload.
-	"""
-	code: String!
-}
-
-"""
-Lifecycle state of a tracked download.
-"""
-enum TrackedDownloadStateValue {
-	"""
-	Download is in progress.
-	"""
-	DOWNLOADING
-	"""
-	Download awaits import.
-	"""
-	IMPORT_PENDING
-	"""
-	Import is in progress.
-	"""
-	IMPORTING
-	"""
-	Import completed successfully.
-	"""
-	IMPORTED
-	"""
-	Import completed, but the torrent is still seeding toward its goal and
-	cannot be removed from the client yet.
-	"""
-	IMPORTED_SEEDING
-	"""
-	Import is blocked.
-	"""
-	IMPORT_BLOCKED
-	"""
-	Failure awaits retry or handling.
-	"""
-	FAILED_PENDING
-	"""
-	Download or import failed.
-	"""
-	FAILED
-	"""
-	Download was ignored.
-	"""
-	IGNORED
-}
-
-"""
-Severity of a tracked-download health result.
-"""
-enum TrackedDownloadStatusValue {
-	"""
-	No issue was detected.
-	"""
-	OK
-	"""
-	The item needs attention but is not failed.
-	"""
-	WARNING
-	"""
-	The item has an error.
-	"""
-	ERROR
-}
-
-"""
-Local state of one source-template binding in a tracked rule pack.
-"""
-type TrackedRulePackMemberPayload {
-	"""
-	Stable template ID from the source pack.
-	"""
-	templateId: String!
-	"""
-	Local rule-set ID retained across source updates.
-	"""
-	ruleSetId: ID!
-	"""
-	Whether the template is absent from the current upstream version.
-	"""
-	removed: Boolean!
-	"""
-	Local enabled state, or null when the retained rule no longer exists.
-	"""
-	enabled: Boolean
-	"""
-	Local evaluation priority, or null when the retained rule no longer exists.
-	"""
-	priority: Int
-	"""
-	Local rule name, or null when the retained rule no longer exists.
-	"""
-	name: String
-	"""
-	Local rule description, or null when the retained rule no longer exists.
-	"""
-	description: String
-	"""
-	Local facet scope; empty when the retained rule no longer exists.
-	"""
-	appliedFacets: [String!]!
-}
-
-"""
-One installed rule pack and its locally editable member settings.
-"""
-type TrackedRulePackPayload {
-	"""
-	Immutable registry rule-pack ID.
-	"""
-	packId: String!
-	"""
-	Display name recorded from the verified manifest.
-	"""
-	name: String!
-	"""
-	Installed immutable source version.
-	"""
-	version: String!
-	"""
-	Verified source digest for the installed version.
-	"""
-	digest: String!
-	"""
-	Whether this installed pack permits copying its rules into user-authored rules.
-	"""
-	customizable: Boolean!
-	"""
-	Optimistic-concurrency token for pack changes.
-	"""
-	revision: Long!
-	"""
-	Whether scheduled updates are enabled for this pack.
-	"""
-	autoUpdate: Boolean!
-	"""
-	Newer compatible registry version, or null when the installed version is current.
-	"""
-	availableVersion: String
-	"""
-	Whether an automatic update is currently eligible for this pack.
-	"""
-	autoUpdateAvailable: Boolean!
-	"""
-	Most recent automatic-update failure, or null when none is recorded.
-	"""
-	lastError: String
-	"""
-	UTC timestamp of the last successful installation or update.
-	"""
-	lastUpdated: DateTime!
-	"""
-	Source templates and their local rule-set bindings.
-	"""
-	members: [TrackedRulePackMemberPayload!]!
-}
-
-"""
-Preview of the exact source version that a tracked-pack update would apply.
-"""
-type TrackedRulePackPreviewPayload {
-	"""
-	Candidate immutable source version.
-	"""
-	version: String!
-	"""
-	Candidate verified source digest.
-	"""
-	digest: String!
-	"""
-	Revision that must be supplied to apply this preview.
-	"""
-	revision: Long!
-	"""
-	Template IDs newly introduced by the candidate version.
-	"""
-	addedTemplateIds: [String!]!
-	"""
-	Template IDs whose source content changed in the candidate version.
-	"""
-	changedTemplateIds: [String!]!
-	"""
-	Template IDs removed by the candidate version.
-	"""
-	removedTemplateIds: [String!]!
-}
-
-"""
-Priority to retain for one tracked source template.
-"""
-input TrackedRulePackPriorityInput {
-	"""
-	Stable template ID from the source pack.
-	"""
-	templateId: String!
-	"""
-	Local evaluation priority.
-	"""
-	priority: Int!
-}
-
-"""
-Scope filters for an acquisition search. Omitted intent preserves Wanted behavior.
-"""
-input TriggerAcquisitionSearchInput {
-	"""
-	Optional explicit title/season search intent.
-	"""
-	intent: AcquisitionSearchIntentValue
-	"""
-	Wanted category to search, defaulting to missing items.
-	"""
-	wantedKind: WantedKindValue
-	"""
-	Optional facet restriction.
-	"""
-	facet: MediaFacetValue
-	"""
-	Optional library identities to include.
-	"""
-	libraryIds: [ID!]
-	"""
-	Optional title identity to include.
-	"""
-	titleId: ID
-	"""
-	Optional season number for the selected title.
-	"""
-	seasonNumber: Int
-	"""
-	Optional wanted-scope identity for searching exactly one scope.
-	"""
-	wantedItemId: ID
-}
-
-"""
-Result of queuing title-mismatch recovery searches.
-"""
-type TriggerTitleMismatchRecoverySearchPayload {
-	"""
-	Title ID searched.
-	"""
-	titleId: ID!
-	"""
-	Number of recovery searches accepted for background processing.
-	"""
-	queuedCount: Int!
-}
-
-"""
-Date and time display format preference.
-"""
-enum UiDateTimeFormatValue {
-	"""
-	Use locale-specific formatting.
-	"""
-	LOCALE
-	"""
-	Use ISO date and 24-hour time formatting.
-	"""
-	ISO24H
-}
-
-"""
-Default landing content area.
-"""
-enum UiDefaultLandingViewValue {
-	"""
-	Movies view.
-	"""
-	MOVIES
-	"""
-	Series view.
-	"""
-	SERIES
-	"""
-	Anime view.
-	"""
-	ANIME
-	"""
-	Activity view.
-	"""
-	ACTIVITY
-	"""
-	Calendar view.
-	"""
-	CALENDAR
-	"""
-	Wanted view.
-	"""
-	WANTED
-	"""
-	History view.
-	"""
-	HISTORY
-	"""
-	Settings view.
-	"""
-	SETTINGS
-	"""
-	System view.
-	"""
-	SYSTEM
-}
-
-"""
-Density preference for settings and data presentation.
-"""
-enum UiDensityValue {
-	"""
-	Compact density.
-	"""
-	COMPACT
-	"""
-	Comfortable density.
-	"""
-	COMFORTABLE
-}
-
-"""
-Media facet used by table-column settings.
-"""
-enum UiSettingsFacetValue {
-	"""
-	Movies facet.
-	"""
-	MOVIES
-	"""
-	Series facet.
-	"""
-	SERIES
-	"""
-	Anime facet.
-	"""
-	ANIME
-}
-
-"""
-Persisted caller presentation preferences and table-column settings.
-"""
-type UiSettingsPayload {
-	"""
-	Selected theme.
-	"""
-	theme: UiThemeValue!
-	"""
-	Selected date and time format.
-	"""
-	dateTimeFormat: UiDateTimeFormatValue!
-	"""
-	Primary highlight color, or null when using the default.
-	"""
-	highlightColor: String
-	"""
-	Secondary color, or null when using the default.
-	"""
-	secondaryColor: String
-	"""
-	Whether high-contrast presentation is enabled.
-	"""
-	highContrastMode: Boolean!
-	"""
-	Whether motion-reduction behavior is enabled.
-	"""
-	reduceMotion: Boolean!
-	"""
-	Whether the sponsor button is hidden.
-	"""
-	hideSponsorButton: Boolean!
-	"""
-	Selected density.
-	"""
-	density: UiDensityValue!
-	"""
-	Selected sidebar mode.
-	"""
-	sidebarMode: UiSidebarModeValue!
-	"""
-	Content area opened by default.
-	"""
-	defaultLandingView: UiDefaultLandingViewValue!
-	"""
-	Persisted table-column settings.
-	"""
-	tableColumns: [UiTableColumnSettingPayload!]!
-}
-
-"""
-Sidebar expansion preference.
-"""
-enum UiSidebarModeValue {
-	"""
-	Keep the sidebar collapsed.
-	"""
-	COLLAPSED
-	"""
-	Keep the sidebar expanded.
-	"""
-	EXPANDED
-}
-
-"""
-Input form for one table-column preference.
-"""
-input UiTableColumnSettingInput {
-	"""
-	Media facet to which the setting applies.
-	"""
-	facet: UiSettingsFacetValue!
-	"""
-	Table mode to which the setting applies.
-	"""
-	tableViewMode: UiTableViewModeValue!
-	"""
-	Stable column identifier.
-	"""
-	columnId: String!
-	"""
-	Zero-based display order.
-	"""
-	columnOrder: Int!
-	"""
-	Whether the column should be visible.
-	"""
-	visible: Boolean!
-}
-
-"""
-One persisted table-column preference for a facet and table mode.
-"""
-type UiTableColumnSettingPayload {
-	"""
-	Media facet to which the column setting applies.
-	"""
-	facet: UiSettingsFacetValue!
-	"""
-	Table mode to which the column setting applies.
-	"""
-	tableViewMode: UiTableViewModeValue!
-	"""
-	Stable column identifier.
-	"""
-	columnId: String!
-	"""
-	Zero-based display order.
-	"""
-	columnOrder: Int!
-	"""
-	Whether the column is visible.
-	"""
-	visible: Boolean!
-}
-
-"""
-Table presentation mode.
-"""
-enum UiTableViewModeValue {
-	"""
-	Compact table mode.
-	"""
-	COMPACT
-	"""
-	Poster table mode.
-	"""
-	POSTER_TABLE
-}
-
-"""
-Theme preference for the caller's settings.
-"""
-enum UiThemeValue {
-	"""
-	Light theme.
-	"""
-	LIGHT
-	"""
-	Dark theme.
-	"""
-	DARK
-	"""
-	Legacy input alias for the dark theme.
-	"""
-	PRIDE @deprecated(reason: "use DARK; this legacy value is normalized to DARK")
-	"""
-	Follow the system theme.
-	"""
-	SYSTEM
-}
-
-"""
-Identifier returned after uninstalling a plugin.
-"""
-type UninstallPluginPayload {
-	"""
-	Uninstalled plugin ID.
-	"""
-	pluginId: ID!
-}
-
-"""
-Identifier returned after unlinking an external account.
-"""
-type UnlinkExternalAccountPayload {
-	"""
-	Linked-account identity that was removed.
-	"""
-	linkedAccountId: ID!
-}
-
-"""
-Acquisition scheduler timing and scoring thresholds.
-"""
-input UpdateAcquisitionSettingsInput {
-	"""
-	Whether acquisition scheduling is enabled.
-	"""
-	enabled: Boolean!
-	"""
-	Deprecated and inert: accepted and ignored; nothing is read or stored.
-	Removed in the next minor.
-	"""
-	upgradeCooldownHours: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
-	"""
-	Minimum score improvement for a same-tier upgrade.
-	"""
-	sameTierMinDelta: Int!
-	"""
-	Deprecated and inert: accepted and ignored; nothing is read or stored.
-	Removed in the next minor.
-	"""
-	crossTierMinDelta: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
-	"""
-	Deprecated and inert: accepted and ignored; nothing is read or stored.
-	Removed in the next minor.
-	"""
-	forcedUpgradeDeltaBypass: Int @deprecated(reason: "Inert: the stored value is no longer read; removed in the next minor.")
-	"""
-	How often, in seconds, download clients are checked for failed grabs.
-	"""
-	pollIntervalSeconds: Int!
-	"""
-	How often, in seconds, the catalog is walked for missing and
-	upgradable media. Omitted by older clients, which keeps the stored
-	value.
-	"""
-	walkIntervalSeconds: Int
-	"""
-	Maximum long-tail scopes processed per cycle.
-	"""
-	longTailBackfillMaxScopesPerCycle: Int!
-	"""
-	Days between long-tail reconvergence passes.
-	"""
-	longTailReconvergeDays: Int!
-	"""
-	Default threshold for newly added movies. Omitted by older clients.
-	"""
-	defaultMovieAvailability: String
-	"""
-	ISO-3166-1 alpha-2 market for movie release dates. Omitted by older clients.
-	"""
-	movieReleaseMarket: String
-	"""
-	Signed offset in days from the applicable release date. Omitted by older clients.
-	"""
-	movieAvailabilityDelayDays: Int
-}
-
-"""
-Automatic-backup schedule and key-management settings.
-"""
-input UpdateAutoBackupSettingsInput {
-	"""
-	Whether automatic backups are enabled.
-	"""
-	enabled: Boolean!
-	"""
-	Daily backup time in local time format.
-	"""
-	dailyTimeLocal: String!
-	"""
-	New automatic-backup encryption key, when rotating or setting one.
-	"""
-	setAutoBackupKey: String
-	"""
-	Whether the stored automatic-backup key should be cleared.
-	"""
-	clearAutoBackupKey: Boolean!
-}
-
-"""
-Optional custom backup destination.
-"""
-input UpdateBackupSettingsInput {
-	"""
-	Filesystem path used for custom backups.
-	"""
-	customBackupPath: String
-}
-
-"""
-Patch for an existing download client.
-"""
-input UpdateDownloadClientConfigInput {
-	"""
-	Download-client configuration identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement display name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement provider implementation; omission preserves it.
-	"""
-	clientType: String
-	"""
-	Replacement provider configuration; omitted secret fields retain stored secrets.
-	"""
-	config: [ProviderConfigValueInput!]
-	"""
-	Replacement proxy assignment; omission preserves it and null clears it.
-	"""
-	proxyConfigId: ID
-	"""
-	Replacement enabled state; omission preserves it.
-	"""
-	isEnabled: Boolean
-}
-
-"""
-Download-client routing entries for a content scope.
-"""
-input UpdateDownloadClientRoutingInput {
-	"""
-	Content scope receiving the routing rules.
-	"""
-	scope: ContentScopeValue!
-	"""
-	Routing entries keyed by download-client identity.
-	"""
-	entries: [DownloadClientRoutingEntryInput!]!
-}
-
-"""
-General retention, cache, and plugin trust settings.
-"""
-input UpdateGeneralSettingsInput {
-	"""
-	Whether administrators may use the API explorer. Omission preserves the saved setting.
-	"""
-	apiExplorerEnabled: Boolean
-	"""
-	Whether surfaces that are still being finished are shown on this instance. Omission preserves the saved setting.
-	"""
-	experimentalFeaturesEnabled: Boolean
-	"""
-	Whether this instance sends its library context to the metadata gateway for personalized discovery. Omission preserves the saved setting.
-	"""
-	personalizedDiscoveryEnabled: Boolean
-	"""
-	Whether automatic SABnzbd and NZBGet imports may ask srrdb.com to recover obfuscated filenames. Omission preserves the saved setting.
-	"""
-	srrdbFilenameRecoveryEnabled: Boolean
-	"""
-	Whether history is retained without expiry.
-	"""
-	keepHistoryForever: Boolean
-	"""
-	History retention period in days when not retained forever.
-	"""
-	historyRetentionDays: Int
-	"""
-	Maximum image-cache size in megabytes.
-	"""
-	imageCacheMaxSizeMb: Int
-	"""
-	PEM bundle path or contents used to trust plugin HTTP certificates.
-	"""
-	pluginHttpCaBundlePem: String
-}
-
-"""
-Patch for an existing indexer provider.
-"""
-input UpdateIndexerConfigInput {
-	"""
-	Indexer configuration identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement display name; omission preserves the current value.
-	"""
-	name: String
-	"""
-	Replacement provider implementation; omission preserves the current value.
-	"""
-	providerType: String
-	"""
-	Proxy identity: omission preserves it, null clears it, and a value replaces it.
-	"""
-	proxyConfigId: ID
-	"""
-	Download-client identity: omission preserves it, null clears it, and a value replaces it.
-	"""
-	downloadClientId: ID
-	"""
-	Replacement rate-limit interval in seconds; omission preserves it.
-	"""
-	rateLimitSeconds: Int
-	"""
-	Replacement rate-limit burst; omission preserves it.
-	"""
-	rateLimitBurst: Int
-	"""
-	Query budget per minute: omission preserves it, null clears it, and a
-	value of at least 1 replaces it.
-	Searches draw on it in arrival order, so an interactive search waits
-	behind queued background searches; caps probes and NZB fetches do not
-	count against it. The budget bounds when a search is released to run; a
-	request already released can still wait for a concurrency permit or the
-	host limiter and go out later.
-	"""
-	maxQueriesPerMinute: Int
-	"""
-	Replacement enabled state; omission preserves it.
-	"""
-	isEnabled: Boolean
-	"""
-	Replacement interactive-search state; omission preserves it.
-	"""
-	enableInteractiveSearch: Boolean
-	"""
-	Replacement automatic-search state; omission preserves it.
-	"""
-	enableAutoSearch: Boolean
-	"""
-	Replacement provider configuration; omitted secret fields retain stored secrets.
-	"""
-	config: [ProviderConfigValueInput!]
-}
-
-"""
-Indexer routing entries for a content scope.
-"""
-input UpdateIndexerRoutingInput {
-	"""
-	Content scope receiving the routing rules.
-	"""
-	scope: ContentScopeValue!
-	"""
-	Routing entries keyed by indexer identity.
-	"""
-	entries: [IndexerRoutingEntryInput!]!
-}
-
-"""
-Patch for an existing media library.
-"""
-input UpdateLibraryInput {
-	"""
-	Library identity to patch.
-	"""
-	libraryId: ID!
-	"""
-	Replacement display name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement root list; omission preserves roots and an empty list clears them when valid.
-	"""
-	roots: [UpdateLibraryRootInput!]
-	"""
-	Optional replacement library settings.
-	"""
-	settings: LibrarySettingsInput
-}
-
-"""
-Root paths for movie, series, and optional anime libraries.
-"""
-input UpdateLibraryPathsInput {
-	"""
-	Movie library path.
-	"""
-	moviePath: String!
-	"""
-	Series library path.
-	"""
-	seriesPath: String!
-	"""
-	Anime library path, when configured.
-	"""
-	animePath: String
-}
-
-"""
-Replacement library root path and default marker.
-"""
-input UpdateLibraryRootInput {
-	"""
-	Absolute filesystem path for the root.
-	"""
-	path: String!
-	"""
-	Whether this root is the library default.
-	"""
-	isDefault: Boolean!
-}
-
-"""
-Changes to a followed public list. Omitted fields stay as they are.
-"""
-input UpdateListSubscriptionInput {
-	"""
-	New display name.
-	"""
-	name: String
-	"""
-	Kinds of title to keep.
-	"""
-	kinds: [MediaFacetValue!]
-	"""
-	What a sync does with a new title.
-	"""
-	mode: ListMode
-	"""
-	Replacement routes.
-	"""
-	routes: [ListRouteInput!]
-	"""
-	Replacement filters.
-	"""
-	filters: [ListFilterInput!]
-	"""
-	Most titles acted on per sync; null lifts the cap.
-	"""
-	maxPerSync: Int = null
-	"""
-	What happens to a title the list added when it leaves the list.
-	"""
-	onLeave: ListOnLeave
-}
-
-"""
-Replaces the matcher of an existing rule set, appending a revision.
-"""
-input UpdateMaintenanceRuleMatcherInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Replacement matcher source as written in the editor.
-	"""
-	regoSource: String!
-	"""
-	Legacy action the new revision authorizes. Supply this or
-	`actionSequence`, never both.
-	"""
-	action: MaintenanceActionInput
-	"""
-	Ordered actions the new revision authorizes. Supply this or `action`,
-	never both.
-	"""
-	actionSequence: MaintenanceActionSequenceInput
-	"""
-	Days a subject must match continuously before the action becomes due;
-	defaults to zero.
-	"""
-	graceDays: Int
-	"""
-	Configured library root. Omission preserves the current root, null
-	clears it, and a value replaces it.
-	"""
-	storageRootId: ID
-}
-
-"""
-Renames and re-scopes a rule set without touching its matcher.
-"""
-input UpdateMaintenanceRuleMetadataInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Replacement name.
-	"""
-	name: String!
-	"""
-	Replacement description; omitted clears it.
-	"""
-	description: String
-	"""
-	Replacement library scope. Omitted or empty means every library.
-	"""
-	libraryIds: [String!]
-}
-
-"""
-Replacement preferences for the caller's media request.
-"""
-input UpdateMediaRequestInput {
-	"""
-	Media request identity to update.
-	"""
-	requestId: ID!
-	"""
-	Quality profile identity requested for the title.
-	"""
-	requestedQualityProfileId: ID!
-	"""
-	Optional monitoring policy requested for the title.
-	"""
-	requestedMonitorType: MonitorTypeValue
-	"""
-	Seasons and series movies to monitor; required with `ADVANCED`.
-	"""
-	requestedMonitorSelection: MonitorSelectionInput
-	"""
-	Replacement lease in days. Omission preserves the current lease; null requests forever.
-	"""
-	requestedLeaseDays: Int
-}
-
-"""
-Patch for an existing media-server connection.
-"""
-input UpdateMediaServerConnectionInput {
-	"""
-	Media-server connection identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement provider type; omission preserves the current value.
-	"""
-	provider: MediaServerProviderValue
-	"""
-	Replacement display name; omission preserves the current value.
-	"""
-	displayName: String
-	"""
-	Replacement base URL; omission preserves the current value.
-	"""
-	baseUrl: String
-	"""
-	Replacement browser-facing URL; omission preserves the current value and an empty value clears it.
-	"""
-	externalUrl: String
-	"""
-	Replacement enabled state; omission preserves the current value.
-	"""
-	enabled: Boolean
-	"""
-	Replacement login-enabled state; omission preserves the current value.
-	"""
-	loginEnabled: Boolean
-	"""
-	Replacement linking-enabled state; omission preserves the current value.
-	"""
-	linkingEnabled: Boolean
-	"""
-	Replacement auto-add state; omission preserves the current value.
-	"""
-	autoAddEnabled: Boolean
-	"""
-	Replacement default application permissions; omission preserves the current list.
-	"""
-	defaultAppPermissions: [AppPermissionValue!]
-	"""
-	Replacement default library grants; omission preserves the current list.
-	"""
-	defaultLibraryGrants: [MediaServerDefaultLibraryGrantInput!]
-	"""
-	Replacement machine identity; omission preserves it.
-	"""
-	machineId: String
-	"""
-	Whether the stored machine identity should be cleared.
-	"""
-	clearMachineId: Boolean
-	"""
-	Replacement Plex authentication token; omission preserves it and the value is never returned.
-	"""
-	plexAuthToken: String
-	"""
-	Replacement Plex server identity; omission preserves it.
-	"""
-	plexServerId: String
-	"""
-	Replacement provider API key; omission preserves it and the value is never returned.
-	"""
-	apiKey: String
-	"""
-	Whether the stored API key should be cleared.
-	"""
-	clearApiKey: Boolean
-	"""
-	Replacement provider administrator username; omission preserves it.
-	"""
-	adminUsername: String
-	"""
-	Replacement provider administrator password; omission preserves it and the value is never returned.
-	"""
-	adminPassword: String
-	"""
-	Replacement Emby connection mode; omission preserves it.
-	"""
-	embyConnectionMode: EmbyConnectionModeValue
-	"""
-	Replacement Emby local setup method; omission preserves it.
-	"""
-	embyLocalSetupMethod: EmbyLocalSetupMethodValue
-	"""
-	Replacement Emby Connect enabled state; omission preserves it.
-	"""
-	embyConnectEnabled: Boolean
-	"""
-	Replacement Emby Connect username or email; omission preserves it.
-	"""
-	embyConnectUsernameOrEmail: String
-	"""
-	Replacement Emby Connect password; omission preserves it and the value is never returned.
-	"""
-	embyConnectPassword: String
-	"""
-	Replacement Emby Connect server identity; omission preserves it.
-	"""
-	embyConnectServerId: String
-	"""
-	Replacement path mappings; omission preserves the current mappings.
-	"""
-	pathMappings: [MediaServerPathMappingInput!]
-}
-
-"""
-Optional media-settings values applied to a content scope.
-"""
-input UpdateMediaSettingsInput {
-	"""
-	Content scope receiving the settings.
-	"""
-	scope: ContentScopeValue!
-	"""
-	Optional library path override.
-	"""
-	libraryPath: String
-	"""
-	Optional replacement list of library roots; null leaves existing roots unchanged.
-	"""
-	rootFolders: [RootFolderInput!]
-	"""
-	Optional required audio-language codes; use `original` to resolve per title.
-	"""
-	requiredAudioLanguages: [String!]
-	"""
-	Whether episodic titles use season folders.
-	"""
-	useSeasonFolders: Boolean
-	"""
-	Optional title folder template.
-	"""
-	folderTemplate: String
-	"""
-	Optional season folder template.
-	"""
-	seasonFolderTemplate: String
-	"""
-	Optional specials folder template.
-	"""
-	specialsFolderTemplate: String
-	"""
-	Whether automatic renaming is enabled.
-	"""
-	renameEnabled: Boolean
-	"""
-	Optional file and folder rename template.
-	"""
-	renameTemplate: String
-	"""
-	Collision policy for generated paths.
-	"""
-	renameCollisionPolicy: RenameCollisionPolicyValue
-	"""
-	Behavior when metadata needed for renaming is missing.
-	"""
-	renameMissingMetadataPolicy: RenameMissingMetadataPolicyValue
-	"""
-	Filler monitoring policy.
-	"""
-	fillerPolicy: FillerPolicyValue
-	"""
-	Recap monitoring policy.
-	"""
-	recapPolicy: RecapPolicyValue
-	"""
-	Whether specials are monitored.
-	"""
-	monitorSpecials: Boolean
-	"""
-	Whether inter-season movies are monitored.
-	"""
-	interSeasonMovies: Boolean
-	"""
-	Whether filler movies are monitored.
-	"""
-	monitorFillerMovies: Boolean
-	"""
-	Whether NFO metadata is written during import.
-	"""
-	nfoWriteOnImport: Boolean
-	"""
-	Whether Plex match metadata is written during import.
-	"""
-	plexmatchWriteOnImport: Boolean
-	"""
-	Import mode used for files in this scope.
-	"""
-	importMode: ImportModeValue
-	"""
-	Whether Linux ownership and mode changes are applied.
-	"""
-	setPermissionsLinux: Boolean
-	"""
-	File chmod mode in numeric or accepted symbolic notation.
-	"""
-	fileChmod: String
-	"""
-	Folder chmod mode in numeric or accepted symbolic notation.
-	"""
-	folderChmod: String
-	"""
-	Optional Unix group name for imported paths.
-	"""
-	chownGroup: String
-}
-
-"""
-Values that may be changed on an existing notification channel.
-"""
-input UpdateNotificationChannelInput {
-	"""
-	Notification channel ID to update.
-	"""
-	id: ID!
-	"""
-	Replacement channel display name, or null to leave it unchanged.
-	"""
-	name: String
-	"""
-	Replacement configuration, or null to leave it unchanged.
-	"""
-	config: [ProviderConfigValueInput!]
-	"""
-	Replacement media-server connection; an explicit null clears it.
-	"""
-	mediaServerConnectionId: ID
-	"""
-	Replacement enabled state, or null to leave it unchanged.
-	"""
-	isEnabled: Boolean
-}
-
-"""
-Values that may be changed on an existing notification subscription.
-"""
-input UpdateNotificationSubscriptionInput {
-	"""
-	Notification subscription ID to update.
-	"""
-	id: ID!
-	"""
-	Replacement target category, or null to leave it unchanged.
-	"""
-	targetKind: String
-	"""
-	Replacement target ID, or null to leave it unchanged.
-	"""
-	targetId: ID
-	"""
-	Replacement event type, or null to leave it unchanged.
-	"""
-	eventType: String
-	"""
-	Replacement scope category, or null to leave it unchanged.
-	"""
-	scope: String
-	"""
-	Replacement scope key, or null to leave it unchanged.
-	"""
-	scopeId: String
-	"""
-	Replacement enabled state, or null to leave it unchanged.
-	"""
-	isEnabled: Boolean
-}
-
-"""
-Replacement details for a custom OAuth application.
-"""
-input UpdateOAuthClientRegistrationInput {
-	"""
-	Name displayed to users during authorization.
-	"""
-	displayName: String!
-	"""
-	Exact HTTPS callback URLs permitted for this application.
-	"""
-	redirectUris: [String!]!
-	"""
-	Whether the application is active. Disabling revokes its existing grants.
-	"""
-	enabled: Boolean!
-}
-
-"""
-Automatic official-plugin patch update setting.
-"""
-input UpdatePluginAutoUpdateSettingsInput {
-	"""
-	Whether the scheduled plugin catalog refresh installs official patch updates automatically.
-	"""
-	enabled: Boolean!
-}
-
-"""
-Values that may be changed on an existing post-processing script.
-"""
-input UpdatePostProcessingScriptInput {
-	"""
-	Script ID to update.
-	"""
-	id: ID!
-	"""
-	Replacement script name, or null to leave unchanged.
-	"""
-	name: String
-	"""
-	Replacement description, or null to leave unchanged.
-	"""
-	description: String
-	"""
-	Replacement script source type, or null to leave unchanged.
-	"""
-	scriptType: String
-	"""
-	Replacement script content, or null to leave unchanged.
-	"""
-	scriptContent: String
-	"""
-	Explicit acknowledgement that inline shell executes with application privileges.
-	"""
-	inlineShellAcknowledged: Boolean
-	"""
-	Replacement media facets, or null to leave unchanged.
-	"""
-	appliedFacets: [String!]
-	"""
-	Replacement execution mode, or null to leave unchanged.
-	"""
-	executionMode: ExecutionModeValue
-	"""
-	Replacement maximum runtime in seconds, or null to leave unchanged.
-	"""
-	timeoutSecs: Int
-	"""
-	Replacement execution priority, or null to leave unchanged.
-	"""
-	priority: Int
-	"""
-	Replacement enabled state, or null to leave unchanged.
-	"""
-	enabled: Boolean
-	"""
-	Replacement debug state, or null to leave unchanged.
-	"""
-	debug: Boolean
-}
-
-"""
-Patch for a proxy configuration.
-"""
-input UpdateProxyConfigInput {
-	"""
-	Proxy configuration identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement display name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement base URL; omission preserves it.
-	"""
-	baseUrl: String
-	"""
-	Replacement request timeout in seconds; omission preserves it.
-	"""
-	requestTimeoutSeconds: Int
-	"""
-	Replacement transport-proxy username. Write-only: omission preserves
-	the stored value, null clears it, and it is never read back.
-	"""
-	username: String
-	"""
-	Replacement transport-proxy password. SSH tunnels reject passwords.
-	Write-only: omission preserves the stored value, null clears it.
-	"""
-	password: String
-	"""
-	Replacement SOCKS5 remote-DNS state; omission preserves it.
-	"""
-	remoteDns: Boolean
-	"""
-	Replacement tunnel private key: PEM for an SSH tunnel, base64 for
-	WireGuard. Write-only: omission preserves the stored value, null clears
-	it, and it is never read back. Writing it re-derives `tunnelPublicKey`.
-	"""
-	privateKey: String
-	"""
-	Replacement private key passphrase. Write-only: omission preserves the
-	stored value, null clears it, and it is never read back.
-	"""
-	privateKeyPassphrase: String
-	"""
-	Replacement WireGuard peer public key; omission preserves it. It has no
-	cleared state: a WireGuard tunnel cannot exist without one.
-	"""
-	peerPublicKey: String
-	"""
-	Replacement WireGuard preshared key. Write-only: omission preserves the
-	stored value, null clears it, and it is never read back.
-	"""
-	presharedKey: String
-	"""
-	Replacement WireGuard interface addresses; omission preserves them, and
-	an empty list clears them.
-	"""
-	tunnelAddresses: [String!]
-	"""
-	Replacement WireGuard resolvers; omission preserves them, and an empty
-	list clears them.
-	"""
-	tunnelDnsServers: [String!]
-	"""
-	Replacement WireGuard MTU; omission preserves it and null restores the
-	engine's default.
-	"""
-	tunnelMtu: Int
-	"""
-	Replacement WireGuard keepalive in seconds; omission preserves it, null
-	restores the engine's default, and zero switches keepalive off.
-	"""
-	tunnelKeepaliveSeconds: Int
-	"""
-	Replacement enabled state; omission preserves it.
-	"""
-	isEnabled: Boolean
-}
-
-"""
-Recycle-bin settings to save. Omitted fields keep their stored value.
-"""
-input UpdateRecycleBinSettingsInput {
-	"""
-	Whether deleted media is retained in the recycle bin; omit to keep the current value.
-	"""
-	enabled: Boolean
-	"""
-	Absolute recycle-bin directory outside every library root; null or blank restores `.scryer-recycle` under each library root, omit to keep the current value.
-	"""
-	path: String
-	"""
-	Days a recycled item is kept before it is purged, from 1 to 3650; omit to keep the current value.
-	"""
-	retentionDays: Int
-}
-
-"""
-Replaces the matcher of an existing rule set, appending revision N+1.
-"""
-input UpdateRequestRuleMatcherInput {
-	"""
-	Rule-set ID.
-	"""
-	ruleSetId: ID!
-	"""
-	Replacement matcher source as written in the editor.
-	"""
-	regoSource: String!
-}
-
-"""
-Renames and re-scopes a rule set without touching its matcher, so no
-revision is created.
-"""
-input UpdateRequestRuleMetadataInput {
-	"""
-	Rule-set ID.
-	"""
-	ruleSetId: ID!
-	"""
-	Replacement name.
-	"""
-	name: String!
-	"""
-	Replacement description; omitted clears it.
-	"""
-	description: String
-	"""
-	Replacement library scope. Omitted or empty means every library.
-	"""
-	libraryIds: [String!]
-}
-
-"""
-Patches a rule set while preserving omitted values.
-"""
-input UpdateRuleSetInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Replacement name, or null to preserve.
-	"""
-	name: String
-	"""
-	Replacement description, or null to preserve.
-	"""
-	description: String
-	"""
-	Replacement Rego source, or null to preserve.
-	"""
-	regoSource: String
-	"""
-	Replacement facet list, or null to preserve.
-	"""
-	appliedFacets: [String!]
-	"""
-	Replacement priority, or null to preserve.
-	"""
-	priority: Int
-	"""
-	Narrow a managed locale pack to titles carrying one of these tags. An
-	empty list clears the filter so the pack applies wherever its facts
-	match. Rejected for user-authored rule sets.
-	"""
-	managedTagFilter: [String!]
-}
-
-"""
-Authentication and local-access security settings.
-"""
-input UpdateSecuritySettingsInput {
-	"""
-	Session lifetime in days (1–365). Omission preserves the saved instance setting.
-	"""
-	sessionDurationDays: Int
-	"""
-	Whether form login is enabled.
-	"""
-	formLoginEnabled: Boolean!
-	"""
-	Minimum accepted password length.
-	"""
-	passwordMinLength: Int!
-	"""
-	Whether local IPs may skip login.
-	"""
-	skipLoginForLocalIps: Boolean!
-	"""
-	Whether API keys are restricted to users with system-settings permission.
-	"""
-	apiKeysRestrictToSystemSettingsUsers: Boolean
-	"""
-	Whether sensitive configuration changes require MFA step-up.
-	"""
-	mfaRequireConfigStepUp: Boolean!
-	"""
-	Whether password login requires MFA.
-	"""
-	mfaRequirePasswordLogin: Boolean!
-	"""
-	Whether Jellyfin login requires an enrolled authentication factor.
-	"""
-	mfaRequireJellyfinLogin: Boolean
-	"""
-	Whether Emby login requires an enrolled authentication factor. Omission preserves the saved setting.
-	"""
-	mfaRequireEmbyLogin: Boolean
-	"""
-	Deprecated alias for `mfaRequireJellyfinLogin`.
-	"""
-	totpRequireJellyfinLogin: Boolean @deprecated(reason: "Use mfaRequireJellyfinLogin.")
-	"""
-	Deprecated alias for `mfaRequireEmbyLogin`. Omission preserves the saved setting.
-	"""
-	totpRequireEmbyLogin: Boolean @deprecated(reason: "Use mfaRequireEmbyLogin.")
-}
-
-"""
-Patch for a stored seeding profile; omitted fields are preserved and explicit nulls clear goals.
-"""
-input UpdateSeedingProfileInput {
-	"""
-	Seeding profile identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement share ratio goal; null clears it and omission preserves it.
-	"""
-	ratio: Float
-	"""
-	Replacement seed time goal in minutes; null clears it and omission preserves it.
-	"""
-	seedTimeMinutes: Int
-	"""
-	Replacement season-pack mode; omission preserves it.
-	"""
-	seasonPackMode: SeasonPackSeedModeValue
-	"""
-	Replacement season-pack ratio goal; null clears it and omission preserves it.
-	"""
-	seasonPackRatio: Float
-	"""
-	Replacement season-pack seed time goal in minutes; null clears it and omission preserves it.
-	"""
-	seasonPackSeedTimeMinutes: Int
-	"""
-	Replacement tracker-minimum handling; omission preserves it.
-	"""
-	honorTrackerMinimums: Boolean
-	"""
-	Replacement goal-met action; omission preserves it.
-	"""
-	goalMetAction: SeedGoalMetActionValue
-	"""
-	Replacement never-remove flag; omission preserves it.
-	"""
-	neverRemove: Boolean
-	"""
-	Replacement minimum seeders; null restores the system floor and omission preserves it.
-	"""
-	minimumSeeders: Int
-	"""
-	Replacement post-import tracking mode; omission preserves it.
-	"""
-	postImportTracking: PostImportTrackingValue
-}
-
-"""
-User-tag additions and removals applied across a set of series movies.
-"""
-input UpdateSeriesMovieTagsInput {
-	"""
-	Series-movie links to patch. Each link's series is checked for title-management rights before the first write, so a set spanning a library the caller cannot manage changes nothing.
-	"""
-	seriesMovieLinkIds: [ID!]!
-	"""
-	Labels to add. Each must already be defined in the title-tag registry, and reserved `scryer:` entries are rejected.
-	"""
-	add: [String!]
-	"""
-	Labels to remove. A label the registry no longer defines may still be removed, so a deleted tag can always be cleared off a series movie.
-	"""
-	remove: [String!]
-}
-
-"""
-TLS certificate and private-key filesystem paths.
-"""
-input UpdateServiceSettingsInput {
-	"""
-	Absolute TLS certificate path. Omission preserves the saved path.
-	"""
-	tlsCertPath: String
-	"""
-	Absolute TLS private-key path. Omission preserves the saved path.
-	"""
-	tlsKeyPath: String
-	"""
-	Save a trusted-proxy override. Omission preserves the existing policy.
-	"""
-	trustedProxyIps: [String!]
-	"""
-	Clear the saved override and use environment configuration.
-	"""
-	resetTrustedProxyIps: Boolean
-}
-
-"""
-Patch for an existing subtitle provider.
-"""
-input UpdateSubtitleProviderConfigInput {
-	"""
-	Subtitle-provider configuration identity to patch.
-	"""
-	id: ID!
-	"""
-	Replacement display name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement provider implementation; omission preserves it.
-	"""
-	providerType: String
-	"""
-	Replacement provider configuration; omitted secret fields retain stored secrets.
-	"""
-	config: [ProviderConfigValueInput!]
-	"""
-	Replacement enabled facets; omission preserves them.
-	"""
-	enabledFacets: [MediaFacetValue!]
-	"""
-	Replacement enabled state; omission preserves it.
-	"""
-	isEnabled: Boolean
-	"""
-	Disable-until timestamp: omission preserves it, null clears it, and a value replaces it.
-	"""
-	disabledUntil: DateTime
-}
-
-"""
-Subtitle acquisition, translation, and synchronization settings.
-"""
-input UpdateSubtitleSettingsInput {
-	"""
-	Whether subtitle processing is enabled.
-	"""
-	enabled: Boolean!
-	"""
-	Ordered language preferences.
-	"""
-	languages: [SubtitleLanguagePreferenceInput!]!
-	"""
-	Whether subtitles are downloaded automatically after import.
-	"""
-	autoDownloadOnImport: Boolean!
-	"""
-	Minimum provider score for series subtitles.
-	"""
-	minimumScoreSeries: Int!
-	"""
-	Minimum provider score for movie subtitles.
-	"""
-	minimumScoreMovie: Int!
-	"""
-	Search interval in hours.
-	"""
-	searchIntervalHours: Int!
-	"""
-	Whether AI-translated subtitles are accepted.
-	"""
-	includeAiTranslated: Boolean!
-	"""
-	Whether machine-translated subtitles are accepted.
-	"""
-	includeMachineTranslated: Boolean!
-	"""
-	Whether subtitle synchronization is enabled.
-	"""
-	syncEnabled: Boolean!
-	"""
-	Synchronization threshold for series subtitles.
-	"""
-	syncThresholdSeries: Int!
-	"""
-	Synchronization threshold for movie subtitles.
-	"""
-	syncThresholdMovie: Int!
-	"""
-	Maximum synchronization offset in seconds.
-	"""
-	syncMaxOffsetSeconds: Int!
-}
-
-"""
-Patch for title metadata and settings.
-"""
-input UpdateTitleInput {
-	"""
-	Title identity to patch.
-	"""
-	titleId: ID!
-	"""
-	Replacement title name; omission preserves it.
-	"""
-	name: String
-	"""
-	Replacement facet; omission preserves it.
-	"""
-	facet: MediaFacetValue
-	"""
-	Replacement tag list; omission preserves it and an empty list clears tags.
-	"""
-	tags: [String!]
-	"""
-	Optional title settings patch.
-	"""
-	options: TitleOptionsInput
-}
-
-"""
-Title-tag rename or description change.
-"""
-input UpdateTitleTagDefinitionInput {
-	"""
-	Title-tag definition to change.
-	"""
-	id: ID!
-	"""
-	Replacement label; omitted or null leaves the label alone. A rename rewrites every title and delay profile carrying the old label.
-	"""
-	label: String
-	"""
-	Replacement description; omitted leaves it alone, and null clears it.
-	"""
-	description: String
-}
-
-"""
-User-tag additions and removals applied across a set of titles.
-"""
-input UpdateTitleTagsInput {
-	"""
-	Titles to patch. Every title's library is checked before the first write, so a set containing one title the caller cannot manage changes nothing.
-	"""
-	titleIds: [ID!]!
-	"""
-	Labels to add. Each must already be defined in the title-tag registry, and reserved `scryer:` entries are rejected.
-	"""
-	add: [String!]
-	"""
-	Labels to remove. A label the registry no longer defines may still be removed, so a deleted tag can always be cleared off a title.
-	"""
-	remove: [String!]
-}
-
-"""
-Verification depth applied to download-client completed-download copies.
-Location operations (library moves, root changes, consolidations) always
-verify in full and ignore this preference: they move the only copy of the
-content, so the stronger guarantee is a floor rather than a choice.
-"""
-input UpdateVerificationSettingsInput {
-	"""
-	Depth applied when proving a copied file before its source is touched.
-	"""
-	depth: VerificationDepthValue!
-}
-
-"""
-A multipart file upload
-"""
-scalar Upload
-
-"""
-Account origin used for login and authorization behavior.
-"""
-enum UserAccountKindValue {
-	"""
-	Account created and managed locally.
-	"""
-	LOCAL
-	"""
-	Account created automatically from an external provider login.
-	"""
-	EXTERNAL_AUTO_PROVISIONED
-}
-
-"""
-Permissions granted to one library for one user.
-"""
-type UserLibraryPermissionGrantPayload {
-	"""
-	ID of the library receiving the grant.
-	"""
-	libraryId: ID!
-	"""
-	Permissions granted within that library.
-	"""
-	permissions: [LibraryPermissionValue!]!
-}
-
-"""
-User summary with authorization and credential-presence flags, never credential values.
-"""
-type UserPayload {
-	"""
-	ID of the user.
-	"""
-	id: ID!
-	"""
-	Login username.
-	"""
-	username: String!
-	"""
-	Whether password or external login is enabled.
-	"""
-	loginEnabled: Boolean!
-	"""
-	Whether this is the default administrator account.
-	"""
-	isDefaultAdmin: Boolean!
-	"""
-	Whether a password is configured, without revealing it.
-	"""
-	hasPassword: Boolean!
-	"""
-	Whether a local password must be replaced before the next local-password session is full.
-	"""
-	passwordChangeRequired: Boolean!
-	"""
-	Whether MFA is configured, without revealing its secret.
-	"""
-	hasMfa: Boolean!
-	"""
-	Whether a passkey is configured.
-	"""
-	hasPasskey: Boolean!
-	"""
-	Local or externally provisioned account origin.
-	"""
-	accountKind: UserAccountKindValue!
-	"""
-	Application-wide permissions granted to the user.
-	"""
-	appPermissions: [AppPermissionValue!]!
-	"""
-	Library-specific permission grants.
-	"""
-	libraryPermissions: [UserLibraryPermissionGrantPayload!]!
-}
-
-"""
-External service kind and credentials to validate.
-"""
-input ValidateExternalImportConnectionInput {
-	"""
-	External service kind.
-	"""
-	kind: ExternalImportConnectionKind!
-	"""
-	Base URL and API key to validate.
-	"""
-	connection: ExternalImportConnectionInput!
-}
-
-"""
-Validates maintenance rule source without saving it.
-"""
-input ValidateMaintenanceRuleInput {
-	"""
-	Matcher source to validate, as written in the editor.
-	"""
-	regoSource: String!
-}
-
-"""
-Validates request rule source without saving it.
-"""
-input ValidateRequestRuleInput {
-	"""
-	Matcher source to validate, as written in the editor.
-	"""
-	regoSource: String!
-}
-
-"""
-Validates Rego source, optionally in the context of an existing rule set.
-"""
-input ValidateRuleSetInput {
-	"""
-	Rego source to validate.
-	"""
-	regoSource: String!
-	"""
-	Existing rule-set ID for context, or null for standalone validation.
-	"""
-	ruleSetId: ID
-}
-
-"""
-How thoroughly a copied file is proven before its source may be touched.
-"""
-enum VerificationDepthValue {
-	"""
-	Read the destination back in full and compare it against the CRC streamed
-	during the copy.
-	"""
-	FULL
-	"""
-	Compare the sampled head and tail content proof plus the file size. This
-	is also the floor full verification falls back to when a full read-back
-	cannot run.
-	"""
-	QUICK
-}
-
-"""
-Verification depth applied to download-client completed-download copies.
-Location operations (library moves, root changes, consolidations) always
-verify in full and ignore this preference: they move the only copy of the
-content, so the stronger guarantee is a floor rather than a choice.
-"""
-type VerificationSettingsPayload {
-	"""
-	Depth applied when proving a copied file before its source is touched.
-	"""
-	depth: VerificationDepthValue!
-}
-
-"""
-Acquisition target for a title scope, including missing and upgrade states.
-"""
-type WantedItemPayload {
-	"""
-	Stable identifier for this scope, or an addressable key such as `episode:<id>`, `title:<id>`, or `series_movie:<id>`.
-	"""
-	id: ID!
-	"""
-	Identifier of the title targeted for acquisition.
-	"""
-	titleId: ID!
-	"""
-	Title name, or null when title metadata is unavailable.
-	"""
-	titleName: String
-	"""
-	Stable title slug, or null when unavailable.
-	"""
-	titleSlug: String
-	"""
-	Title facet, or null when title context is unavailable.
-	"""
-	titleFacet: String
-	"""
-	Identifier of the containing library, or null when the scope has no library context.
-	"""
-	libraryId: ID
-	"""
-	Library name, or null when library metadata is unavailable.
-	"""
-	libraryName: String
-	"""
-	Stable library slug, or null when library metadata is unavailable.
-	"""
-	librarySlug: String
-	"""
-	Identifier of the targeted episode, or null for title and series-movie scopes.
-	"""
-	episodeId: ID
-	"""
-	Identifier of the targeted collection, or null when not applicable.
-	"""
-	collectionId: ID
-	"""
-	Season number for an episodic scope, or null when not applicable or unknown.
-	"""
-	seasonNumber: String
-	"""
-	Episode number for an episodic scope, or null when not applicable or unknown.
-	"""
-	episodeNumber: String
-	"""
-	Acquisition media type represented by this scope.
-	"""
-	mediaType: WantedMediaTypeValue!
-	"""
-	Time of the latest search in UTC, or null before a search runs.
-	"""
-	lastSearchAt: DateTime
-	"""
-	Acquisition status; missing targets report wanted until a stored status exists.
-	"""
-	status: WantedStatusValue!
-	"""
-	Serialized grabbed-release metadata, or null when no release has been grabbed.
-	"""
-	grabbedRelease: String
-	"""
-	Safe provider label extracted from grabbed-release metadata, with sensitive release details omitted.
-	"""
-	sourceProvider: String
-	"""
-	The bar this scope's landed file sets, or null when nothing occupies it.
-	
-	The re-derived canonical score of the primary media file occupying the
-	scope: computed on read from the row, never read back from the persisted
-	`acquisition_score`, which is display history and is only valid while the
-	profile, persona, rule packs and scoring algorithm that wrote it are all
-	unchanged. This is the same number the admission gate compares a
-	candidate against, so the value shown here and the value a grab or import
-	decision used cannot disagree.
-	
-	It used to be a per-scope ledger column that only held a landed score in
-	one of its five lifecycle states; after a rejected import it held the
-	score of a release that never landed, which read lower than the
-	incumbent.
-	"""
-	currentScore: Int
-	"""
-	Latest release decision, or null before a candidate decision exists.
-	"""
-	latestReleaseDecision: ReleaseDecisionPayload
-	"""
-	Number of saved fallback candidates keyed to this scope. Season-pack
-	candidates are keyed to their season's anchor episode, so sibling
-	episodes can report zero while the anchor reports the saved candidates.
-	"""
-	standbyCount: Int!
-	"""
-	Whether a changed title match permits a recovery search.
-	"""
-	mismatchRecoveryEligible: Boolean!
-	"""
-	Convergence state showing whether indexer coverage is queued, searching, complete, or deferred.
-	"""
-	convergenceState: ConvergenceStateValue!
-	"""
-	Number of routed indexers already searched under the current fingerprint.
-	"""
-	indexersCovered: Int!
-	"""
-	Number of routed indexers enabled for this scope.
-	"""
-	indexersRouted: Int!
-	"""
-	Scheduling lane used to prioritize convergence work.
-	"""
-	recencyLane: RecencyLaneValue!
-	"""
-	Creation time in UTC, using a fallback timestamp for synthesized scopes.
-	"""
-	createdAt: DateTime!
-	"""
-	Update time in UTC, using a fallback timestamp for synthesized scopes.
-	"""
-	updatedAt: DateTime!
-	"""
-	Title targeted by this wanted scope, or null when it is no longer available to the caller.
-	"""
-	title: TitlePayload
-	"""
-	Collection targeted by this scope, or null when the scope is not collection-based.
-	"""
-	collection: CollectionPayload
-	"""
-	Episode targeted by this scope, or null for title, collection, and series-movie scopes.
-	"""
-	episode: EpisodePayload
-	"""
-	Release decisions for this wanted scope with a total count and continuation flag.
-	"""
-	releaseDecisions(
-		"""
-		Page size; defaults to 50 and clamps to 1 through 300.
-		"""
-		limit: Int! = 50,
-		"""
-		Zero-based page offset; defaults to 0 and negative values become 0.
-		"""
-		offset: Int! = 0
-	): ReleaseDecisionsPagePayload!
-	"""
-	Pending releases for this wanted scope with a total count and continuation flag.
-	"""
-	pendingReleases(
-		"""
-		Page size; defaults to 50 and clamps to 1 through 300.
-		"""
-		limit: Int! = 50,
-		"""
-		Zero-based page offset; defaults to 0 and negative values become 0.
-		"""
-		offset: Int! = 0
-	): PendingReleasesPayload!
-}
-
-"""
-A complete or partial page of wanted acquisition scopes.
-"""
-type WantedItemsListPayload {
-	"""
-	Wanted items in stable order.
-	"""
-	items: [WantedItemPayload!]!
-	"""
-	Number of matching scopes across all pages.
-	"""
-	totalCount: Int!
-	"""
-	Whether another page exists after this page.
-	"""
-	hasMore: Boolean!
-}
-
-"""
-Wanted items returned without a total-count query.
-"""
-type WantedItemsPagePayload {
-	"""
-	Wanted items in stable order.
-	"""
-	items: [WantedItemPayload!]!
-}
-
-"""
-Derived acquisition-target set represented by a wanted view.
-"""
-enum WantedKindValue {
-	"""
-	Scope has no primary file; this is the default target set.
-	"""
-	MISSING
-	"""
-	Scope has a file below the effective profile cutoff.
-	"""
-	CUTOFF_UPGRADE
-}
-
-"""
-Media shape represented by a wanted target.
-"""
-enum WantedMediaTypeValue {
-	"""
-	A movie target.
-	"""
-	MOVIE
-	"""
-	An episode target.
-	"""
-	EPISODE
-	"""
-	A movie belonging to a series.
-	"""
-	SERIES_MOVIE
-}
-
-"""
-Counts reported for a wanted search attempt.
-"""
-type WantedSearchPayload {
-	"""
-	Number of scopes queued for search.
-	"""
-	queuedCount: Int!
-	"""
-	Number of scopes skipped because work was already in progress.
-	"""
-	skippedInProgressCount: Int!
-}
-
-"""
-Count of wanted items grouped by lifecycle status.
-"""
-type WantedStatusCountPayload {
-	"""
-	Wanted-item status.
-	"""
-	status: WantedStatusValue!
-	"""
-	Number of items with this status.
-	"""
-	count: Int!
-}
-
-"""
-Lifecycle state of a wanted acquisition target.
-"""
-enum WantedStatusValue {
-	"""
-	Target is wanted and not yet grabbed.
-	"""
-	WANTED
-	"""
-	A release was grabbed for the target.
-	"""
-	GRABBED
-	"""
-	Target processing is paused.
-	"""
-	PAUSED
-	"""
-	Target has completed acquisition.
-	"""
-	COMPLETED
-}
-
-"""
-WebAuthn registration or authentication challenge options.
-"""
-type WebauthnChallengePayload {
-	"""
-	ID of the short-lived WebAuthn challenge.
-	"""
-	challengeId: ID!
-	"""
-	Browser options JSON; it contains challenge data and should not be persisted as a credential.
-	"""
-	optionsJson: JSON!
-	"""
-	UTC time when the challenge expires.
-	"""
-	expiresAt: DateTime!
-}
-
-"""
-WebAuthn assertion response paired with a previously issued challenge.
-"""
-input WebauthnCompleteInput {
-	"""
-	ID of the WebAuthn challenge to complete.
-	"""
-	challengeId: ID!
-	"""
-	Browser assertion JSON; credential material is consumed for verification and not echoed.
-	"""
-	responseJson: JSON!
-	"""
-	Whether the returned session should persist; absent or null uses the request policy.
-	"""
-	persistSession: Boolean
-}
-
-"""
-WebAuthn registration response paired with a previously issued challenge.
-"""
-input WebauthnRegisterCompleteInput {
-	"""
-	ID of the WebAuthn registration challenge.
-	"""
-	challengeId: ID!
-	"""
-	Browser registration JSON; credential material is consumed for verification and not echoed.
-	"""
-	responseJson: JSON!
-	"""
-	Optional display name for the new passkey; absent or null leaves it unset.
-	"""
-	friendlyName: String
-}
-
-"""
-Marks an element of a GraphQL schema as no longer supported.
-"""
-directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | ENUM_VALUE
-"""
-Directs the executor to include this field or fragment only when the `if` argument is true.
-"""
-directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
-"""
-Indicates that an Input Object is a OneOf Input Object (and thus requires exactly one of its field be provided)
-"""
-directive @oneOf on INPUT_OBJECT
-"""
-Directs the executor to skip this field or fragment when the `if` argument is true.
-"""
-directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
-"""
-Provides a scalar specification URL for specifying the behavior of custom scalar types.
-"""
-directive @specifiedBy(url: String!) on SCALAR
-schema {
-	query: QueryRoot
-	mutation: MutationRoot
-	subscription: SubscriptionRoot
-}
+	searchAliases: [String!]

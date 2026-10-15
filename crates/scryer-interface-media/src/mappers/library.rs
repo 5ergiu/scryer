@@ -606,6 +606,7 @@ pub fn from_library_scan_session(
 pub fn from_job_definition(definition: JobDefinition) -> JobDefinitionPayload {
     JobDefinitionPayload {
         key: JobKeyValue::from_application(definition.key),
+        custom_job_id: definition.custom_job_id.map(Into::into),
         display_name: definition.display_name,
         description: definition.description,
         category: JobCategoryValue::from_application(definition.category),
@@ -629,9 +630,11 @@ pub fn from_job_definition(definition: JobDefinition) -> JobDefinitionPayload {
 }
 
 pub fn from_job_run(run: JobRun) -> JobRunPayload {
+    let custom_job_id = run.custom_job_id().map(|id| id.to_string().into());
     JobRunPayload {
         id: run.id.into(),
         job_key: JobKeyValue::from_application(run.job_key),
+        custom_job_id,
         display_name: run.display_name,
         category: JobCategoryValue::from_application(run.category),
         section: JobSectionValue::from_application(run.section),
@@ -664,6 +667,7 @@ pub fn from_media_rename_plan(plan: RenamePlan) -> MediaRenamePlanPayload {
         noop: plan.noop as i32,
         conflicts: plan.conflicts as i32,
         errors: plan.errors as i32,
+        folder_repairs: plan.folder_repairs.len() as i32,
         items: plan
             .items
             .into_iter()
@@ -881,6 +885,20 @@ pub fn from_calendar_episode(
         },
         if is_movie { "w250" } else { "w300" },
     );
+    let title_background_url = ep
+        .title_background_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .and_then(|url| {
+            app.media_image_url(
+                Some(url).filter(|url| url.starts_with("http")),
+                Some("title"),
+                Some(&ep.title_id),
+                ImageProxyKind::Fanart,
+                "w1280",
+            )
+        });
     CalendarEpisodePayload {
         id: ep.id.into(),
         title_id: ep.title_id.into(),
@@ -895,6 +913,7 @@ pub fn from_calendar_episode(
         episode_title: ep.episode_title,
         overview: ep.overview,
         image_url,
+        title_background_url,
         air_date: parse_date(ep.air_date),
         monitored: ep.monitored,
         media_availability,

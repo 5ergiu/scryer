@@ -19,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  SquareTerminal,
   TextSearch,
   Trash2,
   User,
@@ -287,7 +288,7 @@ export function buildRouteCommands({
           onSelect: buildNavigate(onNavigate, "calendar"),
         } satisfies RouteCommand]
       : []),
-    ...(canAccessListsPage(canViewCatalog, canManageLists, experimentalFeaturesEnabled)
+    ...(canAccessListsPage(canViewCatalog || hasAnyLibraryPermission(user, LIBRARY_PERMISSIONS.request) || hasAnyLibraryPermission(user, LIBRARY_PERMISSIONS.manageTitles), canManageLists || canManageSystemSettings)
       ? [{
           id: "lists",
           label: t("nav.lists"),
@@ -298,7 +299,7 @@ export function buildRouteCommands({
           onSelect: buildNavigate(onNavigate, "lists"),
         } satisfies RouteCommand]
       : []),
-    ...(canAccessListExclusions(canManageLists, experimentalFeaturesEnabled)
+    ...(canAccessListExclusions(canManageLists)
       ? [{
           id: "lists-exclusions",
           label: `${t("nav.lists")} / ${t("lists.tab.exclusions")}`,
@@ -552,6 +553,14 @@ export function buildRouteCommands({
           keywords: ["settings", "plugins", "wasm", "extensions"],
           icon: Puzzle,
           onSelect: buildNavigate(onNavigate, "settings", "plugins"),
+        } satisfies RouteCommand, {
+          id: "settings-scripts",
+          label: `${settingsGroupLabel} / ${t("settings.scripts")}`,
+          description: t("settings.scriptInterpreters.title"),
+          groupLabel: settingsGroupLabel,
+          keywords: ["settings", "scripts", "interpreters", "python", "powershell", "batch", "go"],
+          icon: SquareTerminal,
+          onSelect: buildNavigate(onNavigate, "settings", "scripts"),
         } satisfies RouteCommand]
       : []),
     ...(canAccessRecycleBin

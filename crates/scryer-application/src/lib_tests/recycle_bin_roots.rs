@@ -223,6 +223,35 @@ async fn unreadable_library_roots_leave_the_default_bin_working() {
 }
 
 #[tokio::test]
+async fn upgrade_root_check_failure_preserves_existing_payload() {
+    let fixture = Fixture::new();
+    let root = fixture.root_a();
+    let (app, user) = movie_app(&root).await;
+    let (media, neighbour) = fixture.seed_media(&root, "Synthetic Feature");
+    let title =
+        create_movie_title_with_folder(&app, &user, "Synthetic Feature", media.parent().unwrap())
+            .await;
+    let old_file = TitleMediaFile {
+        id: "synthetic-old-file".into(),
+        title_id: title.id.clone(),
+        file_path: media.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let moved_root = root.with_file_name("unavailable-root-fixture");
+    std::fs::rename(&root, &moved_root).unwrap();
+    let result = crate::upgrade::resolve_old_file_recycle_context(&app, &title, &old_file).await;
+    assert!(matches!(result, Err(AppError::Validation(_))));
+    assert_untouched(
+        &moved_root.join(media.strip_prefix(&root).unwrap()),
+        "Synthetic Feature media",
+    );
+    assert_untouched(
+        &moved_root.join(neighbour.strip_prefix(&root).unwrap()),
+        "Synthetic Feature neighbour",
+    );
+}
+
+#[tokio::test]
 async fn upgrade_refuses_a_custom_bin_inside_another_library_root_and_keeps_the_old_file() {
     let fixture = Fixture::new();
     let root_a = fixture.root_a();

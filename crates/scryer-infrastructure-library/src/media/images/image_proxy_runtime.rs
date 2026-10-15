@@ -12,7 +12,7 @@ use reqwest::header::{
 use scryer_application::{
     AppError, AppResult, ImageProxyCacheControl, ImageProxyCacheEntryRecord, ImageProxyCacheUsage,
     ImageProxyRepository, ImageProxySourceRecord, TitleImageKind, TitleImageProcessor,
-    TitleImageRepository,
+    TitleImageRepository, image_upstream_variant_url,
 };
 use scryer_outbound_http::{
     HostRpsProfile, OutboundHttpClient, OutboundHttpError, RateLimitRegistry, RequestPolicy,
@@ -370,7 +370,7 @@ impl ImageProxyRuntime {
         let Some(source_url) = source.upstream_url.as_deref() else {
             return Ok(None);
         };
-        let upstream_url = upstream_variant_url(source_url, &source.image_kind, variant)
+        let upstream_url = image_upstream_variant_url(source_url, &source.image_kind, variant)
             .and_then(|url| approved_upstream_url(&url))
             .ok_or_else(|| AppError::Validation("unapproved image proxy source".to_string()))?;
         let mut response = self
@@ -928,29 +928,6 @@ fn valid_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn upstream_variant_url(source_url: &str, kind: &str, variant: &str) -> Option<String> {
-    let mut parsed = url::Url::parse(source_url).ok()?;
-    if parsed.host_str()?.eq_ignore_ascii_case("image.tmdb.org") {
-        let size = match (kind, variant) {
-            ("poster", "w70") => "w92",
-            ("poster", "w250") => "w300",
-            ("poster", "original") | ("fanart", "original") => "original",
-            ("fanart", "w1280") => "w1280",
-            ("person", "w185") => "w185",
-            ("person", "original") => "original",
-            ("episode_still", "w300") => "w300",
-            ("episode_still", "original") => "original",
-            _ => return None,
-        };
-        let path = parsed.path();
-        let prefix = "/t/p/";
-        let rest = path.strip_prefix(prefix)?;
-        let (_, asset) = rest.split_once('/')?;
-        parsed.set_path(&format!("{prefix}{size}/{asset}"));
-    }
-    Some(parsed.to_string())
-}
-
 fn approved_content_type(value: &str) -> Option<&'static str> {
     match value
         .split(';')
@@ -1121,8 +1098,8 @@ mod tests {
 
     use super::{
         IMAGE_PROXY_HOST_RPS, IMAGE_PROXY_HOST_RPS_BURST, IMAGE_PROXY_HOST_RPS_LANE,
-        ImageProxyRuntime, image_fetch_policy, image_outbound_http_client, upstream_variant_url,
-        valid_raster_bytes, valid_token, variant_allowed,
+        ImageProxyRuntime, image_fetch_policy, image_outbound_http_client,
+        image_upstream_variant_url, valid_raster_bytes, valid_token, variant_allowed,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -1756,7 +1733,7 @@ mod tests {
     #[test]
     fn tmdb_variant_mapping_preserves_asset_identity() {
         assert_eq!(
-            upstream_variant_url(
+            image_upstream_variant_url(
                 "https://image.tmdb.org/t/p/w500/poster.jpg",
                 "poster",
                 "w70"
@@ -1765,7 +1742,7 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w92/poster.jpg")
         );
         assert_eq!(
-            upstream_variant_url(
+            image_upstream_variant_url(
                 "https://image.tmdb.org/t/p/original/poster.jpg",
                 "poster",
                 "w250"
@@ -1774,7 +1751,7 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w300/poster.jpg")
         );
         assert_eq!(
-            upstream_variant_url(
+            image_upstream_variant_url(
                 "https://image.tmdb.org/t/p/original/background.jpg",
                 "fanart",
                 "w1280"
@@ -1783,7 +1760,7 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w1280/background.jpg")
         );
         assert_eq!(
-            upstream_variant_url(
+            image_upstream_variant_url(
                 "https://image.tmdb.org/t/p/original/episode.jpg",
                 "episode_still",
                 "w300"
@@ -1792,7 +1769,7 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w300/episode.jpg")
         );
         assert_eq!(
-            upstream_variant_url(
+            image_upstream_variant_url(
                 "https://artworks.thetvdb.com/banners/poster.jpg",
                 "poster",
                 "w250"
