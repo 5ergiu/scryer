@@ -440,6 +440,7 @@ async fn a_ledger_claim_scores_with_the_listing_its_grab_froze() {
         .await;
     let release = "Claimed.Movie.2024.1080p.WEB-DL-GRP";
     let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+        grab_scoring: None,
         published_at: None,
         thumbs_up: None,
         thumbs_down: None,

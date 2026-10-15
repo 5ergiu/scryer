@@ -859,7 +859,10 @@ impl AppUseCase {
         }
         match run.job_key {
             JobKey::TitleDeletion | JobKey::TitleRename => Ok(true),
-            JobKey::MediaFileDeletion | JobKey::RecycleBinRestore | JobKey::RecycleBinPurge => {
+            JobKey::MediaFileRescore
+            | JobKey::MediaFileDeletion
+            | JobKey::RecycleBinRestore
+            | JobKey::RecycleBinPurge => {
                 let Some((prefix, remainder)) = run.operation_type.split_once(':') else {
                     return Ok(false);
                 };
@@ -876,7 +879,8 @@ impl AppUseCase {
                         }
                         vec![library_id]
                     }
-                    (JobKey::RecycleBinRestore, "recycle_bin_restore_batch")
+                    (JobKey::MediaFileRescore, "media_file_rescore")
+                    | (JobKey::RecycleBinRestore, "recycle_bin_restore_batch")
                     | (JobKey::RecycleBinPurge, "recycle_bin_purge_batch") => {
                         let Some((library_ids, batch_size)) = remainder.rsplit_once(':') else {
                             return Ok(false);
@@ -961,6 +965,7 @@ impl AppUseCase {
                 JobKey::TitleDeletion
                     | JobKey::TitleRename
                     | JobKey::MediaFileDeletion
+                    | JobKey::MediaFileRescore
                     | JobKey::RecycleBinRestore
                     | JobKey::RecycleBinPurge
             )
@@ -2117,6 +2122,9 @@ impl AppUseCase {
             JobKey::MediaFileDeletion => Err(AppError::Validation(
                 "media file deletion jobs must be started from the media file deletion mutation"
                     .into(),
+            )),
+            JobKey::MediaFileRescore => Err(AppError::Validation(
+                "select files, seasons, or titles to refresh scores".into(),
             )),
             JobKey::RecycleBinRestore => Err(AppError::Validation(
                 "recycle restore jobs must be started from the recycle restore mutation".into(),

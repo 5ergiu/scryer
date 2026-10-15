@@ -576,10 +576,95 @@ pub fn from_pp_script_run(
     }
 }
 
+fn history_scoring(json: Option<&str>) -> Option<HistoryScoringPayload> {
+    let value: serde_json::Value = serde_json::from_str(json?).ok()?;
+    let data = value.get("data").unwrap_or(&value);
+    let snapshot = data
+        .get("release_facts")
+        .and_then(|facts| facts.get("scoring"))
+        .and_then(|scoring| {
+            serde_json::from_value::<scryer_domain::GrabScoringSnapshot>(scoring.clone()).ok()
+        });
+    let snapshot = snapshot.or_else(|| {
+        if value.get("type")?.as_str()? != "file_upgraded" {
+            return None;
+        }
+        let score = i32::try_from(data.get("new_score")?.as_i64()?).ok()?;
+        let previous = data
+            .get("old_score")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok());
+        Some(scryer_domain::GrabScoringSnapshot {
+            candidate_score: score,
+            previous_score: previous,
+            delta: previous.map(|previous| i64::from(score) - i64::from(previous)),
+            decision_code: "upgrade".into(),
+            comparisons: vec![],
+            entries: vec![],
+        })
+    })?;
+    Some(HistoryScoringPayload {
+        candidate_score: snapshot.candidate_score,
+        previous_score: snapshot.previous_score,
+        delta: snapshot.delta.map(Into::into),
+        decision_code: snapshot.decision_code,
+        comparisons: snapshot
+            .comparisons
+            .into_iter()
+            .map(|comparison| HistoryScoreComparisonPayload {
+                file_id: comparison.file_id.into(),
+                episode_ids: comparison.episode_ids.into_iter().map(Into::into).collect(),
+                previous_score: comparison.previous_score,
+                delta: comparison.delta.into(),
+            })
+            .collect(),
+        entries: snapshot
+            .entries
+            .into_iter()
+            .map(|entry| ScoreEvaluationEntryPayload {
+                code: entry.code,
+                delta: entry.delta,
+                kind: entry.kind,
+                source: entry.source,
+            })
+            .collect(),
+    })
+}
+
+#[cfg(test)]
+mod scoring_history_tests {
+    use super::history_scoring;
+
+    #[test]
+    fn history_scoring_preserves_recorded_evidence_and_legacy_absence() {
+        assert!(history_scoring(None).is_none());
+        assert!(history_scoring(Some(r#"{"type":"release_grabbed","data":{}}"#)).is_none());
+        let json = serde_json::json!({"type":"release_grabbed","data":{"release_facts":{"scoring":{
+            "candidate_score":0,"previous_score":-5,"delta":5,"decision_code":"manual_override",
+            "comparisons":[],"entries":[{"code":"synthetic_rule","delta":-3,"kind":"score_contribution","source":"Test rule"}]
+        }}}}).to_string();
+        let score = history_scoring(Some(&json)).unwrap();
+        assert_eq!(score.candidate_score, 0);
+        assert_eq!(score.previous_score, Some(-5));
+        assert_eq!(score.decision_code, "manual_override");
+        assert_eq!(score.entries[0].delta, -3);
+        assert_eq!(score.entries[0].source.as_deref(), Some("Test rule"));
+        let upgrade = history_scoring(Some(
+            r#"{"type":"file_upgraded","data":{"old_score":-7,"new_score":0}}"#,
+        ))
+        .unwrap();
+        assert_eq!(upgrade.candidate_score, 0);
+        assert_eq!(upgrade.previous_score, Some(-7));
+        assert_eq!(upgrade.decision_code, "upgrade");
+    }
+}
+
 pub fn from_title_history_record(
     record: TitleHistoryRecord,
 ) -> scryer_application::AppResult<TitleHistoryEventPayload> {
+    let scoring = history_scoring(record.data_json.as_deref());
     Ok(TitleHistoryEventPayload {
+        scoring,
         id: record.id.into(),
         title_id: record.title_id.map(Into::into),
         title_name: record.title_name,

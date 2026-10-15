@@ -2317,7 +2317,10 @@ async fn commit_season_pack_proposal(
                             grab_indexer.clone(),
                             grab.client_id.as_deref(),
                         )
-                        .await;
+                        .await
+                        .with_scoring(crate::quality::grab_scoring::from_listing(
+                            best_pack.release_listing_json.as_deref(),
+                        ));
                     let _ = app
                         .append_domain_event(new_title_domain_event(
                             initiated_by.clone(),
@@ -5175,7 +5178,10 @@ async fn commit_scope_grab(
                         grab_indexer.clone(),
                         grab.client_id.as_deref(),
                     )
-                    .await;
+                    .await
+                    .with_scoring(crate::quality::grab_scoring::from_listing(
+                        candidate.release_listing_json.as_deref(),
+                    ));
                 let _ = app
                     .append_domain_event(new_title_domain_event(
                         initiated_by.clone(),

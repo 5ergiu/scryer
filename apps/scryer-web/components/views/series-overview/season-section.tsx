@@ -1,4 +1,6 @@
 import * as React from "react";
+import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
+import { useCanManageOverviewTitle } from "@/lib/hooks/use-title-overview-access";
 import {
   ChevronDown,
   ChevronRight,
@@ -236,6 +238,7 @@ function SeasonSectionImpl({
   onSetSeasonSelected,
 }: SeasonSectionProps) {
   const t = useTranslate();
+  const canRefreshScores = useCanManageOverviewTitle(libraryId);
   const isMobile = useIsMobile();
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seasonToggling, setSeasonToggling] = React.useState(false);
@@ -522,6 +525,7 @@ function SeasonSectionImpl({
                 className="w-[6.75rem]"
               />
             ) : null}
+            {canRefreshScores ? <RefreshScoresButton selection={{ seasonIds: [collection.id] }} /> : null}
             <IconButton
               id={`season-details-${collection.id}`}
               label={`${seasonHeading(collection, t)} — ${t("episode.details")}`}
@@ -616,6 +620,7 @@ function SeasonSectionImpl({
                 {seasonSearchResults.length > 0 ? (
                   <SearchResultBuckets
                     titleId={collection.titleId}
+                    ownedScope={{ collectionId: collection.id }}
                     results={seasonSearchResults}
                     onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
                     requireCandidateToken

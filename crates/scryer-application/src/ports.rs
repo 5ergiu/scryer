@@ -7425,7 +7425,51 @@ pub struct MediaFileHashCandidate {
 
 #[async_trait]
 pub trait MediaFileRepository: Send + Sync {
+    /// Stable, bounded pages of files in an explicit score-refresh selection.
+    async fn score_refresh_page(
+        &self,
+        _selection: &crate::ScoreRefreshSelection,
+        _after: &str,
+    ) -> AppResult<Vec<String>> {
+        Err(AppError::Repository(
+            "score refresh selection is unavailable".into(),
+        ))
+    }
+
+    /// Last explicitly requested evaluation; reading it never runs scoring.
+    async fn get_score_evaluation(
+        &self,
+        _file_id: &str,
+    ) -> AppResult<Option<crate::quality::evaluations::FileScoreEvaluation>> {
+        Ok(None)
+    }
+
+    /// Persist a display evaluation without changing acquisition evidence.
+    async fn save_score_evaluation(
+        &self,
+        _file_id: &str,
+        _title_id: &str,
+        _evaluation: &crate::quality::evaluations::FileScoreEvaluation,
+    ) -> AppResult<()> {
+        Err(AppError::Repository(
+            "score evaluation persistence is unavailable".into(),
+        ))
+    }
+
     async fn insert_media_file(&self, input: &InsertMediaFileInput) -> AppResult<String>;
+
+    async fn score_evaluation_episode_ids(&self, file: &TitleMediaFile) -> AppResult<Vec<String>> {
+        let mut ids: Vec<_> = self
+            .list_media_files_for_title(&file.title_id)
+            .await?
+            .into_iter()
+            .filter(|row| row.id == file.id)
+            .filter_map(|row| row.episode_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
 
     async fn claim_import_destination(
         &self,

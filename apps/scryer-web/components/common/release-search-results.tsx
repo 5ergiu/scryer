@@ -1,5 +1,8 @@
 import * as React from "react";
 import { useQuery } from "urql";
+import { useActivityEventStream } from "@/lib/hooks/use-activity-event-stream";
+import { TITLE_OVERVIEW_IMPORT_REFRESH_KINDS } from "@/lib/utils/title-overview-refresh-policy";
+import type { CurrentReleaseScope } from "@/lib/utils/current-release";
 import { currentReleaseFilesQuery } from "@/lib/graphql/queries";
 import { currentReleaseNames, releaseIdentityName, type CurrentReleaseFile } from "@/lib/utils/current-release";
 import {
@@ -785,10 +788,11 @@ function SearchResultRow({
 }
 
 const EMPTY_CURRENT_RELEASES = new Set<string>();
+const OWNED_RELEASE_REFRESH_KINDS = new Set([...TITLE_OVERVIEW_IMPORT_REFRESH_KINDS, "file_deleted", "media_file_deleted", "file_analyzed"]);
 type SearchResultBucketsProps = Omit<
   React.ComponentProps<typeof SearchResultBucketsContent>,
   "currentNames"
->;
+> & { ownedScope?: CurrentReleaseScope };
 
 export function SearchResultBuckets({
   titleId,
@@ -803,16 +807,20 @@ export function SearchResultBuckets({
 
 function TitleSearchResultBuckets({
   titleId,
+  ownedScope,
   ...props
 }: SearchResultBucketsProps & { titleId: string }) {
-  const [{ data }] = useQuery<{ title: { id: string; mediaFiles: CurrentReleaseFile[] } | null }>({
+  const [{ data }, refresh] = useQuery<{ title: { id: string; mediaFiles: CurrentReleaseFile[] } | null }>({
     query: currentReleaseFilesQuery,
     variables: { id: titleId },
     requestPolicy: "cache-and-network",
   });
+  useActivityEventStream({ titleId, kinds: OWNED_RELEASE_REFRESH_KINDS,
+    onStart: () => refresh({ requestPolicy: "network-only" }),
+    onEvent: () => refresh({ requestPolicy: "network-only" }) });
   const currentNames = React.useMemo(
-    () => currentReleaseNames(data?.title?.id === titleId ? data.title.mediaFiles : []),
-    [data, titleId],
+    () => currentReleaseNames(data?.title?.id === titleId ? data.title.mediaFiles : [], ownedScope),
+    [data, titleId, ownedScope],
   );
   return <SearchResultBucketsContent {...props} currentNames={currentNames} />;
 }

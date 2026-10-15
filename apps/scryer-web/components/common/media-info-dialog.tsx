@@ -1,4 +1,5 @@
 import * as React from "react";
+import { FileScoreSummary } from "@/components/common/score-breakdown";
 import { Info } from "lucide-react";
 import {
   Dialog,
@@ -117,6 +118,7 @@ export function MediaInfoDialog({
       </DialogHeader>
 
       <div className="space-y-5 text-sm">
+        <FileScoreSummary evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} />
         <FieldTable section={fieldSection("media-info-file")} t={t} />
         <FieldTable section={fieldSection("media-info-video")} t={t} />
 

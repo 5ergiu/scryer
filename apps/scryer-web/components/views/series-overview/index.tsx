@@ -1,4 +1,5 @@
 import * as React from "react";
+import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
 import { FolderOpen, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -318,6 +319,11 @@ function SeriesOverviewViewImpl({
   const [selectedEpisodeIds, setSelectedEpisodeIds] = React.useState<Set<string>>(
     () => new Set(),
   );
+  const selectedSeasons = Object.entries(episodesByCollection).filter(([, episodes]) =>
+    episodes.length > 0 && episodes.every((episode) => selectedEpisodeIds.has(episode.id)),
+  );
+  const selectedSeasonEpisodes = new Set(selectedSeasons.flatMap(([, episodes]) => episodes.map((episode) => episode.id)));
+  const wholeSeasonsSelected = selectedSeasonEpisodes.size === selectedEpisodeIds.size && selectedSeasons.length > 0;
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [historyEpisodeScope, setHistoryEpisodeScope] = React.useState<{
     episodeId: string;
@@ -1314,6 +1320,7 @@ function SeriesOverviewViewImpl({
               <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                 {episodeSelectionEnabled && selectedEpisodeIds.size > 0 ? (
                   <>
+                    {wholeSeasonsSelected ? <RefreshScoresButton selection={{ seasonIds: selectedSeasons.map(([id]) => id) }} /> : null}
                     <Button
                       id={SERIES_OVERVIEW_CLEAR_EPISODE_SELECTION_ID}
                       type="button"
