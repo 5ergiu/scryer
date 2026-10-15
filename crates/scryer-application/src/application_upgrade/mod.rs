@@ -9,6 +9,7 @@
 
 mod engine;
 pub mod manifest;
+pub mod msi_source;
 mod product;
 mod restart;
 mod shared;

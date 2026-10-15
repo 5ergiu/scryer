@@ -86,6 +86,8 @@ mod startup_migrations;
 #[path = "tray_ipc.rs"]
 mod tray_ipc;
 mod ui_assets;
+#[cfg(any(windows, test))]
+mod windows_installer_recovery;
 #[cfg(windows)]
 mod windows_startup;
 
@@ -705,6 +707,18 @@ async fn run_application() {
     // args[0] is the binary name; subcommand (if any) is args[1].
     if let Some(arg) = args.get(1) {
         match arg.as_str() {
+            #[cfg(windows)]
+            "--repair-windows-installer" => {
+                if args.len() != 2 {
+                    eprintln!("usage: scryer --repair-windows-installer");
+                    std::process::exit(1);
+                }
+                if let Err(error) = windows_installer_recovery::repair().await {
+                    eprintln!("Installer recovery failed: {error}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             "init" => {
                 init::run_init(args);
                 return;

@@ -2145,14 +2145,14 @@ jobs:
           clang-cl --version 2>&1 | Tee-Object -FilePath "${{ matrix.artifact_name }}-native-build-env.txt" -Append
           lld-link --version 2>&1 | Tee-Object -FilePath "${{ matrix.artifact_name }}-native-build-env.txt" -Append
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            cargo build --timings -p scryer --bin scryer --bin scryer-tray --profile $env:SCRYER_CARGO_PROFILE --locked --target ${{ matrix.target }} 2>&1 | Tee-Object -FilePath "${{ matrix.artifact_name }}-build.log"
+            cargo build --timings -p scryer --bin scryer --bin scryer-tray --bin scryer-setup --profile $env:SCRYER_CARGO_PROFILE --locked --target ${{ matrix.target }} 2>&1 | Tee-Object -FilePath "${{ matrix.artifact_name }}-build.log"
             $cargoExitCode = $LASTEXITCODE
           } else {
             & python .github/scripts/build_heartbeat.py `
               --output "${{ matrix.artifact_name }}-heartbeat.log" `
               --build-log "${{ matrix.artifact_name }}-build.log" `
               --status-file "${{ matrix.artifact_name }}-build-status.json" `
-              -- cargo build --timings -p scryer --bin scryer --bin scryer-tray --profile $env:SCRYER_CARGO_PROFILE --locked --target ${{ matrix.target }}
+              -- cargo build --timings -p scryer --bin scryer --bin scryer-tray --bin scryer-setup --profile $env:SCRYER_CARGO_PROFILE --locked --target ${{ matrix.target }}
             $cargoExitCode = $LASTEXITCODE
           }
           if ($cargoExitCode -ne 0) {
@@ -2169,7 +2169,7 @@ jobs:
           # scryer-tray.exe must link the WebView2 loader statically: a
           # WebView2Loader.dll import would mean the MSI and the zip, which
           # ship no such DLL, carry a tray that cannot start.
-          foreach ($name in @("scryer.exe", "scryer-tray.exe")) {
+          foreach ($name in @("scryer.exe", "scryer-tray.exe", "scryer-setup.exe")) {
             $binary = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}\$env:SCRYER_CARGO_PROFILE\$name"
             $imports = & llvm-readobj --coff-imports $binary 2>&1
             if ($LASTEXITCODE -ne 0) {
@@ -2343,6 +2343,12 @@ jobs:
           SCRYER_DB_PATH          Override database path (advanced)
           "@ | Set-Content -Path README.txt -Encoding UTF8
 
+      - name: Package graphical Windows setup
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.target }}\$env:SCRYER_CARGO_PROFILE\scryer-setup.exe" "${{ matrix.artifact_name }}-setup.exe"
+
       - name: Package zip
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
@@ -2443,6 +2449,7 @@ jobs:
             ${{ matrix.artifact_name }}-portable.tar.gz
             ${{ matrix.artifact_name }}.msi
             ${{ matrix.artifact_name }}.msi.json
+            ${{ matrix.artifact_name }}-setup.exe
             ${{ matrix.artifact_name }}-winget.msi
             ${{ matrix.artifact_name }}-winget.msi.json
           if-no-files-found: error
@@ -2952,6 +2959,8 @@ jobs:
             scryer-windows-x86_64-portable.tar.gz \
             scryer-windows-arm64.zip \
             scryer-windows-x86_64.zip \
+            scryer-windows-arm64-setup.exe \
+            scryer-windows-x86_64-setup.exe \
             scryer-windows-arm64.msi \
             scryer-windows-x86_64.msi \
             scryer-windows-arm64-winget.msi \
@@ -2981,6 +2990,7 @@ jobs:
             scryer-windows-arm64-winget.msi \
             scryer-windows-x86_64-winget.msi \
             scryer-winget-manifests.tar.gz > scryer-checksums.txt
+          sha256sum scryer-windows-arm64-setup.exe scryer-windows-x86_64-setup.exe >> scryer-checksums.txt
 
       # Release blobs are signed twice for interop. The historical
       # `<file>.sigstore.json` name keeps the Cosign v2 legacy bundle that
@@ -3094,6 +3104,8 @@ jobs:
             release-artifacts/scryer-*.zip
             release-artifacts/scryer-windows-arm64.msi
             release-artifacts/scryer-windows-x86_64.msi
+            release-artifacts/scryer-windows-arm64-setup.exe
+            release-artifacts/scryer-windows-x86_64-setup.exe
             release-artifacts/scryer-windows-arm64-winget.msi
             release-artifacts/scryer-windows-x86_64-winget.msi
             release-artifacts/scryer-checksums.txt
@@ -3364,6 +3376,7 @@ jobs:
             scryer-windows-arm64-winget.msi \
             scryer-windows-x86_64-winget.msi \
             scryer-winget-manifests.tar.gz > scryer-subjects.sha256
+          sha256sum scryer-windows-arm64-setup.exe scryer-windows-x86_64-setup.exe >> scryer-subjects.sha256
           echo "base64_subjects=$(base64 < scryer-subjects.sha256 | tr -d '\n')" >> "$GITHUB_OUTPUT"
 
   archive-provenance:

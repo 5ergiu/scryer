@@ -110,6 +110,10 @@ scryer-runtime-info = { path = "../scryer-runtime-info" }
 name = "scryer-tray"
 path = "src/tray.rs"
 
+[[bin]]
+name = "scryer-setup"
+path = "src/setup.rs"
+
 [target.'cfg(unix)'.dependencies]
 # `SIGTERM` for the tray's graceful stop of its server child.
 libc = "0.2"
