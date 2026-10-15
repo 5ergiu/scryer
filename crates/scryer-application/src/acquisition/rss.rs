@@ -2571,7 +2571,74 @@ impl AppUseCase {
         let mut selected: Option<usize> = None;
         let mut next_pending_role = PendingReleaseRole::Primary;
 
-        for (candidate_index, candidate) in scored.iter().enumerate() {
+        let mut ranked = Vec::with_capacity(scored.len());
+        for (index, candidate) in scored.iter().enumerate() {
+            let scope = candidate
+                .coverage_scope
+                .as_ref()
+                .unwrap_or(&subject.submission_scope);
+            let candidate_admission = if scope == &subject.submission_scope {
+                admission.clone()
+            } else {
+                let membership = self
+                    .scope_membership_for_with_reads(title, scope, &reads)
+                    .await;
+                let queued = if let Some(queue) = queue {
+                    self.queued_releases_for_scope(
+                        title,
+                        &membership.view(),
+                        &scoring_context,
+                        &queue.submissions,
+                        &queue.tracked_states,
+                        dl_snapshot,
+                        &catalog_episodes,
+                        &catalog_collections,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                };
+                let queued = self
+                    .queued_releases_with_grabbed_claims(
+                        queued,
+                        title,
+                        &membership.view(),
+                        &scoring_context,
+                        &catalog_episodes,
+                        &catalog_collections,
+                    )
+                    .await;
+                self.admission_subject_for_scope_with_reads(
+                    title,
+                    scope,
+                    &scoring_context,
+                    None,
+                    crate::quality::canonical_context::SubjectIntent::Grab,
+                    &reads,
+                )
+                .await
+                .with_queued(queued)
+            };
+            let parsed = candidate.parsed_release_metadata.as_ref();
+            let decision = candidate.quality_profile_decision.as_ref();
+            let facts = crate::admission::CandidateFacts::new(
+                decision.and_then(|decision| decision.tier_index),
+                parsed.map_or(0, crate::acquisition::scoring::revision_rank),
+                decision.map_or(0, |decision| decision.preference_score),
+            )
+            .with_revision_policy(
+                parsed.and_then(|parsed| parsed.release_group.as_deref()),
+                upgrade_context.profile.criteria.ignore_proper_repack,
+            );
+            let mut rank = crate::acquisition::scoring::RankHead::from_result(candidate);
+            rank.negated_revision =
+                crate::admission::revision_preference(facts, &candidate_admission).saturating_neg();
+            ranked.push((index, candidate_admission, rank.key()));
+        }
+        // Preserve the existing listing tie-breakers after the scope-derived key.
+        ranked.sort_by_key(|(index, _, key)| (*key, *index));
+        for (candidate_index, admission, _) in ranked {
+            let candidate = &scored[candidate_index];
             let candidate_scope = candidate
                 .coverage_scope
                 .as_ref()

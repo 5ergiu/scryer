@@ -2996,6 +2996,15 @@ async fn a_folder_two_untouched_titles_already_share_does_not_block_another_rena
 /// refuse every rename in the library.
 #[tokio::test]
 async fn an_untouched_title_recorded_at_the_library_root_does_not_block_a_rename() {
+    assert_root_level_record_does_not_block_a_rename(false).await;
+}
+
+#[tokio::test]
+async fn an_untouched_title_recorded_above_the_library_root_does_not_block_a_rename() {
+    assert_root_level_record_does_not_block_a_rename(true).await;
+}
+
+async fn assert_root_level_record_does_not_block_a_rename(record_at_parent: bool) {
     let mut ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
     set_folder_template(&ctx, "MOVIE", "{title} ({year})").await;
@@ -3014,7 +3023,12 @@ async fn an_untouched_title_recorded_at_the_library_root_does_not_block_a_rename
 
     let (idle, _, idle_file) =
         seed_movie_renamed_into_place(&ctx, &actor, &movie_root, "Amber Quay", "94118").await;
-    set_title_folder_path(&ctx, &idle.id, &movie_root).await;
+    let invalid_folder = if record_at_parent {
+        roots.path()
+    } else {
+        movie_root.as_path()
+    };
+    set_title_folder_path(&ctx, &idle.id, invalid_folder).await;
     let (moving, source) = seed_movie_in_folder(&ctx, &movie_root, "Birch Quay", "94119").await;
 
     let preview = ctx

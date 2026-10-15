@@ -46,6 +46,7 @@ export type Release = {
     detectedHdr: boolean;
     parseConfidence: number;
     isProperUpload: boolean;
+    revision: number;
     isRemux: boolean;
     isBdDisk: boolean;
     isAiEnhanced: boolean;

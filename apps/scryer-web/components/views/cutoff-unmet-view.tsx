@@ -383,6 +383,7 @@ export function CutoffUnmetView({ state }: { state: CutoffUnmetViewState }) {
                     </div>
                     {showResults ? (
                       <SearchResultBuckets
+                        titleId={item.titleId}
                         results={searchResults}
                         onQueue={(release) => queueRelease(item, release)}
                         requireCandidateToken
@@ -449,6 +450,7 @@ export function CutoffUnmetView({ state }: { state: CutoffUnmetViewState }) {
                         <TableRow>
                           <TableCell colSpan={6} className="bg-background/20">
                             <SearchResultBuckets
+                              titleId={item.titleId}
                               results={searchResults}
                               onQueue={(release) => queueRelease(item, release)}
                               requireCandidateToken

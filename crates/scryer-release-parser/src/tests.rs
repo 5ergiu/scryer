@@ -2736,6 +2736,93 @@ fn bracketed_short_hyphenated_release_group_preserves_both_parts() {
     assert_eq!(candidate.projected.release_group.as_deref(), Some("C-W"));
 }
 
+/// An anime group name can be hyphenated. The finalizer used to keep only the
+/// final element, because it absorbed a preceding hyphenated token just when it
+/// was three characters or shorter.
+#[test]
+fn anime_release_group_keeps_the_whole_hyphenated_suffix() {
+    let target = context(ContextFacetHint::Anime, "Show A");
+
+    for (release, expected) in [
+        (
+            "Show A S01E02 MULTi 1080p NF WEB-DL AAC2.0 AV1-Group-Raws (READNFO, VF, FRENCH, SUBFRENCH, VOSTFR, Alias)",
+            "Group-Raws",
+        ),
+        (
+            "Show A S01E01 1080p WEB-DL AAC2.0 H.264-Group-Raws",
+            "Group-Raws",
+        ),
+        ("Show A S01E01 1080p WEB-DL AAC2.0 H.264-Foo-Bar", "Foo-Bar"),
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        let candidate = analysis.best_candidate().expect("best candidate");
+        assert_eq!(
+            candidate.projected.release_group.as_deref(),
+            Some(expected),
+            "{release}"
+        );
+    }
+}
+
+#[test]
+fn anime_release_group_does_not_absorb_audio_or_subtitle_tags() {
+    let target = context(ContextFacetHint::Anime, "Show A");
+    for tag in ["Dual-Audio", "Multi-Subs", "Multi-Audio"] {
+        for release in [
+            format!("Show A S01E01 1080p WEB-DL H.264-{tag}-Group-Raws"),
+            format!("Show A S01E01 1080p WEB-DL H.264 [{tag}] [Group-Raws]"),
+        ] {
+            let analysis = analyze_release_for_target(&release, &target);
+            assert_eq!(
+                analysis
+                    .best_candidate()
+                    .unwrap()
+                    .projected
+                    .release_group
+                    .as_deref(),
+                Some("Group-Raws"),
+                "{release}"
+            );
+        }
+    }
+}
+
+#[test]
+fn episode_titles_and_edition_tags_do_not_invent_release_groups() {
+    let target = context(ContextFacetHint::Series, "Show C");
+    let mut unexpected_groups = Vec::new();
+    for release in [
+        "Show C (2005) - S02E01 - The Episode Name [WEBDL-1080p][EAC3 2.0][x264]",
+        "Show C (2005) - S02E01 - Pilot [WEBDL-1080p][EAC3 2.0][x264]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264][CAST]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264] {Diamond Edition}",
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        let candidate = analysis.best_candidate().expect("best candidate");
+        if let Some(group) = &candidate.projected.release_group {
+            unexpected_groups.push((release, group.clone()));
+        }
+    }
+    assert!(unexpected_groups.is_empty(), "{unexpected_groups:?}");
+    for release in [
+        "Show C (2005) - S02E01 - The Episode Name [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup [CAST]",
+        "Show C S02E01 [WEBDL-1080p][EAC3 2.0][x264]-ValidGroup {Diamond Edition}",
+    ] {
+        let analysis = analyze_release_for_target(release, &target);
+        assert_eq!(
+            analysis
+                .best_candidate()
+                .expect("best candidate")
+                .projected
+                .release_group
+                .as_deref(),
+            Some("ValidGroup"),
+            "{release}"
+        );
+    }
+}
+
 #[test]
 fn terminal_language_adjacent_token_can_be_release_group() {
     let mut target = context(
@@ -3576,6 +3663,43 @@ fn proper_is_a_revision_flag_not_an_edition() {
     assert_eq!(repack_projected.edition, None);
     assert!(repack_projected.is_proper_upload);
     assert!(repack_projected.is_repack);
+}
+
+#[test]
+fn numbered_revisions_respect_technical_boundaries() {
+    let target = context(ContextFacetHint::Movie, "Movie Title");
+    for (marker, revision) in [
+        ("PROPER", 1),
+        ("REPACK", 1),
+        ("RERIP", 1),
+        ("PROPER2", 2),
+        ("REPACK3", 3),
+        ("rePaCk4", 4),
+        ("REPACK17", 17),
+        ("REAL.PROPER", 2),
+        ("REAL.REAL.REPACK", 3),
+        ("PROPER.REPACK3.REPACK2", 3),
+        ("REPACK0", 0),
+        ("REPACK2147483648", 0),
+        ("REPACK2oops", 0),
+    ] {
+        let raw = format!("Movie.Title.2024.1080p.WEB-DL.{marker}.x264-GRP");
+        let analysis = analyze_release_for_target(&raw, &target);
+        let parsed = &analysis.best_candidate().unwrap().projected;
+        assert_eq!(parsed.revision, revision, "{raw}");
+        assert_eq!(parsed.release_group.as_deref(), Some("GRP"), "{raw}");
+        assert_eq!(parsed.is_proper_upload, revision > 0, "{raw}");
+    }
+    for title in ["The Proper Family", "Real Repack", "Repack2 Adventures"] {
+        let target = context(ContextFacetHint::Movie, title);
+        let raw = format!("{}.2024.1080p.WEB-DL.x264-GRP", title.replace(' ', "."));
+        let analysis = analyze_release_for_target(&raw, &target);
+        assert_eq!(
+            analysis.best_candidate().unwrap().projected.revision,
+            0,
+            "{raw}"
+        );
+    }
 }
 
 #[test]

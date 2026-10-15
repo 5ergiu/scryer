@@ -666,6 +666,13 @@ fn main() {
             std::process::exit(1);
         }
     }
+    // A server started by a process that interrupted another console server
+    // inherits the ignore-Ctrl+C flag, and must clear it to stay stoppable.
+    #[cfg(windows)]
+    // SAFETY: A null handler with FALSE only clears this process's flag.
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0)
+    };
     if let Err(error) = load_startup_environment() {
         eprintln!("{error}");
         std::process::exit(1);

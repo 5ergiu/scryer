@@ -31,7 +31,7 @@ use std::sync::{Mutex, PoisonError};
 /// Memo entries are keyed on it, so a build whose scoring changed never reuses
 /// a bar the previous scoring produced. (Entries do not outlive the process
 /// today, so this matters once anything persists them; keep it honest now.)
-pub(crate) const SCORER_VERSION: u32 = 2;
+pub(crate) const SCORER_VERSION: u32 = 3;
 
 /// Hard bound on entries. A full pass drops every entry it did not touch, so
 /// the memo normally holds one entry per live occupied scope; this is the

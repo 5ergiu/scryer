@@ -66,6 +66,62 @@ struct PluginSearchCallResponse {
     completion: IndexerSearchCompletion,
 }
 
+fn endpoint_resolution_error() -> AppError {
+    AppError::Validation("network_endpoint_resolution_failed: Cannot resolve this indexer's configured endpoints. Check the selected definition and its endpoint settings; authorities must be HTTP(S) origins available from configuration.".into())
+}
+
+fn validate_network_endpoints(bytes: &[u8]) -> AppResult<Vec<String>> {
+    use scryer_plugin_sdk::command::ResolveNetworkEndpointsResponse;
+    use std::collections::BTreeSet;
+    if bytes.len() > 32 * 1024 {
+        return Err(endpoint_resolution_error());
+    }
+    let PluginResult::Ok(response) =
+        serde_json::from_slice::<PluginResult<PluginActionResponse>>(bytes)
+            .map_err(|_| endpoint_resolution_error())?
+    else {
+        return Err(endpoint_resolution_error());
+    };
+    let response: ResolveNetworkEndpointsResponse =
+        serde_json::from_value(response.payload).map_err(|_| endpoint_resolution_error())?;
+    let mut origins = BTreeSet::new();
+    let mut hosts = BTreeSet::new();
+    for origin in response.origins {
+        let url = url::Url::parse(&origin).map_err(|_| endpoint_resolution_error())?;
+        let authority = origin
+            .split_once("://")
+            .map(|(_, value)| value.strip_suffix('/').unwrap_or(value));
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+            || origin.contains(['*', '\\', '@'])
+            || origin.chars().any(char::is_whitespace)
+            || origin
+                .split_once("://")
+                .is_none_or(|(_, authority)| authority.starts_with('/'))
+            || authority
+                .is_none_or(|authority| authority.is_empty() || authority.contains(['/', '?', '#']))
+            || !(origin.to_ascii_lowercase().starts_with("http://")
+                || origin.to_ascii_lowercase().starts_with("https://"))
+        {
+            return Err(endpoint_resolution_error());
+        }
+        let host = url
+            .host_str()
+            .filter(|host| !host.is_empty() && host.len() <= 253)
+            .ok_or_else(endpoint_resolution_error)?;
+        origins.insert(url.origin().ascii_serialization());
+        if origins.len() > 64 {
+            return Err(endpoint_resolution_error());
+        }
+        hosts.insert(host.to_string());
+    }
+    Ok(hosts.into_iter().collect())
+}
+
 impl WasmIndexerClient {
     /// Build an async WASI Preview 2 component indexer. The component is
     /// compiled once for this configured client and instantiated lazily on its
@@ -204,6 +260,58 @@ impl WasmIndexerClient {
         }
     }
 
+    async fn initialize_component(&self, token: &CancellationToken) -> AppResult<ComponentActor> {
+        let indexer = &self.component;
+        let resolve = self
+            .descriptor
+            .indexer()
+            .is_some_and(|value| value.capabilities.resolve_network_endpoints);
+        let deadline = tokio::time::Instant::now() + indexer.timeout;
+        let initialize = async {
+            if resolve {
+                tokio::time::timeout_at(deadline, async {
+                    // Permissions are rebuilt from this configuration, never accumulated.
+                    indexer.host.set_declared_hosts(Vec::new());
+                    let resolver = indexer
+                        .host
+                        .endpoint_resolver()
+                        .map_err(|_| endpoint_resolution_error())?;
+                    resolver.bind_cancellation(token.clone());
+                    let mut actor = indexer
+                        .runtime
+                        .instantiate(&resolver)
+                        .await
+                        .map_err(|_| endpoint_resolution_error())?;
+                    let request = serde_json::to_vec(&PluginActionRequest {
+                        action: "resolve_network_endpoints".into(),
+                        payload: serde_json::Value::Null,
+                    })
+                    .expect("static action request");
+                    let bytes = actor
+                        .action(request)
+                        .await
+                        .map_err(|_| endpoint_resolution_error())?
+                        .map_err(|_| endpoint_resolution_error())?;
+                    let hosts = validate_network_endpoints(&bytes)?;
+                    indexer.host.set_declared_hosts(hosts);
+                    Ok::<_, AppError>(())
+                })
+                .await
+                .map_err(|_| endpoint_resolution_error())??;
+            }
+            tokio::time::timeout_at(deadline, indexer.runtime.instantiate(&indexer.host))
+                .await
+                .map_err(|_| {
+                    AppError::Repository("Indexer component initialization timed out".into())
+                })?
+                .map_err(|_| AppError::Repository("Indexer component initialization failed".into()))
+        };
+        tokio::select! {
+            _ = token.cancelled() => Err(AppError::canceled("Indexer initialization canceled")),
+            result = initialize => result,
+        }
+    }
+
     /// Invoke one retained component operation. Store ownership remains inside
     /// the actor for ordinary calls. Cancellation, timeout, and a component
     /// trap remove the actor while holding its serialization lock, which drops
@@ -231,18 +339,7 @@ impl WasmIndexerClient {
         let mut actor = _guard;
 
         if actor.is_none() {
-            *actor = Some(
-                indexer
-                    .runtime
-                    .instantiate(&indexer.host)
-                    .await
-                    .map_err(|error| {
-                        AppError::Repository(format!(
-                            "indexer component {} could not start {operation}: {error}",
-                            self.descriptor.id
-                        ))
-                    })?,
-            );
+            *actor = Some(self.initialize_component(&token).await?);
         }
 
         let call = async {
@@ -332,18 +429,13 @@ impl WasmIndexerClient {
             .host
             .begin_indexer_error_capture(self.indexer_error_capture(operation));
         if actor.is_none() {
-            *actor = Some(
-                indexer
-                    .runtime
-                    .instantiate(&indexer.host)
-                    .await
-                    .map_err(|error| {
-                        AppError::Repository(format!(
-                            "indexer component {} could not start strategy plan: {error}",
-                            self.descriptor.id
-                        ))
-                    })?,
-            );
+            match self.initialize_component(&cancel_token).await {
+                Ok(initialized) => *actor = Some(initialized),
+                Err(error) => {
+                    indexer.host.finish_indexer_error_capture(true);
+                    return Err(error);
+                }
+            }
         }
 
         let (raw_event_tx, mut raw_event_rx) = component_strategy_event_channel();
@@ -396,6 +488,11 @@ impl WasmIndexerClient {
             }
         };
 
+        if let Some(error) = indexer.host.captured_host_policy_error() {
+            actor.take();
+            indexer.host.finish_indexer_error_capture(true);
+            return Err(error);
+        }
         if let Some(error) = event_error {
             actor.take();
             indexer.host.finish_indexer_error_capture(true);
@@ -497,6 +594,10 @@ impl WasmIndexerClient {
             )),
             Err(error) => Err(error),
         };
+        let result = indexer
+            .host
+            .captured_host_policy_error()
+            .map_or(result, Err);
         indexer.host.finish_indexer_error_capture(result.is_err());
         result
     }
@@ -536,12 +637,20 @@ impl WasmIndexerClient {
             Err(error) => Err(error),
         };
         let result = match result {
-            Err(error) => match indexer.host.captured_newznab_quota_error() {
+            Err(error) => match indexer
+                .host
+                .captured_host_policy_error()
+                .or_else(|| indexer.host.captured_newznab_quota_error())
+            {
                 Some(quota_error) => Err(quota_error),
                 None => Err(error),
             },
             ok => ok,
         };
+        let result = indexer
+            .host
+            .captured_host_policy_error()
+            .map_or(result, Err);
         indexer.host.finish_indexer_error_capture(result.is_err());
         result
     }
@@ -2181,26 +2290,86 @@ impl IndexerClient for WasmIndexerClient {
         &self,
         download_url: &str,
     ) -> AppResult<Option<ResolvedDownloadArtifact>> {
+        let indexer = &self.component;
+        let _operation_guard = indexer.invocation_lock.lock().await;
+        indexer.host.begin_indexer_error_capture(
+            self.indexer_error_capture(IndexerErrorOperation::IndexerAction),
+        );
         let request = PluginActionRequest {
             action: "grab".to_string(),
             payload: serde_json::json!({ "url": download_url }),
         };
         let result = self
             .invoke_component(PluginIndexerCommand::Action(request), "indexer_grab", None)
-            .await?;
-        let context = "indexer grab component";
-        let PluginIndexerCommandResult::Action(result) = result else {
-            return Err(AppError::Repository(format!(
-                "{context} returned the wrong result for indexer_grab"
-            )));
+            .await;
+        let result = match result {
+            Ok(PluginIndexerCommandResult::Action(result)) => decode_grab_result(result),
+            Ok(_) => Err(AppError::Repository(
+                "Indexer component returned the wrong result for grab".into(),
+            )),
+            Err(error) => Err(error),
         };
-        decode_grab_result(result)
+        let result = indexer
+            .host
+            .captured_host_policy_error()
+            .map_or(result, Err);
+        indexer.host.finish_indexer_error_capture(result.is_err());
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint_response(origins: Vec<String>) -> Vec<u8> {
+        serde_json::to_vec(&PluginResult::Ok(PluginActionResponse {
+            payload: serde_json::json!({"origins": origins}),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn network_endpoints_validate_and_bound_origins() {
+        assert_eq!(
+            validate_network_endpoints(&endpoint_response(vec![
+                "https://API.example:8443".into(),
+                "https://api.example/".into()
+            ]))
+            .unwrap(),
+            vec!["api.example"]
+        );
+        for invalid in [
+            "https://user:secret@api.example",
+            "https://@api.example",
+            "https://*.example",
+            "ftp://api.example",
+            "https://api.example/path",
+            "https://api.example?secret=value",
+            "https://api.example#secret",
+            "https:api.example",
+            "https:///api.example",
+            "https://api.example\\other",
+            "https://api.example\n",
+        ] {
+            assert!(
+                validate_network_endpoints(&endpoint_response(vec![invalid.into()])).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            validate_network_endpoints(&endpoint_response(
+                (0..65).map(|n| format!("https://api{n}.example")).collect()
+            ))
+            .is_err()
+        );
+        assert!(validate_network_endpoints(&vec![b' '; 32 * 1024 + 1]).is_err());
+        assert!(validate_network_endpoints(b"{}").is_err());
+        assert!(
+            validate_network_endpoints(&endpoint_response(vec!["https://api.example".into(); 64]))
+                .is_ok()
+        );
+    }
 
     fn page(titles: &[&str], next_cursor: Option<&str>) -> PluginSearchCallResponse {
         PluginSearchCallResponse {

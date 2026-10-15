@@ -1093,7 +1093,8 @@ impl AppUseCase {
                 "release size does not match the signed candidate".into(),
             ));
         }
-            let outcome = self.queue_replacement_release_with_listing(
+        let outcome = self
+            .queue_replacement_release_with_listing(
                 actor,
                 title_id,
                 queued_release.clone(),
@@ -1304,7 +1305,8 @@ impl AppUseCase {
                 "release size does not match the signed candidate".into(),
             ));
         }
-            let outcome = self.queue_existing_title_download_with_listing(
+        let outcome = self
+            .queue_existing_title_download_with_listing(
                 actor,
                 title_id,
                 queued_release.clone(),
@@ -1461,7 +1463,7 @@ impl AppUseCase {
                 None,
                 now,
             )
-                .await;
+            .await;
         }
         let Some(best_index) = results
             .iter()
@@ -1635,6 +1637,7 @@ mod auto_eligibility_reason_tests {
                 preference_score: 0,
                 tier_index: None,
                 size_fit_penalty: 0,
+                revision_preference: 0,
             }),
             extra: Default::default(),
             response_attributes: Default::default(),

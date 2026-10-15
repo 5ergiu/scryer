@@ -1160,6 +1160,10 @@ const en: LocaleDictionary = {
   "settings.renameTokenYear": "Release year",
   "settings.renameTokenTitleWithYear": "Title name followed by the year, added only when the name does not already end with it",
   "settings.renameTokenTitleWithoutYear": "Title name with any year at the end removed",
+  "settings.renameTokenTitleWithArticle": "Title with a leading article moved to the end using its metadata language",
+  "settings.renameTokenTitleFirstCharacter": "First letter or digit after language-aware article sorting; preserves non-Latin characters and falls back to _",
+  "rename.namingLanguage": "Naming language: {{language}}",
+  "rename.organizingFolderChanges": "Titles changing organizing folder: {{count}}",
   "settings.renameTokenQuality": "Quality (e.g. 1080p)",
   "settings.renameTokenEdition": "Edition (e.g. Director's Cut)",
   "settings.renameTokenImdbId": "IMDb ID",
@@ -1738,6 +1742,7 @@ const en: LocaleDictionary = {
 
   "nzb.searchResultsFor": "NZB results for {{name}}",
   "nzb.noResultsYet": "No release matches yet.",
+  "nzb.currentFile": "Current file",
   "nzb.searchFailed": "Release search failed.",
   "nzb.queue": "Queue",
   "nzb.movieAvailabilityWarning": "{{reason}}. Confirm before queuing early.",
@@ -1853,6 +1858,7 @@ const en: LocaleDictionary = {
   "queue.assignTitlePlaceholder": "Search titles...",
   "queue.assignTitleResults": "Matching titles",
   "queue.assignTitleEmpty": "No matching titles found.",
+  "queue.assignTitleSearchHint": "Type a title name to search…",
   "queue.assignTitleQueued": "Title assigned. Import will be re-evaluated.",
   "queue.assignTitleFailed": "Failed to assign title.",
   "queue.assignTitleBeforeImport":
@@ -1887,12 +1893,12 @@ const en: LocaleDictionary = {
   "queue.releaseHeldSourcesPreservedRemovalFailed": "removal failed",
   "queue.releaseHeldSourcesPreservedDownloadNotImported": "the download was not proven imported",
   "queue.releaseHeldSourcesPreservedLookupIncomplete": "not every folder could be checked",
-  "queue.markFailedSearchAgain": "Mark Failed and Search Again",
-  "queue.markFailedOnly": "Mark Failed Only",
+  "queue.markFailedSearchAgain": "Blocklist, Delete Data and Search Again",
+  "queue.markFailedOnly": "Blocklist and Delete Data",
   "queue.markFailedSearchSuccess":
-    "Download marked failed; reacquisition will run.",
+    "Blocklist and data removal requested; reacquisition enabled.",
   "queue.markFailedOnlySuccess":
-    "Download marked failed without reacquisition.",
+    "Blocklist and data removal requested without reacquisition.",
   "queue.markFailedFailed": "Failed to mark download failed.",
   "queue.bulkIgnoreSuccess": "Ignored {{count}} downloads.",
   "queue.bulkIgnorePartial": "Ignored {{count}} downloads; {{failed}} failed.",
@@ -2165,6 +2171,7 @@ const en: LocaleDictionary = {
   "settings.refStereoSampling": "half or full for side-by-side or top/bottom; null when unknown",
   "settings.refStereoEncoding": "mvc when explicitly corroborated by a 3D marker; null when unknown",
   "settings.refReleaseStereoscopyTokens": "Canonical stereo tokens: stereo:two_d, stereo:three_d, stereo:mixed_2d_3d, stereo:has_3d, stereo:layout:<layout>, stereo:sampling:half/full, stereo:encoding:mvc, and stereo:<field>_conflict. Empty means unknown. Raw normalized_tokens retain their original meaning.",
+  "settings.refReleaseRevision": "Numeric release revision: 0 for original, 1 for PROPER/REPACK/RERIP, 2 for REPACK2, and so on",
   "settings.refReleaseIsProper": "True when the release is tagged as Proper",
   "settings.refReleaseIsRepack": "True when the release is tagged as Repack",
   "settings.refReleaseIsAiEnhanced":
@@ -2700,6 +2707,8 @@ const en: LocaleDictionary = {
   "qualityProfile.allowBdDiskInfo":
     "Allow BD/Disc image releases (ISO/Blu-ray disk style releases) to pass the profile.",
   "qualityProfile.allowDv": "Dolby Vision",
+  "qualityProfile.ignoreProperRepack": "Ignore PROPER/REPACK",
+  "qualityProfile.ignoreProperRepackInfo": "Let quality and scores decide without automatic revision preference or protection. Scoring rules can still reward PROPER/REPACK releases.",
   "qualityProfile.allowUpgrades": "Upgrades allowed",
   "qualityProfile.allowUpgradesInfo":
     "Allow managed copies to be replaced later by a better match, but never above the selected archival quality.",

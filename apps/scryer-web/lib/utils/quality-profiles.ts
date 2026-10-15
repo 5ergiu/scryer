@@ -99,6 +99,7 @@ export function normalizeQualityProfileEntry(rawEntry: unknown): ParsedQualityPr
       prefer_remux: readBoolean(criteria.prefer_remux, false),
       allow_bd_disk: readBoolean(criteria.allow_bd_disk, false),
       allow_upgrades: readBoolean(criteria.allow_upgrades, false),
+    ignore_proper_repack: readBoolean(criteria.ignore_proper_repack, false),
       scoring_overrides: readScoringOverrides(criteria.scoring_overrides),
       cutoff_tier: typeof criteria.cutoff_tier === "string" && criteria.cutoff_tier.trim()
         ? criteria.cutoff_tier.trim().toUpperCase()
@@ -178,6 +179,7 @@ export function qualityProfileEntryFromGraph(
       prefer_remux: profile.criteria.preferRemux,
       allow_bd_disk: profile.criteria.allowBdDisk,
       allow_upgrades: profile.criteria.allowUpgrades,
+    ignore_proper_repack: profile.criteria.ignoreProperRepack ?? false,
       scoring_overrides: scoringOverridesFromGraph(profile.criteria.scoringOverrides),
       cutoff_tier: profile.criteria.cutoffTier?.trim().toUpperCase() || null,
       min_score_to_grab: profile.criteria.minScoreToGrab,
@@ -409,6 +411,7 @@ export function buildQualityProfileTemplate(profileId: string, profileName: stri
     prefer_remux: false,
     allow_bd_disk: true,
     allow_upgrades: true,
+    ignore_proper_repack: false,
     scoring_overrides: {},
     cutoff_tier: "",
     min_score_to_grab: null,
@@ -474,6 +477,7 @@ export function toQualityProfileDraft(
     allow_bd_disk: typeof entry.criteria.allow_bd_disk === "boolean" ? entry.criteria.allow_bd_disk : true,
     allow_upgrades:
       typeof entry.criteria.allow_upgrades === "boolean" ? entry.criteria.allow_upgrades : true,
+    ignore_proper_repack: entry.criteria.ignore_proper_repack === true,
     scoring_overrides: readScoringOverrides(entry.criteria.scoring_overrides),
     cutoff_tier:
       typeof entry.criteria.cutoff_tier === "string" && entry.criteria.cutoff_tier.trim()
@@ -515,6 +519,7 @@ export function qualityProfileCatalogEntryFromDraft(draft: QualityProfileDraft):
       prefer_remux: draft.prefer_remux,
       allow_bd_disk: draft.allow_bd_disk,
       allow_upgrades: draft.allow_upgrades,
+    ignore_proper_repack: draft.ignore_proper_repack,
       scoring_overrides: draft.scoring_overrides,
       cutoff_tier: draft.cutoff_tier || null,
       min_score_to_grab: draft.min_score_to_grab,
@@ -541,6 +546,7 @@ export function qualityProfileEntryToMutationInput(entry: ParsedQualityProfileEn
       preferRemux: entry.criteria.prefer_remux,
       allowBdDisk: entry.criteria.allow_bd_disk,
       allowUpgrades: entry.criteria.allow_upgrades,
+    ignoreProperRepack: entry.criteria.ignore_proper_repack,
       scoringOverrides: scoringOverridesToGraphInput(entry.criteria.scoring_overrides),
       cutoffTier: entry.criteria.cutoff_tier,
       minScoreToGrab: entry.criteria.min_score_to_grab,

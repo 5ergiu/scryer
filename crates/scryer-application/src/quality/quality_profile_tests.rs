@@ -218,6 +218,32 @@ fn parse_minimal_profile() {
 }
 
 #[test]
+fn revision_policy_defaults_round_trips_and_changes_acceptance() {
+    let mut profile =
+        QualityProfile::parse(r#"{"id":"test","name":"Test","criteria":{}}"#).unwrap();
+    assert!(!profile.criteria.ignore_proper_repack);
+    let original = serde_json::to_value(AcceptanceCriteria::from(&profile.criteria)).unwrap();
+    assert!(original.get("ignore_proper_repack").is_none());
+    profile.criteria.ignore_proper_repack = true;
+    let updated = serde_json::to_value(AcceptanceCriteria::from(&profile.criteria)).unwrap();
+    assert_eq!(updated["ignore_proper_repack"], true);
+    assert_ne!(updated, original);
+    let catalog = serde_json::to_string(&vec![profile.clone()]).unwrap();
+    assert_eq!(
+        parse_profile_catalog_from_json(&catalog).unwrap()[0],
+        profile
+    );
+    let config: ScoringConfig = serde_json::from_str("{}").unwrap();
+    assert!(!config.ignore_proper_repack);
+    assert!(
+        serde_json::to_value(config)
+            .unwrap()
+            .get("ignore_proper_repack")
+            .is_none()
+    );
+}
+
+#[test]
 fn parse_profile_normalizes_tiers() {
     let profile = QualityProfile::parse(
         r#"{"id":"t","name":"T","criteria":{"quality_tiers":["2160p","1080p"]}}"#,
@@ -776,6 +802,19 @@ fn proper_upload_bonus() {
             .iter()
             .any(|e| e.code == "proper_upload" && e.delta == 30)
     );
+}
+
+#[test]
+fn ignore_revision_policy_preserves_all_rule_scores() {
+    let mut profile = QualityProfile::default();
+    let config = balanced_scoring_config();
+    let release = parse_release_metadata("Movie.2024.1080p.WEB-DL.REPACK3.H.265-GROUP");
+    let honor = score_with_pack(&profile, &release, false, &config);
+    profile.criteria.ignore_proper_repack = true;
+    let ignore = score_with_pack(&profile, &release, false, &config);
+    assert_eq!(honor.release_score, ignore.release_score);
+    assert_eq!(honor.scoring_log, ignore.scoring_log);
+    assert_eq!(release.revision, 3);
 }
 
 // ── resolve_profile_id_for_title ──────────────────────────────────────────

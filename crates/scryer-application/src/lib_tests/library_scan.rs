@@ -1045,6 +1045,89 @@ async fn movie_full_scan_persists_and_reconciles_unmatched_items() {
 }
 
 #[tokio::test]
+async fn movie_full_scan_keeps_refused_title_boundary_rows_across_reconcile() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mixed_parent = tempdir
+        .path()
+        .join("M")
+        .join("Mqvx Mixed Placeholder (2003)");
+    let mixed_child = mixed_parent.join("Mqvx Nested Placeholder (2004)");
+    std::fs::create_dir_all(&mixed_child).expect("create mixed layout");
+    let parent_file = mixed_parent.join("Mqvx Mixed Placeholder (2003).mkv");
+    let child_file = mixed_child.join("Mqvx Nested Placeholder (2004).mkv");
+    std::fs::write(&parent_file, b"parent").expect("write parent movie file");
+    std::fs::write(&child_file, b"child").expect("write nested movie file");
+
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "movies.path",
+            tempdir.path().to_string_lossy().as_ref(),
+        )
+        .await;
+    let unmatched_items = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_tracking(
+        settings,
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched_items.clone(),
+    );
+    app.services
+        .config
+        .settings
+        .upsert_setting_json(
+            SETTINGS_SCOPE_SYSTEM,
+            crate::FOLDER_TEMPLATE_KEY,
+            Some(MediaFacet::Movie.as_str().to_string()),
+            serde_json::to_string("{title_first_character}/{title_with_article} ({year})")
+                .expect("serialize template"),
+            "test",
+            None,
+        )
+        .await
+        .expect("set the nested movie folder template");
+    app.reconcile_default_library_roots()
+        .await
+        .expect("reconcile legacy movie root");
+
+    let refused_rows = |items: &[LibraryScanUnmatchedItem]| {
+        items
+            .iter()
+            .filter(|item| {
+                item.item_path == mixed_parent.to_string_lossy()
+                    && item.reason_code
+                        == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+            })
+            .count()
+    };
+
+    for pass in 1..=2 {
+        app.scan_library(&user, MediaFacet::Movie)
+            .await
+            .expect("movie scan");
+        let items = unmatched_items.items().await;
+        assert_eq!(
+            refused_rows(&items),
+            1,
+            "scan {pass} must keep the refused mixed-layout row; rows: {:?}",
+            items
+                .iter()
+                .map(|item| (item.item_path.clone(), item.reason_code.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    assert_eq!(std::fs::read(&parent_file).unwrap(), b"parent");
+    assert_eq!(std::fs::read(&child_file).unwrap(), b"child");
+    assert!(
+        app.list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn title_scan_returns_error_when_one_off_hydration_fails() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let settings = Arc::new(StoredSettingsRepo::default());
@@ -8973,6 +9056,62 @@ async fn resolve_pending_import_failure_keeps_pending_item() {
 }
 
 #[tokio::test]
+async fn nested_title_pending_import_rejects_boundary_rows_on_the_server() {
+    let root = tempfile::tempdir().unwrap();
+    let bucket = root.path().join("E");
+    std::fs::create_dir_all(bucket.join("Example")).unwrap();
+    let file = bucket.join("Example/movie.mkv");
+    std::fs::write(&file, b"preserved").unwrap();
+    let settings = Arc::new(StoredSettingsRepo::default());
+    settings
+        .set_value(
+            SETTINGS_SCOPE_MEDIA,
+            "movies.path",
+            &root.path().to_string_lossy(),
+        )
+        .await;
+    let unmatched = Arc::new(TrackingLibraryScanUnmatchedItemRepo::default());
+    let (app, user) = bootstrap_with_scan_unmatched_tracking(
+        settings,
+        Arc::new(MutableLibraryScanner::default()),
+        unmatched.clone(),
+    );
+    app.reconcile_default_library_roots().await.unwrap();
+    let mut item = build_test_unmatched_item(
+        "boundary-rejected",
+        MediaFacet::Movie,
+        &root.path().to_string_lossy(),
+        &bucket.to_string_lossy(),
+        "E",
+        "Example",
+        Some(2001),
+    );
+    item.reason_code = crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY.into();
+    unmatched
+        .upsert_library_scan_unmatched_item(&item)
+        .await
+        .unwrap();
+    let error = app
+        .resolve_pending_import(
+            &user,
+            &item.id,
+            pending_import_title_request(MediaFacet::Movie, "Example", Some("123456"), Some(2001)),
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not a title boundary"));
+    assert_eq!(unmatched.items().await.len(), 1);
+    assert_eq!(std::fs::read(file).unwrap(), b"preserved");
+    assert!(
+        app.list_titles_unpaged(&user, Some(MediaFacet::Movie), None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn hydrate_titles_bulk_updates_title_name_for_selected_metadata_language() {
     let settings = Arc::new(StoredSettingsRepo::default());
     settings
@@ -9310,8 +9449,29 @@ async fn resolve_pending_import_rejects_existing_title_in_same_library() {
 
 #[tokio::test]
 async fn resolve_pending_import_attaches_movie_to_existing_title_in_same_library() {
+    pending_movie_attachment_preserves_boundary(false).await;
+}
+
+#[tokio::test]
+async fn nested_title_pending_import_claims_movie_folder_not_bucket() {
+    pending_movie_attachment_preserves_boundary(true).await;
+}
+
+async fn pending_movie_attachment_preserves_boundary(nested: bool) {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let movie_path = tempdir.path().join("Missing.Movie.2020.mkv");
+    let movie_path = tempdir.path().join(if nested {
+        "E/Example/Missing.Movie.2020.mkv"
+    } else {
+        "Missing.Movie.2020.mkv"
+    });
+    std::fs::create_dir_all(movie_path.parent().unwrap()).unwrap();
+    let expected_folder =
+        nested.then(|| movie_path.parent().unwrap().to_string_lossy().to_string());
+    let sibling = tempdir.path().join("E/Echo/echo.mkv");
+    if nested {
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, b"sibling remains").unwrap();
+    }
     tokio::fs::write(&movie_path, b"movie")
         .await
         .expect("create pending movie");
@@ -9413,7 +9573,7 @@ async fn resolve_pending_import_attaches_movie_to_existing_title_in_same_library
 
     assert!(!result.created);
     assert_eq!(result.title.id, existing_title.id);
-    assert_eq!(result.title.folder_path, None);
+    assert_eq!(result.title.folder_path, expected_folder);
     assert_eq!(
         app.services
             .catalog
@@ -9423,7 +9583,7 @@ async fn resolve_pending_import_attaches_movie_to_existing_title_in_same_library
             .expect("reload attached movie title")
             .expect("attached movie title")
             .folder_path,
-        None
+        expected_folder
     );
     assert!(
         result
@@ -9466,6 +9626,9 @@ async fn resolve_pending_import_attaches_movie_to_existing_title_in_same_library
         1,
         "attaching must not create a second title"
     );
+    if nested {
+        assert_eq!(std::fs::read(sibling).unwrap(), b"sibling remains");
+    }
 }
 
 #[tokio::test]
@@ -11009,7 +11172,11 @@ async fn episode_relink_fixture_in(
     settings
         .set_value(
             SETTINGS_SCOPE_MEDIA,
-            "series.path",
+            if catalog == RelinkCatalog::AnimeTwoSeasonsWithoutBridge {
+                "anime.path"
+            } else {
+                "series.path"
+            },
             tempdir.path().to_string_lossy().as_ref(),
         )
         .await;

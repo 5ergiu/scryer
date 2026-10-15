@@ -36,6 +36,7 @@ const RENAME_MISSING_METADATA_POLICY_OPTIONS = [
 const COMMON_RENAME_TOKENS = [
   "title", "title_with_year", "title_without_year", "year", "quality", "source",
   "video_codec", "audio_codec", "audio_channels", "group", "ext",
+  "title_with_article", "title_first_character",
 ];
 const EXTERNAL_ID_RENAME_TOKENS = [
   "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
@@ -55,8 +56,13 @@ const VALID_EPISODE_RENAME_TOKENS = new Set([
 ]);
 const VALID_FOLDER_TOKENS = new Set([
   "title", "title_with_year", "title_without_year", "year",
+  "title_with_article", "title_first_character",
   "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
 ]);
+const TITLE_ORDER_TOKENS = [
+  { token: "title_with_article", labelKey: "settings.renameTokenTitleWithArticle" },
+  { token: "title_first_character", labelKey: "settings.renameTokenTitleFirstCharacter" },
+];
 const VALID_SEASON_FOLDER_TOKENS = new Set([
   ...VALID_FOLDER_TOKENS,
   "season",
@@ -69,6 +75,7 @@ const TITLE_YEAR_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
 
 const FOLDER_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_ORDER_TOKENS,
   ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "imdb_id", labelKey: "settings.renameTokenImdbId" },
@@ -78,6 +85,9 @@ const FOLDER_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "mal_id", labelKey: "settings.renameTokenMalId" },
   { token: "anilist_id", labelKey: "settings.renameTokenAnilistId" },
 ];
+const MOVIE_FOLDER_TOKEN_DESCRIPTIONS = [
+  ...FOLDER_TOKEN_DESCRIPTIONS,
+];
 const SEASON_FOLDER_TOKEN_DESCRIPTIONS = [
   ...FOLDER_TOKEN_DESCRIPTIONS,
   { token: "season", labelKey: "settings.renameTokenSeason" },
@@ -85,6 +95,7 @@ const SEASON_FOLDER_TOKEN_DESCRIPTIONS = [
 
 const SHARED_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = [
   { token: "title", labelKey: "settings.renameTokenTitle" },
+  ...TITLE_ORDER_TOKENS,
   ...TITLE_YEAR_TOKEN_DESCRIPTIONS,
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "quality", labelKey: "settings.renameTokenQuality" },
@@ -186,6 +197,10 @@ function getValidRenameTokens(scopeId: ViewCategoryId): ReadonlySet<string> {
     : VALID_EPISODE_RENAME_TOKENS;
 }
 
+function getFolderTokenDescriptions(scopeId: ViewCategoryId): TokenDescription[] {
+  return scopeId === "MOVIE" ? MOVIE_FOLDER_TOKEN_DESCRIPTIONS : FOLDER_TOKEN_DESCRIPTIONS;
+}
+
 function getRenameReferenceTokens(
   renameTokenDescriptions: TokenDescription[],
   scopeId: ViewCategoryId,
@@ -206,7 +221,7 @@ function getRenameReferenceTokens(
   };
 
   const folderTokens = scopeId === "MOVIE"
-    ? FOLDER_TOKEN_DESCRIPTIONS
+    ? MOVIE_FOLDER_TOKEN_DESCRIPTIONS
     : SEASON_FOLDER_TOKEN_DESCRIPTIONS;
   folderTokens.forEach((item) => addToken(item, "folders"));
   renameTokenDescriptions.forEach((item) => addToken(item, "files"));
@@ -262,11 +277,13 @@ function validateFolderTemplate(
   t: Translate,
   validTokens: ReadonlySet<string> = VALID_FOLDER_TOKENS,
   requiredToken?: string,
+  allowPathComponents = false,
 ): string | null {
   const issue: FolderTemplateValidationIssue | null = validateFolderTemplateSyntax(
     template,
     validTokens,
     requiredToken,
+    allowPathComponents,
   );
   if (!issue) return null;
 
@@ -305,6 +322,7 @@ function validateFolderTemplate(
 const RENAME_PREVIEW_MOVIE_SAMPLE: Record<string, string> = {
   title: "The Grey Harbor", title_with_year: "The Grey Harbor (2008)",
   title_without_year: "The Grey Harbor", year: "2008", quality: "2160p", edition: "IMAX",
+  title_with_article: "Grey Harbor, The", title_first_character: "G",
   source: "BluRay", video_codec: "x265", audio_codec: "DTS-HD MA",
   audio_channels: "5.1", group: "FraMeSToR", ext: "mkv",
   imdb_id: "tt0468569", tmdb_id: "155", tvdb_id: "123456",
@@ -1088,14 +1106,15 @@ export function RenameSettingsPanel({
   const t = useTranslate();
   const folderTemplateValue = categoryFolderTemplates[activeQualityScopeId];
   const episodicScope = activeQualityScopeId !== "MOVIE";
+  const folderTokens = VALID_FOLDER_TOKENS;
   const useSeasonFolders = categoryUseSeasonFolders[activeQualityScopeId] !== false;
   const seasonFolderTemplateValue = categorySeasonFolderTemplates[activeQualityScopeId];
   const specialsFolderTemplateValue = categorySpecialsFolderTemplates[activeQualityScopeId];
   const renameEnabled = categoryRenameEnabled[activeQualityScopeId] !== "false";
   const templateValue = categoryRenameTemplates[activeQualityScopeId];
   const folderValidationError = React.useMemo(
-    () => validateFolderTemplate(folderTemplateValue, t),
-    [folderTemplateValue, t],
+    () => validateFolderTemplate(folderTemplateValue, t, folderTokens, undefined, true),
+    [folderTemplateValue, folderTokens, t],
   );
   const renameValidationError = React.useMemo(
     () => (renameEnabled ? validateRenameTemplate(templateValue, activeQualityScopeId, t) : null),
@@ -1124,8 +1143,8 @@ export function RenameSettingsPanel({
   );
 
   const folderPreview = React.useMemo(
-    () => applyFolderTemplate(folderTemplateValue, activeQualityScopeId),
-    [activeQualityScopeId, folderTemplateValue],
+    () => applyFolderTemplate(folderTemplateValue, activeQualityScopeId, folderTokens),
+    [activeQualityScopeId, folderTemplateValue, folderTokens],
   );
   const seasonFolderPreview = React.useMemo(
     () => applyFolderTemplate(
@@ -1199,14 +1218,18 @@ export function RenameSettingsPanel({
         return;
       }
       const cursor = input.selectionStart ?? folderTemplateValue.length;
-      const context = resolveTemplateTokenContext(folderTemplateValue, cursor, FOLDER_TOKEN_DESCRIPTIONS);
+      const context = resolveTemplateTokenContext(
+        folderTemplateValue,
+        cursor,
+        getFolderTokenDescriptions(activeQualityScopeId),
+      );
       if (!context) {
         insertTemplateToken(input, folderTemplateValue, token);
         return;
       }
       applyAutocompleteToken(input, folderTemplateValue, context, token);
     },
-    [folderTemplateValue],
+    [activeQualityScopeId, folderTemplateValue],
   );
 
   const autocompleteSeasonFolderToken = React.useCallback(

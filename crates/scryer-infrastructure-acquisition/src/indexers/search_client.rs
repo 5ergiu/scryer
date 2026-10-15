@@ -487,9 +487,21 @@ async fn select_reusable_strategies(
         let contained_retry_at = state.contained_retry_at();
         let page_chain = background_page_budget.and_then(|_| state.page_chain(now));
         if let Some(replay) = state.replay {
-            selection.replayed_result_count = selection
-                .replayed_result_count
-                .saturating_add(replay.send(page_sink, indexer_id).await?);
+            match replay.send(page_sink, indexer_id).await {
+                Ok(count) => {
+                    selection.replayed_result_count =
+                        selection.replayed_result_count.saturating_add(count);
+                }
+                Err(error) if error.is_canceled() => return Err(error),
+                Err(error) => {
+                    tracing::warn!(%indexer_id, %error, "cached search replay failed; restarting live strategy");
+                    // A later cached page may have failed after earlier batches were sent.
+                    // Restart from the beginning so the missing results can be recovered.
+                    strategy.request.page_cursor = None;
+                    selection.live.push(strategy);
+                    continue;
+                }
+            }
         }
 
         let unfinished = state
@@ -10428,6 +10440,52 @@ mod tests {
                 assert!(error.is_canceled());
             }
             assert_eq!(repository.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn strategy_reuse_restarts_live_search_when_cache_fails() {
+        for completion in ["complete", "partial", "deferred"] {
+            let replay = test_candidate_replay(Arc::new(ReplayTestRepository {
+                calls: StdMutex::new(Vec::new()),
+                fail: true,
+                candidates_per_run: 1,
+            }));
+            let mut reusable = HashMap::from([(
+                "cached".into(),
+                ReusableStrategyState {
+                    completion_state: completion.into(),
+                    retry_at: Some(Utc::now() + Duration::hours(1)),
+                    replay: Some(replay),
+                    background: Some(BackgroundIndexerSearchStrategyState {
+                        query_signature: "cached".into(),
+                        strategy_state: SEARCH_STRATEGY_CONTAINED.into(),
+                        retry_at: Some(Utc::now() + Duration::hours(1)),
+                        created_at: Utc::now(),
+                        page_cursor: Some("old-cursor".into()),
+                        cursor_chain_id: Some("old-chain".into()),
+                        chain_run_ids: vec!["old-run".into()],
+                        branch: String::new(),
+                    }),
+                },
+            )]);
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let sink = IndexerSearchPageSink::new(tx, 1);
+            let selection = select_reusable_strategies(
+                vec![prepared_strategy("cached"), prepared_strategy("other")],
+                &mut reusable,
+                "idx-1",
+                &sink,
+                Some(5),
+            )
+            .await
+            .unwrap();
+            assert_eq!(selection.live.len(), 2);
+            assert_eq!(selection.live[0].strategy_id, "cached");
+            assert!(selection.live[0].request.page_cursor.is_none());
+            assert!(selection.page_chains.is_empty());
+            assert_eq!(selection.complete_count, 0);
+            assert_eq!(selection.deferred_count, 0);
         }
     }
 

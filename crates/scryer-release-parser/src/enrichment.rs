@@ -45,6 +45,25 @@ const LANG_SUBTITLE_MARKERS: &[&str] = &[
 const DUB_ONLY_MARKERS: &[&str] = &["DUB", "DUBS", "DUBBED"];
 const HARDCODED_SUBTITLE_MARKERS: &[&str] = &["HC", "HARDCODED", "HARDSUBBED", "HARDSUB"];
 
+pub(crate) fn parse_revision_token(token: &str) -> Option<(i32, bool)> {
+    if token == "RERIP" {
+        return Some((1, true));
+    }
+    let (suffix, repack) = token
+        .strip_prefix("REPACK")
+        .map(|suffix| (suffix, true))
+        .or_else(|| token.strip_prefix("PROPER").map(|suffix| (suffix, false)))?;
+    let revision = if suffix.is_empty() {
+        1
+    } else {
+        if !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse::<i32>().ok().filter(|value| *value > 0)?
+    };
+    Some((revision, repack))
+}
+
 pub(crate) fn enrich_candidate(
     tokens: &[Token],
     candidate: &ReleaseParseCandidate,
@@ -86,11 +105,24 @@ pub(crate) fn enrich_candidate(
                     .then_some(next_token.normalized.as_str())
             });
 
-        if matches!(token, "PROPER" | "REPACK") {
-            enrichment.is_proper_upload = true;
-            if token == "REPACK" {
-                enrichment.is_repack = true;
+        if let Some((mut revision, is_repack)) = parse_revision_token(token) {
+            let mut previous = index;
+            while previous > 0 {
+                let (left_index, left) = scoped_tokens[previous - 1];
+                let (right_index, right) = scoped_tokens[previous];
+                if left.normalized != "REAL"
+                    || left_index + 1 != right_index
+                    || left.group_id != right.group_id
+                    || left.bracket_depth != right.bracket_depth
+                {
+                    break;
+                }
+                revision = revision.saturating_add(1);
+                previous -= 1;
             }
+            enrichment.revision = enrichment.revision.max(revision);
+            enrichment.is_proper_upload = true;
+            enrichment.is_repack |= is_repack;
             index += 1;
             continue;
         }
@@ -343,6 +375,10 @@ pub(crate) fn enrich_candidate(
     enrichment.is_ai_enhanced |= trash_guide_signals.ai_enhanced;
     enrichment.is_proper_upload |= trash_guide_signals.proper;
     enrichment.is_repack |= trash_guide_signals.repack;
+    // Keep legacy anime-version and inclusive flag semantics at revision one.
+    enrichment.revision = enrichment.revision.max(i32::from(
+        enrichment.is_proper_upload || enrichment.is_repack,
+    ));
     enrichment.is_hardcoded_subs |= trash_guide_signals.hardcoded_subs;
 
     enrichment.languages_audio = dedupe_keep_order(enrichment.languages_audio);
@@ -433,6 +469,7 @@ pub(crate) fn project_final_metadata(
     projected.fps = enrichment.fps;
     projected.is_proper_upload = enrichment.is_proper_upload;
     projected.is_repack = enrichment.is_repack;
+    projected.revision = enrichment.revision;
     projected.is_bd_disk = enrichment.is_bd_disk;
     projected.is_ai_enhanced = enrichment.is_ai_enhanced;
     projected.is_hardcoded_subs = enrichment.is_hardcoded_subs;
@@ -1457,5 +1494,29 @@ mod scoped_metadata_tests {
 
         assert_eq!(enrichment.video_codec.as_deref(), Some("H.264"));
         assert!(enrichment.is_10bit);
+    }
+    #[test]
+    fn numbered_revision_tokens_and_real_aliases() {
+        for (token, expected) in [
+            ("PROPER", 1),
+            ("REPACK", 1),
+            ("RERIP", 1),
+            ("REPACK2", 2),
+            ("PROPER3", 3),
+            ("REPACK17", 17),
+            ("REAL.REPACK", 2),
+            ("REAL.REAL.PROPER", 3),
+            ("PROPER.REPACK", 1),
+            ("REPACK3.REPACK2", 3),
+            ("repack4", 4),
+            ("REPACK0", 0),
+            ("REPACK-2", 1),
+            ("REPACK2147483648", 0),
+            ("REPACKED", 0),
+        ] {
+            let (tokens, candidate) = scoped_candidate(token, &[]);
+            let metadata = enrich_candidate(&tokens, &candidate, "");
+            assert_eq!(metadata.revision, expected, "{token}");
+        }
     }
 }

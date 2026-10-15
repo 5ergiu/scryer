@@ -1108,6 +1108,13 @@ export const titleDownloadQueueItemsQuery = `query TitleDownloadQueueItems($id: 
   }
 }`;
 
+export const currentReleaseFilesQuery = `query CurrentReleaseFiles($id: ID!) {
+  title(id: $id) {
+    id
+    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath }
+  }
+}`;
+
 export const titleMediaFilesQuery = `query TitleMediaFiles($id: ID!) {
   title(id: $id) {
     id
@@ -1295,6 +1302,7 @@ export const RELEASE_SEARCH_RESULT_FIELDS = `
       detectedHdr
       parseConfidence
       isProperUpload
+      revision
       isRemux
       isBdDisk
       isAiEnhanced
@@ -2028,6 +2036,8 @@ export const mediaRenamePreviewBulkQuery = `query MediaRenamePreviewBulk($input:
     conflicts
     errors
     folderRepairs
+    organizingFolderChanges
+    namingContext { titleId language currentRelativePath proposedRelativePath organizingFolderChanged }
     items {
       collectionId
       currentPath
@@ -2051,6 +2061,8 @@ export const mediaRenamePreviewQuery = `query MediaRenamePreview($input: MediaRe
     conflicts
     errors
     folderRepairs
+    organizingFolderChanges
+    namingContext { titleId language currentRelativePath proposedRelativePath organizingFolderChanged }
     items {
       collectionId
       seriesMovieLinkIds
@@ -2552,6 +2564,7 @@ const qualityProfileCriteriaFields = `
       preferRemux
       allowBdDisk
       allowUpgrades
+      ignoreProperRepack
       scoringOverrides {
         allowX265Non4K
         blockDvWithoutFallback

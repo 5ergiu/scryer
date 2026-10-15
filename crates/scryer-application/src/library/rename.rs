@@ -158,6 +158,17 @@ pub struct RenamePlan {
     /// inside the planned folder. Applying records that folder for them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_repairs: Vec<RenamePlanTitleFolder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub naming_context: Vec<RenameNamingContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenameNamingContext {
+    pub title_id: String,
+    pub language: String,
+    pub current_relative_path: Option<String>,
+    pub proposed_relative_path: String,
+    pub organizing_folder_changed: bool,
 }
 
 /// The destination folder a rename plan places one title's files under.
@@ -609,6 +620,19 @@ impl AppUseCase {
             .await?;
 
         Ok(())
+    }
+
+    pub(crate) async fn title_for_naming(&self, title: &Title) -> Title {
+        let mut naming_title = title.clone();
+        if naming_title
+            .metadata_language
+            .as_deref()
+            .is_none_or(|language| language.trim().is_empty())
+        {
+            naming_title.metadata_language =
+                Some(self.resolve_metadata_language_for_title(title).await);
+        }
+        naming_title
     }
 
     async fn read_rename_plan_settings(&self, facet: &MediaFacet) -> AppResult<RenamePlanSettings> {
@@ -1908,6 +1932,51 @@ impl AppUseCase {
         );
         plan.title_folders = title_folders;
         plan.folder_repairs = folder_repairs;
+        for planned in &plan.title_folders {
+            let Some(title) = titles.iter().find(|title| title.id == planned.title_id) else {
+                continue;
+            };
+            let roots = self
+                .root_folders_for_library(&title.library_id, &title.facet)
+                .await?;
+            let proposed = stored_path_to_path_buf(&planned.folder_path);
+            let root = roots
+                .iter()
+                .map(|root| stored_path_to_path_buf(&root.path))
+                .filter(|root| proposed != *root && proposed.starts_with(root))
+                .max_by_key(|root| root.components().count())
+                .ok_or_else(|| {
+                    AppError::Validation("planned title folder is outside its library roots".into())
+                })?;
+            let after = proposed
+                .strip_prefix(&root)
+                .map_err(|error| AppError::Validation(error.to_string()))?;
+            let before = title
+                .folder_path
+                .as_deref()
+                .map(stored_path_to_path_buf)
+                .and_then(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf));
+            let language = title
+                .metadata_language
+                .as_deref()
+                .filter(|language| !language.trim().is_empty())
+                .or_else(|| effective_languages.get(&title.id).map(String::as_str))
+                .unwrap_or("eng")
+                .to_string();
+            plan.naming_context.push(RenameNamingContext {
+                title_id: title.id.clone(),
+                language,
+                organizing_folder_changed: before.as_deref().and_then(Path::parent)
+                    != after.parent(),
+                current_relative_path: before.map(path_to_stored_string),
+                proposed_relative_path: path_to_stored_string(after),
+            });
+        }
+        let context =
+            serde_json::to_string(&(&plan.fingerprint, &plan.naming_context, &plan.title_folders))
+                .map_err(|error| AppError::Validation(error.to_string()))?;
+        plan.fingerprint =
+            crate::helpers::blake3_identity_hex(crate::helpers::HashDomain::RenamePlan, &context);
         Ok(plan)
     }
 
@@ -1981,11 +2050,20 @@ impl AppUseCase {
     async fn build_rename_plan_items_for_title(
         &self,
         title: &Title,
-        _effective_language: &str,
+        effective_language: &str,
         settings: &RenamePlanSettings,
         planning: &mut RenamePlanningState,
     ) -> AppResult<(Vec<RenamePlanItem>, Option<RenamePlanTitleFolder>)> {
-        let title = title.clone();
+        let mut title = title.clone();
+        if title
+            .metadata_language
+            .as_deref()
+            .is_none_or(|language| language.trim().is_empty())
+        {
+            title.metadata_language = Some(effective_language.to_string());
+        }
+        let rendering_error =
+            validate_title_folder_rendering(&title, &settings.folder_template).err();
         let use_season_folders = self.resolve_use_season_folders(&title).await?;
         let collections = self
             .services
@@ -2002,6 +2080,14 @@ impl AppUseCase {
             .into_iter()
             .filter(|file| file.role.is_primary())
             .collect::<Vec<_>>();
+        if let Some(error) = rendering_error {
+            tracing::warn!(title_id = %title.id, %error, "title skipped by rename template validation");
+            let mut items = rename_items_outside_library_roots(&media_files);
+            for item in &mut items {
+                item.reason_code = "invalid_title_folder_template".into();
+            }
+            return Ok((items, None));
+        }
         // Only the media root varies per title; every template and policy came
         // from `settings`, which was resolved once for the whole plan. It is
         // resolved from where the files actually are rather than from the
@@ -2662,6 +2748,14 @@ fn parse_rename_template_optional_group(
 }
 
 fn render_rename_template_tokens(template: &str, tokens: &BTreeMap<String, String>) -> String {
+    render_rename_template_tokens_with_folder_path(template, tokens, false)
+}
+
+fn render_rename_template_tokens_with_folder_path(
+    template: &str,
+    tokens: &BTreeMap<String, String>,
+    folder_path: bool,
+) -> String {
     let mut out = String::new();
     let chars: Vec<char> = template.chars().collect();
     let mut cursor = 0usize;
@@ -2684,7 +2778,11 @@ fn render_rename_template_tokens(template: &str, tokens: &BTreeMap<String, Strin
                     .get(&group.guard)
                     .is_some_and(|value| !value.trim().is_empty())
                 {
-                    out.push_str(&render_rename_template_tokens(&group.body, tokens));
+                    out.push_str(&render_rename_template_tokens_with_folder_path(
+                        &group.body,
+                        tokens,
+                        folder_path,
+                    ));
                 }
                 cursor = group.end_index + 1;
                 continue;
@@ -2693,7 +2791,16 @@ fn render_rename_template_tokens(template: &str, tokens: &BTreeMap<String, Strin
             if let Some(end) = chars[cursor + 1..].iter().position(|c| *c == '}') {
                 let end_index = cursor + 1 + end;
                 let token_spec: String = chars[cursor + 1..end_index].iter().collect();
-                out.push_str(&resolve_template_token(tokens, token_spec.trim()));
+                let resolved = resolve_template_token(tokens, token_spec.trim());
+                if folder_path {
+                    if resolved == "_" {
+                        out.push('_');
+                    } else {
+                        out.push_str(&sanitize_filesystem_component(&resolved));
+                    }
+                } else {
+                    out.push_str(&resolved);
+                }
                 cursor = end_index + 1;
                 continue;
             }
@@ -2754,17 +2861,81 @@ fn finalize_generated_filename_component(value: &str) -> String {
 }
 
 pub fn render_title_folder_template(template: &str, tokens: &BTreeMap<String, String>) -> String {
-    let raw = restore_rename_literal_sentinels(&render_rename_template_tokens(template, tokens));
+    render_title_folder_template_components(template, tokens)
+        .split('/')
+        .map(|component| if component.is_empty() { "_" } else { component })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn render_title_folder_template_components(
+    template: &str,
+    tokens: &BTreeMap<String, String>,
+) -> String {
+    let raw = restore_rename_literal_sentinels(&render_rename_template_tokens_with_folder_path(
+        template, tokens, true,
+    ));
     let cleaned = strip_empty_folder_template_groups(&raw);
-    truncate_generated_folder_component(&sanitize_filesystem_component(cleaned.trim()))
+    cleaned
+        .trim()
+        .split('/')
+        .map(|component| {
+            let component = component.trim();
+            let sanitized = if component == "_" {
+                "_".to_string()
+            } else {
+                sanitize_filesystem_component(component)
+            };
+            let sanitized = truncate_generated_folder_component(&sanitized);
+            if matches!(sanitized.as_str(), "." | "..") {
+                "_".to_string()
+            } else {
+                sanitized
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn validate_title_folder_rendering(title: &Title, template: &str) -> AppResult<()> {
+    validate_title_folder_template(template)?;
+    // Validation establishes structural separators before token substitution;
+    // separators in metadata are sanitized and cannot change this depth.
+    let rendered = render_title_folder_template_components(
+        template,
+        &build_title_folder_tokens(title, title.year),
+    );
+    let components = rendered.split('/').collect::<Vec<_>>();
+    if components.len() != template.split('/').count()
+        || components
+            .iter()
+            .any(|component| component.trim().is_empty())
+    {
+        return Err(AppError::Validation("title folder template renders an empty path component; supply the missing metadata or choose another template".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_title_folder_template(template: &str) -> AppResult<()> {
+    let trimmed = template.trim();
+    if trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(AppError::Validation(
+            "folder template must contain only relative, non-empty path components".to_string(),
+        ));
+    }
+
     validate_folder_component_template(
-        template,
+        trimmed,
         "folder",
         is_supported_title_folder_token,
         None,
+        true,
+        is_illegal_title_folder_template_literal,
         true,
     )
 }
@@ -2776,6 +2947,8 @@ pub(crate) fn validate_season_folder_template(template: &str) -> AppResult<()> {
         is_supported_season_folder_token,
         Some("season"),
         false,
+        is_illegal_folder_template_literal,
+        false,
     )
 }
 
@@ -2786,11 +2959,81 @@ pub(crate) fn validate_specials_folder_template(template: &str) -> AppResult<()>
         is_supported_season_folder_token,
         None,
         false,
+        is_illegal_folder_template_literal,
+        false,
     )
+}
+
+pub(crate) fn episode_folder_discovery_pattern(template: &str) -> AppResult<regex::Regex> {
+    fn fragment(template: &str) -> AppResult<(String, bool)> {
+        let chars: Vec<char> = template.chars().collect();
+        let mut cursor = 0;
+        let mut pattern = String::new();
+        let mut has_boundary_evidence = false;
+        let mut literal_braces = 0usize;
+        while cursor < chars.len() {
+            let ch = chars[cursor];
+            if ch == '{' && chars.get(cursor + 1) == Some(&'{') {
+                pattern.push_str(r"\{");
+                literal_braces += 1;
+                cursor += 2;
+            } else if ch == '{' && chars.get(cursor + 1) == Some(&'?') {
+                let group = parse_rename_template_optional_group(&chars, cursor).map_err(|_| {
+                    AppError::Validation("invalid episode folder optional group".into())
+                })?;
+                // Optional text cannot establish a folder boundary when absent.
+                pattern.push_str(&format!("(?:{})?", fragment(&group.body)?.0));
+                cursor = group.end_index + 1;
+            } else if ch == '{' {
+                let end = chars[cursor + 1..]
+                    .iter()
+                    .position(|ch| *ch == '}')
+                    .ok_or_else(|| AppError::Validation("unclosed episode folder token".into()))?
+                    + cursor
+                    + 1;
+                let token: String = chars[cursor + 1..end].iter().collect();
+                let name = token.split([':', '|']).next().unwrap_or_default().trim();
+                has_boundary_evidence |= name == "season";
+                pattern.push_str(if name == "season" {
+                    r"[0-9]+"
+                } else {
+                    r"[^/\\]*"
+                });
+                cursor = end + 1;
+            } else if ch == '}' && literal_braces > 0 {
+                pattern.push_str(r"\}");
+                literal_braces -= 1;
+                cursor += if chars.get(cursor + 1) == Some(&'}') {
+                    2
+                } else {
+                    1
+                };
+            } else {
+                pattern.push_str(&regex::escape(&ch.to_string()));
+                has_boundary_evidence |= ch.is_alphanumeric();
+                cursor += 1;
+            }
+        }
+        Ok((pattern, has_boundary_evidence))
+    }
+    let (pattern, has_boundary_evidence) = fragment(template)?;
+    // Metadata-only names remain valid for rendering and owned titles, but
+    // cannot identify an unowned episode folder. Match nothing in that case.
+    let pattern = if has_boundary_evidence {
+        format!("(?i)^{pattern}$")
+    } else {
+        r"\b\B".to_owned()
+    };
+    regex::Regex::new(&pattern)
+        .map_err(|error| AppError::Validation(format!("invalid episode folder pattern: {error}")))
 }
 
 fn is_illegal_folder_template_literal(ch: char) -> bool {
     matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || ch.is_control()
+}
+
+fn is_illegal_title_folder_template_literal(ch: char) -> bool {
+    matches!(ch, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*') || ch.is_control()
 }
 
 #[derive(Default)]
@@ -2932,6 +3175,8 @@ fn validate_folder_component_template(
     is_supported_token: impl Fn(&str) -> bool,
     required_token: Option<&str>,
     require_any_token: bool,
+    is_illegal_literal: fn(char) -> bool,
+    allow_path: bool,
 ) -> AppResult<()> {
     let trimmed = template.trim();
     if trimmed.is_empty() {
@@ -2944,14 +3189,27 @@ fn validate_folder_component_template(
         saw_token: false,
         saw_required_token: required_token.is_none(),
     };
-    validate_rename_template_fragment(
-        trimmed,
-        template_label,
-        &is_supported_token,
-        Some(is_illegal_folder_template_literal),
-        required_token,
-        &mut state,
-    )?;
+    let components = if allow_path {
+        trimmed.split('/').collect::<Vec<_>>()
+    } else {
+        vec![trimmed]
+    };
+    for component in components {
+        let component = component.trim();
+        if component.is_empty() {
+            return Err(AppError::Validation(format!(
+                "{template_label} template must contain only relative, non-empty path components"
+            )));
+        }
+        validate_rename_template_fragment(
+            component,
+            template_label,
+            &is_supported_token,
+            Some(is_illegal_literal),
+            required_token,
+            &mut state,
+        )?;
+    }
 
     if require_any_token && !state.saw_token {
         return Err(AppError::Validation(format!(
@@ -3098,13 +3356,34 @@ pub(crate) fn build_title_folder_tokens(
     let resolved_year = title_year_hint
         .or_else(|| title.year.map(|value| value.to_string()))
         .unwrap_or_default();
+    let title_order_source = title_token.clone();
     let mut tokens = BTreeMap::from([
         ("title".to_string(), title_token),
         ("year".to_string(), resolved_year),
     ]);
     insert_title_year_variant_tokens(&mut tokens, title);
+    insert_title_order_tokens(
+        &mut tokens,
+        &title_order_source,
+        title.metadata_language.as_deref(),
+    );
     insert_title_external_id_tokens(&mut tokens, title);
     tokens
+}
+
+fn insert_title_order_tokens(
+    tokens: &mut BTreeMap<String, String>,
+    title: &str,
+    language: Option<&str>,
+) {
+    tokens.insert(
+        "title_with_article".into(),
+        scryer_domain::title_naming::title_with_article(title, language),
+    );
+    tokens.insert(
+        "title_first_character".into(),
+        scryer_domain::title_naming::title_first_character(title, language),
+    );
 }
 
 pub(crate) fn render_episode_folder_name(
@@ -3120,7 +3399,7 @@ pub(crate) fn render_episode_folder_name(
     };
     let mut tokens = build_title_folder_tokens(title, title.year);
     tokens.insert("season".to_string(), season.to_string());
-    let rendered = render_title_folder_template(template, &tokens);
+    let rendered = render_title_folder_template_components(template, &tokens);
     if rendered.is_empty() {
         render_title_folder_template(default_template, &tokens)
     } else {
@@ -3136,7 +3415,9 @@ pub(crate) fn configured_title_folder_path(
 ) -> PathBuf {
     let tokens = build_title_folder_tokens(title, parsed_year);
     let folder_name = render_title_folder_template(folder_template, &tokens);
-    PathBuf::from(media_root).join(if folder_name.is_empty() {
+    // A template that renders to nothing (empty, or a single placeholder with
+    // no metadata) falls back to the title name rather than a lone `_` folder.
+    PathBuf::from(media_root).join(if folder_name.is_empty() || folder_name == "_" {
         tokens
             .get("title")
             .map(|value| sanitize_filesystem_component(value))
@@ -3453,10 +3734,23 @@ fn planned_title_folder_overlap<'a>(
         }))
         .collect::<Vec<_>>();
     let mut by_key: HashMap<String, Vec<TitleFolderClaim<'a>>> = HashMap::new();
+    let comparison_paths = claims
+        .iter()
+        .map(|claim| {
+            let raw = &claim.folder.folder_path;
+            let path = stored_path_to_path_buf(raw);
+            let resolved = crate::folder_ownership::resolved_folder_identity(&path).unwrap_or(path);
+            let mut spelling = path_to_stored_string(&resolved);
+            if crate::folder_ownership::folder_case_insensitive(&resolved) {
+                spelling = spelling.to_lowercase();
+            }
+            (raw.clone(), spelling)
+        })
+        .collect::<HashMap<_, _>>();
     let mut keyed = Vec::new();
     let mut unkeyed = Vec::new();
     for claim in &claims {
-        match folder_containment_key(&claim.folder.folder_path) {
+        match folder_containment_key(&comparison_paths[&claim.folder.folder_path]) {
             Some(key) => {
                 by_key.entry(key.clone()).or_default().push(*claim);
                 keyed.push((key, *claim));
@@ -3477,7 +3771,7 @@ fn planned_title_folder_overlap<'a>(
         }
     }
     for (own_key, claim) in &keyed {
-        for key in containing_folder_keys(&claim.folder.folder_path) {
+        for key in containing_folder_keys(&comparison_paths[&claim.folder.folder_path]) {
             if &key == own_key {
                 continue;
             }
@@ -3718,6 +4012,8 @@ fn is_supported_rename_template_token(token: &str) -> bool {
         "title"
             | "title_with_year"
             | "title_without_year"
+            | "title_with_article"
+            | "title_first_character"
             | "year"
             | "quality"
             | "edition"
@@ -3756,6 +4052,7 @@ fn is_supported_rename_template_token_for_facet(token: &str, facet: &MediaFacet)
         .any(|(token_name, _)| *token_name == token);
 
     common
+        || matches!(token, "title_with_article" | "title_first_character")
         || match facet {
             MediaFacet::Movie => token == "edition",
             MediaFacet::Series | MediaFacet::Anime => matches!(
@@ -3768,7 +4065,12 @@ fn is_supported_rename_template_token_for_facet(token: &str, facet: &MediaFacet)
 fn is_supported_title_folder_token(token: &str) -> bool {
     matches!(
         token,
-        "title" | "title_with_year" | "title_without_year" | "year"
+        "title"
+            | "title_with_year"
+            | "title_without_year"
+            | "title_with_article"
+            | "title_first_character"
+            | "year"
     ) || TITLE_EXTERNAL_ID_TOKENS
         .iter()
         .any(|(token_name, _)| *token_name == token)
@@ -3991,6 +4293,12 @@ pub(crate) fn title_rename_tokens(
     let mut tokens = BTreeMap::new();
     insert_common_rename_tokens(&mut tokens, common.common);
     insert_title_year_variant_tokens(&mut tokens, title);
+    let title_token = tokens.get("title").cloned().unwrap_or_default();
+    insert_title_order_tokens(
+        &mut tokens,
+        &title_token,
+        title.metadata_language.as_deref(),
+    );
     insert_title_external_id_tokens(&mut tokens, title);
     (tokens, common.edition)
 }
@@ -4639,6 +4947,7 @@ pub(crate) fn build_rename_plan_from_items(
         items,
         title_folders: Vec::new(),
         folder_repairs: Vec::new(),
+        naming_context: Vec::new(),
     }
 }
 

@@ -1781,12 +1781,12 @@ const ru: LocaleDictionary = {
     "queue.releaseHeldSourcesPreservedDownloadNotImported": "импорт загрузки не подтверждён",
     "queue.releaseHeldSourcesPreservedLookupIncomplete": "не все папки удалось проверить",
 
-    "queue.markFailedSearchAgain": "Пометить как ошибочную и выполнить повторный поиск",
-    "queue.markFailedOnly": "Только пометить как ошибочную",
+    "queue.markFailedSearchAgain": "Заблокировать, удалить данные и искать снова",
+    "queue.markFailedOnly": "Заблокировать и удалить данные",
     "queue.markFailedSearchSuccess":
-        "Загрузка помечена как ошибочная. Будет выполнен повторный поиск.",
+        "Запрошены блокировка и удаление данных; повторный поиск включён.",
     "queue.markFailedOnlySuccess":
-        "Загрузка помечена как ошибочная без повторного поиска.",
+        "Запрошены блокировка и удаление данных без повторного поиска.",
     "queue.markFailedFailed":
         "Не удалось пометить загрузку как ошибочную.",
 

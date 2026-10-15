@@ -1209,7 +1209,9 @@ fn classify_token(
             strong_anchor: false,
         });
     }
-    if is_release_flag_metadata_token(normalized) {
+    if is_release_flag_metadata_token(normalized)
+        || crate::enrichment::parse_revision_token(normalized).is_some()
+    {
         roles.push(RoleCandidate {
             role: TokenRole::ReleaseFlag,
             confidence: 86,
@@ -3351,14 +3353,19 @@ fn infer_release_group_for_candidate(
     state: &ParseState,
     tokens: &[Token],
     raw_input: &str,
+    facet_hint: ContextFacetHint,
 ) -> Option<String> {
     let title_zones = contiguous_token_ranges(state.title_token_indices.as_slice());
     infer_leading_release_group(tokens, raw_input)
-        .or_else(|| infer_release_group_from_token_suffix(state, tokens))
+        .or_else(|| infer_release_group_from_token_suffix(state, tokens, facet_hint))
         .or_else(|| infer_state_release_group(state, tokens, title_zones.as_slice()))
 }
 
-fn infer_release_group_from_token_suffix(state: &ParseState, tokens: &[Token]) -> Option<String> {
+fn infer_release_group_from_token_suffix(
+    state: &ParseState,
+    tokens: &[Token],
+    facet_hint: ContextFacetHint,
+) -> Option<String> {
     let title_zones = contiguous_token_ranges(state.title_token_indices.as_slice());
     for index in (0..tokens.len()).rev() {
         let Some(token) = tokens.get(index) else {
@@ -3378,7 +3385,7 @@ fn infer_release_group_from_token_suffix(state: &ParseState, tokens: &[Token]) -
                 end_token: index + 1,
             }
         } else {
-            release_group_suffix_range(tokens, index)
+            release_group_suffix_range(state, tokens, index, facet_hint)
         };
         if !release_group_suffix_range_allowed(state, tokens, range, title_zones.as_slice()) {
             continue;
@@ -3417,7 +3424,9 @@ fn release_group_suffix_range_allowed(
     range: TokenRange,
     title_zones: &[TokenRange],
 ) -> bool {
-    if range.start_token >= range.end_token {
+    if range.start_token >= range.end_token
+        || range_follows_episode_title_separator(state, tokens, range)
+    {
         return false;
     }
     if (range.start_token..range.end_token).any(|index| state.identity_token_mask.contains(index)) {
@@ -3448,6 +3457,9 @@ fn infer_state_release_group(
 ) -> Option<String> {
     let release_group = state.release_group.as_deref()?;
     let range = find_phrase_span(tokens, release_group)?;
+    if range_follows_episode_title_separator(state, tokens, range) {
+        return None;
+    }
     if (range.start_token..range.end_token).any(|index| state.identity_token_mask.contains(index)) {
         return None;
     }
@@ -3507,13 +3519,32 @@ fn range_is_embedded_in_larger_group(tokens: &[Token], range: TokenRange) -> boo
     group_start != range.start_token || group_end != range.end_token
 }
 
+fn range_follows_episode_title_separator(
+    state: &ParseState,
+    tokens: &[Token],
+    range: TokenRange,
+) -> bool {
+    let Some(previous_index) = range.start_token.checked_sub(1) else {
+        return false;
+    };
+    let previous = &tokens[previous_index];
+    let first = &tokens[range.start_token];
+    // A spaced separator after the episode identity introduces the episode
+    // title; it is not the attached suffix used for a release group.
+    state.identity_token_mask.contains(previous_index)
+        && first.group_id.is_none()
+        && first.separator_before == SeparatorKind::Hyphen
+        && first.span.start.saturating_sub(previous.span.end) > 1
+}
+
 fn range_is_metadata_marker(tokens: &[Token], range: TokenRange) -> bool {
     let range_len = range.end_token.saturating_sub(range.start_token);
     (range.start_token..range.end_token).any(|index| {
         tokens.get(index).is_some_and(|token| {
             let normalized = token.normalized.as_str();
-            !(release_group_part_is_valid(token, index > range.start_token)
-                || (range_len == 1 && numeric_release_group_suffix(token)))
+            (token.group_id.is_some() && matches!(normalized, "CAST" | "EDITION"))
+                || !(release_group_part_is_valid(token, index > range.start_token)
+                    || (range_len == 1 && numeric_release_group_suffix(token)))
                 || is_explicit_language_metadata_token(normalized)
                 || is_release_flag_metadata_token(normalized)
                 || (range_len == 1 && normalize_standalone_streaming_service(normalized).is_some())
@@ -3546,16 +3577,43 @@ fn has_release_group_suffix_context(state: &ParseState, tokens: &[Token], index:
     })
 }
 
-fn release_group_suffix_range(tokens: &[Token], index: usize) -> TokenRange {
+fn release_group_suffix_range(
+    state: &ParseState,
+    tokens: &[Token],
+    index: usize,
+    facet_hint: ContextFacetHint,
+) -> TokenRange {
     let mut start_token = index;
-    if let Some(previous_index) = index.checked_sub(1)
-        && let Some(previous) = tokens.get(previous_index)
-        && (previous.separator_before == SeparatorKind::Hyphen
-            || (previous.group_id.is_some()
-                && previous.group_id == tokens.get(index).and_then(|token| token.group_id)))
-        && previous.raw.len() <= 3
-        && release_group_part_is_valid(previous, false)
-    {
+    // Walk back across the contiguous hyphen run so a multi-part anime group
+    // (`Group-Raws`, `Erai-raws`) is not truncated to its final element. Series
+    // and movie releases keep the previous single-token rule, where a suffix
+    // like `-Goki-TAoE` or `-Qorl-VRT3X` is read as tag plus terminal group.
+    // The run stops at anything that is not a valid group part (`x265`,
+    // `WEB-DL`) and at a token the beam already read as the episode identity,
+    // so `S02E01 - Group` cannot become the group `S02E01-Group`.
+    let anime = facet_hint == ContextFacetHint::Anime;
+    let max_steps = if anime { 3 } else { 1 };
+    while start_token > 0 && index - start_token < max_steps {
+        let previous_index = start_token - 1;
+        let Some(previous) = tokens.get(previous_index) else {
+            break;
+        };
+        let hyphen_joined = previous.separator_before == SeparatorKind::Hyphen;
+        let current_depth = tokens
+            .get(start_token)
+            .map(|token| token.bracket_depth)
+            .unwrap_or_default();
+        let same_group = previous.group_id.is_some()
+            && previous.group_id == tokens.get(start_token).and_then(|token| token.group_id)
+            && previous.bracket_depth == current_depth;
+        if state.identity_token_mask.contains(previous_index)
+            || previous.bracket_depth != current_depth
+            || (!hyphen_joined && !same_group)
+            || !release_group_part_is_valid(previous, false)
+            || (!anime && previous.raw.len() > 3)
+        {
+            break;
+        }
         start_token = previous_index;
     }
 
@@ -4655,7 +4713,8 @@ fn build_candidate(
         .filter(|(index, _)| !state.consumed_tokens.contains(*index))
         .map(|(_, token)| token.span)
         .collect::<Vec<_>>();
-    let release_group = infer_release_group_for_candidate(&state, tokens, raw_input);
+    let release_group =
+        infer_release_group_for_candidate(&state, tokens, raw_input, context_index.facet_hint);
     let raw_score = finalize_score(&state, tokens, annotations);
     let zones = build_candidate_zones(&state, tokens, release_group.as_deref());
     let is_remux = state
@@ -4716,6 +4775,7 @@ fn build_candidate(
         fps: None,
         is_proper_upload: false,
         is_repack: false,
+        revision: 0,
         is_remux,
         is_bd_disk: false,
         is_ai_enhanced: false,

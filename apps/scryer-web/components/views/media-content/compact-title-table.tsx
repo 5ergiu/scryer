@@ -1045,6 +1045,7 @@ export const CompactTitleTable = React.memo(function CompactTitleTable({
                   </p>
                 ) : (
                   <SearchResultBuckets
+                    titleId={item.id}
                     results={interactiveSearchResults}
                     onQueue={(release) => {
                       if (bulkActionBusy) {

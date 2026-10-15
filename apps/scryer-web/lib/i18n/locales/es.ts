@@ -1137,6 +1137,7 @@ const es: LocaleDictionary = {
   "queue.assignTitlePlaceholder": "Buscar títulos…",
   "queue.assignTitleResults": "Títulos coincidentes",
   "queue.assignTitleEmpty": "No se encontraron títulos coincidentes.",
+  "queue.assignTitleSearchHint": "Escribe el nombre de un título para buscar…",
   "queue.assignTitleQueued": "Título asignado. La importación será reevaluada.",
   "queue.assignTitleFailed": "No se pudo asignar el título.",
   "queue.assignTitleBeforeImport":

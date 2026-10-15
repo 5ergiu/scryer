@@ -832,6 +832,21 @@ pub struct MediaRenamePlanItemPayload {
 }
 
 #[derive(SimpleObject, Clone)]
+/// Effective language and root-relative title placement used by a rename preview.
+pub struct MediaRenameNamingContextPayload {
+    /// Title whose folder is being previewed.
+    pub title_id: ID,
+    /// Metadata language used for language-sensitive naming tokens.
+    pub language: String,
+    /// Current title folder relative to its root, or null when no valid folder is recorded.
+    pub current_relative_path: Option<String>,
+    /// Complete proposed title folder relative to its root.
+    pub proposed_relative_path: String,
+    /// Whether the organizing directories above this title folder change.
+    pub organizing_folder_changed: bool,
+}
+
+#[derive(SimpleObject, Clone)]
 /// Read-only media rename plan and stable fingerprint for later application.
 pub struct MediaRenamePlanPayload {
     /// Media facet covered by the plan.
@@ -859,6 +874,10 @@ pub struct MediaRenamePlanPayload {
     /// Number of titles with nothing to move whose recorded folder is not a
     /// title folder; applying the plan records the planned folder for them.
     pub folder_repairs: i32,
+    /// Per-title naming language and complete relative folder placement.
+    pub naming_context: Vec<MediaRenameNamingContextPayload>,
+    /// Number of titles whose organizing directories change in this plan.
+    pub organizing_folder_changes: i32,
     /// Plan items in deterministic service order.
     pub items: Vec<MediaRenamePlanItemPayload>,
 }
@@ -934,7 +953,615 @@ impl ExternalIdInput {
 #[derive(InputObject, Clone)]
 /// Optional title settings used when creating or updating a title.
 pub struct TitleOptionsInput {
+    /// Movie minimum availability override; omission preserves it, null clears it to legacy Announced behavior, and a value replaces it. Other facets reject this field.
+    pub min_availability: MaybeUndefined<String>,
     /// Search-language override: omitted preserves, null inherits the library, empty searches only the primary name and custom aliases.
     pub search_languages: MaybeUndefined<Vec<String>>,
     /// User-owned search aliases: omitted preserves, null or empty clears. Metadata refresh preserves these aliases.
     pub search_aliases: MaybeUndefined<Vec<String>>,
+    /// Quality profile identity; omission preserves the current value, null clears it, and a value replaces it.
+    pub quality_profile_id: MaybeUndefined<ID>,
+    /// Root-folder identity used when a title is created; omission preserves the current value, null clears it, and a value replaces it. Changing the root of an existing title that has tracked files is refused: preview the change with locationOperationPreview and run it with startLocationOperation.
+    #[graphql(
+        deprecation = "Retired for existing titles with tracked files: use locationOperationPreview and startLocationOperation to move a title. Still accepted at title creation and for titles with no tracked files."
+    )]
+    pub root_folder_id: MaybeUndefined<ID>,
+    /// Monitoring policy; omission preserves the current value, null clears it, and a value replaces it.
+    pub monitor_type: MaybeUndefined<MonitorTypeValue>,
+    /// Whether season folders are used for Series or Anime; omission preserves the current value, null clears it, and a value replaces it. Movies reject this field.
+    pub use_season_folders: MaybeUndefined<bool>,
+    /// Metadata language; omission preserves the current value, null clears it, and a value replaces it.
+    pub metadata_language: MaybeUndefined<String>,
+    /// Whether specials are monitored; omission preserves the current value, null clears it, and a value replaces it.
+    pub monitor_specials: MaybeUndefined<bool>,
+    /// Whether inter-season movies are monitored; omission preserves the current value, null clears it, and a value replaces it.
+    pub inter_season_movies: MaybeUndefined<bool>,
+    /// Filler policy; omission preserves the current value, null clears it, and a value replaces it.
+    pub filler_policy: MaybeUndefined<FillerPolicyValue>,
+    /// Recap policy; omission preserves the current value, null clears it, and a value replaces it.
+    pub recap_policy: MaybeUndefined<RecapPolicyValue>,
+    /// Which episode numbering this title's releases are read in; omission preserves the current value, null clears it (back to `AUTO`), and a value replaces it. Movies reject this field.
+    pub release_numbering: MaybeUndefined<ReleaseNumberingValue>,
+    /// Seasons and series movies to monitor under `ADVANCED`; omission preserves the current selection, null clears it, and a value replaces it. Required with `ADVANCED`, and rejected for movies.
+    pub monitor_selection: MaybeUndefined<MonitorSelectionInput>,
+}
+
+#[derive(InputObject, Clone)]
+/// Metadata and acquisition settings for creating a title.
+pub struct AddTitleInput {
+    /// Display name of the title.
+    pub name: String,
+    /// Media facet, such as movie, series, or anime.
+    pub facet: MediaFacetValue,
+    /// Library identity receiving the title; null lets the server resolve the default behavior.
+    pub library_id: Option<ID>,
+    /// Whether the title starts monitored.
+    pub monitored: bool,
+    /// Tag values attached to the title.
+    pub tags: Vec<String>,
+    /// Optional title settings to apply at creation.
+    pub options: Option<TitleOptionsInput>,
+    /// External provider identifiers for the title.
+    pub external_ids: Option<Vec<ExternalIdInput>>,
+    /// SMG canonical movie title ID, when supplied by metadata search.
+    pub smg_id: Option<i64>,
+    /// TVDB title ID, when supplied by metadata search.
+    pub tvdb_id: Option<String>,
+    /// TMDB title ID, when supplied by metadata search.
+    pub tmdb_id: Option<i64>,
+    /// IMDb title ID, when supplied by metadata search.
+    pub imdb_id: Option<String>,
+    /// Download source locator, such as an NZB URL or magnet URI, used when queuing the title.
+    pub source_hint: Option<String>,
+    /// Optional source category for the title.
+    pub source_kind: Option<DownloadSourceKindValue>,
+    /// Optional source release title.
+    pub source_title: Option<String>,
+    /// Optional minimum availability value used by acquisition logic.
+    pub min_availability: Option<String>,
+    // Non-artwork metadata fields supplied from the search result.
+    // Poster and fanart URLs are sourced from server-side SMG metadata.
+    /// Release year when known.
+    pub year: Option<i32>,
+    /// Plot summary when known.
+    pub overview: Option<String>,
+    /// Sort key for title ordering.
+    pub sort_title: Option<String>,
+    /// URL-safe title slug.
+    pub slug: Option<String>,
+    /// Runtime in minutes.
+    pub runtime_minutes: Option<i32>,
+    /// Metadata language code.
+    pub language: Option<String>,
+    /// Provider content-status label.
+    pub content_status: Option<String>,
+}
+
+#[derive(InputObject)]
+/// Candidate mappings selected from a manual-import preview.
+pub struct QueueManualImportInput {
+    /// Manual-import selection identity.
+    pub selection_id: ID,
+    /// File mappings to enqueue for import.
+    pub files: Vec<ManualImportCandidateMappingInput>,
+}
+
+#[derive(InputObject)]
+/// Download identity used to build a manual-import preview.
+pub struct BeginManualImportSelectionInput {
+    /// Configured download-client identity.
+    pub client_id: ID,
+    /// Download-client provider type.
+    pub client_type: String,
+    /// Provider-specific download item identity.
+    pub download_client_item_id: String,
+    /// Title identity used to suggest import targets.
+    pub title_id: ID,
+    /// Explicitly extract an archive-only download before building the preview.
+    pub extract_archives: Option<bool>,
+}
+
+#[derive(InputObject, Clone)]
+/// Scope and mode for previewing media file renames.
+pub struct MediaRenamePreviewInput {
+    /// Facet whose paths are previewed.
+    pub facet: MediaFacetValue,
+    /// Optional title identity; null previews the full facet scope.
+    pub title_id: Option<ID>,
+    /// Whether to calculate changes without applying them; omission uses the resolver default.
+    pub dry_run: Option<bool>,
+    /// Whether to return only the items counted by `renamable`; counts and fingerprint still describe the whole plan.
+    pub renamable_only: Option<bool>,
+    /// Maximum number of `items` returned; counts and fingerprint still describe the whole plan.
+    pub max_items: Option<i32>,
+}
+
+#[derive(InputObject, Clone)]
+/// Titles whose files should be renamed in the background.
+pub struct RenameTitlesInput {
+    /// Facet shared by every requested title.
+    pub facet: MediaFacetValue,
+    /// Titles to rename; each is locked until the job finishes with it.
+    pub title_ids: Vec<ID>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Accepted rename work and the job run tracking it.
+pub struct RenameTitlesPayload {
+    /// Background job run tracking the rename work.
+    pub job_run: JobRunPayload,
+    /// Title IDs accepted for processing.
+    pub accepted_title_ids: Vec<ID>,
+}
+
+#[derive(InputObject, Clone)]
+/// Scope and mode for previewing renames across several titles at once.
+pub struct MediaRenamePreviewBulkInput {
+    /// Facet shared by every requested title.
+    pub facet: MediaFacetValue,
+    /// Titles whose rename plans are returned, in the order supplied.
+    pub title_ids: Vec<ID>,
+    /// Whether to return only the items counted by `renamable`; counts and fingerprint still describe the whole plan.
+    pub renamable_only: Option<bool>,
+    /// Maximum number of `items` returned across all plans; counts and fingerprints still describe the whole plan.
+    pub max_items: Option<i32>,
+}
+
+#[derive(InputObject, Clone)]
+/// Idempotent request to apply a title's rename plan.
+pub struct MediaRenameApplyInput {
+    /// Facet containing the title.
+    pub facet: MediaFacetValue,
+    /// Title identity whose rename plan is applied.
+    pub title_id: ID,
+    /// Preview fingerprint required to ensure the plan is current.
+    pub fingerprint: String,
+    /// Optional caller key preventing duplicate application of the same request.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(InputObject, Clone)]
+/// Idempotent request to apply a bulk rename plan.
+pub struct MediaRenameBulkApplyInput {
+    /// Facet containing the titles.
+    pub facet: MediaFacetValue,
+    /// Preview fingerprint required to ensure the plan is current.
+    pub fingerprint: String,
+    /// Optional caller key preventing duplicate application of the same request.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(InputObject)]
+/// Destructive deletion request for one title.
+pub struct DeleteTitleInput {
+    /// Title identity to delete.
+    pub title_id: ID,
+    /// Whether associated media files are removed from disk.
+    pub delete_files_on_disk: Option<bool>,
+    /// Preview fingerprint required to confirm the current deletion target.
+    pub preview_fingerprint: Option<String>,
+    /// Required typed confirmation for destructive deletion.
+    pub typed_confirmation: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Identity returned after deleting a title.
+pub struct DeleteTitlePayload {
+    /// Deleted title identity.
+    pub id: async_graphql::ID,
+}
+
+#[derive(InputObject)]
+/// Destructive deletion request for multiple titles.
+pub struct DeleteTitlesInput {
+    /// Title deletion items with per-title preview fingerprints.
+    pub items: Vec<DeleteTitlesItemInput>,
+    /// Whether associated media files are removed from disk.
+    pub delete_files_on_disk: Option<bool>,
+    /// Required typed confirmation for destructive deletion.
+    pub typed_confirmation: Option<String>,
+}
+
+#[derive(InputObject)]
+/// One title identity and its preview fingerprint for bulk deletion.
+pub struct DeleteTitlesItemInput {
+    /// Title identity to delete.
+    pub title_id: ID,
+    /// Preview fingerprint required to confirm this title's current deletion target.
+    pub preview_fingerprint: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Identity returned after clearing a title release blocklist entry.
+pub struct ClearTitleReleaseBlocklistEntryPayload {
+    /// Cleared release-blocklist entry identity.
+    pub id: async_graphql::ID,
+}
+
+#[derive(InputObject)]
+/// Input for generating deletion previews for selected titles.
+pub struct DeleteTitlesPreviewInput {
+    /// Title identities to include in the preview.
+    pub title_ids: Vec<ID>,
+}
+
+#[derive(InputObject)]
+/// Input for previewing deletion of the media files of selected episodes.
+pub struct DeleteEpisodeFilesPreviewInput {
+    /// Title identity owning the episodes.
+    pub title_id: ID,
+    /// Episode identities whose media files would be deleted.
+    pub episode_ids: Vec<ID>,
+}
+
+#[derive(InputObject)]
+/// Destructive deletion request for the media files of selected episodes.
+pub struct DeleteEpisodeFilesInput {
+    /// Title identity owning the episodes.
+    pub title_id: ID,
+    /// Episode identities whose media files are deleted.
+    pub episode_ids: Vec<ID>,
+    /// Whether the files are removed from disk.
+    pub delete_from_disk: Option<bool>,
+    /// Aggregate preview fingerprint required to confirm the current deletion target.
+    pub preview_fingerprint: Option<String>,
+    /// Required typed confirmation for large destructive deletions.
+    pub typed_confirmation: Option<String>,
+}
+
+#[derive(InputObject)]
+/// Monitoring state change for a title.
+pub struct SetTitleMonitoredInput {
+    /// Title identity to update.
+    pub title_id: ID,
+    /// Whether the title is monitored.
+    pub monitored: bool,
+}
+
+#[derive(InputObject)]
+/// Patch for title metadata and settings.
+pub struct UpdateTitleInput {
+    /// Title identity to patch.
+    pub title_id: ID,
+    /// Replacement title name; omission preserves it.
+    pub name: Option<String>,
+    /// Replacement facet; omission preserves it.
+    pub facet: Option<MediaFacetValue>,
+    /// Replacement tag list; omission preserves it and an empty list clears tags.
+    pub tags: Option<Vec<String>>,
+    /// Optional title settings patch.
+    pub options: Option<TitleOptionsInput>,
+}
+
+#[derive(InputObject)]
+/// User-tag additions and removals applied across a set of titles.
+pub struct UpdateTitleTagsInput {
+    /// Titles to patch. Every title's library is checked before the first write, so a set containing one title the caller cannot manage changes nothing.
+    pub title_ids: Vec<ID>,
+    /// Labels to add. Each must already be defined in the title-tag registry, and reserved `scryer:` entries are rejected.
+    pub add: Option<Vec<String>>,
+    /// Labels to remove. A label the registry no longer defines may still be removed, so a deleted tag can always be cleared off a title.
+    pub remove: Option<Vec<String>>,
+}
+
+#[derive(InputObject)]
+/// User-tag additions and removals applied across a set of series movies.
+pub struct UpdateSeriesMovieTagsInput {
+    /// Series-movie links to patch. Each link's series is checked for title-management rights before the first write, so a set spanning a library the caller cannot manage changes nothing.
+    pub series_movie_link_ids: Vec<ID>,
+    /// Labels to add. Each must already be defined in the title-tag registry, and reserved `scryer:` entries are rejected.
+    pub add: Option<Vec<String>>,
+    /// Labels to remove. A label the registry no longer defines may still be removed, so a deleted tag can always be cleared off a series movie.
+    pub remove: Option<Vec<String>>,
+}
+
+#[derive(InputObject)]
+/// Primary-file assignment for a movie title.
+pub struct SetPrimaryMovieFileInput {
+    /// Movie title identity.
+    pub title_id: ID,
+    /// Media-file identity to make primary.
+    pub file_id: ID,
+}
+
+#[derive(InputObject)]
+/// External metadata identity used to repair a title match.
+pub struct FixTitleMatchInput {
+    /// Title identity to rematch.
+    pub title_id: ID,
+    /// TVDB identity to associate with the title. Required for Series and Anime.
+    pub tvdb_id: Option<String>,
+    /// SMG canonical movie title ID to associate with a Movie title.
+    pub smg_id: Option<i64>,
+}
+
+#[derive(InputObject, Clone)]
+/// Monitoring state change for a collection.
+pub struct SetCollectionMonitoredInput {
+    /// Collection identity to update.
+    pub collection_id: ID,
+    /// Whether the collection is monitored.
+    pub monitored: bool,
+}
+
+#[derive(InputObject, Clone)]
+/// Monitoring state change for an episode.
+pub struct SetEpisodeMonitoredInput {
+    /// Episode identity to update.
+    pub episode_id: ID,
+    /// Whether the episode is monitored.
+    pub monitored: bool,
+}
+
+#[derive(InputObject, Clone)]
+/// Monitoring state change for a series-movie link.
+pub struct SetSeriesMovieMonitoredInput {
+    /// Series-movie link identity to update.
+    pub series_movie_link_id: ID,
+    /// Whether the linked movie is monitored.
+    pub monitored: bool,
+}
+
+#[derive(InputObject, Clone)]
+/// New library root path and default marker.
+pub struct CreateLibraryRootInput {
+    /// Absolute filesystem path for the root.
+    pub path: String,
+    /// Whether this root is the library default.
+    pub is_default: bool,
+}
+
+#[derive(InputObject, Clone)]
+/// Replacement library root path and default marker.
+pub struct UpdateLibraryRootInput {
+    /// Absolute filesystem path for the root.
+    pub path: String,
+    /// Whether this root is the library default.
+    pub is_default: bool,
+}
+
+#[derive(InputObject, Clone)]
+/// New media library definition.
+pub struct CreateLibraryInput {
+    /// Media facet stored in the library.
+    pub facet: MediaFacetValue,
+    /// Library display name.
+    pub name: String,
+    /// Root paths owned by the library.
+    pub roots: Vec<CreateLibraryRootInput>,
+    /// Optional library acquisition and import settings.
+    pub settings: Option<LibrarySettingsInput>,
+}
+
+#[derive(InputObject, Clone)]
+/// Patch for an existing media library.
+pub struct UpdateLibraryInput {
+    /// Library identity to patch.
+    pub library_id: ID,
+    /// Replacement display name; omission preserves it.
+    pub name: Option<String>,
+    /// Replacement root list; omission preserves roots and an empty list clears them when valid.
+    pub roots: Option<Vec<UpdateLibraryRootInput>>,
+    /// Optional replacement library settings.
+    pub settings: Option<LibrarySettingsInput>,
+}
+
+#[derive(InputObject, Clone)]
+/// Acquisition, import, routing, and filesystem settings for a library.
+pub struct LibrarySettingsInput {
+    /// Ordered release-search languages, independent of metadata and audio.
+    pub search_languages: Option<Vec<String>>,
+    /// Required audio-language codes; use `original` to resolve per title.
+    pub required_audio_languages: Option<Vec<String>>,
+    /// Metadata language override; null inherits the global default.
+    pub metadata_language: Option<String>,
+    /// Whether episodic titles use season folders; null inherits the facet setting.
+    pub use_season_folders: Option<bool>,
+    /// Default quality profile identity.
+    pub quality_profile_id: Option<ID>,
+    /// Quality profile identities allowed for requests.
+    pub request_quality_profile_ids: Option<Vec<ID>>,
+    /// Scoring persona applied by default.
+    pub scoring_persona: Option<ScoringPersonaValue>,
+    /// Filler monitoring policy.
+    pub filler_policy: Option<FillerPolicyValue>,
+    /// Recap monitoring policy.
+    pub recap_policy: Option<RecapPolicyValue>,
+    /// Whether specials are monitored.
+    pub monitor_specials: Option<bool>,
+    /// Whether inter-season movies are monitored.
+    pub inter_season_movies: Option<bool>,
+    /// Whether filler movies are monitored.
+    pub monitor_filler_movies: Option<bool>,
+    /// Whether NFO metadata is written during import.
+    pub nfo_write_on_import: Option<bool>,
+    /// Whether Plex match metadata is written during import.
+    pub plexmatch_write_on_import: Option<bool>,
+    /// Import mode used for library files.
+    pub import_mode: Option<ImportModeValue>,
+    /// Whether Linux ownership and mode changes are applied.
+    pub set_permissions_linux: Option<bool>,
+    /// File chmod mode in numeric or accepted symbolic notation.
+    pub file_chmod: Option<String>,
+    /// Folder chmod mode in numeric or accepted symbolic notation.
+    pub folder_chmod: Option<String>,
+    /// Unix group name applied when permissions are set.
+    pub chown_group: Option<String>,
+    /// Indexer routing rules for this library.
+    pub indexer_routing: Option<Vec<IndexerRoutingEntryInput>>,
+    /// Download-client routing rules for this library.
+    pub download_client_routing: Option<Vec<DownloadClientRoutingEntryInput>>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Identity returned after deleting a library.
+pub struct DeleteLibraryPayload {
+    /// Deleted library identity.
+    pub id: async_graphql::ID,
+}
+
+#[derive(InputObject)]
+/// Destructive deletion request for one media file.
+pub struct DeleteMediaFileInput {
+    /// Media-file identity to delete.
+    pub file_id: ID,
+    /// Whether the file is removed from disk.
+    pub delete_from_disk: Option<bool>,
+    /// Preview fingerprint required to confirm the current deletion target.
+    pub preview_fingerprint: Option<String>,
+    /// Required typed confirmation for destructive deletion.
+    pub typed_confirmation: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Result of a media-file deletion request.
+pub struct DeleteMediaFilePayload {
+    /// Deleted media-file identity.
+    pub id: async_graphql::ID,
+    /// Background job accepted to complete deletion and related cleanup.
+    pub job_run: JobRunPayload,
+}
+
+/// How a candidate folder relates to the title being edited.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum FolderMatchOwnershipValue {
+    /// No title in the library claims the folder.
+    Unowned,
+    /// The title being edited already owns it; selecting it is a no-op.
+    OwnedByThisTitle,
+    /// Another title owns it; it is never taken silently.
+    OwnedByAnotherTitle,
+}
+
+/// How the user chose to settle a candidate folder's ownership.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Default)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum FolderMatchResolutionValue {
+    /// Claim an unowned folder. The default, and rejected against an owned
+    /// folder so a conflict never resolves itself.
+    #[default]
+    Assign,
+    /// Trade folders with the current owner.
+    Swap,
+    /// Take the folder; the former owner becomes unmatched and needs repair.
+    TakeOver,
+}
+
+/// What a folder-match correction actually did.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum FolderMatchOutcomeValue {
+    /// The title already owned the folder; nothing was submitted.
+    AlreadyOwned,
+    /// An unowned folder became the title's folder.
+    Assigned,
+    /// Two titles traded folders.
+    Swapped,
+    /// The folder changed hands and the former owner is now unmatched.
+    TakenOver,
+}
+
+#[derive(SimpleObject, Clone)]
+/// A title taking part in a folder-match correction.
+pub struct FolderMatchTitleRefPayload {
+    /// Title identity.
+    pub id: ID,
+    /// Title display name.
+    pub name: String,
+    /// Folder this title owns, or null when it owns none.
+    pub folder_path: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// A title left without a folder by a takeover, and how it surfaces for repair.
+pub struct DisplacedTitleRepairPayload {
+    /// Displaced title identity.
+    pub id: ID,
+    /// Displaced title display name.
+    pub name: String,
+    /// Folder the displaced title no longer owns.
+    pub previous_folder_path: String,
+    /// Reason recorded on its unmatched-discovery item.
+    pub repair_reason_code: String,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Read-only description of a proposed folder-match correction.
+pub struct ChangeTitleFolderPreviewPayload {
+    /// The title being edited.
+    pub title: FolderMatchTitleRefPayload,
+    /// Media facet of the title being edited.
+    pub facet: MediaFacetValue,
+    /// Library that owns the title and every candidate folder.
+    pub library_id: ID,
+    /// Library display name.
+    pub library_name: String,
+    /// Root containing the title's current folder, or null when it owns none.
+    pub current_root_id: Option<ID>,
+    /// Path of the root containing the title's current folder.
+    pub current_root_path: Option<String>,
+    /// Candidate folder, normalized to its stored form.
+    pub selected_folder_path: String,
+    /// Root containing the candidate folder; always a root of the title's library.
+    pub selected_root_id: ID,
+    /// Path of the root containing the candidate folder.
+    pub selected_root_path: String,
+    /// How the candidate folder relates to the title being edited.
+    pub ownership: FolderMatchOwnershipValue,
+    /// The other title holding the candidate folder, or null when unowned.
+    pub current_owner: Option<FolderMatchTitleRefPayload>,
+    /// Tracked media rows the title currently has inside its existing folder.
+    pub current_folder_tracked_media_count: i32,
+    /// Tracked media rows inside the candidate folder, counted across the title
+    /// being edited and the candidate folder's owner.
+    pub selected_folder_tracked_media_count: i32,
+    /// Always false: correcting a folder match never moves file content.
+    pub files_will_move: bool,
+    /// Whether the title already owns the candidate folder, making this a no-op.
+    pub no_op: bool,
+    /// Resolutions this exact selection admits.
+    pub available_resolutions: Vec<FolderMatchResolutionValue>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Result of applying a folder-match correction.
+pub struct ChangeTitleFolderPayload {
+    /// What the correction actually did.
+    pub outcome: FolderMatchOutcomeValue,
+    /// The edited title after the change.
+    pub title: FolderMatchTitleRefPayload,
+    /// Folder the edited title owned before, or null when it owned none.
+    pub previous_folder_path: Option<String>,
+    /// Media associations detached because a title gave up a folder.
+    pub detached_media_file_count: i32,
+    /// Rescan of the edited title's new folder, or null for a no-op.
+    pub scan: Option<LibraryScanSummaryPayload>,
+    /// The other title after a swap, with the folder it received.
+    pub swapped_title: Option<FolderMatchTitleRefPayload>,
+    /// Rescan of the swapped title's new folder.
+    pub swapped_title_scan: Option<LibraryScanSummaryPayload>,
+    /// The title left unmatched by a takeover, or null when none was displaced.
+    pub displaced_title: Option<DisplacedTitleRepairPayload>,
+}
+
+#[derive(InputObject, Clone)]
+/// Request describing a proposed folder-match correction; changes nothing.
+pub struct ChangeTitleFolderPreviewInput {
+    /// Title whose folder match would change.
+    pub title_id: ID,
+    /// Candidate folder, which must be inside one of the title's library roots.
+    pub folder_path: String,
+}
+
+#[derive(InputObject, Clone)]
+/// Request applying a folder-match correction.
+pub struct ApplyTitleFolderChangeInput {
+    /// Title whose folder match changes.
+    pub title_id: ID,
+    /// Chosen folder, which must be inside one of the title's library roots.
+    pub folder_path: String,
+    /// How to settle ownership. Defaults to ASSIGN, which is refused when
+    /// another title already owns the folder.
+    pub resolution: Option<FolderMatchResolutionValue>,
+}

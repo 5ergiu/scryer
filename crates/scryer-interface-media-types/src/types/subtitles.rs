@@ -242,6 +242,8 @@ pub struct TitleHistoryFilterInput {
     pub download_id: Option<String>,
     /// Episode ID to include, or null for all episodes.
     pub episode_id: Option<ID>,
+    /// Season collection ID to include, or null for all collections.
+    pub collection_id: Option<ID>,
     /// Whether equivalent events should be grouped.
     pub group_by_event: Option<bool>,
     /// Maximum number of events to return.

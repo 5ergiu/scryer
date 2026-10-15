@@ -24,6 +24,9 @@
     "indexer_search_response": {
       "$ref": "#/$defs/PluginSearchResponse"
     },
+    "resolve_network_endpoints_response": {
+      "$ref": "#/$defs/ResolveNetworkEndpointsResponse"
+    },
     "indexer_search_plan_request": {
       "$ref": "#/$defs/PluginSearchPlanRequest"
     },
@@ -147,6 +150,7 @@
     "host_response",
     "indexer_search_request",
     "indexer_search_response",
+    "resolve_network_endpoints_response",
     "indexer_search_plan_request",
     "indexer_search_strategy_event",
     "indexer_search_plan_summary",
@@ -828,6 +832,10 @@
     "IndexerCapabilities": {
       "type": "object",
       "properties": {
+        "resolve_network_endpoints": {
+          "description": "Resolve instance-specific HTTP origins before any ordinary operation.",
+          "type": "boolean"
+        },
         "rss": {
           "type": "boolean",
           "default": true
@@ -10063,6 +10071,22 @@
       "required": [
         "relative_path",
         "content"
+      ]
+    },
+    "ResolveNetworkEndpointsResponse": {
+      "description": "Payload of the `resolve_network_endpoints` action. Origins must contain\nonly an HTTP(S) scheme, hostname, and optional port.\nThe host validates these origins, then grants instance-scoped hostname\npermissions using the descriptor network policy. Scheme and port are not\npermission boundaries: other HTTP(S) ports on a declared host are allowed.",
+      "type": "object",
+      "properties": {
+        "origins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "origins"
       ]
     },
     "PluginSearchPlanRequest": {

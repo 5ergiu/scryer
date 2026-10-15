@@ -157,7 +157,9 @@ impl AppUseCase {
             ));
         }
         let release_market = settings.movie_release_market.trim().to_ascii_uppercase();
-        if release_market.len() != 2 || !release_market.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        if release_market.len() != 2
+            || !release_market.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
             return Err(AppError::Validation(
                 "movie release market must be a two-letter ISO-3166 country code".into(),
             ));

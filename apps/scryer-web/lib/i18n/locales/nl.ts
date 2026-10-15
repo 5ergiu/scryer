@@ -1551,12 +1551,12 @@ const nl: LocaleDictionary = {
   "queue.releaseHeldSourcesPreservedRemovalFailed": "verwijderen mislukt",
   "queue.releaseHeldSourcesPreservedDownloadNotImported": "de download is niet aantoonbaar geïmporteerd",
   "queue.releaseHeldSourcesPreservedLookupIncomplete": "niet elke map kon worden gecontroleerd",
-  "queue.markFailedSearchAgain": "Als mislukt markeren en opnieuw zoeken",
-  "queue.markFailedOnly": "Alleen als mislukt markeren",
+  "queue.markFailedSearchAgain": "Blokkeer, verwijder gegevens en zoek opnieuw",
+  "queue.markFailedOnly": "Blokkeer en verwijder gegevens",
   "queue.markFailedSearchSuccess":
-    "Download als mislukt gemarkeerd; wordt opnieuw opgehaald.",
+    "Blokkeren en gegevens verwijderen aangevraagd; opnieuw zoeken ingeschakeld.",
   "queue.markFailedOnlySuccess":
-    "Download als mislukt gemarkeerd zonder opnieuw op te halen.",
+    "Blokkeren en gegevens verwijderen aangevraagd zonder opnieuw te zoeken.",
   "queue.markFailedFailed": "Download als mislukt markeren mislukt.",
   "queue.bulkIgnoreSuccess": "{{count}} downloads genegeerd.",
   "queue.bulkIgnorePartial": "{{count}} downloads genegeerd; {{failed}} mislukt.",

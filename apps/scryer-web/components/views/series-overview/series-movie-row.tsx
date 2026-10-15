@@ -137,6 +137,7 @@ function SeriesMovieTimelineContent({
             {t("title.searchReleasesAction")}
           </p>
           <SearchResultBuckets
+            titleId={link.seriesTitleId}
             results={searchResults}
             onQueue={(release) => onQueueFromSeriesMovieSearch(link, release)}
             onQueueAdditional={onQueueAdditionalFromSeriesMovieSearch

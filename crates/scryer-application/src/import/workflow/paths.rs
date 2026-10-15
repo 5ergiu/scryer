@@ -503,6 +503,7 @@ async fn ensure_import_title_folder_available(
     folder_path: &Path,
 ) -> AppResult<()> {
     crate::folder_ownership::ensure_title_folder_is_not_a_library_root(app, title).await?;
+    crate::folder_ownership::ensure_folder_move_available_to_title(app, title, folder_path).await?;
     crate::folder_ownership::ensure_folder_available_to_title(app, title, folder_path).await
 }
 

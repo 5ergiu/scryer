@@ -544,9 +544,17 @@ async fn seed_fixture(subtitles_enabled: bool, providers: StubProviders) -> Subt
             .await
             .expect("create title");
 
-        let media_path = root.join(format!("{title_name}.mkv"));
+        let title_folder = root.join(title_name);
+        std::fs::create_dir(&title_folder).expect("create title folder");
+        app.services
+            .catalog
+            .titles
+            .set_folder_path(&title.id, title_folder.to_str().unwrap())
+            .await
+            .expect("record title folder ownership");
+        let media_path = title_folder.join(format!("{title_name}.mkv"));
         std::fs::write(&media_path, b"video").expect("write media file");
-        let subtitle_path = root.join(format!("{title_name}.eng.srt"));
+        let subtitle_path = title_folder.join(format!("{title_name}.eng.srt"));
         std::fs::write(&subtitle_path, b"subtitle").expect("write subtitle file");
 
         let media_file_id = app

@@ -158,6 +158,8 @@ pub(crate) fn announced_metadata_for_title(
 /// (D18) — all need the same derivation, and it is the derivation that has to
 /// agree with the search lane or the whole design is undone.
 pub(crate) struct ParkedReleaseFacts {
+    pub coverage: crate::acquisition_coverage::ReleaseCoverage,
+    pub release_group: Option<String>,
     /// The D4 runtime basis for what the release covers: total runtime, one
     /// member's, and how many members.
     pub size_basis: CoverageSizeBasis,
@@ -222,6 +224,7 @@ pub(crate) fn score_parked_release_title(
         &context.profile().criteria,
         parsed.quality.as_deref(),
     );
+    let release_group = parsed.release_group.clone();
     let scored = crate::canonical_scoring::score_release(
         &crate::canonical_scoring::ReleaseEvidence::announced(parsed, size_bytes)
             .with_listing(listing),
@@ -229,6 +232,8 @@ pub(crate) fn score_parked_release_title(
     );
 
     ParkedReleaseFacts {
+        coverage,
+        release_group,
         size_basis,
         // Like the incumbent bar, retain every numeric contribution and carry
         // eligibility separately from the score.
@@ -510,12 +515,8 @@ impl AppUseCase {
                     revision: bar.revision,
                     file_id: file.id.clone(),
                     file_path: file.file_path.clone(),
-                    release_group: file
-                        .release_group
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|group| !group.is_empty())
-                        .map(str::to_string),
+                    release_group: crate::canonical_scoring::announced_parse_from_media_file(file)
+                        .release_group,
                     score: bar.score,
                     covers,
                     created_at: file.created_at.clone(),
@@ -823,6 +824,7 @@ impl AppUseCase {
                     context,
                 );
                 Some(crate::admission::QueuedRelease {
+                    release_group: facts.release_group.clone(),
                     release_key: crate::admission::release_key(&release_title),
                     title: release_title,
                     covers: match &submission.scope {
@@ -908,6 +910,7 @@ impl AppUseCase {
                     context,
                 );
                 Some(crate::admission::QueuedRelease {
+                    release_group: facts.release_group.clone(),
                     covers: match submission_scope_for_acquisition_scope_state(state) {
                         crate::SubmissionScope::Episode { episode_id } => vec![episode_id],
                         crate::SubmissionScope::Collection { .. } => {

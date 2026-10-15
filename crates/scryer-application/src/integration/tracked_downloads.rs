@@ -79,6 +79,12 @@ pub struct TrackedDownload {
     pub import_hold: Option<ImportHold>,
     /// Manual failure actions can record the failure without reacquiring.
     pub skip_reacquire_on_failure: bool,
+    /// Explicit operator blocklist action, including client payload removal.
+    /// Persisted as a tracked-state reason so cleanup survives restart.
+    pub manual_failure_cleanup: bool,
+    /// A manual blocklist request could not be confirmed; only an explicit
+    /// operator action may retry it. Restored from the durable blocked reason.
+    pub blocklist_confirmation_failed: bool,
     /// Runtime-only marker that this failed row must use the import-style
     /// seeding-aware cleanup path. Burned import rejections and warnings that
     /// outlived a completed payload both set it.
@@ -232,9 +238,12 @@ impl TrackedDownload {
         self.import_hold = finished.import_hold;
         self.completed_source = finished.completed_source;
         self.burned_by_import_gate = finished.burned_by_import_gate;
+        self.manual_failure_cleanup = finished.manual_failure_cleanup;
+        self.blocklist_confirmation_failed = finished.blocklist_confirmation_failed;
     }
 
     pub(crate) fn reset_for_import_retry(&mut self) {
+        self.blocklist_confirmation_failed = false;
         self.state = TrackedDownloadState::ImportPending;
         self.status = TrackedDownloadStatus::Ok;
         self.status_messages.clear();
@@ -245,6 +254,7 @@ impl TrackedDownload {
         self.import_execution_retry = None;
         self.import_hold = None;
         self.skip_reacquire_on_failure = false;
+        self.manual_failure_cleanup = false;
         self.burned_by_import_gate = false;
     }
 
@@ -322,6 +332,9 @@ impl TrackedDownload {
 // ── TrackedDownloadService ───────────────────────────────────────────────────
 
 pub(crate) const IMPORT_GATE_REJECTED_TRACKED_STATE_REASON: &str = "import_gate_rejected";
+pub(crate) const MANUAL_FAILURE_CLEANUP_REASON: &str = "manual_blocklist_remove_data";
+pub(crate) const MANUAL_FAILURE_NO_REACQUIRE_REASON: &str =
+    "manual_blocklist_remove_data_no_reacquire";
 pub(crate) const WARNING_TIMEOUT_TRACKED_STATE_REASON: &str = "warning_timeout";
 pub(crate) const WARNING_TIMEOUT_STATUS_MESSAGE_PREFIX: &str =
     "download client warning persisted for 24h:";
@@ -340,6 +353,7 @@ pub(crate) enum ImportBlockedReason {
     AssignedTitleMissing,
     CompletedTitleIdentityMismatch,
     UnverifiedAlreadyImported,
+    BlocklistConfirmationFailed,
 }
 
 impl ImportBlockedReason {
@@ -352,6 +366,7 @@ impl ImportBlockedReason {
             Self::AssignedTitleMissing => "assigned_title_missing",
             Self::CompletedTitleIdentityMismatch => "completed_title_identity_mismatch",
             Self::UnverifiedAlreadyImported => "unverified_already_imported",
+            Self::BlocklistConfirmationFailed => "manual_blocklist_confirmation_failed",
         }
     }
 
@@ -364,6 +379,7 @@ impl ImportBlockedReason {
             "assigned_title_missing" => Some(Self::AssignedTitleMissing),
             "completed_title_identity_mismatch" => Some(Self::CompletedTitleIdentityMismatch),
             "unverified_already_imported" => Some(Self::UnverifiedAlreadyImported),
+            "manual_blocklist_confirmation_failed" => Some(Self::BlocklistConfirmationFailed),
             _ => None,
         }
     }
@@ -708,6 +724,8 @@ impl TrackedDownloadService {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -907,6 +925,7 @@ impl TrackedDownloadService {
         };
 
         let warning_is_actionable = tracked.client_item.is_scryer_origin
+            && !tracked.blocklist_confirmation_failed
             && matches!(
                 tracked.state,
                 TrackedDownloadState::Downloading
@@ -1322,7 +1341,17 @@ impl TrackedDownloadService {
         state: TrackedDownloadState,
     ) -> bool {
         let password_failure = td.client_item.password_failure();
-        let (reason, detail) = if state == TrackedDownloadState::Failed
+        let (reason, detail) = if state == TrackedDownloadState::Failed && td.manual_failure_cleanup
+        {
+            (
+                Some(if td.skip_reacquire_on_failure {
+                    MANUAL_FAILURE_NO_REACQUIRE_REASON
+                } else {
+                    MANUAL_FAILURE_CLEANUP_REASON
+                }),
+                None,
+            )
+        } else if state == TrackedDownloadState::Failed
             && let Some(failure) = password_failure
         {
             (Some(failure.code()), Some(failure.message()))
@@ -1516,6 +1545,7 @@ impl TrackedDownloadService {
             // restart: re-deriving it would re-import the payload and then
             // remove a torrent that is still working off its seeding goal.
             && (state.is_import_settled()
+                || state == TrackedDownloadState::FailedPending
                 || state == TrackedDownloadState::ImportBlocked
                 || (state == TrackedDownloadState::Importing
                     && app
@@ -1529,7 +1559,12 @@ impl TrackedDownloadService {
                         .is_some()))
         {
             td.state = state;
-            let terminal_failure_reason = if state == TrackedDownloadState::Failed {
+            let terminal_failure_reason = if matches!(
+                state,
+                TrackedDownloadState::Failed
+                    | TrackedDownloadState::FailedPending
+                    | TrackedDownloadState::ImportBlocked
+            ) {
                 app.services
                     .workflow
                     .download_submissions
@@ -1544,6 +1579,17 @@ impl TrackedDownloadService {
             } else {
                 None
             };
+            td.manual_failure_cleanup = matches!(
+                terminal_failure_reason.as_deref(),
+                Some(MANUAL_FAILURE_CLEANUP_REASON | MANUAL_FAILURE_NO_REACQUIRE_REASON)
+            );
+            td.skip_reacquire_on_failure =
+                terminal_failure_reason.as_deref() == Some(MANUAL_FAILURE_NO_REACQUIRE_REASON);
+            td.blocklist_confirmation_failed = terminal_failure_reason.as_deref()
+                == Some(ImportBlockedReason::BlocklistConfirmationFailed.as_str());
+            if td.blocklist_confirmation_failed {
+                td.import_attempted = true;
+            }
             td.burned_by_import_gate = terminal_failure_reason.as_deref().is_some_and(|reason| {
                 matches!(
                     reason,
@@ -4245,6 +4291,8 @@ mod tests {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -4620,6 +4668,88 @@ mod tests {
             failing_visible_queue_item.download_client_item_id, "failing-job",
             "queue projection input remains available when tracking is skipped"
         );
+    }
+
+    #[tokio::test]
+    async fn manual_blocklist_restart_restores_cleanup_and_reacquire_intent() {
+        for state in [
+            TrackedDownloadState::FailedPending,
+            TrackedDownloadState::Failed,
+        ] {
+            for reason in [
+                MANUAL_FAILURE_CLEANUP_REASON,
+                MANUAL_FAILURE_NO_REACQUIRE_REASON,
+            ] {
+                let id = DownloadId::new();
+                let submissions = Arc::new(TestDownloadSubmissionRepo::default());
+                submissions
+                    .canonical_identity_tracked_states
+                    .lock()
+                    .await
+                    .insert(id, state.as_str().into());
+                submissions
+                    .canonical_identity_tracked_state_reasons
+                    .lock()
+                    .await
+                    .insert(id, reason.into());
+                let app = build_app(submissions, Arc::new(TestImportRepo::default()));
+                let mut item = build_client_item();
+                item.download_id = Some(id.to_wire());
+                let tracked = TrackedDownloadService::build_new_tracked_download(
+                    &app,
+                    id,
+                    tracked_download_id_for_item(&item),
+                    item,
+                )
+                .await;
+                assert_eq!(tracked.state, state);
+                assert!(tracked.manual_failure_cleanup);
+                assert_eq!(
+                    tracked.skip_reacquire_on_failure,
+                    reason == MANUAL_FAILURE_NO_REACQUIRE_REASON
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_blocklist_confirmation_hold_survives_restart_and_client_failure() {
+        let id = DownloadId::new();
+        let submissions = Arc::new(TestDownloadSubmissionRepo::default());
+        submissions
+            .canonical_identity_tracked_states
+            .lock()
+            .await
+            .insert(id, "import_blocked".into());
+        submissions
+            .canonical_identity_tracked_state_reasons
+            .lock()
+            .await
+            .insert(
+                id,
+                ImportBlockedReason::BlocklistConfirmationFailed
+                    .as_str()
+                    .into(),
+            );
+        let app = build_app(submissions, Arc::new(TestImportRepo::default()));
+        let mut item = build_client_item();
+        item.download_id = Some(id.to_wire());
+        item.state = DownloadQueueState::Failed;
+        let mut tracked = TrackedDownloadService::build_new_tracked_download(
+            &app,
+            id,
+            tracked_download_id_for_item(&item),
+            item,
+        )
+        .await;
+        assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+        assert!(tracked.blocklist_confirmation_failed);
+        assert!(tracked.import_attempted);
+        assert!(!tracked.manual_failure_cleanup);
+        crate::failed_download_handler::check(&mut tracked);
+        assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+        tracked.reset_for_import_retry();
+        assert!(!tracked.blocklist_confirmation_failed);
     }
 
     #[tokio::test]
@@ -6411,6 +6541,8 @@ mod tests {
                 import_execution_retry: None,
                 import_hold: None,
                 skip_reacquire_on_failure: false,
+                manual_failure_cleanup: false,
+                blocklist_confirmation_failed: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
                 retained_in_client_after_cleanup: false,
@@ -7064,6 +7196,8 @@ mod tests {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -7114,6 +7248,8 @@ mod tests {
                 import_execution_retry: None,
                 import_hold: None,
                 skip_reacquire_on_failure: false,
+                manual_failure_cleanup: false,
+                blocklist_confirmation_failed: false,
                 burned_by_import_gate: false,
                 snapshot_missing_since: None,
                 retained_in_client_after_cleanup: false,
@@ -7318,6 +7454,8 @@ mod tests {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -7405,6 +7543,8 @@ mod tests {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -7622,6 +7762,8 @@ mod tests {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,

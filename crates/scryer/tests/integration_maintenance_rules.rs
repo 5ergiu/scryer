@@ -1611,7 +1611,14 @@ async fn wait_for_candidate_state(ctx: &TestContext, rule_set_id: &str, state: &
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("candidate never reached state {state} for rule {rule_set_id}");
+    let last = gql(
+        ctx,
+        &candidates_query(),
+        json!({"ruleSetId": rule_set_id, "includeShadow": true}),
+    )
+    .await;
+    let runs = gql(ctx, ACTION_RUNS_QUERY, json!({"ruleSetId": rule_set_id})).await;
+    panic!("candidate never reached state {state} for rule {rule_set_id}: {last}; runs={runs}");
 }
 
 #[tokio::test]
@@ -1667,6 +1674,45 @@ async fn destructive_arming_requires_the_reviewed_revision_and_explicit_library_
 async fn the_full_destructive_journey_removes_a_matching_title() {
     let ctx = TestContext::new().await;
     seed_title(&ctx, "title-doomed", "Doomed Movie", true).await;
+    let root = tempfile::tempdir().expect("maintenance fixture root");
+    let library =
+        scryer_application::LibraryRepository::get_by_id(&ctx.libraries, &movie_library_id())
+            .await
+            .unwrap()
+            .unwrap();
+    scryer_application::LibraryRepository::update(
+        &ctx.libraries,
+        &library.id,
+        library.name,
+        library.slug,
+        vec![scryer_application::LibraryRootDraft {
+            path: root.path().to_string_lossy().into_owned(),
+            is_default: true,
+        }],
+    )
+    .await
+    .expect("configure isolated maintenance root");
+    let folder = root.path().join("Doomed Movie");
+    std::fs::create_dir(&folder).expect("create title folder");
+    ctx.titles
+        .set_folder_path("title-doomed", folder.to_str().unwrap())
+        .await
+        .expect("record title folder ownership");
+    let media_path = folder.join("Doomed.Movie.mkv");
+    std::fs::write(&media_path, b"video").expect("write owned media");
+    scryer_application::MediaFileRepository::insert_media_file(
+        &ctx.media_files,
+        &scryer_application::InsertMediaFileInput {
+            title_id: "title-doomed".into(),
+            file_path: media_path.to_string_lossy().into_owned(),
+            size_bytes: 5,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("record owned media");
+    let unrelated = root.path().join("unrelated.txt");
+    std::fs::write(&unrelated, b"preserved").expect("write unrelated file");
     let detail = create_rule(&ctx, "Retire watched", MONITORED_MATCHER, delete_action()).await;
     let rule_set_id = detail["ruleSet"]["id"]
         .as_str()
@@ -1723,6 +1769,8 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
         .await
         .expect("read title");
     assert!(gone.is_none(), "the title must be removed by the action");
+    assert!(!media_path.exists(), "the action removes the owned media");
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"preserved");
 
     let runs = gql(&ctx, ACTION_RUNS_QUERY, json!({ "ruleSetId": rule_set_id })).await;
     assert_no_errors(&runs);

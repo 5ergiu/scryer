@@ -199,7 +199,7 @@ fn runtime_size_rotation_preserves_multiline_events_and_appends() {
 }
 
 #[test]
-fn utc_rollover_waits_for_an_event_and_never_archives_empty_days() {
+fn crossing_utc_midnight_does_not_rotate_below_size_limit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scryer.log");
     let (now, clock) = clock();
@@ -211,16 +211,16 @@ fn utc_rollover_waits_for_an_event_and_never_archives_empty_days() {
     now.fetch_add(1, Ordering::SeqCst); // Midnight UTC.
     event(&writer, "b\n");
     idle(&writer);
-    assert_eq!(all(&path), ["a\n", "b\n"]);
+    assert_eq!(all(&path), ["a\nb\n"]);
     now.fetch_add(86400 * 3, Ordering::SeqCst);
     event(&writer, "c\n");
     idle(&writer);
     drop(guard);
-    assert_eq!(all(&path), ["a\n", "b\n", "c\n"]);
+    assert_eq!(all(&path), ["a\nb\nc\n"]);
 }
 
 #[test]
-fn startup_rotates_previous_day_or_oversized_files_on_first_event() {
+fn startup_rotates_only_oversized_files_on_first_event() {
     for (contents, limit, age) in [("old\n", 100, 86400), ("oversized\n", 2, 0)] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scryer.log");
@@ -237,7 +237,11 @@ fn startup_rotates_previous_day_or_oversized_files_on_first_event() {
         event(&writer, "new\n");
         idle(&writer);
         drop(guard);
-        assert_eq!(all(&path), [contents, "new\n"]);
+        if contents.len() as u64 >= limit {
+            assert_eq!(all(&path), [contents, "new\n"]);
+        } else {
+            assert_eq!(all(&path), [format!("{contents}new\n")]);
+        }
     }
 }
 

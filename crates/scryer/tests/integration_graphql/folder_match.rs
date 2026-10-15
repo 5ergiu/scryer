@@ -140,6 +140,7 @@ async fn graphql_change_title_folder_preview_reports_an_unowned_candidate() {
     let media_root = tempfile::tempdir().expect("media root tempdir");
     let current = make_folder(media_root.path(), "Wrong Folder (2019)");
     let candidate = make_folder(media_root.path(), "Right Folder (2024)");
+    write_media(&candidate, "Right.Folder.2024.1080p.mkv");
     let current_file = write_media(&current, "Wrong.Folder.2019.1080p.mkv");
 
     let title = movie_title_in_folder(&ctx, media_root.path(), "Right Folder", &current).await;
@@ -304,6 +305,7 @@ async fn graphql_apply_title_folder_change_refuses_to_take_an_owned_folder_by_de
     let media_root = tempfile::tempdir().expect("media root tempdir");
     let requester_folder = make_folder(media_root.path(), "Requester (2020)");
     let owned_folder = make_folder(media_root.path(), "Owner (2021)");
+    write_media(&owned_folder, "Owner.2021.1080p.mkv");
 
     let requester =
         movie_title_in_folder(&ctx, media_root.path(), "Requester", &requester_folder).await;

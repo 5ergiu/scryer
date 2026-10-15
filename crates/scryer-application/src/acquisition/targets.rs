@@ -192,7 +192,18 @@ pub(crate) fn movie_availability_decision(
                 } else if let Some(theatrical) =
                     earliest_movie_release_date(&release_dates.theatrical_dates)
                 {
-                    (theatrical + Duration::days(90), true)
+                    {
+                        let Some(estimated) = theatrical.checked_add_signed(Duration::days(90))
+                        else {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                true,
+                                "effective_release_date_out_of_range",
+                            );
+                        };
+                        (estimated, true)
+                    }
                 } else {
                     return movie_availability_result(
                         MovieAvailabilityStatus::Unknown,
@@ -242,7 +253,18 @@ pub(crate) fn movie_availability_decision(
                 } else if let Some(theatrical) =
                     legacy_theatrical_date.and_then(parse_movie_release_date)
                 {
-                    (theatrical + Duration::days(90), true)
+                    {
+                        let Some(estimated) = theatrical.checked_add_signed(Duration::days(90))
+                        else {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                true,
+                                "effective_release_date_out_of_range",
+                            );
+                        };
+                        (estimated, true)
+                    }
                 } else {
                     return movie_availability_result(
                         MovieAvailabilityStatus::Unknown,

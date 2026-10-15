@@ -2529,13 +2529,33 @@ impl AppUseCase {
         draft.destination_root_id = destination_root_id;
         draft.destination_root_path = Some(destination_root_path.clone());
 
+        let naming_title = self
+            .title_for_naming(merge_destination.unwrap_or(title))
+            .await;
+        if (merge_destination.is_none()
+            || naming_title
+                .folder_path
+                .as_deref()
+                .is_none_or(|path| path.trim().is_empty()))
+            && let Err(error) = crate::library::rename::validate_title_folder_rendering(
+                &naming_title,
+                folder_template,
+            )
+        {
+            draft.class = TitleLocationClass::NeedsResolution;
+            draft.blocked_reason = Some(error.to_string());
+            return Ok(RootMoveTitleOutcome::settled(
+                draft,
+                Some("invalid_title_folder_template"),
+            ));
+        }
         let destination_folder = match merge_destination {
-            Some(destination_title) => {
-                merge_destination_folder(destination_title, &destination_root_path, folder_template)
+            Some(_) => {
+                merge_destination_folder(&naming_title, &destination_root_path, folder_template)
             }
             None => crate::library::rename::configured_title_folder_path(
                 &destination_root_path.to_string_lossy(),
-                title,
+                &naming_title,
                 folder_template,
                 title.year,
             ),

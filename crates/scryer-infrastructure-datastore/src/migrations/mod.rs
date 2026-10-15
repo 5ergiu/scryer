@@ -858,6 +858,9 @@ async fn run_rust_hook(
         "repair_root_title_folders" => {
             repair_root_title_folders::repair_root_title_folders_sqlite(tx).await
         }
+        "repair_live_title_folders" => {
+            repair_root_title_folders::repair_live_title_folders_sqlite(tx).await
+        }
         "migrate_title_image_blobs" => {
             title_image_blobs::migrate_title_image_blobs_sqlite(tx).await
         }

@@ -252,28 +252,16 @@ fn scanned_movie_entry_folder_path(
     }
 
     let item_path = stored_path_to_path_buf(representative_path);
-    if let Ok(relative) = item_path.strip_prefix(scan_root)
-        && let Some(first_component) = relative.components().next()
-    {
-        let entry_path = scan_root.join(first_component.as_os_str());
-        let entry_path = path_to_stored_string(&entry_path).trim().to_string();
-        if entry_path.is_empty() {
-            return None;
-        }
-        if entry_path == representative_path {
-            return representative_is_directory.then_some(entry_path);
-        }
-        return Some(entry_path);
-    }
-
-    let parent = path_to_stored_string(item_path.parent()?)
-        .trim()
-        .to_string();
-    if parent.is_empty() || parent == path_to_stored_string(scan_root) {
-        None
+    let boundary = if representative_is_directory {
+        item_path.as_path()
     } else {
-        Some(parent)
-    }
+        item_path.parent()?
+    };
+    crate::title_folder_rules::path_is_strictly_within(
+        &path_to_stored_string(boundary),
+        &path_to_stored_string(scan_root),
+    )
+    .then(|| path_to_stored_string(boundary))
 }
 
 async fn sync_movie_title_folder_path_for_scan(

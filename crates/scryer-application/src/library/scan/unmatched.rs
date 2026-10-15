@@ -17,6 +17,9 @@ use crate::{
 
 pub(crate) const LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE: &str =
     "skipped_unusable_title_evidence";
+/// The scanned folder is an organizing folder, a mixed layout, or a link; it
+/// cannot be bound to a title as-is.
+pub(crate) const LIBRARY_SCAN_INVALID_TITLE_BOUNDARY: &str = "library_scan_invalid_title_boundary";
 pub(crate) const LIBRARY_SCAN_SKIPPED_FILE_METADATA_UNREADABLE: &str =
     "skipped_file_metadata_unreadable";
 pub(crate) const LIBRARY_SCAN_TITLE_ALREADY_OWNS_ANOTHER_FOLDER: &str =

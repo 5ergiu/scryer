@@ -333,6 +333,7 @@ fn decode_quality_profile(
             prefer_remux: row.bool("prefer_remux")?,
             allow_bd_disk: row.bool("allow_bd_disk")?,
             allow_upgrades: row.bool("allow_upgrades")?,
+            ignore_proper_repack: scoring_config.ignore_proper_repack,
             prefer_dual_audio: row.bool("prefer_dual_audio").unwrap_or(false),
             required_audio_languages,
             scoring_persona: scoring_config.scoring_persona,
@@ -403,6 +404,7 @@ async fn upsert_quality_profile_tx(
     let required_audio_languages = serde_json::to_value(&criteria.required_audio_languages)
         .map_err(|error| AppError::Repository(error.to_string()))?;
     let scoring_config = serde_json::to_value(ScoringConfig {
+        ignore_proper_repack: criteria.ignore_proper_repack,
         scoring_persona: criteria.scoring_persona,
         scoring_overrides: criteria.scoring_overrides,
         cutoff_tier: criteria.cutoff_tier,
@@ -909,6 +911,32 @@ mod tests {
         );
         let gamma = &profiles[2].criteria;
         assert!(gamma.quality_tiers.is_empty() && gamma.source_allowlist.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revision_policy_survives_sqlite_save_reload_and_legacy_defaults() {
+        let (store, pool) = fixture().await;
+        insert_profile(&pool, "revision-profile", "Revision Profile", None).await;
+        let mut profiles = store.list_quality_profiles(SCOPE, None).await.unwrap();
+        assert!(!profiles[0].criteria.ignore_proper_repack);
+        profiles[0].criteria.ignore_proper_repack = true;
+        store
+            .replace_quality_profiles(SCOPE, None, profiles)
+            .await
+            .unwrap();
+        store.invalidate_cache();
+        let loaded = store.list_quality_profiles(SCOPE, None).await.unwrap();
+        assert!(loaded[0].criteria.ignore_proper_repack);
+        let raw: String = sqlx::query_scalar(
+            "SELECT scoring_config FROM quality_profiles WHERE id = 'revision-profile'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&raw).unwrap()["ignore_proper_repack"],
+            true
+        );
     }
 
     #[tokio::test]

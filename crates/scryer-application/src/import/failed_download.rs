@@ -14,6 +14,9 @@ use crate::{AppUseCase, ClientJobLocator};
 /// Called for downloads that have not reached a terminal tracked state. If the
 /// client reports failure, transitions to FailedPending before import can run.
 pub fn check(td: &mut TrackedDownload) {
+    if td.blocklist_confirmation_failed {
+        return;
+    }
     // Only process if in a check-eligible state.
     if !matches!(
         td.state,
@@ -51,10 +54,13 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
         warn_download_not_grabbed(td);
         td.state = TrackedDownloadState::Downloading;
         td.skip_reacquire_on_failure = false;
+        td.manual_failure_cleanup = false;
         return;
     }
 
-    if let Some(failure) = td.client_item.password_failure() {
+    if !td.manual_failure_cleanup
+        && let Some(failure) = td.client_item.password_failure()
+    {
         if crate::acquisition_workflow::record_password_retry_failure(app, td, failure)
             .await
             .is_err()
@@ -84,7 +90,7 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
         "download failed - processing failure"
     );
 
-    let outcome = crate::acquisition_workflow::process_download_failure_for_download(
+    let outcome = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
         app,
         td.canonical_download_id(),
         DownloadFailureContext {
@@ -108,8 +114,31 @@ pub async fn process_failed(app: &AppUseCase, td: &mut TrackedDownload) {
                 .then(|| format!("import rejected: {failure_reason}")),
             skip_reacquire: td.skip_reacquire_on_failure,
         },
+        td.manual_failure_cleanup,
     )
     .await;
+    if outcome == FailureHandlingOutcome::RecordingFailed {
+        td.status_messages =
+            vec!["Could not confirm blocklist entry; download preserved for retry".into()];
+        return;
+    }
+    if outcome == FailureHandlingOutcome::MissingBlocklistKey {
+        let message = "Cannot blocklist this download because its title or release name is missing. Automatic retries stopped; download and files are preserved. Resolve the missing identity before retrying the blocklist action.";
+        crate::tracked_downloads::persist_import_blocked_state_marker(
+            app,
+            td,
+            crate::tracked_downloads::ImportBlockedReason::BlocklistConfirmationFailed,
+            Some(message),
+        )
+        .await;
+        td.state = TrackedDownloadState::ImportBlocked;
+        td.status = TrackedDownloadStatus::Error;
+        td.status_messages = vec![message.into()];
+        td.blocklist_confirmation_failed = true;
+        td.manual_failure_cleanup = false;
+        td.import_attempted = true;
+        return;
+    }
     if td.skip_reacquire_on_failure
         && !matches!(outcome, FailureHandlingOutcome::RecordedNoReacquire)
     {

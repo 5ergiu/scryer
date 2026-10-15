@@ -11,10 +11,13 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { useTranslate } from "@/lib/context/translate-context";
-import { titlesQuery } from "@/lib/graphql/queries";
+import { catalogSearchTitlesQuery } from "@/lib/graphql/queries";
 import type { DownloadQueueItem } from "@/lib/types";
 import { selectorId } from "@/lib/utils/dom-ids";
 import { LoadingMark } from "@/components/common/loading-mark";
+
+const TITLE_SEARCH_DEBOUNCE_MS = 250;
+const TITLE_SEARCH_LIMIT = 25;
 
 type TitleSearchResult = {
   id: string;
@@ -73,37 +76,51 @@ export function AssignTrackedDownloadTitleDialog({
       return undefined;
     }
 
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      return undefined;
+    }
+
     let cancelled = false;
 
     setLoading(true);
     setError(null);
-    client
-      .query(titlesQuery, { limit: 300 })
-      .toPromise()
-      .then(({ data, error: queryError }) => {
-        if (cancelled) {
-          return;
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const { data, error: queryError } = await client
+            .query(catalogSearchTitlesQuery, {
+              query: trimmed,
+              facet: null,
+              limit: TITLE_SEARCH_LIMIT,
+            })
+            .toPromise();
+          if (cancelled) return;
+          if (queryError) throw queryError;
+          setResults((data?.titles?.items ?? []) as TitleSearchResult[]);
+        } catch (err: unknown) {
+          if (cancelled) return;
+          setResults([]);
+          setError(
+            err instanceof Error ? err.message : t("status.failedToLoad"),
+          );
+        } finally {
+          if (!cancelled) {
+            setLoading(false);
+          }
         }
-        if (queryError) throw queryError;
-        setResults((data?.titles?.items ?? []) as TitleSearchResult[]);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setResults([]);
-        setError(err instanceof Error ? err.message : t("status.failedToLoad"));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
+      })();
+    }, TITLE_SEARCH_DEBOUNCE_MS);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [client, open, queueItem, t]);
+  }, [client, open, queueItem, query, t]);
 
   const handleSelect = React.useCallback(
     async (titleId: string) => {
@@ -128,6 +145,7 @@ export function AssignTrackedDownloadTitleDialog({
       title={t("queue.assignTitleTitle")}
       description={t("queue.assignTitleDescription")}
       className="sm:max-w-2xl"
+      shouldFilter={false}
     >
       <div id="activity-assign-title-dialog">
       <CommandInput
@@ -151,7 +169,16 @@ export function AssignTrackedDownloadTitleDialog({
             <span>{t("label.loading")}</span>
           </div>
         ) : null}
-        <CommandEmpty>{t("queue.assignTitleEmpty")}</CommandEmpty>
+        {query.trim() ? (
+          <CommandEmpty>{t("queue.assignTitleEmpty")}</CommandEmpty>
+        ) : (
+          <div
+            id="activity-assign-title-empty"
+            className="px-4 py-3 text-sm text-muted-foreground"
+          >
+            {t("queue.assignTitleSearchHint")}
+          </div>
+        )}
         <CommandGroup heading={t("queue.assignTitleResults") }>
           {results.map((title) => {
             const assigning = assigningId === title.id;

@@ -2389,7 +2389,13 @@ async fn delete_media_file_honors_custom_library_permissions_after_library_refac
     };
     let title = ctx.titles.create(title).await.expect("create scoped title");
 
-    let file_path = media_root.path().join("Scoped.Delete.Movie.2024.1080p.mkv");
+    let title_folder = media_root.path().join("Scoped Delete Movie (2024)");
+    std::fs::create_dir(&title_folder).expect("create title folder");
+    ctx.titles
+        .set_folder_path(&title.id, title_folder.to_str().unwrap())
+        .await
+        .expect("record title folder ownership");
+    let file_path = title_folder.join("Scoped.Delete.Movie.2024.1080p.mkv");
     std::fs::write(&file_path, b"scoped-delete").expect("write media file");
 
     let file_id = ctx
@@ -2549,9 +2555,8 @@ async fn delete_media_file_honors_custom_library_permissions_after_library_refac
         "delete should remove the matching movie collection row"
     );
 
-    let catalog_only_path = media_root
-        .path()
-        .join("Scoped.Delete.Movie.2024.Catalog.Only.mkv");
+    std::fs::create_dir_all(&title_folder).expect("recreate title folder after file deletion");
+    let catalog_only_path = title_folder.join("Scoped.Delete.Movie.2024.Catalog.Only.mkv");
     std::fs::write(&catalog_only_path, b"catalog-only").expect("write catalog-only media file");
     let catalog_only_file_id = ctx
         .media_files

@@ -2581,6 +2581,8 @@ async fn tracked_title_assignment_fixture() -> TrackedTitleAssignmentFixture {
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -5083,6 +5085,8 @@ async fn failed_tracked_cleanup_uses_facet_routing_and_exact_client_id() {
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -5234,6 +5238,7 @@ async fn import_series_duplicate_destination_requires_catalog_for_already_import
     });
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Series, library_dir.path()).await;
     let title_folder = library_dir.path().join("Import Series Skip");
     let title = app
         .add_title(
@@ -5442,6 +5447,31 @@ fn library_video_file_names(root: &Path) -> Vec<String> {
     names
 }
 
+async fn register_import_fixture_root(app: &AppUseCase, facet: MediaFacet, root: &std::path::Path) {
+    let library = app
+        .services
+        .catalog
+        .libraries
+        .default_for_facet(facet)
+        .await
+        .expect("library lookup")
+        .expect("fixture library exists");
+    app.services
+        .catalog
+        .libraries
+        .update(
+            &library.id,
+            library.name.clone(),
+            library.slug.clone(),
+            vec![LibraryRootDraft {
+                path: root.to_string_lossy().into_owned(),
+                is_default: true,
+            }],
+        )
+        .await
+        .expect("register import fixture root");
+}
+
 struct FailClosedPackFixture {
     app: AppUseCase,
     user: User,
@@ -5517,22 +5547,30 @@ async fn build_fail_closed_pack_fixture(
         .expect("seed import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
-    if options.series_root_at_library_dir || options.anime_root_at_library_dir {
+    {
         let current_paths = app.get_library_paths(&user).await.expect("library paths");
         app.update_library_paths(
             &user,
             UpdateLibraryPaths {
-                movie_path: current_paths.movie_path,
-                series_path: if options.series_root_at_library_dir {
+                movie_path: if options.facet == MediaFacet::Movie {
+                    library_dir.path().to_string_lossy().into_owned()
+                } else {
+                    current_paths.movie_path
+                },
+                series_path: if options.series_root_at_library_dir
+                    || options.facet == MediaFacet::Series
+                {
                     library_dir.path().to_string_lossy().into_owned()
                 } else {
                     current_paths.series_path
                 },
-                anime_path: Some(if options.anime_root_at_library_dir {
-                    library_dir.path().to_string_lossy().into_owned()
-                } else {
-                    current_paths.anime_path
-                }),
+                anime_path: Some(
+                    if options.anime_root_at_library_dir || options.facet == MediaFacet::Anime {
+                        library_dir.path().to_string_lossy().into_owned()
+                    } else {
+                        current_paths.anime_path
+                    },
+                ),
             },
         )
         .await
@@ -10029,6 +10067,7 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Additional Series Movie Import");
     let title = app
         .add_title(
@@ -10241,6 +10280,7 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Movie, library_dir.path()).await;
     let title_folder = library_dir.path().join("Additional Movie Retry (2026)");
     let title = app
         .add_title(
@@ -10627,6 +10667,7 @@ async fn path_manual_import_can_target_series_movie_link() {
         .expect("seed manual import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Manual Series Movie Import");
     let title = app
         .add_title(
@@ -10803,7 +10844,8 @@ async fn path_manual_import_rejects_another_title_folder_before_source_mutation(
     assert!(
         error
             .to_string()
-            .contains("already owned by title Fixture Owner")
+            .contains(&format!("overlaps the folder owned by title {}", owner.id)),
+        "{error}"
     );
     assert_eq!(
         std::fs::metadata(&source_file)
@@ -12668,6 +12710,8 @@ impl DispositionFixture {
             import_execution_retry: None,
             import_hold: None,
             skip_reacquire_on_failure: false,
+            manual_failure_cleanup: false,
+            blocklist_confirmation_failed: false,
             burned_by_import_gate: false,
             snapshot_missing_since: None,
             retained_in_client_after_cleanup: false,
@@ -13447,6 +13491,304 @@ async fn manual_movie_upgrade_sends_one_import_completed_marked_as_upgrade() {
     }
 }
 
+#[tokio::test]
+async fn manual_blocklist_missing_key_holds_sources_without_automatic_retry() {
+    for missing_title in [false, true] {
+        let fixture =
+            disposition_fixture("Blocklist Hold", "Blocklist.Hold.2026.1080p.WEB-DL-GRP").await;
+        let mut tracked = fixture.tracked_import_pending();
+        tracked.download_id = fixture.download_submissions.store.lock().await[0].download_id;
+        tracked.client_item.is_scryer_origin = true;
+        tracked.client_item.state = DownloadQueueState::Failed;
+        tracked.state = TrackedDownloadState::FailedPending;
+        tracked.manual_failure_cleanup = true;
+        tracked.skip_reacquire_on_failure = true;
+        if missing_title {
+            fixture.download_submissions.store.lock().await[0]
+                .title_id
+                .clear();
+            tracked.title_id = None;
+        } else {
+            fixture.download_submissions.store.lock().await[0].source_title = None;
+            tracked.source_title = Some("   ".into());
+            tracked.client_item.title_name = "   ".into();
+        }
+        let source = fixture
+            ._download_dir
+            .path()
+            .join("Blocklist.Hold.2026.1080p.WEB-DL-GRP.mkv");
+        std::fs::write(&source, b"synthetic retained download").unwrap();
+        let before = std::fs::read(&source).unwrap();
+        crate::failed_download_handler::process_failed(&fixture.app, &mut tracked).await;
+        assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+        assert!(tracked.blocklist_confirmation_failed);
+        assert!(!tracked.manual_failure_cleanup);
+        assert!(tracked.import_attempted);
+        assert!(tracked.status_messages[0].contains("Automatic retries stopped"));
+        crate::failed_download_handler::check(&mut tracked);
+        crate::failed_download_handler::process_failed(&fixture.app, &mut tracked).await;
+        assert_eq!(tracked.state, TrackedDownloadState::ImportBlocked);
+        assert!(fixture.blocklisted_titles().await.is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert!(
+            fixture
+                .app
+                .services
+                .library
+                .media_files
+                .list_media_files_for_title(&fixture.title.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+async fn prepare_first_nested_import(
+    app: &AppUseCase,
+    user: &User,
+    title: &Title,
+    root: &Path,
+    empty_destination: bool,
+) -> PathBuf {
+    app.services
+        .catalog
+        .titles
+        .clear_folder_path(&title.id)
+        .await
+        .unwrap();
+    app.update_media_settings(
+        user,
+        title.facet.clone(),
+        UpdateMediaSettings {
+            folder_template: Some("F/{title}".into()),
+            ..empty_update_media_settings()
+        },
+    )
+    .await
+    .unwrap();
+    let destination = root.join("F").join(&title.name);
+    std::fs::create_dir_all(root.join("F")).unwrap();
+    std::fs::write(root.join("F/unrelated.txt"), b"preserve bucket contents").unwrap();
+    if empty_destination {
+        std::fs::create_dir(&destination).unwrap();
+    } else {
+        assert!(!destination.exists());
+    }
+    assert!(
+        app.services
+            .catalog
+            .titles
+            .get_by_id(&title.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .folder_path
+            .is_none()
+    );
+    assert!(
+        app.services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    destination
+}
+
+async fn assert_first_nested_import(app: &AppUseCase, title: &Title, destination: &Path) {
+    let stored = app
+        .services
+        .catalog
+        .titles
+        .get_by_id(&title.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.folder_path.as_deref(), destination.to_str());
+    assert!(destination.is_dir());
+    let files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(Path::new(&files[0].file_path).starts_with(destination));
+    assert!(std::fs::metadata(&files[0].file_path).unwrap().len() > 0);
+    assert_eq!(
+        std::fs::read(destination.parent().unwrap().join("unrelated.txt")).unwrap(),
+        b"preserve bucket contents"
+    );
+}
+
+#[tokio::test]
+async fn first_movie_import_claims_missing_or_empty_nested_destination() {
+    for empty_destination in [false, true] {
+        let fixture = disposition_fixture(
+            "First Nested Movie",
+            "First.Nested.Movie.2026.1080p.WEB-DL-GRP",
+        )
+        .await;
+        let destination = prepare_first_nested_import(
+            &fixture.app,
+            &fixture.user,
+            &fixture.title,
+            fixture._library_dir.path(),
+            empty_destination,
+        )
+        .await;
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        let result = crate::import_workflow::import_completed_download(
+            &fixture.app,
+            &fixture.user,
+            &fixture.completed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.decision,
+            scryer_domain::ImportDecision::Imported,
+            "{result:?}"
+        );
+        assert_first_nested_import(&fixture.app, &fixture.title, &destination).await;
+    }
+}
+
+#[tokio::test]
+async fn first_movie_import_tolerates_stray_files_but_refuses_child_title_folders() {
+    for child_title in [false, true] {
+        let fixture = disposition_fixture(
+            "First Nested Movie",
+            "First.Nested.Movie.2026.1080p.WEB-DL-GRP",
+        )
+        .await;
+        let destination = prepare_first_nested_import(
+            &fixture.app,
+            &fixture.user,
+            &fixture.title,
+            fixture._library_dir.path(),
+            true,
+        )
+        .await;
+        std::fs::write(destination.join("stale.nfo"), b"left by an earlier attempt").unwrap();
+        let child = destination.join("Other Title (2001)/other.mkv");
+        if child_title {
+            std::fs::create_dir_all(child.parent().unwrap()).unwrap();
+            std::fs::write(&child, b"another title's media").unwrap();
+        }
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        let result = crate::import_workflow::import_completed_download(
+            &fixture.app,
+            &fixture.user,
+            &fixture.completed,
+        )
+        .await;
+        if child_title {
+            let result = result.unwrap();
+            assert_eq!(
+                result.decision,
+                scryer_domain::ImportDecision::Failed,
+                "{result:?}"
+            );
+            assert!(
+                result
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("other title folders")),
+                "{result:?}"
+            );
+            assert_eq!(std::fs::read(&child).unwrap(), b"another title's media");
+            assert!(
+                fixture
+                    .app
+                    .services
+                    .catalog
+                    .titles
+                    .get_by_id(&fixture.title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .folder_path
+                    .is_none()
+            );
+            assert!(
+                fixture
+                    .app
+                    .services
+                    .library
+                    .media_files
+                    .list_media_files_for_title(&fixture.title.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(
+                result.unwrap().decision,
+                scryer_domain::ImportDecision::Imported
+            );
+            assert_first_nested_import(&fixture.app, &fixture.title, &destination).await;
+        }
+        assert_eq!(
+            std::fs::read(destination.join("stale.nfo")).unwrap(),
+            b"left by an earlier attempt"
+        );
+    }
+}
+
+#[tokio::test]
+async fn first_episode_import_claims_missing_or_empty_nested_destination() {
+    for empty_destination in [false, true] {
+        let fixture = fail_closed_pack_fixture().await;
+        let destination = prepare_first_nested_import(
+            &fixture.app,
+            &fixture.user,
+            &fixture.title,
+            fixture.library_dir.path(),
+            empty_destination,
+        )
+        .await;
+        let source = tempfile::tempdir().unwrap();
+        write_pack_video(source.path(), "Fail.Closed.Pack.S01E01.1080p.WEB-DL.mkv");
+        let completed = series_pack_completed_download(
+            "first-nested-episode",
+            &fixture.title.id,
+            "Fail.Closed.Pack.S01E01.1080p.WEB-DL",
+            source.path(),
+        );
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        let result = crate::import_workflow::import_completed_download(
+            &fixture.app,
+            &fixture.user,
+            &completed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.decision,
+            scryer_domain::ImportDecision::Imported,
+            "{result:?}"
+        );
+        assert_first_nested_import(&fixture.app, &fixture.title, &destination).await;
+        let files = fixture
+            .app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&fixture.title.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            files[0].episode_id.as_deref(),
+            Some(fixture.episode.id.as_str())
+        );
+    }
+}
+
 /// A manual movie import that fills an empty slot sends exactly one
 /// `import_completed`, the canonical movie import's own, not marked as an
 /// upgrade.
@@ -13755,6 +14097,7 @@ async fn a_grabbed_series_movie_link_import_keeps_the_listing_snapshot() {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Listing Snapshot Link");
     let title = app
         .add_title(
@@ -14150,6 +14493,7 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
         .expect("seed manual import actor");
 
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Manual Link Verdict Bypass");
     let title = app
         .add_title(
@@ -14298,6 +14642,7 @@ score_entry["operator_refuses_this_file"] := -10000 if {
     let config =
         create_enabled_download_client_config(&app, &user, "Primary NZBGet", "nzbget").await;
     let library_dir = tempfile::tempdir().expect("library tempdir");
+    register_import_fixture_root(&app, MediaFacet::Anime, library_dir.path()).await;
     let title_folder = library_dir.path().join("Refused Link Import");
     let title = app
         .add_title(

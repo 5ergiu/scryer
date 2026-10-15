@@ -715,10 +715,7 @@ impl AppUseCase {
             TitleHydrationClaim::Claimed { _guard, title } => (_guard, title),
             TitleHydrationClaim::AlreadyHydrated(title) => return Ok(title),
         };
-        let series_smg_id = result
-            .raw_series
-            .as_ref()
-            .and_then(|series| series.smg_id);
+        let series_smg_id = result.raw_series.as_ref().and_then(|series| series.smg_id);
         let redirected_from = redirected_smg_id(&title, series_smg_id, redirects);
         let hydrated = self
             .apply_hydration_result(title, result, target.source)
@@ -1081,8 +1078,7 @@ impl AppUseCase {
                             warn!(error = %error, "linked movie metadata hydration failed");
                         })
                         .unwrap_or_default();
-                    for ((target, _), fetched) in series_targets.into_iter().zip(series_by_target)
-                    {
+                    for ((target, _), fetched) in series_targets.into_iter().zip(series_by_target) {
                         if crate::library::library::library_scan_cancel_requested(cancel_token) {
                             break 'languages;
                         }
@@ -1122,10 +1118,9 @@ impl AppUseCase {
                                 .hydrated_titles
                                 .insert(refreshed.id.clone(), refreshed);
                         } else {
-                            outcome.failed_titles.insert(
-                                title_id,
-                                "metadata could not be persisted".to_string(),
-                            );
+                            outcome
+                                .failed_titles
+                                .insert(title_id, "metadata could not be persisted".to_string());
                         }
                     }
                 }
@@ -1519,12 +1514,14 @@ impl AppUseCase {
                 &metadata_update,
             );
         let movie_availability_metadata_changed = title.facet == MediaFacet::Movie
-            && (metadata_update.movie_release_dates.as_ref().is_some_and(|dates| {
-                title.movie_release_dates.as_ref() != Some(dates)
-            }) || metadata_update
-                .digital_release_date
+            && (metadata_update
+                .movie_release_dates
                 .as_ref()
-                .is_some_and(|date| title.digital_release_date.as_ref() != Some(date))
+                .is_some_and(|dates| title.movie_release_dates.as_ref() != Some(dates))
+                || metadata_update
+                    .digital_release_date
+                    .as_ref()
+                    .is_some_and(|date| title.digital_release_date.as_ref() != Some(date))
                 || metadata_update
                     .first_aired
                     .as_ref()

@@ -296,6 +296,133 @@ fn title_folder_template_optional_group_omits_missing_values() {
 }
 
 #[test]
+fn movie_title_order_tokens_move_leading_articles_and_bucket_by_sorted_title() {
+    for (name, expected) in [
+        ("The Grey Harbor (2008)", "Grey Harbor, The (2008)"),
+        (
+            "The Grey Harbor (Extended) (2008)",
+            "Grey Harbor, The (Extended) (2008)",
+        ),
+        ("Grey Harbor (2008)", "Grey Harbor (2008)"),
+    ] {
+        assert_eq!(
+            scryer_domain::title_naming::title_with_article(name, Some("en")),
+            expected,
+            "{name}"
+        );
+    }
+
+    let mut title = test_movie_title("The Grey Harbor");
+    title.year = Some(2008);
+    let tokens = build_title_folder_tokens(&title, None);
+
+    assert_eq!(
+        tokens.get("title_with_article").map(String::as_str),
+        Some("Grey Harbor, The")
+    );
+    assert_eq!(
+        tokens.get("title_first_character").map(String::as_str),
+        Some("G")
+    );
+    assert_eq!(
+        render_title_folder_template(
+            "{title_first_character}/{title_with_article} ({year})",
+            &tokens
+        ),
+        "G/Grey Harbor, The (2008)"
+    );
+
+    let number_title = test_movie_title("An 8th Voyage");
+    let number_tokens = build_title_folder_tokens(&number_title, None);
+    assert_eq!(
+        number_tokens.get("title_with_article").map(String::as_str),
+        Some("8th Voyage, An")
+    );
+    assert_eq!(
+        number_tokens
+            .get("title_first_character")
+            .map(String::as_str),
+        Some("8")
+    );
+
+    let punctuation_title = test_movie_title("The !Grey Harbor");
+    let punctuation_tokens = build_title_folder_tokens(&punctuation_title, None);
+    assert_eq!(
+        punctuation_tokens
+            .get("title_first_character")
+            .map(String::as_str),
+        Some("G")
+    );
+
+    let accented_title = test_movie_title("The Élan");
+    let accented_tokens = build_title_folder_tokens(&accented_title, None);
+    assert_eq!(
+        accented_tokens
+            .get("title_first_character")
+            .map(String::as_str),
+        Some("E")
+    );
+
+    let symbol_title = test_movie_title("The !!");
+    let symbol_tokens = build_title_folder_tokens(&symbol_title, None);
+    assert_eq!(
+        symbol_tokens
+            .get("title_first_character")
+            .map(String::as_str),
+        Some("_")
+    );
+}
+
+#[test]
+fn movie_title_folder_templates_allow_safe_nested_paths_only() {
+    validate_title_folder_template("{title_first_character}/{title_with_article} ({year})")
+        .expect("relative nested title folders should be valid");
+
+    for template in ["/A/{title}", "A//{title}", "../{title}", "A/../{title}"] {
+        assert!(
+            validate_title_folder_template(template).is_err(),
+            "unsafe movie folder template should be rejected: {template}"
+        );
+    }
+
+    let title = test_movie_title("The ../Escape");
+    let path = configured_title_folder_path(
+        "/library",
+        &title,
+        "{title_first_character}/{title_with_article}",
+        None,
+    );
+    assert!(path.starts_with("/library"));
+    assert_eq!(path.components().count(), 4, "rendered path: {path:?}");
+}
+
+#[test]
+fn title_folder_template_rendering_rejects_empty_components_without_changing_depth() {
+    let title = test_movie_title("The A/B\\C: Example");
+    let template = "{title_first_character}/{title_with_article}";
+    validate_title_folder_rendering(&title, template).unwrap();
+    let rendered = render_title_folder_template(template, &build_title_folder_tokens(&title, None));
+    assert_eq!(rendered.split('/').count(), 2);
+    assert!(!rendered.contains(['\\', ':']));
+    assert!(validate_title_folder_rendering(&title, "{imdb_id}/{title}").is_err());
+    assert!(
+        render_title_folder_template(
+            "{imdb_id}/{title}",
+            &build_title_folder_tokens(&title, None)
+        )
+        .starts_with("_/")
+    );
+}
+
+#[test]
+fn title_order_tokens_are_valid_for_every_facet() {
+    for facet in [MediaFacet::Movie, MediaFacet::Series, MediaFacet::Anime] {
+        validate_rename_template_for_facet("{title_with_article}.{ext}", &facet).unwrap();
+        validate_rename_template_for_facet("{title_first_character}.{ext}", &facet).unwrap();
+    }
+}
+
+#[test]
 fn render_title_folder_template_literal_braces_around_resolved_token() {
     let t = tokens(&[("edition", "IMAX")]);
     let result = render_title_folder_template("{{edition-{edition}}}", &t);
@@ -313,7 +440,7 @@ fn render_title_folder_template_literal_braces_around_external_id() {
 fn render_title_folder_template_trims_empty_literal_brace_group() {
     let t = tokens(&[]);
     let result = render_title_folder_template("{{{edition}}}", &t);
-    assert_eq!(result, "");
+    assert_eq!(result, "_");
 }
 
 #[test]
@@ -484,6 +611,15 @@ fn specials_folder_template_accepts_literal_and_folder_safe_tokens() {
 #[test]
 fn render_episode_folder_name_selects_regular_and_specials_templates() {
     let title = test_movie_title("Neon Cipher");
+
+    assert_eq!(
+        render_episode_folder_name(&title, 0, "Season {season}", "{tvdb_id}"),
+        "Specials"
+    );
+    assert_eq!(
+        render_episode_folder_name(&title, 0, "Season {season}", "_"),
+        "_"
+    );
 
     assert_eq!(
         render_episode_folder_name(&title, 3, "Season {season}", "Specials"),
@@ -1061,7 +1197,7 @@ fn test_movie_title(name: &str) -> Title {
         country: None,
         aliases: vec![],
         tagged_aliases: vec![],
-        metadata_language: None,
+        metadata_language: Some("eng".into()),
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
@@ -1863,6 +1999,17 @@ fn two_titles_planned_into_the_same_folder_overlap() {
     let mut pair = [outer, inner];
     pair.sort();
     assert_eq!(pair, ["title-a", "title-c"]);
+}
+
+#[test]
+fn nested_title_case_only_destinations_are_blocked_when_volume_case_is_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let planned = [
+        planned_folder("first", &root.path().join("E/Example").to_string_lossy()),
+        planned_folder("second", &root.path().join("e/example").to_string_lossy()),
+    ];
+    assert!(planned_title_folder_overlap(&planned, &[]).is_some());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[test]

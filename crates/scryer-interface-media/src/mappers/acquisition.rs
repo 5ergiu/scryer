@@ -220,6 +220,7 @@ pub fn from_parsed_release(result: ParsedReleaseMetadata) -> ParsedReleasePayloa
         is_dolby_vision: result.is_dolby_vision,
         detected_hdr: result.detected_hdr,
         is_proper_upload: result.is_proper_upload,
+        revision: result.revision,
         is_remux: result.is_remux,
         is_bd_disk: result.is_bd_disk,
         is_ai_enhanced: result.is_ai_enhanced,

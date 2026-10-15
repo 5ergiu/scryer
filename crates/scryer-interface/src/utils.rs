@@ -25,5 +25,338 @@ pub(crate) struct ResolvedTitleOptionsInput {
 impl ResolvedTitleOptionsInput {
     pub(crate) fn to_application_patch(&self) -> scryer_application::TitleOptionsPatch {
         scryer_application::TitleOptionsPatch {
+            min_availability: self.min_availability.clone(),
             search_languages: self.search_languages.clone(),
             search_aliases: self.search_aliases.clone(),
+            quality_profile_id: self.quality_profile_id.clone(),
+            root_folder_id: self.root_folder_id.clone(),
+            monitor_type: self.monitor_type.clone(),
+            use_season_folders: self.use_season_folders,
+            monitor_specials: self.monitor_specials,
+            inter_season_movies: self.inter_season_movies,
+            filler_policy: self.filler_policy.clone(),
+            recap_policy: self.recap_policy.clone(),
+            release_numbering: self.release_numbering.clone(),
+            monitor_selection: self.monitor_selection.clone(),
+        }
+    }
+}
+
+fn push_structured_tag(tags: &mut Vec<String>, prefix: &str, value: Option<String>) {
+    let Some(value) = value else {
+        return;
+    };
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    tags.push(format!("{prefix}{normalized}"));
+}
+
+fn set_structured_tag(tags: &mut Vec<String>, prefix: &str, value: Option<String>) {
+    tags.retain(|tag| !tag.starts_with(prefix));
+    push_structured_tag(tags, prefix, value);
+}
+
+fn normalize_title_tag(tag: String) -> Option<String> {
+    let trimmed = tag.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(if trimmed.starts_with("scryer:") {
+        trimmed
+    } else {
+        trimmed.to_lowercase()
+    })
+}
+
+/// Search languages and aliases are bounded title options; the raw `tags`
+/// field must not carry them past the option validation.
+const OPTION_ONLY_TAG_PREFIXES: [&str; 2] = [
+    scryer_domain::SEARCH_LANGUAGES_TAG_PREFIX,
+    scryer_domain::SEARCH_ALIASES_TAG_PREFIX,
+];
+
+pub(crate) fn normalize_title_tags(tags: Vec<String>) -> GqlResult<Vec<String>> {
+    let tags: Vec<String> = tags.into_iter().filter_map(normalize_title_tag).collect();
+    if let Some(prefix) = OPTION_ONLY_TAG_PREFIXES
+        .into_iter()
+        .find(|prefix| tags.iter().any(|tag| tag.starts_with(prefix)))
+    {
+        return Err(to_gql_error(scryer_application::AppError::Validation(
+            format!("tags cannot set {prefix}*; use the title options instead"),
+        )));
+    }
+    Ok(tags)
+}
+
+pub(crate) fn apply_title_options(tags: &mut Vec<String>, options: ResolvedTitleOptionsInput) {
+    for (prefix, patch) in [
+        (
+            scryer_domain::SEARCH_LANGUAGES_TAG_PREFIX,
+            options.search_languages,
+        ),
+        (
+            scryer_domain::SEARCH_ALIASES_TAG_PREFIX,
+            options.search_aliases,
+        ),
+    ] {
+        if let Some(value) = patch {
+            scryer_domain::set_title_search_option(tags, prefix, value);
+        }
+    }
+    if let Some(value) = options.quality_profile_id {
+        set_structured_tag(tags, "scryer:quality-profile:", value);
+    }
+    if let Some(value) = options.monitor_type {
+        set_structured_tag(tags, "scryer:monitor-type:", value);
+    }
+    if let Some(value) = options.filler_policy {
+        set_structured_tag(tags, "scryer:filler-policy:", value);
+    }
+    if let Some(value) = options.recap_policy {
+        set_structured_tag(tags, "scryer:recap-policy:", value);
+    }
+    if let Some(value) = options.release_numbering {
+        set_structured_tag(tags, scryer_domain::RELEASE_NUMBERING_TAG_PREFIX, value);
+    }
+
+    if let Some(use_season_folders) = options.use_season_folders {
+        set_structured_tag(
+            tags,
+            "scryer:season-folder:",
+            use_season_folders.map(|use_season_folders| {
+                if use_season_folders {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+                .to_string()
+            }),
+        );
+    }
+
+    if let Some(monitor_specials) = options.monitor_specials {
+        set_structured_tag(
+            tags,
+            "scryer:monitor-specials:",
+            monitor_specials.map(|monitor_specials| {
+                if monitor_specials { "true" } else { "false" }.to_string()
+            }),
+        );
+    }
+
+    if let Some(inter_season_movies) = options.inter_season_movies {
+        set_structured_tag(
+            tags,
+            "scryer:inter-season-movies:",
+            inter_season_movies.map(|inter_season_movies| {
+                if inter_season_movies { "true" } else { "false" }.to_string()
+            }),
+        );
+    }
+}
+
+pub(crate) fn merge_title_option_tags(
+    mut tags: Vec<String>,
+    options: ResolvedTitleOptionsInput,
+) -> Vec<String> {
+    apply_title_options(&mut tags, options);
+    tags
+}
+
+pub(crate) fn map_add_input(
+    input: AddTitleInput,
+    resolved_options: Option<ResolvedTitleOptionsInput>,
+) -> GqlResult<NewTitle> {
+    let AddTitleInput {
+        name,
+        facet,
+        library_id: _,
+        monitored,
+        mut tags,
+        options: _,
+        external_ids,
+        smg_id,
+        tvdb_id,
+        tmdb_id,
+        imdb_id,
+        source_hint: _,
+        source_kind: _,
+        source_title: _,
+        min_availability,
+        year,
+        overview,
+        sort_title,
+        slug,
+        runtime_minutes,
+        language,
+        content_status,
+    } = input;
+
+    let parsed_facet = facet.into_domain();
+    tags = normalize_title_tags(tags)?;
+    let root_folder_id = resolved_options
+        .as_ref()
+        .and_then(|options| options.root_folder_id.clone().flatten());
+    let min_availability = resolved_options
+        .as_ref()
+        .and_then(|options| options.min_availability.clone())
+        .unwrap_or(min_availability);
+    if let Some(options) = resolved_options {
+        apply_title_options(&mut tags, options);
+    }
+
+    let mut external_ids = external_ids
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.into_domain())
+        .collect::<Vec<_>>();
+    // Every facet retains every external id it was added with. Series and anime
+    // titles hold their imdb/tmdb/smg ids alongside tvdb: those ids flow on into
+    // indexer search subjects, RSS candidate indexes, notification payloads and
+    // the `externalIds` readback, none of which are facet-aware, and dropping
+    // them here left a series unable to be matched by id at all.
+    for (source, value) in [
+        ("smg", smg_id.map(|id| id.to_string())),
+        ("tvdb", tvdb_id),
+        ("tmdb", tmdb_id.map(|id| id.to_string())),
+        ("imdb", imdb_id),
+    ] {
+        let Some(value) = value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !external_ids.iter().any(|external_id| {
+            external_id.source.eq_ignore_ascii_case(source) && external_id.value == value
+        }) {
+            external_ids.push(ExternalId::new(source.to_string(), value));
+        }
+    }
+    Ok(NewTitle {
+        name,
+        facet: parsed_facet,
+        monitored,
+        tags,
+        external_ids,
+        root_folder_id,
+        min_availability,
+        poster_url: None,
+        year,
+        overview,
+        sort_title,
+        slug,
+        runtime_minutes,
+        language,
+        content_status,
+    })
+}
+
+pub(crate) fn parse_download_source_kind(
+    raw: Option<DownloadSourceKindValue>,
+) -> Option<scryer_application::DownloadSourceKind> {
+    raw.map(DownloadSourceKindValue::into_application)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_add_input;
+    use crate::types::{AddTitleInput, ExternalIdInput, MediaFacetValue};
+    use scryer_domain::MediaFacet;
+
+    fn add_input(facet: MediaFacetValue, external_ids: Vec<ExternalIdInput>) -> AddTitleInput {
+        AddTitleInput {
+            name: "Test".to_string(),
+            facet,
+            library_id: None,
+            monitored: true,
+            tags: Vec::new(),
+            options: None,
+            external_ids: Some(external_ids),
+            smg_id: None,
+            tvdb_id: None,
+            tmdb_id: None,
+            imdb_id: None,
+            source_hint: None,
+            source_kind: None,
+            source_title: None,
+            min_availability: None,
+            year: None,
+            overview: None,
+            sort_title: None,
+            slug: None,
+            runtime_minutes: None,
+            language: None,
+            content_status: None,
+        }
+    }
+
+    /// The kind names the entity an id points at. A kindless domain id is a
+    /// wildcard in the title store, so dropping the caller's kind here lets a
+    /// movie id resolve onto a series that happens to share the source/value.
+    #[test]
+    fn map_add_input_carries_the_external_id_kind_into_the_domain_id() {
+        let title = map_add_input(
+            add_input(
+                MediaFacetValue::Movie,
+                vec![ExternalIdInput {
+                    source: "tmdb".to_string(),
+                    kind: Some("Movie".to_string()),
+                    value: "880101".to_string(),
+                }],
+            ),
+            None,
+        )
+        .expect("mapped title");
+
+        assert_eq!(title.external_ids.len(), 1);
+        assert_eq!(title.external_ids[0].source, "tmdb");
+        assert_eq!(title.external_ids[0].kind.as_deref(), Some("movie"));
+        assert_eq!(title.external_ids[0].value, "880101");
+    }
+
+    /// An omitted kind still means "unknown", which the store treats as a
+    /// wildcard on purpose.
+    #[test]
+    fn map_add_input_leaves_an_omitted_external_id_kind_unset() {
+        let title = map_add_input(
+            add_input(
+                MediaFacetValue::Movie,
+                vec![ExternalIdInput {
+                    source: "tmdb".to_string(),
+                    kind: None,
+                    value: "880101".to_string(),
+                }],
+            ),
+            None,
+        )
+        .expect("mapped title");
+
+        assert_eq!(title.external_ids[0].kind, None);
+    }
+
+    #[test]
+    fn map_add_input_rejects_search_option_tags_in_raw_tags() {
+        for tag in [
+            "scryer:search-aliases:Fixture Alias",
+            " scryer:search-languages:deu ",
+        ] {
+            let mut input = add_input(MediaFacetValue::Movie, Vec::new());
+            input.tags = vec!["keep".to_string(), tag.to_string()];
+            assert!(map_add_input(input, None).is_err(), "{tag}");
+        }
+
+        let mut input = add_input(MediaFacetValue::Movie, Vec::new());
+        input.tags = vec!["Keep".to_string(), "scryer:monitor-type:all".to_string()];
+        let title = map_add_input(input, None).expect("ordinary tags map");
+        assert_eq!(title.tags, ["keep", "scryer:monitor-type:all"]);
+    }
+
+    #[test]
+    fn media_facet_value_maps_series_to_series_domain() {
+        assert_eq!(MediaFacetValue::Series.into_domain(), MediaFacet::Series);
+    }
+}

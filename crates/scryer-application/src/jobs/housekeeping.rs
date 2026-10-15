@@ -1485,6 +1485,12 @@ impl AppUseCase {
                     )));
                 }
 
+                crate::folder_ownership::ensure_restore_ownership(
+                    self,
+                    manifest.title_id.as_deref(),
+                    &original_path,
+                )
+                .await?;
                 let file_name = original_path
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("unknown"));
@@ -1512,8 +1518,7 @@ impl AppUseCase {
         conflict_policy: crate::RecycleRestoreConflictPolicy,
     ) -> AppResult<bool> {
         // Restoring writes a file back into the title's folder, which an
-        // in-flight operation is copying out of (FR-084). Entries with no title
-        // (orphaned files) overlap nothing and pass through.
+        // in-flight operation is copying out of (FR-084).
         if let Some(title_id) = context.manifest.title_id.as_deref() {
             self.ensure_location_ownership_allows_title(
                 &crate::location::ownership_guard::RECYCLE_RESTORE_ENTRY,
@@ -1522,6 +1527,12 @@ impl AppUseCase {
             .await?;
         }
         let original_path = context.manifest.original_path_buf();
+        crate::folder_ownership::ensure_restore_ownership(
+            self,
+            context.manifest.title_id.as_deref(),
+            &original_path,
+        )
+        .await?;
         let file_name = original_path
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("unknown"));

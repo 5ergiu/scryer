@@ -1341,6 +1341,8 @@ async fn import_gate_rejection_blocklists_under_its_own_reason_and_reopens_the_s
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: true,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -1520,6 +1522,8 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -1997,6 +2001,7 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
                 title_search: None,
                 download_id: Some("failed-duplicate".to_string()),
                 episode_id: None,
+                collection_id: None,
                 group_by_event: false,
                 limit: 10,
                 offset: 0,
@@ -2360,6 +2365,8 @@ async fn tracked_download_failure_prefers_tracked_source_title_for_blocklist_ide
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2599,6 +2606,8 @@ async fn parse_matched_observed_failed_download_does_not_blocklist_or_requeue() 
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: true,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2872,6 +2881,8 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2933,6 +2944,7 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
                 title_search: None,
                 download_id: Some("failed-season-pack".to_string()),
                 episode_id: None,
+                collection_id: None,
                 group_by_event: false,
                 limit: 10,
                 offset: 0,
@@ -4084,6 +4096,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
                             preference_score: 100,
                             tier_index: Some(0),
                             size_fit_penalty: 0,
+                            revision_preference: 0,
                         },
                     ),
                     extra: Default::default(),
@@ -7792,10 +7805,10 @@ async fn a_cycle_with_nothing_due_and_nothing_pending_does_no_work() {
 
 #[tokio::test]
 async fn scheduled_rss_fetches_before_deciding_due_pending_releases() {
-    let pending_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
-    // A strictly better revision makes the fresh winner deterministic. Equal
+    let pending_title = "Scheduled.Pending.Movie.2024.720p.WEB-DL-GRP";
+    // A higher quality tier makes the fresh winner deterministic. Equal
     // releases may legitimately select the durable pending row as the winner.
-    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL.REPACK-GRP";
+    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
@@ -10790,6 +10803,8 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
         serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
     let mut input = external_test_input();
+    // With no incumbent, use a tier upgrade rather than a revision-only tie.
+    input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
     input.published_at = Some(Utc::now());
     input.flags = vec!["freeleech".into()];
     let first = app
@@ -12011,6 +12026,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                                 preference_score: 100,
                                 tier_index: Some(0),
                                 size_fit_penalty: 0,
+                                revision_preference: 0,
                             },
                         ),
                         extra: Default::default(),
@@ -16270,6 +16286,28 @@ async fn assert_upgrade_waits_for_the_client_queue_then_grabs(
 }
 
 #[tokio::test]
+async fn expired_pending_ranking_prefers_revision_of_queued_group() {
+    let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
+    let (app, title, _) = season_pack_downloading_fixture(vec![queued_pack]).await;
+    let wanted = season_scope_states(&app, &title, "7").await.remove(0);
+    let mut unrelated = pending_movie_release(
+        &wanted.id,
+        &title,
+        "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB",
+        PendingReleaseStatus::Waiting,
+    );
+    unrelated.id = "a-unrelated-group".into();
+    unrelated.release_size_bytes = None;
+    let mut revision = unrelated.clone();
+    revision.id = "b-queued-group-revision".into();
+    revision.release_title = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".into();
+    let mut releases = vec![unrelated, revision];
+    app.order_expired_releases_by_rank(&wanted, &mut releases, Utc::now())
+        .await;
+    assert_eq!(releases[0].id, "b-queued-group-revision");
+}
+
+#[tokio::test]
 async fn saved_proper_of_the_downloading_pack_is_grabbed() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let proper_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();
@@ -16576,7 +16614,7 @@ async fn a_queue_covered_saved_pack_costs_no_writes_until_the_queued_pack_leaves
 async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let covered_single = "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-GroupB".to_string();
-    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupC".to_string();
+    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     seed_season_eight_scopes(&app, &title).await;
@@ -16629,7 +16667,7 @@ async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
 #[tokio::test]
 async fn a_covered_episode_row_does_not_hide_a_refused_pack_below_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
-    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB".to_string();
+    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     let anchor = season_scope_states(&app, &title, "7")

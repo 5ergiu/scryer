@@ -450,7 +450,8 @@ async fn seed_series_episode(ctx: &TestContext, title: &Title) -> Episode {
 }
 
 async fn seed_short_form_series_episode(ctx: &TestContext, title: &Title) -> Episode {
-    seed_series_episode_with_duration(ctx, title, Some(60)).await
+    // Match the one-second synthetic video rather than describing a minute-long episode.
+    seed_series_episode_with_duration(ctx, title, Some(1)).await
 }
 
 async fn seed_series_episode_with_duration(
@@ -590,7 +591,7 @@ async fn seed_second_short_form_series_episode(
     title: &Title,
     collection_id: &str,
 ) -> Episode {
-    seed_series_episode_in_collection(ctx, title, collection_id, 2, Some(60)).await
+    seed_series_episode_in_collection(ctx, title, collection_id, 2, Some(1)).await
 }
 
 async fn seed_series_episode_in_collection(
@@ -2585,6 +2586,8 @@ fn tracked_movie_download(
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -3113,7 +3116,7 @@ async fn automatic_import_places_a_fully_obfuscated_pack_from_srrdb_recovered_na
     let collection_id = episode_1.collection_id.as_deref().expect("collection id");
     let episode_2 = seed_second_short_form_series_episode(&ctx, &title, collection_id).await;
     let episode_3 =
-        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(60)).await;
+        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(1)).await;
     let completed = scryer_completed(
         "dl-srrdb-pack",
         source_dir.to_str().unwrap(),
@@ -3206,7 +3209,7 @@ async fn automatic_import_places_an_obfuscated_pack_under_a_properly_named_relea
     let collection_id = episode_1.collection_id.as_deref().expect("collection id");
     let episode_2 = seed_second_short_form_series_episode(&ctx, &title, collection_id).await;
     let episode_3 =
-        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(60)).await;
+        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(1)).await;
     let mut completed = scryer_completed(
         "dl-srrdb-named-folder",
         source_dir.to_str().unwrap(),
@@ -3299,7 +3302,7 @@ async fn automatic_import_parks_the_pack_member_srrdb_cannot_recover() {
     let collection_id = episode_1.collection_id.as_deref().expect("collection id");
     let episode_2 = seed_second_short_form_series_episode(&ctx, &title, collection_id).await;
     let episode_3 =
-        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(60)).await;
+        seed_series_episode_in_collection(&ctx, &title, collection_id, 3, Some(1)).await;
     let completed = scryer_completed(
         "dl-srrdb-partial-pack",
         source_dir.to_str().unwrap(),

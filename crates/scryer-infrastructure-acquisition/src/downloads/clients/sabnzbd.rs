@@ -124,7 +124,8 @@ enum SabApiAuth {
     Credentials { username: String, password: String },
 }
 
-const SAB_ADDFILE_UPLOAD_FIELD: &str = "nzbfile";
+// SABnzbd and NzbDav accept `name`; Decypharr requires it instead of `nzbfile`.
+const SAB_ADDFILE_UPLOAD_FIELD: &str = "name";
 // Safe reads may make three attempts. Ninety seconds per attempt plus the
 // bounded retry backoff remains below the default 300-second feedback gate.
 const SABNZBD_HTTP_REQUEST_TIMEOUT: std::time::Duration =
@@ -3149,6 +3150,15 @@ mod tests {
 
     #[tokio::test]
     async fn submit_addfile_request_has_no_scryer_download_id_token() {
+        assert_sab_addfile_upload_contract(true).await;
+    }
+
+    #[tokio::test]
+    async fn submit_addfile_in_memory_uses_compatible_upload_field() {
+        assert_sab_addfile_upload_contract(false).await;
+    }
+
+    async fn assert_sab_addfile_upload_contract(staged: bool) {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/release.nzb"))
@@ -3168,10 +3178,17 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "status": true,
-                "nzo_ids": ["SABnzbd_nzo_abc123"]
-            })))
+            .respond_with(|request: &wiremock::Request| {
+                // Decypharr requires `name`; SABnzbd and NzbDav also accept it.
+                let body = String::from_utf8_lossy(&request.body);
+                if !body.contains("Content-Disposition: form-data; name=\"name\"; filename=") {
+                    return ResponseTemplate::new(400).set_body_string("No files uploaded");
+                }
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "status": true,
+                    "nzo_ids": ["SABnzbd_nzo_abc123"]
+                }))
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -3190,12 +3207,14 @@ mod tests {
             Arc::new(Semaphore::new(1)),
         );
         let mut add_request = test_add_request(download_id);
-        add_request.staged_nzb = Some(
-            staged_nzb_store
-                .stage_nzb_bytes_for_test(b"<nzb></nzb>")
-                .await
-                .expect("stage NZB fixture"),
-        );
+        if staged {
+            add_request.staged_nzb = Some(
+                staged_nzb_store
+                    .stage_nzb_bytes_for_test(b"<nzb></nzb>")
+                    .await
+                    .expect("stage NZB fixture"),
+            );
+        }
         let result = client
             .submit_download(&add_request)
             .await
@@ -3237,7 +3256,9 @@ mod tests {
             request.url,
             String::from_utf8_lossy(&request.body)
         );
-        assert!(request_text.contains("name=\"nzbfile\""));
+        assert!(request_text.contains("name=\"name\""));
+        assert_eq!(request_text.matches("filename=").count(), 1);
+        assert!(!request_text.contains("name=\"nzbfile\""));
         assert!(request_text.contains("filename=\"Test Release.nzb\""));
         assert!(request_text.contains("<nzb></nzb>"));
         assert!(
@@ -3460,7 +3481,7 @@ mod tests {
 
     #[test]
     fn sab_addfile_uses_common_sab_upload_field() {
-        assert_eq!(SAB_ADDFILE_UPLOAD_FIELD, "nzbfile");
+        assert_eq!(SAB_ADDFILE_UPLOAD_FIELD, "name");
     }
 
     #[test]

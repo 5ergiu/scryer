@@ -1571,20 +1571,10 @@ fn candidate_revision(candidate: &IndexerSearchResult) -> i32 {
         .map_or(0, crate::acquisition::scoring::revision_rank)
 }
 
-/// Sonarr's `IsRevisionUpgrade`: the same quality already on disk, re-released
-/// at a later revision.
-///
-/// Tier-scoped rather than exact-quality-scoped, because Scryer's tiers are
-/// resolution-only until Part 5 — a 1080p WEB-DL PROPER therefore counts as a
-/// revision of a 1080p Bluray. Coarser than Sonarr, and the same coarseness the
-/// rest of the ladder already has.
-///
-/// `false` for an unoccupied scope: there is nothing to be a revision *of*.
-///
-/// Over **any** incumbent of the scope, not only the best one: Sonarr's
-/// `ProperSpecification` and `QualityCutoffNotMet` both iterate every covered
-/// file, so on a pack or multi-episode scope a PROPER of a weaker member is
-/// still a revision upgrade.
+/// Honor-mode exception for a later revision of a matching known group in the
+/// same tier. Empty scopes, unrelated groups and Ignore mode use ordinary rules.
+/// A pack can qualify against one member, but admission still checks each member
+/// and candidate-wide ranking requires every incumbent to be related.
 pub(crate) fn candidate_is_revision_upgrade(
     candidate: crate::admission::CandidateFacts,
     subject: &crate::admission::AdmissionSubject,
@@ -1600,7 +1590,13 @@ fn revision_upgrade_over(
     candidate: crate::admission::CandidateFacts,
     incumbent: &crate::admission::Incumbent,
 ) -> bool {
-    candidate.tier_index == incumbent.tier_index && candidate.revision > incumbent.revision
+    candidate
+        .revision_cmp(
+            incumbent.tier_index,
+            incumbent.release_group.as_deref(),
+            incumbent.revision,
+        )
+        .is_gt()
 }
 
 /// Has this scope reached its cutoff — **both** halves of it?
@@ -1742,14 +1738,21 @@ pub(crate) fn automatic_candidate_delay_decision(
         candidate_revision(candidate),
         candidate_score,
     )
-    .with_release_title(&candidate.title);
+    .with_release_title(&candidate.title)
+    .with_revision_policy(
+        candidate
+            .parsed_release_metadata
+            .as_ref()
+            .and_then(|parsed| parsed.release_group.as_deref()),
+        profile.criteria.ignore_proper_repack,
+    );
     let delay_context = crate::delay_profile::DelayPolicyContext {
         user_invoked,
         candidate_score,
-        preferred_protocol_same_tier_revision: admission.incumbents().iter().any(|incumbent| {
-            incumbent.tier_index == candidate_facts.tier_index
-                && candidate_facts.revision > incumbent.revision
-        }),
+        preferred_protocol_same_tier_revision: admission
+            .incumbents()
+            .iter()
+            .any(|incumbent| revision_upgrade_over(candidate_facts, incumbent)),
         preferred_protocol_highest_quality: candidate_facts.tier_index == Some(0),
         oldest_overlapping_pending_published_at,
     };
@@ -1948,7 +1951,14 @@ pub(crate) fn evaluate_auto_candidate(
         candidate_revision(candidate),
         candidate_score,
     )
-    .with_release_title(&candidate.title);
+    .with_release_title(&candidate.title)
+    .with_revision_policy(
+        candidate
+            .parsed_release_metadata
+            .as_ref()
+            .and_then(|parsed| parsed.release_group.as_deref()),
+        context.profile.criteria.ignore_proper_repack,
+    );
 
     if let Some(code) = cutoff_refusal(
         candidate_facts,
@@ -2027,17 +2037,6 @@ pub(crate) fn evaluate_auto_candidate(
             }
             _ => ReleaseAutoDecisionCode::UpgradeRejected,
         };
-    }
-
-    // After admission on purpose: a same-tier higher-revision candidate now
-    // admits above, so this rule runs on exactly the population Sonarr's
-    // `RepackSpecification` checks — the repacks that would otherwise be fetched.
-    if crate::acquisition_policy::repack_group_mismatch(
-        candidate,
-        candidate_facts,
-        context.admission,
-    ) {
-        return ReleaseAutoDecisionCode::RepackGroupMismatch;
     }
 
     if let Some(delay_decision) = auto_candidate_delay_decision(candidate, context)
@@ -2465,8 +2464,10 @@ impl AppUseCase {
             .scope_membership_for_with_reads(title, &subject.submission_scope, reads)
             .await;
         let mut queued = Vec::new();
+        let mut submissions = Vec::new();
+        let mut tracked_states = HashMap::new();
         if !dl_snapshot.queue_listing_failed() {
-            let submissions = self
+            submissions = self
                 .services
                 .workflow
                 .download_submissions
@@ -2478,7 +2479,7 @@ impl AppUseCase {
                     .iter()
                     .map(crate::contracts::ClientJobLocator::from_submission)
                     .collect::<Vec<_>>();
-                let tracked_states = self
+                tracked_states = self
                     .services
                     .workflow
                     .download_submissions
@@ -2590,6 +2591,9 @@ impl AppUseCase {
             tracing::warn!(title_id = title.id, %error, "automatic admission could not read acquisition pauses");
         }
         for candidate in &mut results {
+            if let Some(decision) = candidate.quality_profile_decision.as_mut() {
+                decision.revision_preference = 0;
+            }
             if paused_scopes.is_err() {
                 annotate_auto_decision(
                     candidate,
@@ -2616,16 +2620,73 @@ impl AppUseCase {
                 annotate_auto_decision(candidate, ReleaseAutoDecisionCode::AcquisitionPaused);
                 continue;
             }
-            if !user_invoked
-                && candidate.auto_decision_code.as_deref().is_some_and(|code| {
-                    code == ReleaseAutoDecisionCode::PackBelowMissingThreshold.as_str()
-                        || code == ReleaseAutoDecisionCode::AnimeNumberingAmbiguous.as_str()
-                })
-            {
+            if candidate.auto_decision_code.as_deref().is_some_and(|code| {
+                code == ReleaseAutoDecisionCode::PackBelowMissingThreshold.as_str()
+                    || code == ReleaseAutoDecisionCode::AnimeNumberingAmbiguous.as_str()
+            }) {
                 continue;
             }
+            // A pack may cover more files than the episode that initiated the search.
+            // Rank and admit against the complete replacement scope.
+            let candidate_admission = if scope == &subject.submission_scope {
+                admission.clone()
+            } else {
+                let membership = self
+                    .scope_membership_for_with_reads(title, scope, reads)
+                    .await;
+                let queued = self
+                    .queued_releases_for_scope(
+                        title,
+                        &membership.view(),
+                        &scoring_context,
+                        &submissions,
+                        &tracked_states,
+                        &dl_snapshot,
+                        &catalog_episodes,
+                        &catalog_collections,
+                    )
+                    .await;
+                let queued = self
+                    .queued_releases_with_grabbed_claims(
+                        queued,
+                        title,
+                        &membership.view(),
+                        &scoring_context,
+                        &catalog_episodes,
+                        &catalog_collections,
+                    )
+                    .await;
+                self.admission_subject_for_scope_with_reads(
+                    title,
+                    scope,
+                    &scoring_context,
+                    None,
+                    crate::quality::canonical_context::SubjectIntent::Grab,
+                    reads,
+                )
+                .await
+                .with_queued(queued)
+            };
+            let candidate_context = AutoCandidateEvaluationContext {
+                admission: &candidate_admission,
+                ..evaluation_context
+            };
+            if let Some(decision) = candidate.quality_profile_decision.as_mut() {
+                let parsed = candidate.parsed_release_metadata.as_ref();
+                let facts = crate::admission::CandidateFacts::new(
+                    decision.tier_index,
+                    parsed.map_or(0, crate::acquisition::scoring::revision_rank),
+                    decision.preference_score,
+                )
+                .with_revision_policy(
+                    parsed.and_then(|parsed| parsed.release_group.as_deref()),
+                    evaluation_context.profile.criteria.ignore_proper_repack,
+                );
+                decision.revision_preference =
+                    crate::admission::revision_preference(facts, candidate_context.admission);
+            }
             let evaluated_code = active_pending_release_delay_code(
-                evaluate_auto_candidate(candidate, &evaluation_context),
+                evaluate_auto_candidate(candidate, &candidate_context),
                 user_invoked,
                 has_active_pending_overlap,
             );
@@ -2648,6 +2709,7 @@ impl AppUseCase {
             }
         }
 
+        results.sort_by(crate::catalog::release_search::compare_release_search_results);
         Ok(results)
     }
 
@@ -4231,6 +4293,7 @@ mod tests {
             preference_score: score,
             tier_index: None,
             size_fit_penalty: 0,
+            revision_preference: 0,
         }
     }
 
@@ -5961,7 +6024,7 @@ mod tests {
                         revision,
                         file_id: "file-1".to_string(),
                         file_path: "/data/Movies/Nightfall (2022)/Nightfall.mkv".to_string(),
-                        release_group: None,
+                        release_group: Some("GRP".into()),
                         score: 900,
                         covers: Vec::new(),
                         created_at: (now() - chrono::Duration::days(days_ago)).to_rfc3339(),
@@ -6054,7 +6117,7 @@ mod tests {
         fn a_scope_below_cutoff_is_not_gated() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 0, 100),
+                    CandidateFacts::new(Some(1), 0, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 1),
                     false,
                     true,
@@ -6070,7 +6133,7 @@ mod tests {
         fn a_non_revision_candidate_at_cutoff_is_refused() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 0, 9_000),
+                    CandidateFacts::new(Some(1), 0, 9_000).with_revision_policy(Some("GRP"), false),
                     &holding(0, 1),
                     true,
                     true,
@@ -6087,7 +6150,7 @@ mod tests {
         fn a_proper_escapes_the_cutoff_on_the_feed_lane() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 1),
                     true,
                     true,
@@ -6104,7 +6167,7 @@ mod tests {
         fn a_better_tier_candidate_is_still_refused_at_cutoff() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(0), 1, 9_000),
+                    CandidateFacts::new(Some(0), 1, 9_000).with_revision_policy(Some("GRP"), false),
                     &holding(0, 1),
                     true,
                     true,
@@ -6121,7 +6184,7 @@ mod tests {
         fn a_proper_for_a_week_old_file_is_refused_on_the_feed_lane() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 30),
                     true,
                     true,
@@ -6139,7 +6202,7 @@ mod tests {
         fn the_old_file_guard_does_not_bind_an_active_search() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 30),
                     true,
                     false,
@@ -6155,12 +6218,12 @@ mod tests {
         fn an_unoccupied_scope_has_nothing_to_be_a_revision_of() {
             let empty = AdmissionSubject::new(AdmissionScope::Title, []);
             assert!(!candidate_is_revision_upgrade(
-                CandidateFacts::new(Some(1), 2, 100),
+                CandidateFacts::new(Some(1), 2, 100).with_revision_policy(Some("GRP"), false),
                 &empty
             ));
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 2, 100),
+                    CandidateFacts::new(Some(1), 2, 100).with_revision_policy(Some("GRP"), false),
                     &empty,
                     true,
                     true,
@@ -6205,7 +6268,7 @@ mod tests {
         fn the_old_file_guard_binds_below_the_cutoff_too() {
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 30),
                     false,
                     true,
@@ -6216,7 +6279,7 @@ mod tests {
             );
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 1),
                     false,
                     true,
@@ -6227,7 +6290,7 @@ mod tests {
             );
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &holding(0, 30),
                     false,
                     false,
@@ -6250,7 +6313,7 @@ mod tests {
                         revision: 0,
                         file_id: id.to_string(),
                         file_path: format!("/data/TV/{id}.mkv"),
-                        release_group: None,
+                        release_group: Some("GRP".into()),
                         score,
                         covers: vec![covers.to_string()],
                         created_at: (now() - chrono::Duration::days(days_ago)).to_rfc3339(),
@@ -6267,7 +6330,7 @@ mod tests {
             );
             assert_eq!(
                 cutoff_refusal(
-                    CandidateFacts::new(Some(1), 1, 100),
+                    CandidateFacts::new(Some(1), 1, 100).with_revision_policy(Some("GRP"), false),
                     &subject,
                     false,
                     true,
