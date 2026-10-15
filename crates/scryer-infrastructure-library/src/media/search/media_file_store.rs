@@ -363,6 +363,97 @@ fn import_destination_ownership_matches(
 
 #[async_trait]
 impl MediaFileRepository for MediaFileStore {
+    async fn score_refresh_page(
+        &self,
+        selection: &scryer_application::ScoreRefreshSelection,
+        after: &str,
+    ) -> AppResult<Vec<String>> {
+        use scryer_application::ScoreRefreshSelection;
+        let (field, ids) = match selection {
+            ScoreRefreshSelection::Files(ids) => ("mf.id", ids),
+            ScoreRefreshSelection::Titles(ids) => ("mf.title_id", ids),
+            ScoreRefreshSelection::Seasons(ids) => ("e.collection_id", ids),
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["{}"; ids.len()].join(", ");
+        let predicate = live_media_file_predicate(dialect_for_datastore(&self.datastore), "mf");
+        let scope = if matches!(selection, ScoreRefreshSelection::Seasons(_)) {
+            format!(
+                "EXISTS (SELECT 1 FROM file_episode_map fem JOIN episodes e ON e.id = fem.episode_id WHERE fem.file_id = mf.id AND {field} IN ({placeholders}))"
+            )
+        } else {
+            format!("{field} IN ({placeholders})")
+        };
+        let sql = format!(
+            "SELECT mf.id FROM media_files mf WHERE {scope} AND mf.id > {{}} AND {predicate} ORDER BY mf.id LIMIT 100"
+        );
+        let mut args: Vec<_> = ids.iter().cloned().map(SqlArg::Text).collect();
+        args.push(SqlArg::Text(after.to_owned()));
+        SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args)
+            .await?
+            .into_iter()
+            .map(|row| row.text("id"))
+            .collect()
+    }
+
+    async fn score_evaluation_episode_ids(&self, file: &TitleMediaFile) -> AppResult<Vec<String>> {
+        SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            "SELECT episode_id FROM file_episode_map WHERE file_id = {} ORDER BY episode_id",
+            &[SqlArg::Text(file.id.clone())],
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.text("episode_id"))
+        .collect()
+    }
+
+    async fn get_score_evaluation(
+        &self,
+        file_id: &str,
+    ) -> AppResult<Option<scryer_application::FileScoreEvaluation>> {
+        let row = SqlRuntime::fetch_optional(
+            self.datastore.read_exec(),
+            "SELECT current_score_evaluation FROM media_files WHERE id = {}",
+            &[SqlArg::Text(file_id.to_string())],
+        )
+        .await
+        .map_err(repo_err)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let json = row.opt_text("current_score_evaluation")?;
+        json.map(|json| serde_json::from_str(&json).map_err(repo_err))
+            .transpose()
+    }
+
+    async fn save_score_evaluation(
+        &self,
+        file_id: &str,
+        title_id: &str,
+        evaluation: &scryer_application::FileScoreEvaluation,
+    ) -> AppResult<()> {
+        let json = serde_json::to_string(evaluation).map_err(repo_err)?;
+        let changed = execute_write(
+            &self.datastore,
+            "save_score_evaluation",
+            "UPDATE media_files SET current_score_evaluation = {} WHERE id = {} AND title_id = {}"
+                .to_string(),
+            vec![
+                SqlArg::Text(json),
+                SqlArg::Text(file_id.to_string()),
+                SqlArg::Text(title_id.to_string()),
+            ],
+        )
+        .await?;
+        if changed != 1 {
+            return Err(AppError::NotFound("media file ownership changed".into()));
+        }
+        Ok(())
+    }
+
     async fn insert_media_file(&self, input: &InsertMediaFileInput) -> AppResult<String> {
         let id = Id::new().0;
         let args = media_file_insert_args(&self.datastore, input, &id)?;
@@ -2894,6 +2985,108 @@ mod tests {
     };
     use scryer_infrastructure_datastore::SqliteServices;
 
+    #[tokio::test]
+    async fn score_evaluation_selection_and_persistence_preserve_acquisition_evidence() {
+        use scryer_application::{FileScoreEvaluation, ScoreRefreshSelection};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scores.db");
+        let services = SqliteServices::new(path.to_string_lossy()).await.unwrap();
+        let files = media_file_store(&services);
+        let titles = title_store(&services);
+        for id in ["selected", "unselected"] {
+            titles.create(make_test_series_title(id)).await.unwrap();
+        }
+        let mut selected = Vec::new();
+        for (index, role) in [MediaFileRole::Primary, MediaFileRole::Additional]
+            .into_iter()
+            .enumerate()
+        {
+            selected.push(
+                files
+                    .insert_media_file(&InsertMediaFileInput {
+                        title_id: "selected".into(),
+                        file_path: format!("/synthetic/{index}.mkv"),
+                        role,
+                        acquisition_score: Some(17),
+                        scoring_log: Some("acquisition evidence".into()),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: "unselected".into(),
+                file_path: "/synthetic/other.mkv".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        selected.sort();
+        let scope = ScoreRefreshSelection::Titles(vec!["selected".into(), "selected".into()]);
+        assert_eq!(
+            files.score_refresh_page(&scope, "").await.unwrap(),
+            selected
+        );
+        assert_eq!(
+            files
+                .score_refresh_page(&scope, &selected[0])
+                .await
+                .unwrap(),
+            vec![selected[1].clone()]
+        );
+        assert!(
+            files
+                .score_refresh_page(&ScoreRefreshSelection::Files(vec![]), "")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let evaluation = FileScoreEvaluation {
+            score: -5,
+            evaluated_at: "2026-01-01T00:00:00Z".into(),
+            fingerprint: "inputs-a".into(),
+            time_sensitive: false,
+            entries: vec![],
+            rejection_codes: vec!["minimum_score".into()],
+        };
+        assert!(
+            files
+                .get_score_evaluation(&selected[0])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        files
+            .save_score_evaluation(&selected[0], "selected", &evaluation)
+            .await
+            .unwrap();
+        assert!(
+            files
+                .save_score_evaluation(&selected[0], "unselected", &evaluation)
+                .await
+                .is_err()
+        );
+        let row = files
+            .get_media_file_by_id(&selected[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.acquisition_score, Some(17));
+        assert_eq!(row.scoring_log.as_deref(), Some("acquisition evidence"));
+        let reopened = SqliteServices::new(path.to_string_lossy()).await.unwrap();
+        assert_eq!(
+            media_file_store(&reopened)
+                .get_score_evaluation(&selected[0])
+                .await
+                .unwrap()
+                .unwrap()
+                .score,
+            -5
+        );
+    }
+
     /// A single-title missing-scope derivation must be driven by the episode
     /// index on `title_id`, not by a full scan of `episodes`. The catalog-wide
     /// form of this query reads the whole btree by design (it has no filter to
@@ -4583,6 +4776,30 @@ mod tests {
             .await
             .expect("media file and associations should insert atomically");
         assert_eq!(created.disposition, MediaFileCatalogDisposition::Created);
+
+        let score_selection = scryer_application::ScoreRefreshSelection::Seasons(vec![
+            collection.id.clone(),
+            collection.id.clone(),
+        ]);
+        assert_eq!(
+            media_files
+                .score_refresh_page(&score_selection, "")
+                .await
+                .unwrap(),
+            vec![created.media_file_id.clone()]
+        );
+        let score_file = media_files
+            .get_media_file_by_id(&created.media_file_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            media_files
+                .score_evaluation_episode_ids(&score_file)
+                .await
+                .unwrap(),
+            associations.episode_ids
+        );
 
         #[cfg(windows)]
         let lookup_path = "c:/media/show/season 01/show - s01e01-e02.mkv";

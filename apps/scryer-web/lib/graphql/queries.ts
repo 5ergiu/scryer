@@ -435,6 +435,10 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       videoCodecParsed
       audioCodecParsed
       acquisitionScore
+      currentScoreEvaluation {
+        score evaluatedAt needsRefresh timeSensitive rejectionCodes
+        entries { code delta kind source }
+      }
       scoringLog
       indexerSource
       grabbedReleaseTitle
@@ -738,7 +742,14 @@ export const TITLE_MUTATION_RESULT_FIELDS = `
     recapPolicy
     createdAt`;
 
+const HISTORY_SCORING_FIELDS = `scoring {
+  candidateScore previousScore delta decisionCode
+  entries { code delta kind source }
+  comparisons { fileId episodeIds previousScore delta }
+}`;
+
 const TITLE_EVENT_FIELDS = `
+    ${HISTORY_SCORING_FIELDS}
     id
     titleId
     episodeId
@@ -1089,7 +1100,7 @@ export const titleDownloadQueueItemsQuery = `query TitleDownloadQueueItems($id: 
 export const currentReleaseFilesQuery = `query CurrentReleaseFiles($id: ID!) {
   title(id: $id) {
     id
-    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath }
+    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath episodeId seriesMovieLinkIds episode { collectionId } }
   }
 }`;
 
@@ -4642,6 +4653,7 @@ export const externalSubtitlesQuery = `query ExternalSubtitles($titleId: ID!) {
 export const titleHistoryQuery = `query TitleHistory($filter: TitleHistoryFilterInput!) {
   titleHistory(filter: $filter) {
     items {
+      ${HISTORY_SCORING_FIELDS}
       id
       titleId
       titleName

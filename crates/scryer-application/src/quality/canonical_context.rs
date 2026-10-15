@@ -31,6 +31,28 @@ pub(crate) struct ResolvedScoringContext {
 }
 
 impl ResolvedScoringContext {
+    pub(crate) fn evaluation_reads_clock(&self) -> bool {
+        self.rules.reads_clock()
+    }
+
+    pub(crate) fn evaluation_fingerprint(
+        &self,
+        file: &crate::TitleMediaFile,
+        basis: CoverageSizeBasis,
+        episode_ids: &[String],
+    ) -> String {
+        use crate::quality::landed_bar_memo::hash_debug;
+        let mut hasher = blake3::Hasher::new();
+        self.hash_memo_inputs(&mut hasher);
+        // RuleHandle includes the compiled source digest and execution metadata.
+        hash_debug(&mut hasher, &self.rules.rules());
+        hash_debug(&mut hasher, &self.rules.limits());
+        hash_debug(&mut hasher, file);
+        hash_debug(&mut hasher, &basis);
+        hash_debug(&mut hasher, &episode_ids);
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// Borrow scoring inputs.
     ///
     /// `size_basis` overrides the title's own runtime for scopes that know
@@ -158,6 +180,7 @@ pub(crate) fn announced_metadata_for_title(
 /// (D18) — all need the same derivation, and it is the derivation that has to
 /// agree with the search lane or the whole design is undone.
 pub(crate) struct ParkedReleaseFacts {
+    pub scoring_log: Vec<crate::quality_profile::ScoringEntry>,
     pub coverage: crate::acquisition_coverage::ReleaseCoverage,
     pub release_group: Option<String>,
     /// The D4 runtime basis for what the release covers: total runtime, one
@@ -232,6 +255,7 @@ pub(crate) fn score_parked_release_title(
     );
 
     ParkedReleaseFacts {
+        scoring_log: scored.announced_decision.scoring_log.clone(),
         coverage,
         release_group,
         size_basis,

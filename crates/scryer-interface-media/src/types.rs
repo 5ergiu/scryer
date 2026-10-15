@@ -4,6 +4,48 @@ use chrono::{DateTime, Utc};
 pub use crate::conversions::{FromApplication, IntoApplication};
 pub use scryer_interface_media_types::*;
 
+/// Explicit scope for an on-demand score refresh. Exactly one selection kind is required.
+#[derive(async_graphql::OneofObject)]
+pub enum FileScoreSelectionInput {
+    FileIds(Vec<ID>),
+    SeasonIds(Vec<ID>),
+    TitleIds(Vec<ID>),
+}
+
+/// Current-rule evaluation, separate from the score recorded on acquisition.
+#[derive(SimpleObject, Clone)]
+pub struct FileScoreEvaluationPayload {
+    pub score: i32,
+    pub evaluated_at: String,
+    pub needs_refresh: bool,
+    pub time_sensitive: bool,
+    pub entries: Vec<ScoreEvaluationEntryPayload>,
+    pub rejection_codes: Vec<String>,
+}
+
+impl From<scryer_application::FileScoreEvaluationView> for FileScoreEvaluationPayload {
+    fn from(view: scryer_application::FileScoreEvaluationView) -> Self {
+        let evaluation = view.evaluation;
+        Self {
+            score: evaluation.score,
+            evaluated_at: evaluation.evaluated_at,
+            needs_refresh: view.stale,
+            time_sensitive: evaluation.time_sensitive,
+            entries: evaluation
+                .entries
+                .into_iter()
+                .map(|entry| ScoreEvaluationEntryPayload {
+                    code: entry.code,
+                    delta: entry.delta,
+                    kind: entry.kind,
+                    source: entry.source,
+                })
+                .collect(),
+            rejection_codes: evaluation.rejection_codes,
+        }
+    }
+}
+
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]
 /// Catalog metadata, monitoring settings, and media identity for a title.

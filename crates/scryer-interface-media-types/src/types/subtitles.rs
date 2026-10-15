@@ -71,9 +71,38 @@ pub struct ExternalSubtitleBlocklistEntryPayload {
 // Title History
 // ---------------------------------------------------------------------------
 
+/// A recorded score contribution, including rule attribution and rejections.
+#[derive(SimpleObject, Clone)]
+pub struct ScoreEvaluationEntryPayload {
+    pub code: String,
+    pub delta: i32,
+    pub kind: String,
+    pub source: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct HistoryScoreComparisonPayload {
+    pub file_id: ID,
+    pub episode_ids: Vec<ID>,
+    pub previous_score: i32,
+    pub delta: Long,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct HistoryScoringPayload {
+    pub candidate_score: i32,
+    pub previous_score: Option<i32>,
+    pub delta: Option<Long>,
+    pub decision_code: String,
+    pub comparisons: Vec<HistoryScoreComparisonPayload>,
+    pub entries: Vec<ScoreEvaluationEntryPayload>,
+}
+
 #[derive(SimpleObject, Clone)]
 /// One event in a title's acquisition and file history.
 pub struct TitleHistoryEventPayload {
+    /// Immutable decision-time evidence; absent for legacy events without scores.
+    pub scoring: Option<HistoryScoringPayload>,
     /// History event ID.
     pub id: ID,
     /// Title ID associated with the event, or null when the event has no

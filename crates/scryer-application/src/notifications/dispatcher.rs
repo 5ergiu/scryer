@@ -3637,6 +3637,7 @@ mod tests {
                 .to_string(),
         );
         data.release_facts = Some(scryer_domain::GrabbedReleaseFacts {
+            scoring: None,
             quality: Some("1080p".to_string()),
             release_group: Some("NOGRP".to_string()),
             audio_languages: vec!["eng".to_string(), "jpn".to_string()],

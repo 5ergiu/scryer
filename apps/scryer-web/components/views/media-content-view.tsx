@@ -1,4 +1,5 @@
 import * as React from "react";
+import { RefreshScoresButton, useScoreRefreshUpdates } from "@/components/common/refresh-scores-button";
 import { useLocation } from "react-router";
 import {
   ArrowDown,
@@ -1188,6 +1189,7 @@ function TitleContextPanel({
     void refreshDownloadFeedback();
     return title ? onTitleOptionsChanged(title) : undefined;
   }, [onTitleOptionsChanged, refreshDownloadFeedback, title]);
+  useScoreRefreshUpdates(reloadTitleAndDownloads);
   const refreshAndScan = useTitleRefreshAndScan({
     titleId,
     onScanned: reloadTitleAndDownloads,
@@ -3999,6 +4001,7 @@ export function MediaContentView({
                           <Pencil className="h-4 w-4" />
                           {t("label.edit")}
                         </Button>
+                        {canManageTitle ? <RefreshScoresButton selection={{ titleIds: [...selectedTitleIds] }} disabled={bulkActionBusy} /> : null}
                         {canRenameSelectedTitles ? (
                           <Button
                             variant="outline"

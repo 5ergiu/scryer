@@ -84,6 +84,7 @@ impl RuleSetTestListingInput {
             })
             .unwrap_or_default();
         ReleaseListingSnapshot {
+            grab_scoring: None,
             published_at: self
                 .published_at
                 .as_deref()

@@ -59,6 +59,7 @@ export type MediaInfoFile = {
   videoCodecParsed?: string | null;
   audioCodecParsed?: string | null;
   acquisitionScore?: number | null;
+  currentScoreEvaluation?: import("../types/file-score").FileScoreEvaluation | null;
   scoringLog?: string | null;
   indexerSource?: string | null;
   grabbedReleaseTitle?: string | null;

@@ -2237,6 +2237,7 @@ fn a_stream_pointer_is_not_rejected_for_the_size_of_its_url() {
 /// can move `now` around it.
 fn frozen_listing() -> crate::quality::release_listing::ReleaseListingSnapshot {
     crate::quality::release_listing::ReleaseListingSnapshot {
+        grab_scoring: None,
         published_at: Some("2024-01-02T00:00:00Z".into()),
         thumbs_up: Some(7),
         thumbs_down: Some(1),

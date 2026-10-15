@@ -2606,12 +2606,6 @@ impl AppUseCase {
                 annotate_auto_decision(candidate, ReleaseAutoDecisionCode::AcquisitionPaused);
                 continue;
             }
-            if candidate.auto_decision_code.as_deref().is_some_and(|code| {
-                code == ReleaseAutoDecisionCode::PackBelowMissingThreshold.as_str()
-                    || code == ReleaseAutoDecisionCode::AnimeNumberingAmbiguous.as_str()
-            }) {
-                continue;
-            }
             // A pack may cover more files than the episode that initiated the search.
             // Rank and admit against the complete replacement scope.
             let candidate_admission = if scope == &subject.submission_scope {
@@ -2657,6 +2651,18 @@ impl AppUseCase {
                 admission: &candidate_admission,
                 ..evaluation_context
             };
+            if candidate.auto_decision_code.as_deref().is_some_and(|code| {
+                code == ReleaseAutoDecisionCode::PackBelowMissingThreshold.as_str()
+                    || code == ReleaseAutoDecisionCode::AnimeNumberingAmbiguous.as_str()
+            }) {
+                crate::quality::grab_scoring::attach(
+                    candidate,
+                    candidate_context.admission,
+                    "manual_override",
+                    now,
+                );
+                continue;
+            }
             if let Some(decision) = candidate.quality_profile_decision.as_mut() {
                 let parsed = candidate.parsed_release_metadata.as_ref();
                 let facts = crate::admission::CandidateFacts::new(
@@ -2677,6 +2683,12 @@ impl AppUseCase {
                 has_active_pending_overlap,
             );
             annotate_external_id_diagnostics(candidate, evaluation_context.subject);
+            crate::quality::grab_scoring::attach(
+                candidate,
+                candidate_context.admission,
+                code.as_str(),
+                now,
+            );
             annotate_auto_decision(candidate, code);
         }
 

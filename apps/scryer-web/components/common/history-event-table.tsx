@@ -91,6 +91,8 @@ function actorLabel(event: TitleHistoryEvent): string {
 }
 
 function historyTypeLabel(event: TitleHistoryEvent, t: ReturnType<typeof useTranslate>): string {
+  if (event.scoring?.decisionCode === "upgrade") return t("history.upgrade");
+  if (event.scoring?.decisionCode === "manual_override") return t("scoring.manualOverride");
   return event.eventType === "file_upgraded" ? t("history.upgrade") : t("history.initial");
 }
 

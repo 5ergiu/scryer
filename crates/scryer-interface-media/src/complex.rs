@@ -1365,6 +1365,20 @@ impl EpisodePayload {
 
 #[ComplexObject]
 impl TitleMediaFilePayload {
+    /// Read saved evidence and its freshness; reading never runs the scorer.
+    async fn current_score_evaluation(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<Option<FileScoreEvaluationPayload>> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        Ok(app
+            .media_file_score_evaluation(&actor, self.id.as_str())
+            .await
+            .map_err(to_gql_error)?
+            .map(Into::into))
+    }
+
     /// Parent title for this media file, or null if it is no longer available to the caller.
     async fn title(&self, ctx: &Context<'_>) -> GqlResult<Option<TitlePayload>> {
         let image_app = app_from_ctx(ctx)?;

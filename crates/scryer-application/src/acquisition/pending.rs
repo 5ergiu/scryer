@@ -63,6 +63,7 @@ pub(crate) enum PendingJudgement {
 
 /// What the grab half needs from a judgement that admitted the release.
 pub(crate) struct AdmittedPendingRelease {
+    scoring: scryer_domain::GrabScoringSnapshot,
     title: Title,
     pending_scope: SubmissionScope,
     candidate_score: i32,
@@ -1441,6 +1442,12 @@ impl AppUseCase {
         }
         Ok(PendingJudgement::Admitted(Box::new(
             AdmittedPendingRelease {
+                scoring: crate::quality::grab_scoring::capture_values(
+                    candidate_score,
+                    &facts.scoring_log,
+                    &admission,
+                    "eligible",
+                ),
                 title,
                 pending_scope,
                 candidate_score,
@@ -1462,6 +1469,7 @@ impl AppUseCase {
         initiated_by: &DomainEventActor,
     ) -> AppResult<PendingGrabOutcome> {
         let AdmittedPendingRelease {
+            mut scoring,
             title,
             pending_scope,
             candidate_score,
@@ -1589,6 +1597,13 @@ impl AppUseCase {
         .is_some_and(|episode| episode.full_season);
 
         let release_listing_json = ReleaseListingSnapshot::json_for_pending_release(pr, *now);
+        if matches!(trigger, PendingGrabTrigger::Operator) {
+            scoring.decision_code = "manual_override".into();
+        }
+        let release_listing_json = crate::quality::grab_scoring::with_snapshot(
+            release_listing_json,
+            Some(scoring.clone()),
+        );
         let canonical_result = self
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
                 request: DownloadClientAddRequest {
@@ -1717,7 +1732,8 @@ impl AppUseCase {
                         grab_indexer.clone(),
                         grab.client_id.as_deref(),
                     )
-                    .await;
+                    .await
+                    .with_scoring(Some(scoring));
                 let _ = self
                     .append_domain_event(new_title_domain_event(
                         initiated_by.clone(),

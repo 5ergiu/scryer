@@ -4427,9 +4427,38 @@ pub struct ReleaseGrabbedEventData {
     pub release_facts: Option<GrabbedReleaseFacts>,
 }
 
+/// Immutable scoring evidence captured by the selection that led to a grab.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabScoringSnapshot {
+    pub candidate_score: i32,
+    pub previous_score: Option<i32>,
+    pub delta: Option<i64>,
+    pub decision_code: String,
+    pub comparisons: Vec<GrabScoreComparison>,
+    pub entries: Vec<ScoringSnapshotEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabScoreComparison {
+    pub file_id: String,
+    pub episode_ids: Vec<String>,
+    pub previous_score: i32,
+    pub delta: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScoringSnapshotEntry {
+    pub code: String,
+    pub delta: i32,
+    pub kind: String,
+    pub source: Option<String>,
+}
+
 /// Release facts captured at grab time, for history and notifications.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrabbedReleaseFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<GrabScoringSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4447,6 +4476,13 @@ pub struct GrabbedReleaseFacts {
     pub indexer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_client_name: Option<String>,
+}
+
+impl GrabbedReleaseFacts {
+    pub fn with_scoring(mut self, scoring: Option<GrabScoringSnapshot>) -> Self {
+        self.scoring = scoring;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

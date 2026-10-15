@@ -14,11 +14,11 @@ test("current release uses the grab identity after library rename, not quality s
   assert.ok(!names.has("film"));
 });
 
-test("only live primary files supplied by the title query identify the current release", () => {
+test("live primary and additional files identify owned releases", () => {
   assert.deepEqual([...currentReleaseNames([
     { role: "additional", grabbedReleaseTitle: "Old.Release", filePath: "/library/old.mkv" },
     { role: "primary", grabbedReleaseTitle: "New.Release", filePath: "/library/new.mkv" },
-  ])], ["new.release"]);
+  ])], ["old.release", "new.release"]);
   assert.equal(currentReleaseNames([]).size, 0);
 });
 
@@ -27,4 +27,19 @@ test("scanned files use scene or original file identity without fuzzy title matc
     { role: "primary", sceneName: "Show.S01E01-GROUP", filePath: "/library/renamed.mkv" },
     { role: "primary", originalFilePath: "D:\\downloads\\Show.S01E02-GROUP.mkv", filePath: "/library/renamed2.mkv" },
   ])], ["show.s01e01-group", "show.s01e02-group"]);
+});
+
+test("a renamed filename without persisted release evidence never proves ownership", () => {
+  assert.equal(currentReleaseNames([{ role: "primary", filePath: "/library/Film.1080p-GROUP.mkv" }]).size, 0);
+});
+
+test("episode, season and series-movie scopes exclude unrelated owned releases", () => {
+  const files = [
+    { role: "primary", filePath: "/library/a.mkv", grabbedReleaseTitle: "Show.E01-GROUP", episodeId: "ep-a", episode: { collectionId: "season-a" }, seriesMovieLinkIds: [] },
+    { role: "additional", filePath: "/library/b.mkv", grabbedReleaseTitle: "Show.E02-GROUP", episodeId: "ep-b", episode: { collectionId: "season-b" }, seriesMovieLinkIds: ["movie-b"] },
+  ];
+  assert.deepEqual([...currentReleaseNames(files, { episodeId: "ep-a" })], ["show.e01-group"]);
+  assert.deepEqual([...currentReleaseNames(files, { collectionId: "season-b" })], ["show.e02-group"]);
+  assert.deepEqual([...currentReleaseNames(files, { seriesMovieLinkId: "movie-b" })], ["show.e02-group"]);
+  assert.equal(currentReleaseNames(files, { episodeId: "missing" }).size, 0);
 });
