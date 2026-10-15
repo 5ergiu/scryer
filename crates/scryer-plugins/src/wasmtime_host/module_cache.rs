@@ -325,6 +325,7 @@ fn compile_registered(
     // Every surviving flavor is a WASI Preview 2 component, so they all compile
     // on the one async engine.
     let engine = engine::shared_async_engine();
+    engine::prepare_cache_cleanup();
     let (cache_hits_before, cache_misses_before) = engine::cache_statistics();
     let result = Component::from_binary(engine, wasm)
         .map(Arc::new)
