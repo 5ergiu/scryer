@@ -1819,15 +1819,14 @@ struct CandidateJobContext {
 }
 
 fn report_incomplete_discovery(ctx: &CandidateJobContext, error: AppError) {
-    if ctx
+    let delivered = ctx
         .candidate_events
         .send(ScanCandidateJobEvent::DiscoveryIncomplete { error })
-        .is_err()
-    {
-        return;
-    }
+        .is_ok();
+    #[cfg(not(test))]
+    let _ = delivered;
     #[cfg(test)]
-    if let Some(observer) = &ctx.incomplete_discovery_observer {
+    if delivered && let Some(observer) = &ctx.incomplete_discovery_observer {
         observer.notify_one();
     }
 }

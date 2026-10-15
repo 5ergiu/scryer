@@ -136,7 +136,7 @@ enum PreviewSubject {
     Release {
         name: String,
         size_bytes: Option<i64>,
-        listing: ListingFacts,
+        listing: Box<ListingFacts>,
     },
     StoredFile {
         file: Box<crate::TitleMediaFile>,
@@ -533,7 +533,7 @@ impl AppUseCase {
                 size_bytes: request.size_bytes,
                 // A tester candidate has never been grabbed: its age is
                 // measured now, like any live search result.
-                listing: ListingFacts::candidate(request.listing.snapshot(now), now),
+                listing: Box::new(ListingFacts::candidate(request.listing.snapshot(now), now)),
             },
             (None, None) => unreachable!("validated preview subject"),
         };
@@ -629,7 +629,7 @@ impl AppUseCase {
                             parsed.clone(),
                             size_bytes,
                         )
-                        .with_listing(Some(listing)),
+                        .with_listing(Some(*listing)),
                         &preview_context,
                     );
                     Ok(ScoredSubject {

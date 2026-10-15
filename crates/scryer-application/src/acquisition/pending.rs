@@ -341,6 +341,10 @@ impl AppUseCase {
         });
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "uses the caller's batched catalog and queue snapshots"
+    )]
     async fn pending_queued_releases(
         &self,
         title: &Title,
@@ -403,17 +407,15 @@ impl AppUseCase {
         let membership = self
             .scope_membership_for_with_reads(title, scope, reads)
             .await;
-        let queued = self
-            .queued_releases_with_grabbed_claims(
-                queued,
-                title,
-                &membership.view(),
-                context,
-                catalog_episodes,
-                catalog_collections,
-            )
-            .await;
-        queued
+        self.queued_releases_with_grabbed_claims(
+            queued,
+            title,
+            &membership.view(),
+            context,
+            catalog_episodes,
+            catalog_collections,
+        )
+        .await
     }
 
     /// Park the best candidate of a scope for human review (Pillar A3): the

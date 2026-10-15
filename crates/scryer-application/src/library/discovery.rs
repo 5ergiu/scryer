@@ -1662,7 +1662,7 @@ mod tests {
         write_discovery_fixture(root.path(), "Healthy/Healthy.S01E01.mkv");
         let blocked = root.path().join("Blocked");
         let original = std::fs::metadata(&blocked).unwrap().permissions();
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
         let unreadable = std::fs::read_dir(&blocked).is_err();
         let mut receiver = stream_title_folder_boundaries(
             root.path().into(),
