@@ -2693,6 +2693,7 @@ impl AppUseCase {
         }
 
         results.sort_by(crate::catalog::release_search::compare_release_search_results);
+        results.truncate(200);
         Ok(results)
     }
 

@@ -2580,6 +2580,26 @@ where
 }
 
 async fn shutdown_signal(token: CancellationToken) {
+    #[cfg(windows)]
+    if std::env::var("SCRYER_TRAY_SUPERVISED").as_deref() == Ok("1") {
+        let tray_token = token.clone();
+        // A dedicated thread keeps a blocking pipe read off Tokio workers and
+        // does not prevent runtime shutdown when another signal wins.
+        if let Err(error) = std::thread::Builder::new()
+            .name("tray-shutdown".into())
+            .spawn(
+                move || match wait_for_tray_shutdown(std::io::stdin().lock()) {
+                    Ok(()) => {
+                        tracing::info!("tray closed its control pipe, shutting down");
+                        tray_token.cancel();
+                    }
+                    Err(error) => tracing::warn!(%error, "tray control pipe failed"),
+                },
+            )
+        {
+            tracing::warn!(%error, "could not start tray shutdown listener");
+        }
+    }
     let ctrl_c = tokio::signal::ctrl_c();
 
     #[cfg(unix)]
@@ -2610,6 +2630,19 @@ async fn shutdown_signal(token: CancellationToken) {
         tracing::warn!("graceful shutdown timed out, forcing exit");
         std::process::exit(0);
     });
+}
+
+#[cfg(any(windows, test))]
+fn wait_for_tray_shutdown(mut input: impl std::io::Read) -> std::io::Result<()> {
+    let mut byte = [0];
+    loop {
+        match input.read(&mut byte) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Extract `--data-dir <path>` or `--data-dir=<path>` from the arg list,
@@ -3801,6 +3834,32 @@ async fn seed_builtin_plugin_installations(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_control_pipe_waits_for_eof_and_propagates_errors() {
+        struct InterruptedOnce(bool);
+        impl std::io::Read for InterruptedOnce {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    Err(std::io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        struct Failed;
+        impl std::io::Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        super::wait_for_tray_shutdown(std::io::Cursor::new(b"ignored input")).unwrap();
+        super::wait_for_tray_shutdown(InterruptedOnce(true)).unwrap();
+        assert_eq!(
+            super::wait_for_tray_shutdown(Failed).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
     use super::{
         ALLOW_UNAUTHENTICATED_PUBLIC_ACCESS_ENV, AuthModeConfig, ImageProxyBlob, LogFormat,
         RECOVERY_ADMIN_PASSWORD_ENV, ResolvedLogFileConfig, SelfRestartController,

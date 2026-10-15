@@ -1460,7 +1460,8 @@ impl AppUseCase {
             )
             .then_with(|| left.indexer_id.cmp(&right.indexer_id))
         });
-        scored.truncate(200);
+        // Admission supplies related-incumbent revision preference. Do not
+        // discard candidates before that context has been applied.
 
         timer.outcome("ok");
         Ok(scored)
@@ -1724,25 +1725,10 @@ impl AppUseCase {
                                 );
                                 provenance.search_subject_kind = search_subject_kind;
                             }
-                            let mut retained_and_page = std::mem::take(&mut scored_results);
-                            retained_and_page.append(&mut page.results);
-                            scored_results = self
-                                .score_release_results_with_prepared(
-                                    retained_and_page,
-                                    &quality_profile,
-                                    title_id,
-                                    indexer_routing.as_ref(),
-                                    runtime_minutes,
-                                    parse_context,
-                                    season,
-                                    episode,
-                                    absolute_episode,
-                                    &mut scoring_inputs,
-                                    mode == SearchMode::Auto,
-                                    multi_episode_season,
-                                    scoring_now,
-                                )
-                                .await?;
+                            // Keep the bounded search response until all pages
+                            // arrive, then score once rather than rescoring the
+                            // growing retained set on every page.
+                            scored_results.append(&mut page.results);
                             continue;
                         }
                         None => {
@@ -1800,12 +1786,30 @@ impl AppUseCase {
             }
         }
 
+        if !scored_results.is_empty() {
+            scored_results = self
+                .score_release_results_with_prepared(
+                    scored_results,
+                    &quality_profile,
+                    title_id,
+                    indexer_routing.as_ref(),
+                    runtime_minutes,
+                    parse_context,
+                    season,
+                    episode,
+                    absolute_episode,
+                    &mut scoring_inputs,
+                    mode == SearchMode::Auto,
+                    multi_episode_season,
+                    scoring_now,
+                )
+                .await?;
+        }
         if scored_results.is_empty() && successful_searches == 0 && query_failures > 0 {
             let details =
                 first_failure.unwrap_or_else(|| "all indexer search queries failed".to_string());
             return Err(AppError::Repository(details));
         }
-
         let unsupported_indexer_ids =
             unsupported_indexers(&coverage_by_indexer, required_query_count);
         Ok(ScoredSearchOutcome {

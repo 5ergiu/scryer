@@ -23071,8 +23071,9 @@ input QualityProfileCriteriaInput {
 	allowUpgrades: Boolean!
 	"""
 	Let scores decide without automatic PROPER/REPACK preference.
+	Omission preserves the stored policy when updating a profile.
 	"""
-	ignoreProperRepack: Boolean! = false
+	ignoreProperRepack: Boolean
 	"""
 	Additional scoring preferences.
 	"""

@@ -788,7 +788,7 @@ function SearchResultRow({
 }
 
 const EMPTY_CURRENT_RELEASES = new Set<string>();
-const OWNED_RELEASE_REFRESH_KINDS = new Set([...TITLE_OVERVIEW_IMPORT_REFRESH_KINDS, "file_deleted", "media_file_deleted", "file_analyzed"]);
+const OWNED_RELEASE_REFRESH_KINDS = new Set([...TITLE_OVERVIEW_IMPORT_REFRESH_KINDS, "system_notice", "file_analyzed"]);
 type SearchResultBucketsProps = Omit<
   React.ComponentProps<typeof SearchResultBucketsContent>,
   "currentNames"

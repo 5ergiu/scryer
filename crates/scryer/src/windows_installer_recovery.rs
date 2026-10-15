@@ -155,6 +155,10 @@ pub async fn repair() -> Result<(), String> {
 
 /// The setup executable pins its destination to its own compiled release.
 /// A failed repair prevents the new MSI from starting.
+#[allow(
+    dead_code,
+    reason = "This module is shared by scryer (repair only) and scryer-setup (install)."
+)]
 pub async fn install(version: &str) -> Result<bool, String> {
     repair().await?;
     let discovery: Discovery = serde_json::from_slice(&powershell("discover", None, None).await?)

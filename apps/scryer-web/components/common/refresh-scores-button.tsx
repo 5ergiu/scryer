@@ -49,10 +49,12 @@ export function useScoreRefreshUpdates(reload: () => Promise<void> | void) {
   const { runs } = useJobRunToasts();
   const terminal = runs.filter((run) => run.jobKey === "MEDIA_FILE_RESCORE" && run.completedAt)
     .map((run) => run.id).sort().join(",");
-  const previous = React.useRef(terminal);
+  const previous = React.useRef(new Set(terminal ? terminal.split(",") : []));
   React.useEffect(() => {
-    if (previous.current !== terminal) {
-      previous.current = terminal;
+    const current = new Set(terminal ? terminal.split(",") : []);
+    const newlyCompleted = [...current].some((id) => !previous.current.has(id));
+    previous.current = current;
+    if (newlyCompleted) {
       void reload();
     }
   }, [terminal, reload]);

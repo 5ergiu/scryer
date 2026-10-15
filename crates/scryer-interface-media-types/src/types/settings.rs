@@ -1452,8 +1452,8 @@ pub struct QualityProfileCriteriaInput {
     /// Whether upgrades above the current file are allowed.
     pub allow_upgrades: bool,
     /// Let scores decide without automatic PROPER/REPACK preference.
-    #[graphql(default)]
-    pub ignore_proper_repack: bool,
+    /// Omission preserves the stored policy when updating a profile.
+    pub ignore_proper_repack: Option<bool>,
     /// Additional scoring preferences.
     pub scoring_overrides: ScoringOverridesInput,
     /// Optional cutoff quality tier.

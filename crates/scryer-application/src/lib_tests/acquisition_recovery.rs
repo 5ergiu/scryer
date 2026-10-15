@@ -1659,13 +1659,15 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
-    let (app, user) = bootstrap_with_acquisition_tracking(
+    let (mut app, user) = bootstrap_with_acquisition_tracking(
         download_client,
         download_submissions.clone(),
         pending_releases.clone(),
         wanted_items.clone(),
     );
 
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    app.services.workflow.blocklist_repo = blocklist.clone();
     let title = app
         .add_title(
             &user,
@@ -1753,21 +1755,74 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
         .await
         .expect("record failed submission");
 
-    let outcome = crate::acquisition_workflow::process_download_failure(
+    let failure = || crate::acquisition_workflow::DownloadFailureContext {
+        wanted_item: Some(wanted.clone()),
+        title_id: Some(title.id.clone()),
+        client_id: "primary".to_string(),
+        client_type: "nzbget".to_string(),
+        client_name: Some("Primary".to_string()),
+        client_item_id: "failed-job".to_string(),
+        release_title: "Failed.Release.1080p.WEB-DL".to_string(),
+        reason: "download failed".to_string(),
+        remove_from_client_if_configured: false,
+        blocklist_reason: None,
+        skip_reacquire: false,
+    };
+    blocklist
+        .fail_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
         &app,
-        crate::acquisition_workflow::DownloadFailureContext {
-            wanted_item: Some(wanted.clone()),
-            title_id: Some(title.id.clone()),
-            client_id: "primary".to_string(),
-            client_type: "nzbget".to_string(),
-            client_name: Some("Primary".to_string()),
-            client_item_id: "failed-job".to_string(),
-            release_title: "Failed.Release.1080p.WEB-DL".to_string(),
-            reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
-            blocklist_reason: None,
-            skip_reacquire: false,
-        },
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        failed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert!(blocklist.entries.lock().await.is_empty());
+    blocklist
+        .fail_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    blocklist
+        .fail_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unconfirmed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        unconfirmed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert_eq!(blocklist.entries.lock().await.len(), 1);
+    blocklist
+        .fail_reads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
     )
     .await;
 

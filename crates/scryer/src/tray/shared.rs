@@ -1060,20 +1060,16 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
 /// child would flash a window on every start; on macOS the child inherits the
 /// wrapper's already-windowless session and needs nothing.
 ///
-/// `CREATE_NO_WINDOW` still gives the server a console of its own, just
-/// without a window, and that console is how a stop reaches it with
-/// `CTRL_C_EVENT`. `DETACHED_PROCESS` would leave it no console and no way to
-/// be asked to stop.
+/// `CREATE_NO_WINDOW` provides no console for control events. The private
+/// stdin pipe instead lets the wrapper request shutdown by closing its end.
 #[cfg(windows)]
 fn configure_server_command(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
-    command.creation_flags(CREATE_NO_WINDOW);
-    // A tray relaunched by the upgrade helper inherits its ignore-Ctrl+C flag;
-    // clear it so the server does not inherit it and ignore its stop request.
-    // SAFETY: A null handler with FALSE only clears this process's flag.
-    unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0) };
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::piped());
 }
 
 #[cfg(not(windows))]
@@ -1162,8 +1158,8 @@ mod windows_job {
 /// The server writes a database on every job; killing it outright is safe but
 /// throws away the flush it would otherwise do, so the request comes first and
 /// the caller only escalates when this returns false. On Unix the request is
-/// `SIGTERM`; on Windows it is `CTRL_C_EVENT` on the server's own (windowless)
-/// console, which the server's `ctrl_c` shutdown handler answers.
+/// `SIGTERM`; on Windows closing the private stdin pipe signals the server's
+/// supervised shutdown listener, without requiring a console.
 fn request_graceful_stop(child: &mut Child) -> Result<bool, String> {
     #[cfg(unix)]
     {
@@ -1172,8 +1168,11 @@ fn request_graceful_stop(child: &mut Child) -> Result<bool, String> {
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
     }
     #[cfg(windows)]
-    if !application_updater::windows_process::request_console_interrupt(child.id()) {
-        return Ok(false);
+    {
+        let Some(stdin) = child.stdin.take() else {
+            return Ok(false);
+        };
+        drop(stdin);
     }
 
     let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
@@ -1252,6 +1251,54 @@ mod tests {
         logged_error_message, opens_in_external_browser, parse_http_response,
         popover_content_from_health, remove_desktop_profile, row_detail,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn windowless_shutdown_child() {
+        use std::io::{Read, Write};
+        if std::env::var("SCRYER_TEST_SHUTDOWN_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        println!("shutdown-child-ready");
+        std::io::stdout().flush().unwrap();
+        assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windowless_child_stops_without_console_interrupt_or_kill() {
+        use std::io::{BufRead, BufReader};
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "shared::tests::windowless_shutdown_child",
+                "--nocapture",
+            ])
+            .env("SCRYER_TEST_SHUTDOWN_CHILD", "1")
+            .stdout(std::process::Stdio::piped());
+        super::configure_server_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if line.unwrap().contains("shutdown-child-ready") {
+                    let _ = ready_tx.send(());
+                }
+            }
+        });
+        let ready = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .is_ok();
+        let stopped = ready && super::request_graceful_stop(&mut child).unwrap();
+        if !stopped {
+            let _ = child.kill();
+        }
+        let status = child.wait().unwrap();
+        reader.join().unwrap();
+        assert!(ready && stopped && status.success());
+    }
 
     // -- the environment the supervised server is not allowed to inherit ------
 
