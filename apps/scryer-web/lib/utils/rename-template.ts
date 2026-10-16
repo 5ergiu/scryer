@@ -12,7 +12,8 @@ export type RenameTemplateValidationIssue =
 export type FolderTemplateValidationIssue =
   | RenameTemplateValidationIssue
   | { kind: "illegalCharacter"; character: string }
-  | { kind: "missingRequiredToken"; token: string };
+  | { kind: "missingRequiredToken"; token: string }
+  | { kind: "missingLeafTitleToken" };
 
 export type RenameTemplateSegment = {
   text: string;
@@ -64,7 +65,15 @@ type OptionalRenameTemplateGroupParseResult =
 
 type RenameTemplateValidationState = {
   sawRequiredToken: boolean;
+  /** An unconditional title or external-ID token, outside any optional group. */
+  sawIdentityToken?: boolean;
+  optionalDepth?: number;
 };
+
+const TITLE_IDENTITY_FOLDER_TOKENS = new Set([
+  "title", "title_with_year", "title_without_year", "title_with_article",
+  "imdb_id", "tmdb_id", "tvdb_id", "anidb_id", "mal_id", "anilist_id",
+]);
 
 function isIllegalFolderTemplateLiteral(character: string): boolean {
   const codePoint = character.charCodeAt(0);
@@ -176,6 +185,7 @@ function validateTemplateFragment(
       if (guard.lookupName === requiredToken) {
         state.sawRequiredToken = true;
       }
+      state.optionalDepth = (state.optionalDepth ?? 0) + 1;
       const bodyIssue = validateTemplateFragment(
         body,
         validTokens,
@@ -183,6 +193,7 @@ function validateTemplateFragment(
         requiredToken,
         validateLiteral,
       );
+      state.optionalDepth -= 1;
       if (bodyIssue) {
         return bodyIssue;
       }
@@ -209,6 +220,9 @@ function validateTemplateFragment(
       }
       if (parsed.spec.lookupName === requiredToken) {
         state.sawRequiredToken = true;
+      }
+      if (!state.optionalDepth && TITLE_IDENTITY_FOLDER_TOKENS.has(parsed.spec.lookupName)) {
+        state.sawIdentityToken = true;
       }
       i = closeIndex + 1;
       continue;
@@ -267,9 +281,22 @@ export function validateFolderTemplateSyntax(
     return issue;
   }
 
-  return state.sawRequiredToken
-    ? null
-    : { kind: "missingRequiredToken", token: requiredToken ?? "" };
+  if (!state.sawRequiredToken) {
+    return { kind: "missingRequiredToken", token: requiredToken ?? "" };
+  }
+
+  if (allowPathComponents) {
+    // Organizing folders may group titles by letter or year, but the last
+    // folder must name one title so siblings never share it.
+    const components = trimmed.split("/");
+    const leafState: RenameTemplateValidationState = { sawRequiredToken: true };
+    validateTemplateFragment(components[components.length - 1].trim(), validTokens, leafState);
+    if (!leafState.sawIdentityToken) {
+      return { kind: "missingLeafTitleToken" };
+    }
+  }
+
+  return null;
 }
 
 export function validateRenameTemplateSyntax(

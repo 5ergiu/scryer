@@ -1100,6 +1100,8 @@ const en: LocaleDictionary = {
   "settings.folderValidationUnknownToken":
     "Folder templates support {title}, {year}, and external ID tokens. Invalid token: {{token}}",
   "settings.folderValidationEmpty": "Folder template cannot be empty",
+  "settings.folderValidationLeafTitleToken":
+    "The last folder in the template must include a title or external ID token",
   "settings.folderValidationIllegalCharacter":
     "Folder template contains an illegal filesystem character: {{character}}",
   "settings.renameTemplateLabel": "Rename template",

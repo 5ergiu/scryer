@@ -316,6 +316,8 @@ function validateFolderTemplate(
       });
     case "missingRequiredToken":
       return t("settings.seasonFolderTemplateMustContainSeason");
+    case "missingLeafTitleToken":
+      return t("settings.folderValidationLeafTitleToken");
   }
 }
 

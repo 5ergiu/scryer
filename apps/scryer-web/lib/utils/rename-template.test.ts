@@ -153,6 +153,35 @@ test("validateFolderTemplateSyntax supports safe nested movie folder components"
   }
 });
 
+test("validateFolderTemplateSyntax requires a title token in the last title folder", () => {
+  const tokens = new Set([
+    "title", "title_with_year", "year", "title_first_character", "imdb_id", "tvdb_id",
+  ]);
+  for (const template of [
+    "{title_first_character}/{title_with_year}",
+    "{year}/{title}",
+    "{title_first_character}/[{tvdb_id}]",
+    "{title}{?year: ({year})}",
+  ]) {
+    assert.equal(validateFolderTemplateSyntax(template, tokens, undefined, true), null, template);
+  }
+  for (const template of [
+    "{title_first_character}",
+    "{year}",
+    "{title}/Movie",
+    "{imdb_id}/x",
+    "{title_first_character}/{?imdb_id:{title}}",
+  ]) {
+    assert.deepEqual(
+      validateFolderTemplateSyntax(template, tokens, undefined, true),
+      { kind: "missingLeafTitleToken" },
+      template,
+    );
+  }
+  // Season and specials folders are single components with no title requirement.
+  assert.equal(validateFolderTemplateSyntax("Specials", tokens), null);
+});
+
 test("validateRenameTemplateSyntax accepts literal brace escapes", () => {
   assert.equal(
     validateRenameTemplateSyntax("{{edition-{edition}}}", VALID_TOKENS),

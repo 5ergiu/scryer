@@ -397,6 +397,34 @@ fn movie_title_folder_templates_allow_safe_nested_paths_only() {
 }
 
 #[test]
+fn title_folder_template_leaf_must_name_the_title() {
+    for template in [
+        "{title_first_character}/{title_with_year}",
+        "{year}/{title}",
+        "{title_first_character}/{title_with_article} ({year})",
+        "{title_first_character}/[{tvdb_id}]",
+        "{title}{?year: ({year})}",
+    ] {
+        validate_title_folder_template(template)
+            .unwrap_or_else(|error| panic!("{template}: {error}"));
+    }
+    for template in [
+        "{title_first_character}",
+        "{year}",
+        "{title}/Movie",
+        "{imdb_id}/x",
+        "{title}/{year}",
+        "{title_first_character}/{?imdb_id:{title}}",
+    ] {
+        let error = validate_title_folder_template(template).expect_err(template);
+        assert!(
+            error.to_string().contains("last folder"),
+            "{template}: {error}"
+        );
+    }
+}
+
+#[test]
 fn title_folder_template_rendering_rejects_empty_components_without_changing_depth() {
     let title = test_movie_title("The A/B\\C: Example");
     let template = "{title_first_character}/{title_with_article}";
