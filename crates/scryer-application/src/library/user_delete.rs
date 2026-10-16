@@ -1985,7 +1985,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let context = multi_disc_context(root.path());
         let folder = root.path().join("Movie");
-        let unowned = folder.join("Other/movie.mkv");
+        // `Other` is an extras folder; use a folder that reads as another title.
+        let unowned = folder.join("Other Title/movie.mkv");
         std::fs::create_dir_all(unowned.parent().unwrap()).unwrap();
         std::fs::write(&unowned, b"unowned").unwrap();
         let manifest = build_title_delete_manifest(context.clone()).unwrap();
