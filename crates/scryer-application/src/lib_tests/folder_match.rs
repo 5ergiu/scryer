@@ -570,6 +570,54 @@ async fn nested_title_destination_guard_allows_empty_siblings_but_refuses_overla
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn nested_title_destination_guard_refuses_linked_owner_aliases() {
+    let fixture = FolderMatchFixture::new().await;
+    // A title owns a linked folder whose target lies elsewhere in the root.
+    let target = fixture.folder("Store/Linked Target");
+    let link = fixture.root.path().join("Linked Owner");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let owner = fixture.create_title_with_folder("Linked", &link).await;
+    // Another title owns a folder spelled through a linked organizing folder.
+    let real = fixture.folder("Real Bucket");
+    let alias = fixture.root.path().join("Alias Bucket");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let aliased = fixture
+        .create_title_with_folder("Aliased", &alias.join("Aliased Title"))
+        .await;
+    let title = fixture
+        .create_title_with_folder("Mover", &fixture.folder("Original"))
+        .await;
+    for rejected in [
+        target.clone(),
+        target.join("Season 1"),
+        fixture.root.path().join("Store"),
+        real.join("Aliased Title"),
+    ] {
+        let error = crate::folder_ownership::ensure_folder_move_available_to_title(
+            &fixture.app,
+            &title,
+            &rejected,
+        )
+        .await
+        .expect_err("overlapping destination must be refused");
+        assert!(
+            error.to_string().contains(&owner.id) || error.to_string().contains(&aliased.id),
+            "{error}"
+        );
+    }
+    crate::folder_ownership::ensure_folder_move_available_to_title(
+        &fixture.app,
+        &title,
+        &fixture.root.path().join("Store/Other Title"),
+    )
+    .await
+    .unwrap();
+    assert!(target.is_dir());
+    assert!(real.is_dir());
+}
+
 #[tokio::test]
 async fn nested_title_restore_guard_preserves_siblings_and_refuses_changed_ownership() {
     let fixture = FolderMatchFixture::new().await;
