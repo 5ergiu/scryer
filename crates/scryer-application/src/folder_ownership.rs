@@ -742,7 +742,7 @@ async fn claim_title_folder_with_layout(
             TitleFolderClaimLayout::Conventional => {
                 crate::library_discovery::ensure_scanned_folder_holds_no_child_titles(
                     folder_path,
-                    &title.facet,
+                    title,
                 )
                 .await?;
             }
@@ -1091,6 +1091,64 @@ mod tests {
             if let Some(path) = direct_child {
                 assert_eq!(std::fs::read(path).unwrap(), b"preserved child movie");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_cour_aliases_preserve_files_and_settings() {
+        for relative in [
+            "Glass Meridian S03 Complete/Scan.Fixture.S03E01.mkv",
+            "Arc One/Verified.Alias.S02E01.mkv",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let file = folder.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"preserved episode").unwrap();
+            let (app, mut title) = unowned_scan_title(MediaFacet::Anime, root.path()).await;
+            title.aliases.push("Verified Alias".into());
+            let tags = title.tags.clone();
+            claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                .await
+                .unwrap();
+            assert!(title_owns_folder(&title, &folder));
+            assert_eq!(title.tags, tags);
+            assert_eq!(std::fs::read(&file).unwrap(), b"preserved episode");
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_rejects_unproven_cour_and_foreign_identity() {
+        for (relative, nfo) in [
+            ("Arc One/01.mkv", None),
+            (
+                "Scan.Fixture.S03E01.mkv",
+                Some("<tvshow><title>Other</title><tvdbid>456</tvdbid></tvshow>"),
+            ),
+            (
+                "Arc One/Scan.Fixture.S03E01.mkv",
+                Some("<tvshow><title>Other</title><tvdbid>456</tvdbid></tvshow>"),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let file = folder.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"preserved episode").unwrap();
+            if let Some(nfo) = nfo {
+                std::fs::write(file.parent().unwrap().join("tvshow.nfo"), nfo).unwrap();
+            }
+            let (app, mut title) = unowned_scan_title(MediaFacet::Anime, root.path()).await;
+            title
+                .external_ids
+                .push(scryer_domain::ExternalId::new("tvdb", "123"));
+            assert!(
+                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                    .await
+                    .is_err()
+            );
+            assert!(title.folder_path.is_none());
+            assert_eq!(std::fs::read(&file).unwrap(), b"preserved episode");
         }
     }
 
