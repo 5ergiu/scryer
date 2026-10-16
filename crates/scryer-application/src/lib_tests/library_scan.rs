@@ -388,7 +388,14 @@ async fn assert_fresh_nested_discovery(facet: MediaFacet) {
         std::fs::write(&path, b"synthetic media").unwrap();
         expected_files.push(path);
     }
-    for relative in ["Mixed/Mixed.2024.mkv", "Conflict/Other.Title.2024.mkv"] {
+    // "Mixed" holds loose media beside a nested title folder; "Conflict" holds
+    // files that disagree on identity. A folder whose name merely differs from
+    // its files is not a conflict: that disagreement is left to title matching.
+    for relative in [
+        "Mixed/Mixed.2024.mkv",
+        "Conflict/Conflict.2024.{imdb-tt0000001}.mkv",
+        "Conflict/Other.Title.2024.{imdb-tt0000002}.mkv",
+    ] {
         let path = root.path().join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"preserved ambiguous media").unwrap();
@@ -486,11 +493,14 @@ async fn assert_fresh_nested_discovery(facet: MediaFacet) {
             }
             let pending = unmatched.items().await;
             assert_eq!(pending.len(), 2, "{pending:?}");
-            assert!(pending.iter().all(|item| {
-                item.status == PendingImportStatus::Ignored
-                    && item.reason_code
-                        == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
-            }));
+            assert!(
+                pending.iter().all(|item| {
+                    item.status == PendingImportStatus::Ignored
+                        && item.reason_code
+                            == crate::library_scan_unmatched::LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+                }),
+                "{pending:?}"
+            );
             for relative in ["Mixed", "Conflict"] {
                 assert!(
                     pending
