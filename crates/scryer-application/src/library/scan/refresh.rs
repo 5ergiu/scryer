@@ -250,6 +250,7 @@ async fn refresh_title_boundaries(
     library_id: &str,
     root: &Path,
     session_id: &str,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> AppResult<(Vec<PathBuf>, usize)> {
     let policy =
         crate::library_discovery::TitleFolderBoundaryPolicy::load(app, facet, library_id, root)
@@ -258,7 +259,7 @@ async fn refresh_title_boundaries(
         root.into(),
         policy,
         64,
-        Default::default(),
+        cancel_token.unwrap_or_default(),
     );
     let mut accepted = Vec::new();
     let mut rejected = 0;
@@ -309,13 +310,14 @@ pub(super) async fn background_refresh_series(
     library_id: &str,
     library_path: &str,
     session_id: &str,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> AppResult<LibraryScanSummary> {
     let started_at = Instant::now();
     let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
     let root = require_directory_library_path(library_path)?;
 
     let (folders, boundary_rejections) =
-        refresh_title_boundaries(app, facet, library_id, root, session_id).await?;
+        refresh_title_boundaries(app, facet, library_id, root, session_id, cancel_token).await?;
     coordinator
         .register_discovery_batch(folders.len(), false)
         .await;
@@ -479,13 +481,21 @@ pub(super) async fn background_refresh_movies(
     library_id: &str,
     library_path: &str,
     session_id: &str,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> AppResult<LibraryScanSummary> {
     let started_at = Instant::now();
     let coordinator = LibraryScanCoordinator::new(app.clone(), session_id.to_string());
     let root = require_directory_library_path(library_path)?;
 
-    let (folders, boundary_rejections) =
-        refresh_title_boundaries(app, &MediaFacet::Movie, library_id, root, session_id).await?;
+    let (folders, boundary_rejections) = refresh_title_boundaries(
+        app,
+        &MediaFacet::Movie,
+        library_id,
+        root,
+        session_id,
+        cancel_token,
+    )
+    .await?;
     let entries = folders
         .into_iter()
         .map(|path| MovieTopLevelEntry { path, is_dir: true })
