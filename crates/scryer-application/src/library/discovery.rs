@@ -637,7 +637,9 @@ async fn discover_title_folder_boundaries(
                 && !season
                 && title_part_folder(&path)
                 && !contains_owner;
-            let rejection = if kind.is_symlink() {
+            // A recorded title may own a linked folder. It is emitted, never
+            // walked, and must still resolve inside this library root.
+            let rejection = if kind.is_symlink() && !owned {
                 Some(
                     "linked folder requires explicit ownership resolution before scanning"
                         .to_owned(),
@@ -2311,6 +2313,39 @@ mod tests {
         assert_eq!(
             std::fs::read(outside.path().join("movie.mkv")).unwrap(),
             b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_title_owned_linked_folder_is_emitted_without_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), ".store/Linked Target/Linked.S01E01.mkv");
+        let link = root.path().join("Network/Linked Show");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.path().join(".store/Linked Target"), &link).unwrap();
+        for owned in [true, false] {
+            let mut policy = discovery_policy(MediaFacet::Series);
+            if owned {
+                policy.stored_folders.push(link.clone());
+            }
+            let entries = collect_nested_boundaries(root.path(), policy).await;
+            assert_eq!(entries.len(), 1, "{entries:?}");
+            assert_eq!(entries[0].path, link);
+            if owned {
+                assert!(entries[0].rejection.is_none(), "{entries:?}");
+            } else {
+                assert!(
+                    entries[0]
+                        .rejection
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("linked folder"))
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read(root.path().join(".store/Linked Target/Linked.S01E01.mkv")).unwrap(),
+            b"synthetic media"
         );
     }
 
