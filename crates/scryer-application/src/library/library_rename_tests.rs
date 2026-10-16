@@ -378,7 +378,15 @@ fn movie_title_folder_templates_allow_safe_nested_paths_only() {
     validate_title_folder_template("{title_first_character}/{title_with_article} ({year})")
         .expect("relative nested title folders should be valid");
 
-    for template in ["/A/{title}", "A//{title}", "../{title}", "A/../{title}"] {
+    for template in [
+        "/A/{title}",
+        "A//{title}",
+        "../{title}",
+        "A/../{title}",
+        "{title}/ /{title}",
+        "A/ .. /{title}",
+        " . /{title}",
+    ] {
         assert!(
             validate_title_folder_template(template).is_err(),
             "unsafe movie folder template should be rejected: {template}"

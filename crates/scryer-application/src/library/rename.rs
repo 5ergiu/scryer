@@ -2922,7 +2922,7 @@ pub(crate) fn validate_title_folder_template(template: &str) -> AppResult<()> {
         || trimmed.ends_with('/')
         || trimmed
             .split('/')
-            .any(|component| matches!(component, "." | ".."))
+            .any(|component| matches!(component.trim(), "." | ".."))
     {
         return Err(AppError::Validation(
             "folder template must contain only relative, non-empty path components".to_string(),

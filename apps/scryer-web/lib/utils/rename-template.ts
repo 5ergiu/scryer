@@ -260,7 +260,7 @@ export function validateFolderTemplateSyntax(
     allowPathComponents
     && (trimmed.startsWith("/")
       || trimmed.endsWith("/")
-      || trimmed.split("/").some((component) => component === "" || component === "." || component === ".."))
+      || trimmed.split("/").map((component) => component.trim()).some((component) => component === "" || component === "." || component === ".."))
   ) {
     return { kind: "illegalCharacter", character: "/" };
   }

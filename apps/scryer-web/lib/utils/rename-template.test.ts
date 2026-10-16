@@ -145,7 +145,9 @@ test("validateFolderTemplateSyntax supports safe nested movie folder components"
     "G/Grey Harbor, The (2008)",
   );
 
-  for (const unsafeTemplate of ["/A/{title}", "A//{title}", "../{title}", "A/../{title}"]) {
+  for (const unsafeTemplate of [
+    "/A/{title}", "A//{title}", "../{title}", "A/../{title}", "{title}/ /{title}", "A/ .. /{title}", " . /{title}",
+  ]) {
     assert.deepEqual(
       validateFolderTemplateSyntax(unsafeTemplate, VALID_MOVIE_FOLDER_TOKENS, undefined, true),
       { kind: "illegalCharacter", character: "/" },
