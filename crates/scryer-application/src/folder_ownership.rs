@@ -857,15 +857,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_scan_claim_accepts_conventional_layout_without_changing_import_guard() {
+    async fn scan_and_import_claims_accept_conventional_season_layouts() {
         for facet in [MediaFacet::Series, MediaFacet::Anime] {
-            for season in [
+            for (season, scan) in [
                 "Series 1",
                 "Special Episodes",
                 "Season_1",
                 "Season-1",
                 "Season1",
-            ] {
+            ]
+            .into_iter()
+            .flat_map(|season| [(season, true), (season, false)])
+            {
                 let root = tempfile::tempdir().unwrap();
                 let folder = root.path().join("Scan Fixture");
                 let file = folder.join(season).join("Scan.Fixture.S01E01.mkv");
@@ -873,15 +876,15 @@ mod tests {
                 std::fs::write(&file, b"synthetic media").unwrap();
                 let (app, mut title) = unowned_scan_title(facet.clone(), root.path()).await;
 
-                assert!(
+                if scan {
+                    claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                        .await
+                        .unwrap();
+                } else {
                     claim_title_folder_if_missing(&app, &mut title, &folder)
                         .await
-                        .is_err()
-                );
-                assert!(title.folder_path.is_none());
-                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
-                    .await
-                    .unwrap();
+                        .unwrap_or_else(|error| panic!("{season}: {error}"));
+                }
                 assert!(title_owns_folder(&title, &folder));
                 let stored = app
                     .services

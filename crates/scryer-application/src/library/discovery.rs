@@ -786,12 +786,18 @@ impl EpisodeFolderBoundaryPolicy<'_> {
     }
 
     fn matches(&self, name: &str) -> bool {
+        let conventional = || {
+            crate::library::workflow::scan_title_files::recognize_season_folder_name(name).is_some()
+        };
         match self {
-            Self::Configured(patterns) => patterns.iter().any(|pattern| pattern.is_match(name)),
-            Self::Conventional => {
-                crate::library::workflow::scan_title_files::recognize_season_folder_name(name)
-                    .is_some()
+            // Scan claims accept conventional season names, so every guard on
+            // an existing episodic title accepts them too. Movies carry no
+            // episode patterns and recognise no season folders.
+            Self::Configured(patterns) => {
+                !patterns.is_empty()
+                    && (patterns.iter().any(|pattern| pattern.is_match(name)) || conventional())
             }
+            Self::Conventional => conventional(),
         }
     }
 }
@@ -2208,6 +2214,38 @@ mod tests {
         }
         assert!(
             ensure_existing_title_boundary(&root.path().join("Mixed"), &[])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_title_boundary_accepts_conventional_season_with_other_template() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Show/Series 1/Show.S01E01.mkv");
+        write_discovery_fixture(
+            root.path(),
+            "Organizer/Show Two/Series 1/Show.Two.S01E01.mkv",
+        );
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        ensure_existing_title_boundary(&root.path().join("Show"), &patterns)
+            .await
+            .unwrap();
+        ensure_folder_holds_no_child_titles(&root.path().join("Show"), &patterns)
+            .await
+            .unwrap();
+        assert!(
+            ensure_existing_title_boundary(&root.path().join("Organizer"), &patterns)
+                .await
+                .is_err()
+        );
+        // Movies recognise no season folders.
+        assert!(
+            ensure_existing_title_boundary(&root.path().join("Show"), &[])
                 .await
                 .is_err()
         );

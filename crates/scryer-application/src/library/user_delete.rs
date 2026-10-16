@@ -1981,6 +1981,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_series_delete_accepts_conventional_season_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Show");
+        let media = folder.join("Series 1/Show.S01E01.mkv");
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"owned media").unwrap();
+        let context = TitleDeleteContext {
+            title_id: "show".into(),
+            title_name: "Show".into(),
+            facet: MediaFacet::Series,
+            folder_path: Some(path_to_stored_string(&folder)),
+            root_folders: vec![test_root_entry(root.path())],
+            other_titles: vec![],
+            recorded_paths: vec![path_to_stored_string(&media)],
+        };
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        ensure_owned_title_delete_boundary(&context, &folder, &patterns, &manifest)
+            .await
+            .unwrap();
+        assert_eq!(manifest.to_preview().media_count, 1);
+        assert_eq!(std::fs::read(media).unwrap(), b"owned media");
+    }
+
+    #[tokio::test]
     async fn owned_multi_disc_delete_rejects_unrecorded_nested_media() {
         let root = tempfile::tempdir().unwrap();
         let context = multi_disc_context(root.path());
