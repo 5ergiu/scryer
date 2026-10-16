@@ -415,6 +415,136 @@ pub(crate) async fn find_other_folder_owner(
         }))
 }
 
+/// Lowercased containment keys a folder is compared under before any
+/// filesystem resolution. Lowercasing only widens the set of owners that go
+/// on to the exact, resolving comparison.
+fn overlap_prefilter_key(folder: &str) -> Option<String> {
+    crate::title_folder_rules::folder_containment_key(folder).map(|key| key.to_lowercase())
+}
+
+fn overlap_keys_related(left: &str, right: &str) -> bool {
+    fn within(path: &str, folder: &str) -> bool {
+        path.strip_prefix(folder)
+            .is_some_and(|rest| rest.is_empty() || folder.ends_with('/') || rest.starts_with('/'))
+    }
+    within(left, right) || within(right, left)
+}
+
+/// Keys for comparing one move candidate against every recorded owner while
+/// resolving the candidate and each library root only once.
+struct FolderMoveOverlapKeys {
+    candidate: Vec<String>,
+    /// Library root keys with their resolved spelling, or `None` when the
+    /// root could not be resolved.
+    roots: Vec<(String, Option<String>)>,
+    /// Whether a folder below a library root is a link, shared by owners
+    /// under the same organizing folders.
+    links: std::collections::HashMap<std::path::PathBuf, bool>,
+}
+
+impl FolderMoveOverlapKeys {
+    async fn load(app: &AppUseCase, folder_path: &str) -> AppResult<Self> {
+        let resolved = resolved_folder_identity(&stored_path_to_path_buf(folder_path))?;
+        let mut candidate: Vec<String> = [
+            overlap_prefilter_key(folder_path),
+            overlap_prefilter_key(&path_to_stored_string(&resolved)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        candidate.dedup();
+        let root_paths = match SCAN_FOLDER_ROOTS.try_with(|snapshot| snapshot.all.clone()) {
+            Ok(roots) => roots,
+            Err(_) => app
+                .all_library_root_folders()
+                .await?
+                .into_iter()
+                .map(|root| root.path)
+                .collect(),
+        };
+        let roots = root_paths
+            .iter()
+            .filter_map(|root| {
+                let key = overlap_prefilter_key(root)?;
+                let resolved = resolved_folder_identity(&stored_path_to_path_buf(root))
+                    .ok()
+                    .and_then(|resolved| overlap_prefilter_key(&path_to_stored_string(&resolved)));
+                Some((key, resolved))
+            })
+            .collect();
+        Ok(Self {
+            candidate,
+            roots,
+            links: Default::default(),
+        })
+    }
+
+    /// Whether `owned_path` needs the exact, resolving overlap comparison.
+    /// An owner unrelated by key, also after substituting its resolved library
+    /// root, with no link between that root and its folder, cannot overlap.
+    fn needs_exact_comparison(&mut self, owned_path: &str) -> AppResult<bool> {
+        let Some(owner) = overlap_prefilter_key(owned_path) else {
+            return Ok(true);
+        };
+        let mut owner_keys = vec![owner.clone()];
+        for (root, resolved) in &self.roots {
+            if overlap_keys_related(&owner, root) && owner.len() >= root.len() {
+                let Some(resolved) = resolved else {
+                    return Ok(true);
+                };
+                let rest = owner[root.len()..].trim_start_matches('/');
+                owner_keys.push(if rest.is_empty() {
+                    resolved.clone()
+                } else {
+                    format!("{}/{rest}", resolved.trim_end_matches('/'))
+                });
+            }
+        }
+        if owner_keys.iter().any(|owner| {
+            self.candidate
+                .iter()
+                .any(|candidate| overlap_keys_related(owner, candidate))
+        }) {
+            return Ok(true);
+        }
+        let path = stored_path_to_path_buf(owned_path);
+        if !path.is_absolute() {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors() {
+            let is_resolved_root = overlap_prefilter_key(&path_to_stored_string(ancestor))
+                .is_some_and(|key| {
+                    self.roots
+                        .iter()
+                        .any(|(root, resolved)| resolved.is_some() && *root == key)
+                });
+            if is_resolved_root {
+                break;
+            }
+            let is_link = match self.links.get(ancestor) {
+                Some(is_link) => *is_link,
+                None => {
+                    let is_link = match std::fs::symlink_metadata(ancestor) {
+                        Ok(metadata) => metadata.file_type().is_symlink(),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                        Err(error) => {
+                            return Err(AppError::Validation(format!(
+                                "cannot inspect folder {owned_path} owned by another title: {error}"
+                            )));
+                        }
+                    };
+                    self.links.insert(ancestor.to_path_buf(), is_link);
+                    is_link
+                }
+            };
+            if is_link {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 pub(crate) async fn ensure_folder_move_available_to_title(
     app: &AppUseCase,
     title: &Title,
@@ -424,6 +554,7 @@ pub(crate) async fn ensure_folder_move_available_to_title(
         return Err(AppError::Validation("title folder path is required".into()));
     }
     let folder_path = path_to_stored_string(folder_path);
+    let mut keys = None;
     for owner in app
         .services
         .catalog
@@ -431,12 +562,29 @@ pub(crate) async fn ensure_folder_move_available_to_title(
         .list_delete_preview_info()
         .await?
     {
-        if owner.title_id != title.id
-            && let Some(owned_path) = owner.folder_path.as_deref()
-            && !owned_path.is_empty()
-            && title_folders_overlap(&folder_path, owned_path)?
-            && !folder_spans_a_library_root(app, owned_path).await?
+        let Some(owned_path) = owner.folder_path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        if owner.title_id == title.id {
+            continue;
+        }
+        if keys.is_none() {
+            keys = Some(FolderMoveOverlapKeys::load(app, &folder_path).await?);
+        }
+        if !keys
+            .as_mut()
+            .expect("overlap keys loaded")
+            .needs_exact_comparison(owned_path)?
         {
+            continue;
+        }
+        let overlaps = title_folders_overlap(&folder_path, owned_path).map_err(|error| {
+            AppError::Validation(format!(
+                "cannot compare folder {folder_path} with folder {owned_path} owned by title {}: {error}",
+                owner.title_id
+            ))
+        })?;
+        if overlaps && !folder_spans_a_library_root(app, owned_path).await? {
             return Err(AppError::Validation(format!(
                 "folder {folder_path} overlaps the folder owned by title {}",
                 owner.title_id
@@ -857,15 +1005,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_scan_claim_accepts_conventional_layout_without_changing_import_guard() {
+    async fn scan_and_import_claims_accept_conventional_season_layouts() {
         for facet in [MediaFacet::Series, MediaFacet::Anime] {
-            for season in [
+            for (season, scan) in [
                 "Series 1",
                 "Special Episodes",
                 "Season_1",
                 "Season-1",
                 "Season1",
-            ] {
+            ]
+            .into_iter()
+            .flat_map(|season| [(season, true), (season, false)])
+            {
                 let root = tempfile::tempdir().unwrap();
                 let folder = root.path().join("Scan Fixture");
                 let file = folder.join(season).join("Scan.Fixture.S01E01.mkv");
@@ -873,15 +1024,15 @@ mod tests {
                 std::fs::write(&file, b"synthetic media").unwrap();
                 let (app, mut title) = unowned_scan_title(facet.clone(), root.path()).await;
 
-                assert!(
+                if scan {
+                    claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                        .await
+                        .unwrap();
+                } else {
                     claim_title_folder_if_missing(&app, &mut title, &folder)
                         .await
-                        .is_err()
-                );
-                assert!(title.folder_path.is_none());
-                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
-                    .await
-                    .unwrap();
+                        .unwrap_or_else(|error| panic!("{season}: {error}"));
+                }
                 assert!(title_owns_folder(&title, &folder));
                 let stored = app
                     .services

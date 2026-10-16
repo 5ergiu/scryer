@@ -2922,7 +2922,7 @@ pub(crate) fn validate_title_folder_template(template: &str) -> AppResult<()> {
         || trimmed.ends_with('/')
         || trimmed
             .split('/')
-            .any(|component| matches!(component, "." | ".."))
+            .any(|component| matches!(component.trim(), "." | ".."))
     {
         return Err(AppError::Validation(
             "folder template must contain only relative, non-empty path components".to_string(),
@@ -2937,7 +2937,26 @@ pub(crate) fn validate_title_folder_template(template: &str) -> AppResult<()> {
         true,
         is_illegal_title_folder_template_literal,
         true,
-    )
+    )?;
+
+    // Organizing folders may group titles by letter or year, but the last
+    // folder must name one title so siblings never share it.
+    let leaf = trimmed.rsplit('/').next().unwrap_or_default().trim();
+    let mut state = RenameTemplateValidationState::default();
+    validate_rename_template_fragment(
+        leaf,
+        "folder",
+        &is_supported_title_folder_token,
+        Some(is_illegal_title_folder_template_literal),
+        None,
+        &mut state,
+    )?;
+    if !state.saw_identity_token {
+        return Err(AppError::Validation(
+            "folder template's last folder must include a title or external ID token".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_season_folder_template(template: &str) -> AppResult<()> {
@@ -3040,6 +3059,18 @@ fn is_illegal_title_folder_template_literal(ch: char) -> bool {
 struct RenameTemplateValidationState {
     saw_token: bool,
     saw_required_token: bool,
+    /// An unconditional title or external-ID token, outside any optional group.
+    saw_identity_token: bool,
+    optional_depth: usize,
+}
+
+fn is_title_identity_token(token: &str) -> bool {
+    matches!(
+        token,
+        "title" | "title_with_year" | "title_without_year" | "title_with_article"
+    ) || TITLE_EXTERNAL_ID_TOKENS
+        .iter()
+        .any(|(token_name, _)| *token_name == token)
 }
 
 fn invalid_optional_group_error(
@@ -3123,14 +3154,17 @@ where
             if required_token.is_some_and(|required| group.guard == required) {
                 state.saw_required_token = true;
             }
-            validate_rename_template_fragment(
+            state.optional_depth += 1;
+            let body = validate_rename_template_fragment(
                 &group.body,
                 template_label,
                 is_supported_token,
                 is_illegal_literal,
                 required_token,
                 state,
-            )?;
+            );
+            state.optional_depth -= 1;
+            body?;
             cursor = group.end_index + 1;
             continue;
         }
@@ -3160,6 +3194,9 @@ where
             )));
         }
         state.saw_token = true;
+        if state.optional_depth == 0 && is_title_identity_token(&parsed_token.name) {
+            state.saw_identity_token = true;
+        }
         if required_token.is_some_and(|required| parsed_token.name == required) {
             state.saw_required_token = true;
         }
@@ -3186,8 +3223,8 @@ fn validate_folder_component_template(
     }
 
     let mut state = RenameTemplateValidationState {
-        saw_token: false,
         saw_required_token: required_token.is_none(),
+        ..Default::default()
     };
     let components = if allow_path {
         trimmed.split('/').collect::<Vec<_>>()

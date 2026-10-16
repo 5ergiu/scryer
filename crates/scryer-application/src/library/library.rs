@@ -1404,8 +1404,15 @@ impl AppUseCase {
                     .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Movie) => {
-                    background_refresh_movies(self, actor, library_id, library_path, session_id)
-                        .await?
+                    background_refresh_movies(
+                        self,
+                        actor,
+                        library_id,
+                        library_path,
+                        session_id,
+                        cancel_token.clone(),
+                    )
+                    .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Series | MediaFacet::Anime) => {
                     background_refresh_series(
@@ -1415,6 +1422,7 @@ impl AppUseCase {
                         library_id,
                         library_path,
                         session_id,
+                        cancel_token.clone(),
                     )
                     .await?
                 }

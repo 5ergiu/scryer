@@ -957,6 +957,8 @@ const ru: LocaleDictionary = {
     "settings.folderValidationUnknownToken":
         "Шаблоны папок поддерживают токены {title}, {year} и идентификаторы внешних сервисов. Недопустимый токен: {{token}}",
     "settings.folderValidationEmpty": "Шаблон папки не может быть пустым.",
+    "settings.folderValidationLeafTitleToken":
+        "Последняя папка в шаблоне должна содержать токен названия или внешнего идентификатора",
     "settings.folderValidationIllegalCharacter":
         "Шаблон папки содержит недопустимый символ файловой системы: {{character}}",
     "settings.renameTemplateLabel": "Шаблон переименования",

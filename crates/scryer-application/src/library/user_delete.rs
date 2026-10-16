@@ -635,7 +635,9 @@ impl AppUseCase {
             if path.is_dir() {
                 let patterns =
                     crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
-                crate::library_discovery::ensure_existing_title_boundary(&path, &patterns).await?;
+                crate::library_discovery::ensure_existing_title_boundary(&path, &patterns)
+                    .await
+                    .map_err(title_delete_boundary_error)?;
             }
         }
         self.execute_delete_context(
@@ -1219,6 +1221,17 @@ fn normalize_optional_path_string(path: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Delete refuses a recorded folder that holds other titles or a mixed
+/// layout; the message says how to resolve it instead of naming a selection.
+fn title_delete_boundary_error(error: AppError) -> AppError {
+    match error {
+        AppError::Validation(_) => AppError::Validation(
+            "title folder also holds other titles or a mixed layout; change this title's folder to the one that directly holds its media, then delete again".into(),
+        ),
+        error => error,
+    }
+}
+
 fn required_title_delete_folder(folder_path: Option<String>) -> AppResult<String> {
     normalize_optional_path_string(folder_path).ok_or_else(|| {
         AppError::Validation(
@@ -1237,8 +1250,10 @@ async fn ensure_owned_title_delete_boundary(
     let boundary_error =
         match crate::library_discovery::ensure_existing_title_boundary(path, patterns).await {
             Ok(()) => return Ok(()),
-            Err(error @ AppError::Validation(_)) if title.facet == MediaFacet::Movie => error,
-            Err(error) => return Err(error),
+            Err(error @ AppError::Validation(_)) if title.facet == MediaFacet::Movie => {
+                title_delete_boundary_error(error)
+            }
+            Err(error) => return Err(title_delete_boundary_error(error)),
         };
     // Discovery cannot distinguish a movie's disc folders from nested titles.
     // Only catalog ownership of every media file can establish this exception.
@@ -1364,8 +1379,7 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
     });
     if !has_recorded_media {
         return Err(AppError::Validation(
-            "title folder has no verified recorded media; refusing to delete unowned contents"
-                .into(),
+            "title folder has no verified recorded media, so nothing was deleted; rescan the title folder to record its files, then delete again".into(),
         ));
     }
 
@@ -1981,18 +1995,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_series_delete_accepts_conventional_season_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Show");
+        let media = folder.join("Series 1/Show.S01E01.mkv");
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"owned media").unwrap();
+        let context = TitleDeleteContext {
+            title_id: "show".into(),
+            title_name: "Show".into(),
+            facet: MediaFacet::Series,
+            folder_path: Some(path_to_stored_string(&folder)),
+            root_folders: vec![test_root_entry(root.path())],
+            other_titles: vec![],
+            recorded_paths: vec![path_to_stored_string(&media)],
+        };
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        ensure_owned_title_delete_boundary(&context, &folder, &patterns, &manifest)
+            .await
+            .unwrap();
+        assert_eq!(manifest.to_preview().media_count, 1);
+        assert_eq!(std::fs::read(media).unwrap(), b"owned media");
+    }
+
+    #[tokio::test]
     async fn owned_multi_disc_delete_rejects_unrecorded_nested_media() {
         let root = tempfile::tempdir().unwrap();
         let context = multi_disc_context(root.path());
         let folder = root.path().join("Movie");
-        let unowned = folder.join("Other/movie.mkv");
+        // `Other` is an extras folder; use a folder that reads as another title.
+        let unowned = folder.join("Other Title/movie.mkv");
         std::fs::create_dir_all(unowned.parent().unwrap()).unwrap();
         std::fs::write(&unowned, b"unowned").unwrap();
         let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        let error = ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
+            .await
+            .expect_err("nested title must be refused");
         assert!(
-            ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
-                .await
-                .is_err()
+            error.to_string().contains("directly holds its media"),
+            "{error}"
         );
         assert_eq!(std::fs::read(unowned).unwrap(), b"unowned");
         for path in context.recorded_paths {

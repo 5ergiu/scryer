@@ -900,6 +900,8 @@ const nl: LocaleDictionary = {
   "settings.folderValidationUnknownToken":
     "Maptemplates ondersteunen {title}, {year} en externe ID-tokens. Ongeldig token: {{token}}",
   "settings.folderValidationEmpty": "Maptemplate mag niet leeg zijn",
+  "settings.folderValidationLeafTitleToken":
+    "De laatste map in de template moet een titel- of extern ID-token bevatten",
   "settings.folderValidationIllegalCharacter":
     "Maptemplate bevat een ongeldig teken: {{character}}",
   "settings.renameTemplateLabel": "Template voor hernoemen",

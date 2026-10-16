@@ -378,7 +378,15 @@ fn movie_title_folder_templates_allow_safe_nested_paths_only() {
     validate_title_folder_template("{title_first_character}/{title_with_article} ({year})")
         .expect("relative nested title folders should be valid");
 
-    for template in ["/A/{title}", "A//{title}", "../{title}", "A/../{title}"] {
+    for template in [
+        "/A/{title}",
+        "A//{title}",
+        "../{title}",
+        "A/../{title}",
+        "{title}/ /{title}",
+        "A/ .. /{title}",
+        " . /{title}",
+    ] {
         assert!(
             validate_title_folder_template(template).is_err(),
             "unsafe movie folder template should be rejected: {template}"
@@ -394,6 +402,34 @@ fn movie_title_folder_templates_allow_safe_nested_paths_only() {
     );
     assert!(path.starts_with("/library"));
     assert_eq!(path.components().count(), 4, "rendered path: {path:?}");
+}
+
+#[test]
+fn title_folder_template_leaf_must_name_the_title() {
+    for template in [
+        "{title_first_character}/{title_with_year}",
+        "{year}/{title}",
+        "{title_first_character}/{title_with_article} ({year})",
+        "{title_first_character}/[{tvdb_id}]",
+        "{title}{?year: ({year})}",
+    ] {
+        validate_title_folder_template(template)
+            .unwrap_or_else(|error| panic!("{template}: {error}"));
+    }
+    for template in [
+        "{title_first_character}",
+        "{year}",
+        "{title}/Movie",
+        "{imdb_id}/x",
+        "{title}/{year}",
+        "{title_first_character}/{?imdb_id:{title}}",
+    ] {
+        let error = validate_title_folder_template(template).expect_err(template);
+        assert!(
+            error.to_string().contains("last folder"),
+            "{template}: {error}"
+        );
+    }
 }
 
 #[test]

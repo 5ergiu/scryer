@@ -911,6 +911,7 @@ const zh_HK: LocaleDictionary = {
   "settings.folderRenameSectionTitle": "資料夾重新命名",
   "settings.folderValidationUnknownToken": "資料夾模板支援 {title}、{year} 和外部 ID 標記。無效標記：{{token}}",
   "settings.folderValidationEmpty": "資料夾名稱不可為空。",
+  "settings.folderValidationLeafTitleToken": "範本中的最後一個資料夾必須包含標題或外部 ID 標記",
   "settings.folderValidationIllegalCharacter": "資料夾範本包含非法的文件系統字元：{{character}}",
   "settings.renameTemplateLabel": "重命名模板",
   "settings.renameTemplatePlaceholder": "佔位符",
