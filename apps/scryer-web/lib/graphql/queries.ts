@@ -435,10 +435,6 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       videoCodecParsed
       audioCodecParsed
       acquisitionScore
-      currentScoreEvaluation {
-        score evaluatedAt needsRefresh timeSensitive rejectionCodes
-        entries { code delta kind source }
-      }
       scoringLog
       indexerSource
       grabbedReleaseTitle
@@ -455,6 +451,18 @@ export const TITLE_MEDIA_FILE_FIELDS = `
         indexerLanguages
         extra
         capturedAt
+      }`;
+
+/**
+ * The saved score evaluation is a per-file resolver that re-reads the file,
+ * its title, episodes and quality profile to judge freshness. Request it only
+ * from the detail queries whose UI shows the score summary, never from the
+ * shared file fragment that bulk and maintenance queries reuse.
+ */
+export const TITLE_MEDIA_FILE_SCORE_FIELDS = `
+      currentScoreEvaluation {
+        score evaluatedAt needsRefresh timeSensitive rejectionCodes
+        entries { code delta kind source }
       }`;
 
 const WANTED_ITEM_FIELDS = `
@@ -628,7 +636,7 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     }
     ratings {${TITLE_RATING_SUMMARY_FIELDS}
     }${TITLE_CAST_CREDIT_SELECTION}
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }`;
 
 const SERIES_SIDE_PANEL_TITLE_FIELDS = `
@@ -1115,7 +1123,7 @@ export const titleMediaFilesQuery = `query TitleMediaFiles($id: ID!) {
 export const movieEntityDetailQuery = `query MovieEntityDetail($titleId: ID!, $movieId: ID!) {
   title(id: $titleId) {
     id
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }
   }
   movieEntity(titleId: $titleId, id: $movieId) {
@@ -1140,7 +1148,7 @@ export const episodeSidePanelDetailQuery = `query EpisodeSidePanelDetail($titleI
       state
       primaryQualityLabel
     }
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }
   }
 }`;

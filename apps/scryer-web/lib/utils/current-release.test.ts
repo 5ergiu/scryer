@@ -29,8 +29,19 @@ test("scanned files use scene or original file identity without fuzzy title matc
   ])], ["show.s01e01-group", "show.s01e02-group"]);
 });
 
-test("a renamed filename without persisted release evidence never proves ownership", () => {
-  assert.equal(currentReleaseNames([{ role: "primary", filePath: "/library/Film.1080p-GROUP.mkv" }]).size, 0);
+test("the on-disk filename is the final fallback when a row carries no release evidence", () => {
+  assert.deepEqual([...currentReleaseNames([
+    { role: "primary", filePath: "/library/Film.1080p-GROUP.mkv" },
+    { role: "primary", filePath: "D:\\Library\\Show.S01E01-GROUP.MKV", grabbedReleaseTitle: "  ", sceneName: null, originalFilePath: "" },
+  ])], ["film.1080p-group", "show.s01e01-group"]);
+});
+
+test("the on-disk filename is ignored once any persisted release evidence exists", () => {
+  assert.deepEqual([...currentReleaseNames([
+    { role: "primary", grabbedReleaseTitle: "Grabbed.Release", filePath: "/library/Renamed.Film.mkv" },
+    { role: "primary", sceneName: "Scene.Release", filePath: "/library/Renamed.Show.mkv" },
+    { role: "primary", originalFilePath: "/downloads/Original.Release.mkv", filePath: "/library/Renamed.Other.mkv" },
+  ])], ["grabbed.release", "scene.release", "original.release"]);
 });
 
 test("episode, season and series-movie scopes exclude unrelated owned releases", () => {
