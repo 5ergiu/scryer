@@ -3165,7 +3165,6 @@ export function MediaContentView({
     managedStorageSummary(Math.max(0, catalogManagedBytes)),
   ].join(" · ");
 
-  const [libraryRoutingWide, setLibraryRoutingWide] = React.useState(false);
   const [libraryCrumb, setLibraryCrumb] = React.useState<string | null>(null);
   const facetSettingsSection =
     effectiveContentSettingsSection === "library" ||
@@ -3423,8 +3422,6 @@ export function MediaContentView({
               ? "reference"
               : facetSettingsSection === "routing"
                 ? "full"
-              : facetSettingsSection === "library" && libraryRoutingWide
-              ? "wide"
               : "default"
           }
           trailingCrumb={
@@ -3535,7 +3532,6 @@ export function MediaContentView({
             settingsTitle={mediaLibrarySettingsTitle}
             libraries={libraries}
             librariesLoading={librariesLoading}
-            onWideLayoutChange={setLibraryRoutingWide}
             onActiveLibraryNameChange={setLibraryCrumb}
             rootValidationLibraries={rootValidationLibraries}
             rootValidationLibrariesLoading={rootValidationLibrariesLoading}

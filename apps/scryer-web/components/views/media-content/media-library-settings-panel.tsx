@@ -151,8 +151,6 @@ type MediaLibrarySettingsPanelProps = {
   onUpdateLibrary: (libraryId: string, input: LibraryMutationInput) => Promise<LibraryRecord | null | void> | LibraryRecord | null | void;
   onDeleteLibrary: (libraryId: string) => Promise<boolean | void> | boolean | void;
   onScan: (libraryId: string) => Promise<void> | void;
-  /** Reports whether the content column should widen (dense routing table). */
-  onWideLayoutChange?: (wide: boolean) => void;
   /** Reports the active library name for the page breadcrumb (null when creating). */
   onActiveLibraryNameChange?: (name: string | null) => void;
 };
@@ -292,7 +290,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   onUpdateLibrary,
   onDeleteLibrary,
   onScan,
-  onWideLayoutChange,
   onActiveLibraryNameChange,
 }: MediaLibrarySettingsPanelProps) {
   const t = useTranslate();
@@ -361,9 +358,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     );
     setFooterTarget(document.getElementById(LIBRARY_FOOTER_SLOT_ID));
   }, []);
-  React.useEffect(() => {
-    onWideLayoutChange?.(draftDownloadClientRoutingMode === "custom");
-  }, [draftDownloadClientRoutingMode, onWideLayoutChange]);
 
   const activeLibrary = React.useMemo(
     () => libraries.find((library) => library.id === activeLibraryId) ?? null,
@@ -2088,12 +2082,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
             ? createPortal(
                 <div className="border-t border-[var(--scry-border2)] bg-[var(--scry-surf)]">
                   <div
-                    className={cn(
-                      "mx-auto flex w-full flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]",
-                      draftDownloadClientRoutingMode === "custom"
-                        ? "max-w-[1280px]"
-                        : "max-w-[920px]",
-                    )}
+                    className="mx-auto flex w-full max-w-[920px] flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]"
                   >
                     {mode !== "new" &&
                     activeLibrary &&
