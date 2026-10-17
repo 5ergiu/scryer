@@ -463,6 +463,38 @@ function SearchResultRow({
             <span className="font-[var(--font-code)] font-medium text-foreground/80">
               {bytesToWholeReadable(result.sizeBytes)}
             </span>
+            {decision ? (
+              <>
+                <span aria-hidden="true">•</span>
+                {hasLog ? (
+                  <button
+                    type="button"
+                    onClick={() => setExpanded((prev) => !prev)}
+                    aria-expanded={expanded}
+                    aria-label={
+                      expanded ? t("nzb.hideScoringLog") : t("nzb.showScoringLog")
+                    }
+                    className="inline-flex items-center gap-1"
+                  >
+                    {t("nzb.score")}
+                    <span
+                      className={`font-[var(--font-code)] font-semibold underline decoration-dotted underline-offset-2 ${scoreToneClassName(decision.releaseScore)}`}
+                    >
+                      {formatScore(decision.releaseScore)}
+                    </span>
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1">
+                    {t("nzb.score")}
+                    <span
+                      className={`font-[var(--font-code)] font-semibold ${scoreToneClassName(decision.releaseScore)}`}
+                    >
+                      {formatScore(decision.releaseScore)}
+                    </span>
+                  </span>
+                )}
+              </>
+            ) : null}
             {currentFileBadge}{packBadge}
             {rejectionBadge}
           </div>
@@ -555,6 +587,11 @@ function SearchResultRow({
             ) : null}
           </div>
         </div>
+        {expanded && hasLog ? (
+          <div className="-mx-2.5 -mb-2 mt-2 overflow-x-auto border-t border-border">
+            <ScoringLogPanel decision={decision} />
+          </div>
+        ) : null}
       </div>
     );
   }
