@@ -56,11 +56,7 @@ import { LoadingMark } from "@/components/common/loading-mark";
 function renderEpisodeTypeBadges(episode: CollectionEpisode, t: TranslateFn) {
   return (
     <>
-      {episode.episodeType === "SPECIAL" ? (
-        <Badge tone="info" className="px-1.5 text-[10px]">
-          {t("episode.special")}
-        </Badge>
-      ) : episode.episodeType === "OVA" ? (
+      {episode.episodeType === "OVA" ? (
         <Badge tone="info" className="px-1.5 text-[10px]">
           {t("episode.ova")}
         </Badge>
