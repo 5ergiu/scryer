@@ -21,9 +21,9 @@ const cancel = `mutation CancelFileScoreRefresh($id: ID!) { cancelFileScoreRefre
  * `text` is the bulk-selection button, `icon` sits among a header's icon
  * actions, and `action` sits among a file row's actions.
  */
-export function RefreshScoresButton({ selection, disabled = false, single = false, appearance = "text", id, className }: {
+export function RefreshScoresButton({ selection, disabled = false, single = false, appearance = "text", size = "sm", id, className }: {
   selection: Selection; disabled?: boolean; single?: boolean;
-  appearance?: "text" | "icon" | "action"; id?: string; className?: string;
+  appearance?: "text" | "icon" | "action"; size?: "sm" | "default"; id?: string; className?: string;
 }) {
   const t = useTranslate();
   const client = useClient();
@@ -56,8 +56,8 @@ export function RefreshScoresButton({ selection, disabled = false, single = fals
         disabled={blocked} onClick={() => void submit()} title={label} aria-label={label}
         leadingIcon={pending || active ? <LoadingMark className="h-3.5 w-3.5" /> : <Calculator className="h-3.5 w-3.5" />}>
         {label}</TextActionButton>
-      : <Button size="sm" variant="outline" id={id} className={className} disabled={blocked}
-        onClick={() => void submit()}>{label}</Button>}
+      : <Button size={size} variant="outline" id={id} className={className} disabled={blocked}
+        onClick={() => void submit()}>{icon}{label}</Button>}
     {active ? <Button size="sm" variant="ghost" onClick={() => void client.mutation(cancel, { id: runId }).toPromise()
       .then((result) => { if (result.error) setStatus(t("scoring.refreshFailed"), { level: "ERROR" }); })}>{t("label.cancel")}</Button> : null}
   </span>;

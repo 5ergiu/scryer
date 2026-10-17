@@ -3995,7 +3995,14 @@ export function MediaContentView({
                           <Pencil className="h-4 w-4" />
                           {t("label.edit")}
                         </Button>
-                        {canManageTitle ? <RefreshScoresButton selection={{ titleIds: [...selectedTitleIds] }} disabled={bulkActionBusy} /> : null}
+                        {canManageTitle ? (
+                          <RefreshScoresButton
+                            selection={{ titleIds: [...selectedTitleIds] }}
+                            disabled={bulkActionBusy}
+                            size="default"
+                            className="flex-1 justify-center gap-2"
+                          />
+                        ) : null}
                         {canRenameSelectedTitles ? (
                           <Button
                             variant="outline"
