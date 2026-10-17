@@ -1751,6 +1751,17 @@ ${pageMetadataFields}
 }`;
 }
 
+/** Ids of every title matching the catalog filters, for select-all. */
+export const titleCatalogIdsQuery = `query TitleCatalogIds(
+  $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
+  $filter: TitleCatalogFilterInput, $sort: TitleCatalogSortInput, $limit: Int, $offset: Int
+) {
+  titles(facet: $facet, libraryIds: $libraryIds, query: $query, filter: $filter, sort: $sort, limit: $limit, offset: $offset) {
+    items { id }
+    hasMore
+  }
+}`;
+
 export const titleCatalogCountsQuery = `query TitleCatalogCounts(
   $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
   $filter: TitleCatalogFilterInput
