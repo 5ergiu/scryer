@@ -500,7 +500,7 @@ function SearchResultRow({
               {queueUnavailableReason}
             </p>
           ) : null}
-          <div className="flex flex-wrap gap-2 pt-0.5">
+          <div className="flex flex-row-reverse flex-wrap gap-2 pt-0.5">
             <Button
               id={queueButtonId}
               data-ui="release-search-result-queue"
