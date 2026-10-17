@@ -3146,6 +3146,23 @@ file = "postgres/migrations/0290_media_file_score_evaluation.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 291
+description = "merge list search mode into add"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

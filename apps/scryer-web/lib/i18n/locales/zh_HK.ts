@@ -617,6 +617,8 @@ const zh_HK: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "系統內部",
   "deletePreview.counting": "正在計算要刪除的檔案...",
   "deletePreview.error": "無法準備刪除預覽。",
+  "deletePreview.folderUnknown": "Scryer 無法確定哪個資料夾存放此作品的檔案，因此不會從硬碟刪除任何內容。",
+  "deletePreview.removeFromCatalogOnly": "僅從目錄中移除",
   "deletePreview.files": "檔案",
   "deletePreview.media": "媒體",
   "deletePreview.subtitles": "字幕",

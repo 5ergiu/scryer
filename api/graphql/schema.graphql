@@ -10975,11 +10975,8 @@ What a sync does with a list title the library does not have.
 """
 enum ListMode {
 	"""
-	Add the title monitored and search for it at once.
-	"""
-	SEARCH
-	"""
-	Add the title monitored and let the wanted cycle find it.
+	Add the title with the route's monitoring. A monitored title is found
+	by the wanted cycle; an unmonitored one is not searched.
 	"""
 	ADD
 	"""
