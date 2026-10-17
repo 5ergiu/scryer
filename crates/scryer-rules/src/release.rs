@@ -163,6 +163,9 @@ pub struct ReleaseDoc {
     pub audio_codecs: Vec<String>,
     pub audio_channels: Option<String>,
     pub languages_audio: Vec<String>,
+    /// Audio languages the indexer listing itself reported, as ISO 639 codes.
+    /// Unlike `languages_audio`, never filled from the name or the title.
+    pub indexer_languages: Vec<String>,
     pub languages_subtitles: Vec<String>,
     pub is_dual_audio: bool,
     pub is_atmos: bool,
@@ -2066,6 +2069,7 @@ score_entry["internal"] := 300 if {
                 audio_codecs: vec!["DDP".to_string()],
                 audio_channels: Some("5.1".to_string()),
                 languages_audio: vec!["eng".to_string()],
+                indexer_languages: vec![],
                 languages_subtitles: vec![],
                 is_dual_audio: false,
                 is_atmos: false,

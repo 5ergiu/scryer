@@ -162,6 +162,7 @@ fn test_input() -> scryer_rules::UserRuleInput {
             audio_codecs: vec!["DDP".to_string()],
             audio_channels: Some("5.1".to_string()),
             languages_audio: vec!["eng".to_string()],
+            indexer_languages: vec![],
             languages_subtitles: vec![],
             is_dual_audio: false,
             is_atmos: false,
