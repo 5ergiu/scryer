@@ -43,7 +43,7 @@ import {
 import { ConvergenceBadge } from "@/components/views/convergence-badge";
 import { CutoffUnmetView } from "@/components/views/cutoff-unmet-view";
 import type { CutoffUnmetItem } from "@/components/views/cutoff-unmet-view";
-import { WantedScoringBreakdown } from "@/components/views/wanted-scoring-breakdown";
+import { ScoreLog, ScoreValue } from "@/components/common/score-log";
 import type {
   AcquisitionSearchJob,
   PendingReleaseItem,
@@ -320,7 +320,7 @@ function StandbyReleasesList({
               {release.seeders == null ? null : (
                 <span>{t("wanted.standbySeeders")}: {release.seeders}</span>
               )}
-              <span>{t("wanted.standbyScore")}: {release.releaseScore}</span>
+              <span>{t("wanted.standbyScore")}: <ScoreValue score={release.releaseScore} /></span>
               <span>{t("wanted.standbyAge")}: {formatDate(release.publishedAt ?? release.addedAt, dateTimeFormat)}</span>
             </div>
           </div>
@@ -738,7 +738,7 @@ function WantedItemsCard({
                     </div>
                     <div>
                       <span className="block">{t("wanted.colScore")}</span>
-                      <span className="text-foreground">{item.currentScore ?? "—"}</span>
+                      <ScoreValue score={item.currentScore} />
                     </div>
                     <div>
                       <span className="block">{t("wanted.colIndexers")}</span>
@@ -795,10 +795,10 @@ function WantedItemsCard({
                                 <div className="mt-2 flex flex-wrap gap-2">
                                   {decisionBadge(d.decisionCode, t)}
                                   <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                                    {t("wanted.decScore")}: {d.candidateScore}
+                                    {t("wanted.decScore")}: <ScoreValue score={d.candidateScore} />
                                   </span>
                                   <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                                    {t("wanted.decDelta")}: {d.scoreDelta ?? "—"}
+                                    {t("wanted.decDelta")}: <ScoreValue score={d.scoreDelta} />
                                   </span>
                                 </div>
                                 <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
@@ -820,7 +820,11 @@ function WantedItemsCard({
                                       <span>{t("wanted.scoreBreakdown")}</span>
                                     </button>
                                     {scoringExpanded ? (
-                                      <WantedScoringBreakdown entries={scoringEntries} />
+                                      <ScoreLog
+                                        entries={scoringEntries}
+                                        total={d.candidateScore}
+                                        className="mt-3 rounded-md border border-border"
+                                      />
                                     ) : null}
                                   </div>
                                 ) : null}
@@ -974,7 +978,7 @@ function WantedItemsCard({
                         {formatDate(item.lastSearchAt, dateTimeFormat)}
                       </TableCell>
                       <TableCodeCell className="text-center">
-                        {item.currentScore ?? "—"}
+                        <ScoreValue score={item.currentScore} />
                       </TableCodeCell>
                       <TableCodeCell className="text-center">
                         {item.indexersCovered}/{item.indexersRouted}
@@ -1098,10 +1102,10 @@ function WantedItemsCard({
                                           {decisionBadge(d.decisionCode, t)}
                                         </TableCell>
                                         <TableCodeCell className="text-center">
-                                          {d.candidateScore}
+                                          <ScoreValue score={d.candidateScore} />
                                         </TableCodeCell>
                                         <TableCodeCell className="text-center">
-                                          {d.scoreDelta ?? "—"}
+                                          <ScoreValue score={d.scoreDelta} />
                                         </TableCodeCell>
                                         <TableCodeCell className="text-center text-xs">
                                           {formatBytes(d.releaseSizeBytes)}
@@ -1112,8 +1116,8 @@ function WantedItemsCard({
                                       </TableRow>
                                       {scoringExpanded ? (
                                         <TableRow>
-                                          <TableCell colSpan={7} className="bg-background/70 p-3">
-                                            <WantedScoringBreakdown entries={scoringEntries} />
+                                          <TableCell colSpan={7} className="p-0">
+                                            <ScoreLog entries={scoringEntries} total={d.candidateScore} />
                                           </TableCell>
                                         </TableRow>
                                       ) : null}
@@ -1334,7 +1338,7 @@ function PendingReleasesCard({ state }: { state: PendingViewState }) {
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
                     <div>
                       <span className="block">{t("pending.colScore")}</span>
-                      <span className="text-foreground">{item.releaseScore}</span>
+                      <ScoreValue score={item.releaseScore} />
                     </div>
                     <div>
                       <span className="block">{t("pending.colSize")}</span>
@@ -1455,7 +1459,7 @@ function PendingReleasesCard({ state }: { state: PendingViewState }) {
                         </TableCell>
                         <TableCell className="text-center">{pendingStatusBadge(item.status, t)}</TableCell>
                         <TableCell className="text-center">{pendingPhaseBadge(item.status, t)}</TableCell>
-                        <TableCodeCell className="text-center">{item.releaseScore}</TableCodeCell>
+                        <TableCodeCell className="text-center"><ScoreValue score={item.releaseScore} /></TableCodeCell>
                         <TableCodeCell className="text-center text-xs">
                           {item.releaseSizeBytes == null ? "—" : formatBytes(item.releaseSizeBytes)}
                         </TableCodeCell>

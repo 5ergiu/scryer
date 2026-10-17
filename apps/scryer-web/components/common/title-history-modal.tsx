@@ -17,14 +17,9 @@ import {
   HISTORY_TABLE_SHELL_CLASS,
   HistoryEventTable,
 } from "./history-event-table";
-import {
-  TITLE_HISTORY_FILTERS,
-  getTitleHistoryFilterLabel,
-} from "./title-history-event-meta";
-import {
-  HistoryEventIcon,
-} from "./history-event-icon";
+import { TITLE_HISTORY_FILTERS } from "./title-history-event-meta";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { HistoryEventTypeMultiSelect } from "@/components/common/history-event-type-multi-select";
 
 const PAGE_SIZE = 50;
 
@@ -166,17 +161,6 @@ export function TitleHistoryModal({
     );
   }, [activeFilters, activeScopedEpisode?.episodeId, fetchHistory]);
 
-  const toggleFilter = React.useCallback((eventType: string) => {
-    setActiveFilters((prev) =>
-      prev.includes(eventType)
-        ? prev.filter((f) => f !== eventType)
-        : [...prev, eventType],
-    );
-  }, []);
-
-  const clearFilters = React.useCallback(() => {
-    setActiveFilters([]);
-  }, []);
 
   const clearScopedEpisode = React.useCallback(() => {
     setOffset(0);
@@ -215,32 +199,14 @@ export function TitleHistoryModal({
           </div>
         ) : null}
 
-        <div className="flex flex-wrap gap-1.5 pb-2">
-          <Button
-            type="button"
-            size="sm"
-            variant={activeFilters.length === 0 ? "default" : "secondary"}
-            onClick={clearFilters}
-            className="h-7 text-xs"
-          >
-            {t("history.allEvents")}
-          </Button>
-          {TITLE_HISTORY_FILTERS.map((eventType) => {
-            const isActive = activeFilters.includes(eventType);
-            return (
-              <Button
-                key={eventType}
-                type="button"
-                size="sm"
-                variant={isActive ? "default" : "secondary"}
-                onClick={() => toggleFilter(eventType)}
-                className="h-7 gap-1.5 text-xs"
-              >
-                <HistoryEventIcon eventType={eventType} size={12} />
-                {getTitleHistoryFilterLabel(eventType, t)}
-              </Button>
-            );
-          })}
+        <div className="pb-2">
+          <HistoryEventTypeMultiSelect
+            id="title-history-event-types"
+            eventTypes={TITLE_HISTORY_FILTERS}
+            selectedEventTypes={activeFilters}
+            onSelectedEventTypesChange={setActiveFilters}
+            triggerClassName="h-9 sm:w-[320px]"
+          />
         </div>
 
         <div className="flex-1 overflow-y-auto min-h-0">
