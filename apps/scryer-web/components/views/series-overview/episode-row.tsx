@@ -533,17 +533,18 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               {episodeRuntime}
             </span>
           ) : null}
-          {episodeSizeLabel ? (
-            <span className="ml-2 text-[10px] tabular-nums text-muted-foreground">
-              {episodeSizeLabel}
-            </span>
-          ) : null}
         </TableCell>
         <TableCell className="text-center text-muted-foreground">
           <span className="inline-flex items-center justify-center gap-1">
             <CalendarDays className="h-3.5 w-3.5" />
             {formattedAirDate}
           </span>
+        </TableCell>
+        <TableCell
+          id={selectorId("series-overview-episode-size", episode.id)}
+          className="text-center text-xs tabular-nums text-muted-foreground"
+        >
+          {episodeSizeLabel ?? null}
         </TableCell>
         <TableCell className="text-center">
           <div className="inline-flex items-center justify-center gap-1">
@@ -597,7 +598,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       {isPanelOpen ? (
         <TableRow id={selectorId("series-overview-episode-panel", episode.id)}>
           <TableCell
-            colSpan={selectionCheckbox ? 7 : 6}
+            colSpan={selectionCheckbox ? 8 : 7}
             className="border-t border-border bg-background/40 p-0"
           >
             <div className="px-4 py-3">

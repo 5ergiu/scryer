@@ -525,7 +525,13 @@ function SeasonSectionImpl({
                 className="w-[6.75rem]"
               />
             ) : null}
-            {canRefreshScores ? <RefreshScoresButton selection={{ seasonIds: [collection.id] }} /> : null}
+            {canRefreshScores ? (
+              <RefreshScoresButton
+                appearance="icon"
+                id={`season-refresh-scores-${collection.id}`}
+                selection={{ seasonIds: [collection.id] }}
+              />
+            ) : null}
             <IconButton
               id={`season-details-${collection.id}`}
               label={`${seasonHeading(collection, t)} — ${t("episode.details")}`}
@@ -702,7 +708,8 @@ function SeasonSectionImpl({
                       <TableHead className="w-10 text-center" />
                       <TableHead className="w-12 text-center">{t("episode.numberLabel")}</TableHead>
                       <TableHead>{t("label.title")}</TableHead>
-                      <TableHead className="w-44 text-center">{t("episode.airDate")}</TableHead>
+                      <TableHead className="w-32 text-center">{t("episode.airDate")}</TableHead>
+                      <TableHead className="w-16 text-center">{t("mediaInfo.size")}</TableHead>
                       <TableHead className="w-32 text-center">{t("episode.quality")}</TableHead>
                       <TableActionsHead className="w-28">{t("label.actions")}</TableActionsHead>
                     </TableRow>

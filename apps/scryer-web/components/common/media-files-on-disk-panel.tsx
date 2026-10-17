@@ -1,5 +1,4 @@
 import * as React from "react";
-import { Checkbox } from "@/components/ui/checkbox";
 import { FileScoreSummary } from "@/components/common/score-breakdown";
 import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
 import {
@@ -122,8 +121,6 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
   const dateTimeFormat = useUiDateTimeFormat();
   const { user } = useAuth();
   const canRefreshScores = hasLibraryPermission(user, libraryId, LIBRARY_PERMISSIONS.manageTitles);
-  const [selectedFiles, setSelectedFiles] = React.useState<Set<string>>(() => new Set());
-  const selectedFileIds = mediaFiles.filter((file) => selectedFiles.has(file.id)).map((file) => file.id);
   const [subtitleSearchTarget, setSubtitleSearchTarget] = React.useState<{
     mediaFileId: string;
     filePath: string;
@@ -168,7 +165,6 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
       ) : null}
       {orderedMediaFiles.length > 0 ? (
         <div className={cn(selectedTitlePresentation ? "space-y-4" : "space-y-2")}>
-          {canRefreshScores && selectedFileIds.length > 0 ? <RefreshScoresButton selection={{ fileIds: selectedFileIds }} /> : null}
           {orderedMediaFiles.map((file, fileIndex) => {
             const downloads = subtitleDownloadsByMediaFile[file.id] ?? [];
             const role = file.role?.toLowerCase() ?? "";
@@ -304,18 +300,21 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         </span>
                       ) : null}
                       {fileDate ? <span>{fileDate}</span> : null}
-                      {file.releaseGroup?.trim() ? <span>{file.releaseGroup}</span> : null}
+                      {file.releaseGroup?.trim() ? (
+                        <span
+                          id={selectorId(fileRowIdPrefix, "release-group", file.id)}
+                          title={t("mediaInfo.releaseGroup")}
+                          className={cn(
+                            selectedTitlePresentation
+                              ? "rounded-[6px] bg-[var(--scry-soft)] px-2 py-0.5 text-[10.5px] font-bold text-[var(--scry-text2)]"
+                              : "rounded-full border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-1.5 py-0.5 text-[var(--scry-text2)]",
+                          )}
+                        >
+                          {file.releaseGroup.trim()}
+                        </span>
+                      ) : null}
                     </div>
                     <FileScoreSummary evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} />
-                    {canRefreshScores ? <div className="flex items-center gap-2">
-                      <Checkbox aria-label={`${t("scoring.selectFile")}: ${file.filePath}`}
-                        checked={selectedFiles.has(file.id)} onCheckedChange={(checked) => setSelectedFiles((previous) => {
-                          const next = new Set(previous);
-                          if (checked) next.add(file.id); else next.delete(file.id);
-                          return next;
-                        })} />
-                      <RefreshScoresButton single selection={{ fileIds: [file.id] }} />
-                    </div> : null}
                     {selectedTitlePresentation ? (
                       <div className="flex flex-wrap gap-1.5">
                         {selectedTitleBadges.map((badge, badgeIndex) => (
@@ -388,7 +387,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         {formatMediaFileSize(file.sizeBytes)}
                       </div>
                     </div>
-                    {(canSearchSubtitles || onMakePrimaryFile || onDeleteFile || discAnalysis) ? (
+                    {(canSearchSubtitles || canRefreshScores || onMakePrimaryFile || onDeleteFile || discAnalysis) ? (
                       <div className="flex items-start gap-2 lg:justify-end">
                         <div className="flex flex-wrap items-center gap-2">
                           {canSearchSubtitles ? (
@@ -414,6 +413,19 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                             >
                               {t("subtitle.search")}
                             </TextActionButton>
+                          ) : null}
+                          {canRefreshScores ? (
+                            <RefreshScoresButton
+                              single
+                              appearance="action"
+                              id={selectorId(fileRowIdPrefix, "refresh-score", file.id)}
+                              selection={{ fileIds: [file.id] }}
+                              className={
+                                selectedTitlePresentation
+                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
+                                  : undefined
+                              }
+                            />
                           ) : null}
                           {isAdditionalFile && onMakePrimaryFile ? (
                             <TextActionButton

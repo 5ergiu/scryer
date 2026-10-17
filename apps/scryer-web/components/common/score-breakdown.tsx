@@ -27,9 +27,12 @@ export function FileScoreSummary({ evaluation, acquisitionScore }: {
 }) {
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
+  // A file shows a current score only once it has been rescored; until then
+  // the score it was grabbed with stands on its own.
+  if (!evaluation && acquisitionScore == null) return null;
   return <div className="space-y-1 text-xs text-muted-foreground">
-    <div>{t("scoring.current")}: {evaluation?.score ?? t("scoring.notEvaluated")}</div>
     {evaluation ? <>
+      <div>{t("scoring.current")}: {evaluation.score}</div>
       <div><time dateTime={evaluation.evaluatedAt}>{formatUiDateTime(evaluation.evaluatedAt, dateTimeFormat)}</time>
         {evaluation.needsRefresh ? ` · ${t("scoring.needsRefresh")}` : ""}
         {evaluation.timeSensitive ? ` · ${t("scoring.timeSensitive")}` : ""}</div>
