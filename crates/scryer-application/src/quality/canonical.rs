@@ -692,6 +692,38 @@ fn numeric_score(decision: &QualityProfileDecision) -> i32 {
     )
 }
 
+/// The parse every scoring pass reads: the release as named, with its audio
+/// languages filled in from the listing's indexer languages and the title.
+///
+/// Most release names say nothing about audio. Without this, a profile that
+/// requires a language rejects such a release as
+/// `required_audio_language_missing`. It runs inside [`run_term_pipeline`], so
+/// no lane can score without it; lanes hand the scorer the raw parse. The
+/// audio context is keyed on the title's facet (`ctx.category`), never a
+/// search category, which collapses anime movies to `"movie"` and breaks
+/// dual-audio inference. Idempotent: filling an already filled parse changes
+/// nothing.
+pub(crate) fn canonical_parse(
+    parsed: &ParsedReleaseMetadata,
+    listing: Option<&ListingFacts>,
+    ctx: &ScoringContext<'_>,
+) -> ParsedReleaseMetadata {
+    let language_context = crate::title_audio_language_context(
+        ctx.original_language,
+        ctx.original_country,
+        Some(ctx.category),
+        ctx.title_tags,
+    );
+    let mut enriched = parsed.clone();
+    enriched.languages_audio = crate::release_audio_language_hints_for_title(
+        parsed,
+        listing.map(|listing| listing.snapshot.indexer_languages.as_slice()),
+        Some(&language_context),
+        !ctx.required_audio_languages.is_empty(),
+    );
+    enriched
+}
+
 /// The one term sequence. Both evidence levels walk exactly this path; the only
 /// thing that varies is the facts handed in.
 fn run_term_pipeline(
@@ -702,6 +734,7 @@ fn run_term_pipeline(
     ctx: &ScoringContext<'_>,
     rules: &mut RuleEvaluationBatch,
 ) -> QualityProfileDecision {
+    let parsed = &canonical_parse(parsed, listing, ctx);
     let mut resolved_profile = ctx.profile.clone();
     resolved_profile.criteria.required_audio_languages = ctx.required_audio_languages.to_vec();
 
@@ -1137,34 +1170,15 @@ pub(crate) fn size_basis_bytes(landed: i64, announced: Option<i64>) -> i64 {
 /// The row's listing snapshot is the one the grab persisted, aged at the grab
 /// instant, so the bar never moves with the clock. A row without a snapshot
 /// scores with every listing fact unknown, exactly as before.
-///
-/// The parse's audio languages are filled in exactly as the grab and the
-/// import fill them, from the title and the snapshot's indexer languages. A
-/// stored row whose name says nothing about audio would otherwise carry an
-/// empty language list and be rejected as `required_audio_language_missing`
-/// on every re-derive, although the import that wrote it accepted it.
-pub(crate) fn evidence_from_media_file(
-    file: &crate::TitleMediaFile,
-    ctx: &ScoringContext<'_>,
-) -> ReleaseEvidence {
-    let listing = ListingFacts::grabbed_from_json(file.release_listing_json.as_deref());
-    let parsed = crate::quality::canonical_context::announced_metadata_for_audio_context(
-        &announced_parse_from_media_file(file),
-        ctx.original_language,
-        ctx.original_country,
-        ctx.category,
-        ctx.title_tags,
-        ctx.required_audio_languages,
-        listing
-            .as_ref()
-            .map(|listing| listing.snapshot.indexer_languages.as_slice()),
-    );
+pub(crate) fn evidence_from_media_file(file: &crate::TitleMediaFile) -> ReleaseEvidence {
     ReleaseEvidence::announced(
-        parsed,
+        announced_parse_from_media_file(file),
         Some(size_basis_bytes(file.size_bytes, file.announced_size_bytes)),
     )
     .with_analysis(analyzed_facts_from_media_file(file))
-    .with_listing(listing)
+    .with_listing(ListingFacts::grabbed_from_json(
+        file.release_listing_json.as_deref(),
+    ))
 }
 
 /// Re-derive a stored file's canonical score.
@@ -1179,7 +1193,7 @@ pub(crate) fn score_media_file(
     file: &crate::TitleMediaFile,
     ctx: &ScoringContext<'_>,
 ) -> ScoredRelease {
-    score_release(&evidence_from_media_file(file, ctx), ctx)
+    score_release(&evidence_from_media_file(file), ctx)
 }
 
 /// [`score_media_file`] for the rule editor's tester: the same evidence and
@@ -1188,7 +1202,7 @@ pub(crate) fn score_media_file_preview(
     file: &crate::TitleMediaFile,
     ctx: &ScoringContext<'_>,
 ) -> ScoredReleasePreview {
-    score_release_preview(&evidence_from_media_file(file, ctx), ctx)
+    score_release_preview(&evidence_from_media_file(file), ctx)
 }
 
 /// [`score_media_file_for_episodes`] for the rule editor's tester: the same
@@ -1201,7 +1215,7 @@ pub(crate) fn score_media_file_for_episodes_preview(
     let mut rules = RuleEvaluationBatch::from_context(ctx);
     rules.collect_diagnostics = true;
     let scored = score_disc_scope_with_rules(
-        &evidence_from_media_file(file, ctx),
+        &evidence_from_media_file(file),
         ctx,
         &mut rules,
         Some(episode_ids),
@@ -1220,7 +1234,7 @@ pub(crate) fn score_media_file_for_episodes(
 ) -> ScoredRelease {
     let mut rules = RuleEvaluationBatch::from_context(ctx);
     score_disc_scope_with_rules(
-        &evidence_from_media_file(file, ctx),
+        &evidence_from_media_file(file),
         ctx,
         &mut rules,
         Some(episode_ids),

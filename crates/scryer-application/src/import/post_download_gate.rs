@@ -1940,22 +1940,9 @@ pub(crate) fn compute_post_download_acquisition_decision(
 
     let view = context.view(size_basis, is_filler);
 
-    // **Parse parity with the grab lane.** Most release names say nothing about
-    // audio, and the grab path fills that in from the title's original language
-    // (`announced_metadata_for_title`) before scoring. Import did not, so a
-    // profile with `required_audio_languages` raised
-    // `required_audio_language_missing` against every release the grab side had
-    // just accepted — a veto on the announced pass of a file that is fine. The
-    // dedicated `classify_required_audio` gate, which reads the file's real
-    // audio streams, is the one that should speak here, and it already ran.
-    let announced_parsed = crate::quality::canonical_context::announced_metadata_for_title(
-        title,
-        parsed,
-        context.required_audio_languages(),
-        listing
-            .as_ref()
-            .map(|listing| listing.snapshot.indexer_languages.as_slice()),
-    );
+    // The raw parse: the scorer fills in audio languages itself, from the
+    // listing snapshot and the title, exactly as it does for the grab.
+    let announced_parsed = parsed.clone();
 
     // The grab's frozen listing snapshot, anchored at the grab: the same
     // listing facts the grab scored, and the same ones the row will carry.
