@@ -2797,6 +2797,8 @@ const en: LocaleDictionary = {
   "scoring.needsRefresh": "Needs refresh",
   "scoring.timeSensitive": "Time-sensitive",
   "scoring.breakdown": "Score breakdown",
+  "scoring.customRule": "Custom Rule",
+  "scoring.systemRule": "System Rule",
   "scoring.rejected": "Rejected",
   "scoring.refreshOne": "Refresh score",
   "scoring.refreshSelected": "Refresh scores",

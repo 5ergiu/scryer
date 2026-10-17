@@ -314,7 +314,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         </span>
                       ) : null}
                     </div>
-                    <FileScoreSummary evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} />
+                    <FileScoreSummary idPrefix={selectorId(fileRowIdPrefix, "score", file.id)} evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} scoringLog={file.scoringLog} />
                     {selectedTitlePresentation ? (
                       <div className="flex flex-wrap gap-1.5">
                         {selectedTitleBadges.map((badge, badgeIndex) => (
