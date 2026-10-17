@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useTranslate } from "@/lib/context/translate-context";
 import type { DeletePreview } from "@/lib/types/delete-preview";
@@ -6,16 +7,28 @@ type DeletePreviewSummaryProps = {
   preview: DeletePreview | null;
   loading: boolean;
   error: string | null;
+  /** The condition a refused preview names. */
+  errorReason?: string | null;
+  /**
+   * Offered when the title's folder is unknown: the title can still leave the
+   * catalog with its files left where they are.
+   */
+  onRemoveFromCatalogOnly?: () => void;
   typedConfirmation: string;
   onTypedConfirmationChange: (value: string) => void;
   typedConfirmationPromptId?: string;
   typedConfirmationInputId?: string;
 };
 
+/** The server cannot tell which folder is the title's. */
+const TITLE_FOLDER_UNKNOWN = "title_folder_unknown";
+
 export function DeletePreviewSummary({
   preview,
   loading,
   error,
+  errorReason,
+  onRemoveFromCatalogOnly,
   typedConfirmation,
   onTypedConfirmationChange,
   typedConfirmationPromptId,
@@ -28,6 +41,20 @@ export function DeletePreviewSummary({
       <p className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
         {t("deletePreview.counting")}
       </p>
+    );
+  }
+
+  if (error && errorReason === TITLE_FOLDER_UNKNOWN && onRemoveFromCatalogOnly) {
+    return (
+      <div className="space-y-2 rounded border border-border bg-muted/40 px-3 py-2">
+        <p className="text-xs font-medium text-foreground">
+          {t("deletePreview.folderUnknown")}
+        </p>
+        <p className="text-xs text-muted-foreground">{error}</p>
+        <Button type="button" size="sm" variant="secondary" onClick={onRemoveFromCatalogOnly}>
+          {t("deletePreview.removeFromCatalogOnly")}
+        </Button>
+      </div>
     );
   }
 

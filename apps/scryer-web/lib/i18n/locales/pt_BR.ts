@@ -469,6 +469,8 @@ const pt_BR: LocaleDictionary = {
   "deletePreview.counting": "Contando arquivos para excluir...",
   "deletePreview.error":
     "Não foi possível preparar a visualização de exclusão.",
+  "deletePreview.folderUnknown": "O Scryer não consegue identificar qual pasta contém os arquivos deste título, então não excluirá nada do disco.",
+  "deletePreview.removeFromCatalogOnly": "Remover só do catálogo",
   "deletePreview.files": "Arquivos",
   "deletePreview.media": "Mídia",
   "deletePreview.subtitles": "Legendas",

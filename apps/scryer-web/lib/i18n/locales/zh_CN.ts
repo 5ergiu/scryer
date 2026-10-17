@@ -454,6 +454,8 @@ const zh_CN: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "系统内部",
   "deletePreview.counting": "正在计算要删除的文件...",
   "deletePreview.error": "无法准备删除预览。",
+  "deletePreview.folderUnknown": "Scryer 无法确定哪个文件夹存放此作品的文件，因此不会从磁盘删除任何内容。",
+  "deletePreview.removeFromCatalogOnly": "仅从目录中移除",
   "deletePreview.files": "文件",
   "deletePreview.media": "媒体",
   "deletePreview.subtitles": "字幕",

@@ -469,6 +469,8 @@ const it: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Interno al sistema",
   "deletePreview.counting": "Conteggio dei file da eliminare...",
   "deletePreview.error": "Impossibile preparare l'anteprima di eliminazione.",
+  "deletePreview.folderUnknown": "Scryer non riesce a capire quale cartella contiene i file di questo titolo, quindi non eliminerà nulla dal disco.",
+  "deletePreview.removeFromCatalogOnly": "Rimuovi solo dal catalogo",
   "deletePreview.files": "File",
   "deletePreview.media": "Media",
   "deletePreview.subtitles": "Sottotitoli",

@@ -656,6 +656,8 @@ const ru: LocaleDictionary = {
     "jobs.triggerSource.systemInternal": "Внутренний системный процесс",
     "deletePreview.counting": "Подсчёт файлов для удаления...",
     "deletePreview.error": "Не удалось подготовить предварительный просмотр удаления.",
+    "deletePreview.folderUnknown": "Scryer не может определить, в какой папке лежат файлы этого тайтла, поэтому ничего не удалит с диска.",
+    "deletePreview.removeFromCatalogOnly": "Убрать только из каталога",
     "deletePreview.files": "Файлы",
     "deletePreview.media": "Медиафайлы",
     "deletePreview.subtitles": "Субтитры",

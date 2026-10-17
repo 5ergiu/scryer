@@ -1321,6 +1321,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     preview: titleDeletePreview,
     loading: titleDeletePreviewLoading,
     error: titleDeletePreviewError,
+    errorReason: titleDeletePreviewErrorReason,
   } = useDeletePreview(
     deleteTitlePreviewQuery,
     "deleteTitlePreview",
@@ -5455,6 +5456,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               preview={titleDeletePreview}
               loading={titleDeletePreviewLoading}
               error={titleDeletePreviewError}
+              errorReason={titleDeletePreviewErrorReason}
+              onRemoveFromCatalogOnly={() => setDeleteFilesOnDisk(false)}
               typedConfirmation={titleDeleteTypedConfirmation}
               onTypedConfirmationChange={setTitleDeleteTypedConfirmation}
             />

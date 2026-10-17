@@ -466,6 +466,8 @@ const de: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Systemintern",
   "deletePreview.counting": "Anzahl der zu löschenden Dateien...",
   "deletePreview.error": "Die Löschvorschau kann nicht vorbereitet werden.",
+  "deletePreview.folderUnknown": "Scryer kann nicht erkennen, welcher Ordner die Dateien dieses Titels enthält, und löscht daher nichts von der Festplatte.",
+  "deletePreview.removeFromCatalogOnly": "Nur aus dem Katalog entfernen",
   "deletePreview.files": "Dateien",
   "deletePreview.media": "Medien",
   "deletePreview.subtitles": "Untertitel",

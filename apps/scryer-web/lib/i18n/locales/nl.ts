@@ -535,6 +535,8 @@ const nl: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Systeem intern",
   "deletePreview.counting": "Bestanden tellen om te verwijderen…",
   "deletePreview.error": "Verwijderingsvoorbeeld kon niet worden voorbereid.",
+  "deletePreview.folderUnknown": "Scryer kan niet bepalen in welke map de bestanden van deze titel staan, dus verwijdert het niets van de schijf.",
+  "deletePreview.removeFromCatalogOnly": "Alleen uit catalogus verwijderen",
   "deletePreview.files": "Bestanden",
   "deletePreview.media": "Media",
   "deletePreview.subtitles": "Ondertitels",

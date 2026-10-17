@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useClient } from "urql";
+import { graphQlErrorExtension } from "@/lib/graphql/error-message";
 import type { DeletePreview } from "@/lib/types/delete-preview";
 
 type UseDeletePreviewResult<TPayload = DeletePreview> = {
@@ -12,6 +13,8 @@ type UseDeletePreviewResult<TPayload = DeletePreview> = {
   payload: TPayload | null;
   loading: boolean;
   error: string | null;
+  /** The condition a refused preview names, such as `title_folder_unknown`. */
+  errorReason: string | null;
 };
 
 export function useDeletePreview<
@@ -33,6 +36,7 @@ export function useDeletePreview<
   const [payload, setPayload] = React.useState<TPayload | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [errorReason, setErrorReason] = React.useState<string | null>(null);
   const variablesKey = React.useMemo(
     () => (variables ? JSON.stringify(variables) : ""),
     [variables],
@@ -52,12 +56,14 @@ export function useDeletePreview<
       setPayload(null);
       setLoading(false);
       setError(null);
+      setErrorReason(null);
       return;
     }
 
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setErrorReason(null);
 
     void client
       .query(query, stableVariables, { requestPolicy: "network-only" })
@@ -93,6 +99,7 @@ export function useDeletePreview<
         setError(
           nextError instanceof Error ? nextError.message : String(nextError ?? "Unknown error"),
         );
+        setErrorReason(graphQlErrorExtension(nextError, "VALIDATION_ERROR", "reason"));
       })
       .finally(() => {
         if (!cancelled) {
@@ -105,5 +112,5 @@ export function useDeletePreview<
     };
   }, [client, enabled, fieldName, query, stableVariables]);
 
-  return { preview, payload, loading, error };
+  return { preview, payload, loading, error, errorReason };
 }

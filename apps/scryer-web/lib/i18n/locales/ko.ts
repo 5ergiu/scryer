@@ -461,6 +461,8 @@ const ko: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "시스템 내부",
   "deletePreview.counting": "삭제할 파일 수를 계산하는 중...",
   "deletePreview.error": "삭제 미리보기를 준비할 수 없습니다.",
+  "deletePreview.folderUnknown": "이 작품의 파일이 어느 폴더에 있는지 알 수 없어 디스크에서 아무것도 삭제하지 않습니다.",
+  "deletePreview.removeFromCatalogOnly": "카탈로그에서만 제거",
   "deletePreview.files": "파일",
   "deletePreview.media": "메디아",
   "deletePreview.subtitles": "자막",

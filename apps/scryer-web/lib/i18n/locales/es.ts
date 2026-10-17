@@ -470,6 +470,8 @@ const es: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Interno del sistema",
   "deletePreview.counting": "Contando archivos para eliminar...",
   "deletePreview.error": "No se puede preparar la vista previa de eliminación.",
+  "deletePreview.folderUnknown": "Scryer no puede saber qué carpeta contiene los archivos de este título, así que no eliminará nada del disco.",
+  "deletePreview.removeFromCatalogOnly": "Quitar solo del catálogo",
   "deletePreview.files": "Archivos",
   "deletePreview.media": "Medios de comunicación",
   "deletePreview.subtitles": "Subtítulos",

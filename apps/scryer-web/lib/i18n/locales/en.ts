@@ -735,6 +735,8 @@ const en: LocaleDictionary = {
   "jobs.custom.exitCode": "Exit code",
   "deletePreview.counting": "Counting files to delete...",
   "deletePreview.error": "Unable to prepare delete preview.",
+  "deletePreview.folderUnknown": "Scryer can't tell which folder holds this title's files, so it won't delete anything from disk.",
+  "deletePreview.removeFromCatalogOnly": "Remove from catalog only",
   "deletePreview.files": "Files",
   "deletePreview.media": "Media",
   "deletePreview.subtitles": "Subtitles",

@@ -467,6 +467,8 @@ const ja: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "システム内部",
   "deletePreview.counting": "削除するファイルを数えています...",
   "deletePreview.error": "削除プレビューを準備できません。",
+  "deletePreview.folderUnknown": "このタイトルのファイルがどのフォルダーにあるか判別できないため、ディスクからは何も削除しません。",
+  "deletePreview.removeFromCatalogOnly": "カタログからのみ削除",
   "deletePreview.files": "ファイル",
   "deletePreview.media": "メディア",
   "deletePreview.subtitles": "字幕",

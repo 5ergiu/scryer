@@ -472,6 +472,8 @@ const fr: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Interne au système",
   "deletePreview.counting": "Compter les fichiers à supprimer...",
   "deletePreview.error": "Impossible de préparer l'aperçu de suppression.",
+  "deletePreview.folderUnknown": "Scryer ne peut pas déterminer quel dossier contient les fichiers de ce titre ; il ne supprimera donc rien du disque.",
+  "deletePreview.removeFromCatalogOnly": "Retirer du catalogue uniquement",
   "deletePreview.files": "Fichiers",
   "deletePreview.media": "Médias",
   "deletePreview.subtitles": "Sous-titres",
