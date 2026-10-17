@@ -2659,6 +2659,7 @@ fn completed_downloads_from_sab_slots(
                 size_bytes,
                 completed_at,
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             })
         })
         .collect()

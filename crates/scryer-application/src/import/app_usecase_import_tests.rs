@@ -12,7 +12,9 @@ use crate::{
     DownloadGrabResult, FacetRegistry, IndexerConfigRepository, JwtAuthConfig, TitleRepository,
 };
 use async_trait::async_trait;
-use scryer_domain::{CompletedDownload, ExternalId, IndexerConfig, MediaFacet, Title};
+use scryer_domain::{
+    CompletedDownload, ExternalId, IndexerConfig, MediaFacet, PostedFileName, Title,
+};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -95,6 +97,7 @@ fn test_completed_download(name: &str, dest_dir: &std::path::Path) -> CompletedD
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     }
 }
 
@@ -3332,9 +3335,29 @@ fn test_admission_subject(
 }
 
 const LONG_TITLE_WORDS: &[&str] = &[
-    "the", "quiet", "harbor", "keeper", "who", "never", "learned", "to", "sail", "finally",
-    "meets", "a", "wandering", "lantern", "maker", "and", "discovers", "that", "every", "tide",
-    "remembers", "her", "name",
+    "the",
+    "quiet",
+    "harbor",
+    "keeper",
+    "who",
+    "never",
+    "learned",
+    "to",
+    "sail",
+    "finally",
+    "meets",
+    "a",
+    "wandering",
+    "lantern",
+    "maker",
+    "and",
+    "discovers",
+    "that",
+    "every",
+    "tide",
+    "remembers",
+    "her",
+    "name",
 ];
 
 /// An essay-length title of `word_count` plain words.
@@ -3419,4 +3442,86 @@ fn import_finds_the_episode_of_an_essay_length_anime_download() {
         Some(7),
         "a playable {file_name:?} must not lose its episode"
     );
+}
+
+/// Episode identity for an observed download with no release name, whose only
+/// file Weaver shortened, parsed the way an import parses it.
+fn shortened_file_import_episode(posted_file_names: Vec<PostedFileName>) -> Option<u32> {
+    let posted_name = format!("{}.mkv", anime_release_name(&long_title(300)));
+    let file_name = weaver_bounded_filename(&posted_name[..posted_name.len() - 4], "mkv");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join(&file_name);
+    std::fs::write(&file_path, b"episode").expect("write file");
+    let mut completed = test_completed_download("downloader display label", dir.path());
+    completed.posted_file_names = posted_file_names
+        .into_iter()
+        .map(|mut posted| {
+            posted.name = posted.name.replace("{disk}", &file_name);
+            posted.posted_name = posted.posted_name.replace("{posted}", &posted_name);
+            posted
+        })
+        .collect();
+    let mut files = vec![ImportVideoFile::physical(file_path)];
+
+    apply_posted_file_names(&completed, &mut files);
+
+    let parsed = build_augmented_episode_import_metadata_for_title(
+        &files[0].parse_path(),
+        &observation_evidence(&completed),
+        &titled(MediaFacet::Anime, "Quiet Harbor Keeper", None),
+        false,
+    );
+    parsed_episode_number(&parsed)
+}
+
+fn posted(name: &str, posted_name: &str) -> PostedFileName {
+    PostedFileName {
+        name: name.to_string(),
+        posted_name: posted_name.to_string(),
+    }
+}
+
+#[test]
+fn a_shortened_file_alone_loses_its_episode() {
+    assert_eq!(shortened_file_import_episode(Vec::new()), None);
+}
+
+#[test]
+fn the_posted_name_of_a_shortened_file_restores_its_episode() {
+    assert_eq!(
+        shortened_file_import_episode(vec![posted("{disk}", "{posted}")]),
+        Some(7)
+    );
+}
+
+#[test]
+fn a_posted_name_reported_for_another_file_is_not_applied() {
+    assert_eq!(
+        shortened_file_import_episode(vec![posted("other.mkv", "{posted}")]),
+        None
+    );
+}
+
+#[test]
+fn a_posted_name_never_reaches_outside_its_own_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let inside = dir.path().join("short.mkv");
+    let outside = std::path::PathBuf::from("/elsewhere/short.mkv");
+    let mut completed = test_completed_download("label", dir.path());
+    completed.posted_file_names = vec![posted("short.mkv", "../escape/Show - 07.mkv")];
+    let mut files = vec![
+        ImportVideoFile::physical(inside.clone()),
+        ImportVideoFile::physical(outside.clone()),
+    ];
+
+    apply_posted_file_names(&completed, &mut files);
+
+    assert_eq!(
+        files[0].logical_name.as_deref(),
+        Some(".._escape_Show - 07.mkv")
+    );
+    assert_eq!(files[0].path(), inside.as_path());
+    assert_eq!(files[0].parse_path().parent(), Some(dir.path()));
+    assert_eq!(files[1].logical_name, None);
+    assert_eq!(files[1].path(), outside.as_path());
 }

@@ -827,10 +827,11 @@ pub(crate) fn import_video_destination_extension(
 ///
 /// `physical` is the only path that ever reaches the filesystem: every fs,
 /// artifact, move and cleanup call takes [`ImportVideoFile::path`]. A
-/// `logical_name` is set only when srrdb recovered the original scene filename
-/// for an obfuscated member, and it exists purely so title matching, episode
-/// identity, pack planning and the movie fallback have something to parse. The
-/// file on disk is never renamed.
+/// `logical_name` is set only when the download client reported the name the
+/// file was posted with, or srrdb recovered the original scene filename for an
+/// obfuscated member. It exists purely so title matching, episode identity,
+/// pack planning and the movie fallback have something to parse. The file on
+/// disk is never renamed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportVideoFile {
     pub(crate) physical: PathBuf,
@@ -906,6 +907,42 @@ impl ImportVideoFile {
     }
 }
 
+/// Give each file the client wrote under a different name than it was posted
+/// with (Weaver shortens a name past 240 bytes, for one) its posted name to
+/// parse. Only a file directly named by the report and inside the download's
+/// folder takes one; a path separator in the posted name is never followed.
+fn apply_posted_file_names(completed: &CompletedDownload, files: &mut [ImportVideoFile]) {
+    if completed.posted_file_names.is_empty() {
+        return;
+    }
+    let dest_dir = Path::new(&completed.dest_dir);
+    for file in files.iter_mut() {
+        if !file.physical.starts_with(dest_dir) {
+            continue;
+        }
+        let Some(name) = file.physical.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(posted) = completed
+            .posted_file_names
+            .iter()
+            .find(|posted| posted.name == name)
+        else {
+            continue;
+        };
+        let posted_name = posted.posted_name.trim().replace(['/', '\\'], "_");
+        if posted_name.is_empty() || posted_name == name {
+            continue;
+        }
+        tracing::debug!(
+            physical_name = %file.physical.display(),
+            logical_name = %posted_name,
+            "parsing the name the download client reported this file was posted with"
+        );
+        file.logical_name = Some(posted_name);
+    }
+}
+
 /// srrdb filename recovery for one `run_import` call.
 ///
 /// Everything about it is per-import and in memory: the admin setting is read
@@ -969,6 +1006,7 @@ impl SrrdbFilenameRecovery {
             .into_iter()
             .map(ImportVideoFile::physical)
             .collect();
+        apply_posted_file_names(completed, &mut files);
 
         // The port is absent in every assembly that does not wire the
         // production adapter, which is indistinguishable from the switch being
@@ -996,6 +1034,9 @@ impl SrrdbFilenameRecovery {
         }
 
         for file in &mut files {
+            if file.logical_name.is_some() {
+                continue;
+            }
             if let Some(cached) = self.resolved.get(&file.physical) {
                 file.logical_name = cached.clone();
                 continue;

@@ -2057,6 +2057,7 @@ fn build_completed_download(
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     }
 }
 

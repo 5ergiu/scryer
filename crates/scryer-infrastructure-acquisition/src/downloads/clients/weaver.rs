@@ -8,7 +8,7 @@ use scryer_application::{
     NullStagedNzbStore, RateLimitCooldownAction, StagedNzbStore,
 };
 use scryer_domain::{
-    CompletedDownload, DownloadClientConfig, DownloadQueueItem, DownloadQueueState,
+    CompletedDownload, DownloadClientConfig, DownloadQueueItem, DownloadQueueState, PostedFileName,
 };
 use scryer_outbound_http::{
     OutboundHttpClient, OutboundHttpError, OutboundRequestError, RateLimitRegistry, RequestPolicy,
@@ -225,6 +225,15 @@ pub struct WeaverQueueItem {
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub attention: Option<WeaverAttention>,
+    #[serde(default)]
+    pub posted_file_names: Vec<WeaverPostedFileName>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeaverPostedFileName {
+    pub name: String,
+    pub posted_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -844,19 +853,31 @@ impl WeaverDownloadClient {
         let after = offset.map(|value| {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("off:{value}"))
         });
-        self.graphql_request::<HistoryItemsPayload>(
-            graphql_docs::HISTORY_ITEMS_QUERY,
-            json!({
-                "filter": if use_title_filter && title_id.is_some() {
-                    title_attribute_filter(title_id)
-                } else {
-                    None::<serde_json::Value>
-                },
-                "first": limit.and_then(|value| i32::try_from(value).ok()),
-                "after": after,
-            }),
-        )
-        .await
+        let variables = json!({
+            "filter": if use_title_filter && title_id.is_some() {
+                title_attribute_filter(title_id)
+            } else {
+                None::<serde_json::Value>
+            },
+            "first": limit.and_then(|value| i32::try_from(value).ok()),
+            "after": after,
+        });
+        match self
+            .graphql_request::<HistoryItemsPayload>(
+                graphql_docs::HISTORY_ITEMS_QUERY,
+                variables.clone(),
+            )
+            .await
+        {
+            Err(error) if is_posted_file_names_schema_error(&error) => {
+                self.graphql_request::<HistoryItemsPayload>(
+                    graphql_docs::HISTORY_ITEMS_COMPAT_QUERY,
+                    variables,
+                )
+                .await
+            }
+            result => result,
+        }
         .map(|data| data.history_items)
     }
 
@@ -885,12 +906,22 @@ impl WeaverDownloadClient {
     }
 
     async fn query_history_item(&self, id: i32) -> AppResult<Option<WeaverQueueItem>> {
-        let data = self
+        let data = match self
             .graphql_request::<serde_json::Value>(
                 graphql_docs::HISTORY_ITEM_QUERY,
                 json!({ "id": id }),
             )
-            .await?;
+            .await
+        {
+            Err(error) if is_posted_file_names_schema_error(&error) => {
+                self.graphql_request::<serde_json::Value>(
+                    graphql_docs::HISTORY_ITEM_COMPAT_QUERY,
+                    json!({ "id": id }),
+                )
+                .await?
+            }
+            result => result?,
+        };
         let item = data.get("historyItem").ok_or_else(|| {
             AppError::Repository("weaver historyItem response is missing its result".into())
         })?;
@@ -1232,6 +1263,14 @@ fn weaver_item_to_completed_download(job: &WeaverQueueItem) -> Option<CompletedD
         size_bytes: Some(job.total_bytes as i64),
         completed_at: job.completed_at.or(Some(Utc::now())),
         parameters,
+        posted_file_names: job
+            .posted_file_names
+            .iter()
+            .map(|file| PostedFileName {
+                name: file.name.clone(),
+                posted_name: file.posted_name.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -1251,6 +1290,7 @@ fn compat_job_to_queue_item(job: PublishedWeaverJob) -> WeaverQueueItem {
         created_at: compat_timestamp_to_utc(job.created_at),
         completed_at: None,
         attention: None,
+        posted_file_names: Vec::new(),
     }
 }
 
@@ -1266,6 +1306,12 @@ fn compat_timestamp_to_utc(raw: Option<f64>) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(millis)
         .single()
         .unwrap_or_else(Utc::now)
+}
+
+// A Weaver older than the posted-name record refuses the field; the history
+// read is sent again without it.
+fn is_posted_file_names_schema_error(error: &AppError) -> bool {
+    is_weaver_schema_error(error, "Unknown field \"postedFileNames\"")
 }
 
 fn is_weaver_schema_error(error: &AppError, needle: &str) -> bool {
@@ -3645,6 +3691,122 @@ mod tests {
 
         assert_eq!(download.download_client_item_id, "10002");
         assert_eq!(download.name, "8f1d2c3b4a59687766554433221100ff");
+    }
+
+    fn completed_history_item_json() -> serde_json::Value {
+        json!({
+            "id": 10002,
+            "name": "Fixture Job",
+            "state": "COMPLETE",
+            "error": null,
+            "progressPercent": 100.0,
+            "totalBytes": 123456789_u64,
+            "category": "5070",
+            "attributes": [],
+            "clientRequestId": null,
+            "outputDir": "/data/complete/Fixture Job",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "completedAt": "2024-01-01T00:10:00Z",
+            "attention": null
+        })
+    }
+
+    #[tokio::test]
+    async fn completed_download_carries_the_names_files_were_posted_with() {
+        let server = MockServer::start().await;
+        let client = WeaverDownloadClient::new(server.uri(), None);
+        let mut item = completed_history_item_json();
+        item["postedFileNames"] = json!([{
+            "name": "Fixture Show - shortened.mkv",
+            "postedName": "Fixture Show - the full posted name - 07.mkv"
+        }]);
+        Mock::given(method("POST"))
+            .and(body_string_contains("postedFileNames"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"historyItem": item}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let download = client
+            .get_completed_download("10002")
+            .await
+            .expect("completed download lookup should load")
+            .expect("completed download should exist");
+
+        assert_eq!(
+            download.posted_file_names,
+            vec![scryer_domain::PostedFileName {
+                name: "Fixture Show - shortened.mkv".to_string(),
+                posted_name: "Fixture Show - the full posted name - 07.mkv".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn history_reads_from_a_weaver_without_posted_file_names_resend_without_them() {
+        let server = MockServer::start().await;
+        let client = WeaverDownloadClient::new(server.uri(), None);
+        Mock::given(method("POST"))
+            .and(body_string_contains("postedFileNames"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors": [{"message": "Unknown field \"postedFileNames\" on type \"HistoryItem\"."}]
+            })))
+            .with_priority(1)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("historyItem(id"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": {"historyItem": completed_history_item_json()}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("historyItems("))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"historyItems": [completed_history_item_json()]}}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let download = client
+            .get_completed_download("10002")
+            .await
+            .expect("completed download lookup should load")
+            .expect("completed download should exist");
+        assert!(download.posted_file_names.is_empty());
+
+        let downloads = client
+            .list_recent_completed_downloads(10)
+            .await
+            .expect("history page should load");
+        assert_eq!(downloads.len(), 1);
+    }
+
+    #[test]
+    fn compat_history_documents_differ_only_by_posted_file_names() {
+        let selection = "    postedFileNames {\n      name\n      postedName\n    }\n";
+        for (current, compat) in [
+            (
+                super::graphql_docs::HISTORY_ITEM_QUERY,
+                super::graphql_docs::HISTORY_ITEM_COMPAT_QUERY,
+            ),
+            (
+                super::graphql_docs::HISTORY_ITEMS_QUERY,
+                super::graphql_docs::HISTORY_ITEMS_COMPAT_QUERY,
+            ),
+        ] {
+            assert!(current.contains(selection));
+            assert_eq!(current.replace(selection, ""), compat);
+        }
     }
 
     #[tokio::test]

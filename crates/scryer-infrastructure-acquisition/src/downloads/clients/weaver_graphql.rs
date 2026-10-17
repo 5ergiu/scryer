@@ -3,6 +3,9 @@ pub const VERSION_COMPAT_QUERY: &str = include_str!("weaver/version_compat.graph
 pub const QUEUE_ITEMS_QUERY: &str = include_str!("weaver/queue_items.graphql");
 pub const HISTORY_ITEM_QUERY: &str = include_str!("weaver/history_item.graphql");
 pub const HISTORY_ITEMS_QUERY: &str = include_str!("weaver/history_items.graphql");
+// The history reads for a Weaver that does not report `postedFileNames`.
+pub const HISTORY_ITEM_COMPAT_QUERY: &str = include_str!("weaver/history_item_compat.graphql");
+pub const HISTORY_ITEMS_COMPAT_QUERY: &str = include_str!("weaver/history_items_compat.graphql");
 pub const JOBS_COMPAT_QUERY: &str = include_str!("weaver/jobs_compat.graphql");
 pub const SUBMIT_NZB_MUTATION: &str = include_str!("weaver/submit_nzb.graphql");
 pub const SUBMIT_NZB_COMPAT_MUTATION: &str = include_str!("weaver/submit_nzb_compat.graphql");

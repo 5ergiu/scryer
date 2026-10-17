@@ -4555,6 +4555,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             }])
         }
     }
@@ -8150,6 +8151,7 @@ mod tests {
                         size_bytes: None,
                         completed_at: Some(now - chrono::Duration::seconds(index)),
                         parameters: Vec::new(),
+                        posted_file_names: Vec::new(),
                     });
             }
         }
@@ -8264,6 +8266,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             },
             scryer_domain::CompletedDownload {
                 client_type: "qbittorrent".to_string(),
@@ -8277,6 +8280,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now() - chrono::Duration::minutes(2)),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             },
         ]);
         client_b.completed_downloads.lock().unwrap().extend([
@@ -8292,6 +8296,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now() - chrono::Duration::minutes(1)),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             },
             scryer_domain::CompletedDownload {
                 client_type: "qbittorrent".to_string(),
@@ -8305,6 +8310,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now() - chrono::Duration::minutes(3)),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             },
         ]);
 
@@ -8369,6 +8375,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             });
         let nzbget_client = Arc::new(FailingCompletedDownloadClient::default());
 
@@ -8429,6 +8436,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             });
         let nzbget_client = Arc::new(FailingCompletedDownloadClient::default());
 
@@ -8521,6 +8529,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: None,
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             };
 
             normalize_completed_download_import_dir(&mut item);
@@ -8550,6 +8559,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: None,
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             };
 
             normalize_completed_download_import_dir(&mut item);
@@ -8582,6 +8592,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: None,
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             });
         let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
             Arc::new(MockDownloadClientPluginProvider {
@@ -8658,6 +8669,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             });
 
         let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
@@ -8708,6 +8720,7 @@ mod tests {
                 size_bytes: None,
                 completed_at: Some(Utc::now()),
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             }]);
 
         let plugin_provider: Arc<dyn DownloadClientPluginProvider> =

@@ -160,6 +160,7 @@ mod tests {
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
+            posted_file_names: Vec::new(),
         }
     }
 

@@ -2032,6 +2032,7 @@ pub(super) fn completed_download_fixture_item(
             ("*scryer_title_id".to_string(), title_id.to_string()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     }
 }
 

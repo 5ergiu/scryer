@@ -3251,6 +3251,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
             size_bytes: None,
             completed_at: None,
             parameters: vec![],
+            posted_file_names: Vec::new(),
         });
     let mut history_item = queue_history_fixture_item(item_id, DownloadQueueState::Completed, 40);
     history_item.client_id = config.id.clone();
