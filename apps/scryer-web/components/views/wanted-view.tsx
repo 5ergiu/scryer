@@ -31,7 +31,6 @@ import {
   Clock,
   Download,
   Gauge,
-  History,
   ListChecks,
   Pause,
   Play,
@@ -403,7 +402,7 @@ export function WantedView({
 }: WantedViewProps) {
   const t = useTranslate();
   const wantedNav: Array<{
-    section: WantedSection | "history";
+    section: WantedSection;
     label: string;
     count: number | null;
     icon: typeof ListChecks;
@@ -433,14 +432,6 @@ export function WantedView({
       icon: Clock,
       to: buildViewPath("wanted", undefined, undefined, undefined, "pending"),
       active: section === "pending",
-    },
-    {
-      section: "history",
-      label: t("history.title"),
-      count: null,
-      icon: History,
-      to: buildViewPath("activity", undefined, undefined, undefined, undefined, "history"),
-      active: false,
     },
   ];
   const activeWantedNavItem =
