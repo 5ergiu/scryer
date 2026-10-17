@@ -651,8 +651,8 @@ function SeasonSectionImpl({
                 {t("seasonSection.noEpisodeRecords")}
               </div>
             ) : isMobile ? (
-              <div className={cn(showCollectionHeader && "border-t border-border", "px-3 py-3")}>
-                <div className="space-y-3">
+              <div className={cn(showCollectionHeader && "border-t border-border", "p-2")}>
+                <div className="space-y-2">
                   {episodes.map((episode) => (
                     <EpisodeRow
                       key={episode.id}

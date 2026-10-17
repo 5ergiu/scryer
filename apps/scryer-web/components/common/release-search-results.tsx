@@ -445,9 +445,9 @@ function SearchResultRow({
         data-release-link={result.link ?? ""}
         data-release-download-url={result.downloadUrl ?? ""}
         data-release-candidate-token={result.candidateToken ?? ""}
-        className="rounded-lg border border-border bg-background/40 p-3"
+        className="rounded-lg border border-border bg-background/40 px-2.5 py-2"
       >
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <p className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug text-foreground">
             {result.title}
           </p>
@@ -500,7 +500,7 @@ function SearchResultRow({
               {queueUnavailableReason}
             </p>
           ) : null}
-          <div className="mt-1 grid gap-2">
+          <div className="flex flex-wrap gap-2 pt-0.5">
             <Button
               id={queueButtonId}
               data-ui="release-search-result-queue"
@@ -509,10 +509,10 @@ function SearchResultRow({
               disabled={queueDisabled}
               className={
                 queueButtonMuted
-                  ? "w-full"
+                  ? "min-w-24 flex-1"
                   : queueRequested
-                    ? "w-full border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-bg-strong)] text-[var(--scry-success-text)]"
-                    : "w-full border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-solid)] text-[var(--scry-success-on-solid)] hover:bg-[var(--scry-success-solid-hover)] focus-visible:ring-[var(--scry-success-border-strong)]"
+                    ? "min-w-24 flex-1 border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-bg-strong)] text-[var(--scry-success-text)]"
+                    : "min-w-24 flex-1 border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-solid)] text-[var(--scry-success-on-solid)] hover:bg-[var(--scry-success-solid-hover)] focus-visible:ring-[var(--scry-success-border-strong)]"
               }
               variant={queueButtonMuted ? "ghost" : "default"}
             >
@@ -535,7 +535,7 @@ function SearchResultRow({
                 onClick={handleQueueAdditionalClick}
                 disabled={additionalQueueDisabled}
                 className={cn(
-                  "w-full border-[rgba(var(--scry-accent-rgb),0.30)] bg-[rgba(var(--scry-accent-rgb),0.08)] text-[var(--scry-accent-text)] shadow-none hover:bg-[rgba(var(--scry-accent-rgb),0.13)] hover:text-[var(--scry-accent-text)] focus-visible:ring-[rgba(var(--scry-accent-rgb),0.25)]",
+                  "flex-1 border-[rgba(var(--scry-accent-rgb),0.30)] bg-[rgba(var(--scry-accent-rgb),0.08)] text-[var(--scry-accent-text)] shadow-none hover:bg-[rgba(var(--scry-accent-rgb),0.13)] hover:text-[var(--scry-accent-text)] focus-visible:ring-[rgba(var(--scry-accent-rgb),0.25)]",
                   additionalQueueRequested &&
                     "border-[var(--scry-success-border)] bg-[var(--scry-success-bg)] text-[var(--scry-success-text)] hover:border-[var(--scry-success-border-strong)] hover:bg-[var(--scry-success-bg-strong)] hover:text-[var(--scry-success-text)]",
                 )}

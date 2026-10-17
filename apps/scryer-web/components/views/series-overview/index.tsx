@@ -1308,8 +1308,8 @@ function SeriesOverviewViewImpl({
       ) : null}
 
       <div>
-        <Card className="relative overflow-hidden">
-          <CardHeader>
+        <Card className="relative overflow-hidden max-sm:p-2">
+          <CardHeader className="max-sm:px-1 max-sm:pt-1">
             {/* min-h matches the small buttons so the header keeps one
                 height whether or not the selection controls are showing. */}
             <div className="flex min-h-8 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -449,13 +449,13 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                 </TextActionButton>
               ) : null}
             </div>
-            {isPanelOpen ? (
-              <div className="mt-3 border-t border-border pt-3">
-                {panelContent}
-              </div>
-            ) : null}
           </div>
         </div>
+        {isPanelOpen ? (
+          <div className="mt-3 border-t border-border pt-3">
+            {panelContent}
+          </div>
+        ) : null}
       </div>
     );
   }
