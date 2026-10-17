@@ -1670,14 +1670,16 @@ score_entry["nzbgeek_thumbs_down"] := penalty if {
     }
 
     #[test]
-    fn plugin_indexer_language_policy_ignores_inferred_languages() {
+    fn plugin_indexer_language_policy_needs_every_required_language_reported() {
         let rego = r#"package scryer.rules.user.original_doesnt_matter
 import rego.v1
 
 score_entry["indexer_language_confirmed"] := 80 if {
-    required := {lower(lang) | some lang in input.profile.required_audio_languages}
-    some lang in input.release.indexer_languages
-    lower(lang) in required
+    count(input.profile.required_audio_languages) > 0
+    reported := {lower(lang) | some lang in input.release.indexer_languages}
+    every lang in input.profile.required_audio_languages {
+        lower(lang) in reported
+    }
 }
 "#;
         let id = "plugin_newznab_indexer_language_confirmed";
@@ -1707,6 +1709,19 @@ score_entry["indexer_language_confirmed"] := 80 if {
         assert_eq!(reported.entries.len(), 1);
         assert_eq!(reported.entries[0].code, "indexer_language_confirmed");
         assert_eq!(reported.entries[0].delta, 80);
+
+        input.profile.required_audio_languages = vec!["jpn".to_string(), "eng".to_string()];
+        input.release.indexer_languages = vec!["eng".to_string()];
+        let partial = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(partial.entries.is_empty(), "{:?}", partial.entries);
+
+        input.release.indexer_languages = vec!["eng".to_string(), "jpn".to_string()];
+        let complete = evaluator.evaluate(&input, "movie").unwrap();
+        assert_eq!(complete.entries.len(), 1);
+
+        input.profile.required_audio_languages = vec![];
+        let unrequired = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(unrequired.entries.is_empty(), "{:?}", unrequired.entries);
     }
 
     #[test]
