@@ -33,8 +33,10 @@ import { useTranslate } from "@/lib/context/translate-context";
 import type { InteractiveSearchIndexerProgress } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
 import { useIsNarrowElement } from "@/lib/hooks/use-mobile";
 import {
+  selectorId,
   seriesOverviewSeasonInteractiveSearchId,
   seriesOverviewSeasonMonitorId,
   seriesOverviewSeasonSectionId,
@@ -249,6 +251,7 @@ function SeasonSectionImpl({
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seasonToggling, setSeasonToggling] = React.useState(false);
   const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const [seasonSearchOpen, setSeasonSearchOpen] = React.useState(false);
   const stableSubtitleDownloads = subtitleDownloads ?? EMPTY_SUBTITLE_DOWNLOADS;
   const selectionEnabled = Boolean(onToggleEpisodeSelected);
 
@@ -595,6 +598,7 @@ function SeasonSectionImpl({
                 disabled={seasonInteractiveSearchLoading}
                 onClick={(event) => {
                   event.stopPropagation();
+                  setSeasonSearchOpen(true);
                   onRunSeasonInteractiveSearch();
                 }}
                 label={t("series.interactiveSearchSeason")}
@@ -619,30 +623,37 @@ function SeasonSectionImpl({
         </div>
       ) : null}
 
+      {seasonSearchOpen && onQueueFromSeasonSearch ? (
+        <InteractiveSearchDialog
+          id={selectorId("series-overview-season-search-dialog", collection.id)}
+          open={seasonSearchOpen}
+          onOpenChange={setSeasonSearchOpen}
+          title={t("seasonSection.seasonSearchResults", {
+            season: seasonHeading(collection, t),
+          })}
+          description={t("series.interactiveSearchSeason")}
+        >
+          {seasonInteractiveSearchLoading && !seasonSearchResults?.length ? (
+            <div className="flex flex-col items-center justify-center gap-4 py-16">
+              <LoadingMark className="h-10 w-10 text-[var(--scry-accent-text)]" />
+              <p className="text-lg text-muted-foreground">{t("label.searching")}</p>
+            </div>
+          ) : seasonSearchResults && seasonSearchResults.length > 0 ? (
+            <SearchResultBuckets
+              titleId={collection.titleId}
+              ownedScope={{ collectionId: collection.id }}
+              results={seasonSearchResults}
+              onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
+              requireCandidateToken
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
+          )}
+        </InteractiveSearchDialog>
+      ) : null}
+
       {showSectionContent ? (
         <>
-            {seasonSearchResults &&
-            onQueueFromSeasonSearch &&
-            (seasonSearchResults.length > 0 || !seasonInteractiveSearchLoading) ? (
-              <div className={cn(showCollectionHeader && "border-t border-border", "px-4 py-3")}>
-                <p className="mb-2 text-xs font-medium text-muted-foreground">
-                  {t("seasonSection.seasonSearchResults", {
-                    season: seasonHeading(collection, t),
-                  })}
-                </p>
-                {seasonSearchResults.length > 0 ? (
-                  <SearchResultBuckets
-                    titleId={collection.titleId}
-                    ownedScope={{ collectionId: collection.id }}
-                    results={seasonSearchResults}
-                    onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
-                    requireCandidateToken
-                  />
-                ) : (
-                  <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
-                )}
-              </div>
-            ) : null}
             {!episodesReady ? (
               <div
                 className={cn(

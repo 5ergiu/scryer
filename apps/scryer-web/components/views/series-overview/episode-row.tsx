@@ -43,10 +43,12 @@ import type { DownloadQueueItem } from "@/lib/types/download-queue";
 import {
   episodeDisplayTitle,
   formatDate,
+  seasonHeading,
   formatFileSize,
   formatRuntimeFromSeconds,
 } from "./helpers";
-import { EpisodePanelContent } from "./episode-panel-content";
+import { EpisodePanelContent, EpisodeSearchResults } from "./episode-panel-content";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
 import {
   EpisodeTableActionButton,
   type TranslateFn,
@@ -193,6 +195,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   const [isPanelOpen, setIsPanelOpen] = React.useState(initiallyOpen);
   const [activeTab, setActiveTab] = React.useState<EpisodePanelTab>("details");
   const [episodeToggling, setEpisodeToggling] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const initializedDeepLinkEpisodeIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
@@ -233,11 +236,8 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       setActiveTab(tab);
       setIsPanelOpen(true);
       void onLoadEpisodeDetail?.(episode.id);
-      if (tab === "search" && onRunEpisodeSearch && (searchBlocked || !hasSearchResults)) {
-        onRunEpisodeSearch(episode);
-      }
     },
-    [episode, hasSearchResults, onLoadEpisodeDetail, onRunEpisodeSearch, searchBlocked],
+    [episode.id, onLoadEpisodeDetail],
   );
 
   const handleToggleEpisodeDetails = React.useCallback(() => {
@@ -249,17 +249,15 @@ export const EpisodeRow = React.memo(function EpisodeRow({
     openPanelTab("details");
   }, [activeTab, isPanelOpen, openPanelTab]);
 
-  const handleToggleEpisodeSearch = React.useCallback(() => {
+  const handleOpenEpisodeSearch = React.useCallback(() => {
     if (!onRunEpisodeSearch || !onQueueFromEpisodeSearch) {
       return;
     }
-    if (isPanelOpen && activeTab === "search") {
-      setIsPanelOpen(false);
-      return;
+    setSearchOpen(true);
+    if (searchBlocked || !hasSearchResults) {
+      onRunEpisodeSearch(episode);
     }
-
-    openPanelTab("search");
-  }, [activeTab, isPanelOpen, onQueueFromEpisodeSearch, onRunEpisodeSearch, openPanelTab]);
+  }, [episode, hasSearchResults, onQueueFromEpisodeSearch, onRunEpisodeSearch, searchBlocked]);
 
   const handleEpisodeTabChange = React.useCallback(
     (tab: EpisodePanelTab | "history") => {
@@ -299,27 +297,48 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       clearingReleaseBlocklistEntryId={clearingReleaseBlocklistEntryId}
       episode={episode}
       episodeFiles={episodeFiles}
-      episodeIndexerProgress={episodeIndexerProgress}
-      episodeLoading={searchLoading}
-      episodeResults={episodeResults}
       facet={facet}
-      hasSearchResults={hasSearchResults}
       onClearReleaseBlocklistEntry={onClearReleaseBlocklistEntry}
       onDeleteFile={onDeleteFile}
       onMakePrimaryFile={onMakePrimaryFile}
-      onQueueFromEpisodeSearch={onQueueFromEpisodeSearch}
-      onQueueAdditionalFromEpisodeSearch={onQueueAdditionalFromEpisodeSearch}
       onRefreshSubtitles={onRefreshSubtitles}
-      onRunEpisodeSearch={onRunEpisodeSearch}
       onTabChange={handleEpisodeTabChange}
       showHistoryTab={Boolean(onOpenHistory)}
-      showSearchTab={Boolean(onRunEpisodeSearch && onQueueFromEpisodeSearch)}
       releaseBlocklistEntries={releaseBlocklistEntries}
-      searchBlocked={searchBlocked}
       subtitleDownloads={subtitleDownloads}
       libraryId={libraryId}
       primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
     />
+  ) : null;
+
+  const searchDialog = searchOpen ? (
+    <InteractiveSearchDialog
+      id={selectorId("series-overview-episode-search-dialog", episode.id)}
+      open={searchOpen}
+      onOpenChange={setSearchOpen}
+      title={episodeDisplayTitle(episode, t)}
+      description={[
+        seasonHeading(collection, t),
+        episode.episodeNumber ?? episode.episodeLabel,
+        t("label.interactiveSearch"),
+      ]
+        .filter(Boolean)
+        .join(" · ")}
+    >
+      <EpisodeSearchResults
+        collection={collection}
+        episode={episode}
+        episodeIndexerProgress={episodeIndexerProgress}
+        episodeLoading={searchLoading}
+        episodeResults={episodeResults}
+        facet={facet}
+        hasSearchResults={hasSearchResults}
+        onQueueFromEpisodeSearch={onQueueFromEpisodeSearch}
+        onQueueAdditionalFromEpisodeSearch={onQueueAdditionalFromEpisodeSearch}
+        onRunEpisodeSearch={onRunEpisodeSearch}
+        searchBlocked={searchBlocked}
+      />
+    </InteractiveSearchDialog>
   ) : null;
 
   const episodeTypeBadges = renderEpisodeTypeBadges(episode, t);
@@ -442,7 +461,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                   size="sm"
                   tone="search"
                   className="w-full @md:w-auto @md:min-w-0 @md:flex-1"
-                  onClick={handleToggleEpisodeSearch}
+                  onClick={handleOpenEpisodeSearch}
                   leadingIcon={<Search className="h-4 w-4" />}
                 >
                   <span>{t("label.interactiveSearch")}</span>
@@ -456,6 +475,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
             {panelContent}
           </div>
         ) : null}
+        {searchDialog}
       </div>
     );
   }
@@ -580,7 +600,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                   episode.absoluteNumber,
                 )}
                 tone="search"
-                onClick={handleToggleEpisodeSearch}
+                onClick={handleOpenEpisodeSearch}
                 label={t("label.search")}
                 tooltip={t("help.interactiveSearchTooltip")}
                 showTitleAttribute={false}
@@ -603,6 +623,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
           </TableCell>
         </TableRow>
       ) : null}
+      {searchDialog}
     </React.Fragment>
   );
 });

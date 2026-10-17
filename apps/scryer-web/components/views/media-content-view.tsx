@@ -183,6 +183,7 @@ import {
   TitleRenamePlan,
   TitleRenamePreviewButton,
 } from "@/components/common/title-rename-controls";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
 import { TitleSearchDownloadClientNotice } from "@/components/common/title-search-download-client-notice";
 import { useCanManageOverviewTitle } from "@/lib/hooks/use-title-overview-access";
 import {
@@ -884,17 +885,11 @@ function TitleContextReleaseSearchPanel({
     results === null || searchFailed || results.length === 0;
 
   return (
-    <section className="overflow-hidden rounded-[14px] border border-[var(--scry-border)] bg-[var(--scry-card2)]">
-      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--scry-line3)] px-4 py-3.5">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-[9px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.15)] text-[var(--scry-accent-text)]">
-          <Search className="h-4 w-4" />
-        </span>
+    <section>
+      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--scry-line3)] pb-3">
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[14.5px] font-bold text-[var(--scry-ink2)]">
-            {t("label.interactiveSearch")}
-          </h3>
           <p
-            className="mt-0.5 flex items-center gap-1.5 truncate text-[11.5px] text-[var(--scry-faint)]"
+            className="flex items-center gap-1.5 truncate text-[11.5px] text-[var(--scry-faint)]"
             data-ui="title-release-search-summary"
             data-search-state={loading ? "searching" : "done"}
           >
@@ -983,7 +978,7 @@ function TitleContextReleaseSearchPanel({
       </div>
       <div
         className={cn(
-          results !== null && results.length > 0 && !searchFailed ? "" : "p-4",
+          results !== null && results.length > 0 && !searchFailed ? "pt-3" : "py-4",
         )}
       >
         {loading && (results === null || results.length === 0) ? (
@@ -1586,14 +1581,17 @@ function TitleContextPanel({
           />
         ) : null}
 
-        {releaseSearchOpen ? (
-          <div
-            id={releaseSearchPanelId}
-            role="region"
-            aria-label={t("label.interactiveSearch")}
-            aria-live="polite"
-            className="mt-3"
-          >
+        <InteractiveSearchDialog
+          id={releaseSearchPanelId}
+          open={releaseSearchOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              handleInteractiveSearchAction();
+            }
+          }}
+          title={`${title.name} — ${t("label.interactiveSearch")}`}
+        >
+          <div aria-live="polite">
             <TitleContextReleaseSearchPanel
               title={title}
               onInteractiveSearch={onInteractiveSearch}
@@ -1604,7 +1602,7 @@ function TitleContextPanel({
               onLoadingChange={setReleaseSearchLoading}
             />
           </div>
-        ) : null}
+        </InteractiveSearchDialog>
 
         <div className="mt-3 space-y-3">
           {downloadFeedback.queueItems.length > 0 ? (

@@ -9,6 +9,7 @@ import {
   Zap,
 } from "lucide-react";
 import { SearchResultBuckets } from "@/components/common/release-search-results";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
 import { TitleSearchDownloadClientNotice } from "@/components/common/title-search-download-client-notice";
 import { useTranslate } from "@/lib/context/translate-context";
 import type { Release } from "@/lib/types";
@@ -18,6 +19,7 @@ import {
   seriesOverviewSeriesMovieAutoSearchId,
   seriesOverviewSeriesMovieInteractiveSearchId,
   seriesOverviewSeriesMovieRowId,
+  selectorId,
 } from "@/lib/utils/dom-ids";
 import type {
   EpisodeMediaFile,
@@ -70,22 +72,12 @@ function SeriesMovieTimelineContent({
   subtitleDownloads,
   libraryId,
   onRefreshSubtitles,
-  seriesMovieSearchResultsByLink,
-  seriesMovieSearchLoadingByLink,
-  seriesMovieSearchAttemptedByLink,
-  searchBlockedBySeriesMovie,
-  onQueueFromSeriesMovieSearch,
-  onQueueAdditionalFromSeriesMovieSearch,
   onDeleteFile,
   onMakePrimaryFile,
   primaryMovieFileUpdatingId = null,
   onSeriesMovieTagsChanged,
 }: SeriesMovieTimelineContentProps) {
   const t = useTranslate();
-  const searchBlockedForMovie = searchBlockedBySeriesMovie[link.id] === true;
-  const searchLoading = seriesMovieSearchLoadingByLink[link.id] === true;
-  const searchAttempted = seriesMovieSearchAttemptedByLink[link.id] === true;
-  const searchResults = seriesMovieSearchResultsByLink[link.id];
   const mediaFiles = getSeriesMovieMediaFiles(
     link,
     mediaFilesByEpisode,
@@ -120,6 +112,27 @@ function SeriesMovieTimelineContent({
           </TitleFilesOnDiskRail>
         }
       />
+    </div>
+  );
+}
+
+function SeriesMovieSearchResults({
+  link,
+  seriesMovieSearchResultsByLink,
+  seriesMovieSearchLoadingByLink,
+  seriesMovieSearchAttemptedByLink,
+  searchBlockedBySeriesMovie,
+  onQueueFromSeriesMovieSearch,
+  onQueueAdditionalFromSeriesMovieSearch,
+}: SeriesMovieTimelineContentProps) {
+  const t = useTranslate();
+  const searchBlockedForMovie = searchBlockedBySeriesMovie[link.id] === true;
+  const searchLoading = seriesMovieSearchLoadingByLink[link.id] === true;
+  const searchAttempted = seriesMovieSearchAttemptedByLink[link.id] === true;
+  const searchResults = seriesMovieSearchResultsByLink[link.id];
+
+  return (
+    <>
       {searchBlockedForMovie ? <TitleSearchDownloadClientNotice /> : null}
       {!searchBlockedForMovie && searchLoading ? (
         <div className="flex flex-col items-center justify-center gap-4 py-16">
@@ -132,11 +145,7 @@ function SeriesMovieTimelineContent({
       && searchResults
       && searchResults.length > 0
       && onQueueFromSeriesMovieSearch ? (
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-muted-foreground">
-            {t("title.searchReleasesAction")}
-          </p>
-          <SearchResultBuckets
+        <SearchResultBuckets
             titleId={link.seriesTitleId}
             ownedScope={{ seriesMovieLinkId: link.id }}
             results={searchResults}
@@ -149,7 +158,6 @@ function SeriesMovieTimelineContent({
             }
             requireCandidateToken
           />
-        </div>
       ) : null}
       {!searchBlockedForMovie
       && !searchLoading
@@ -159,7 +167,7 @@ function SeriesMovieTimelineContent({
           {t("title.noReleasesFound", { name: link.movie.title })}
         </p>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -216,6 +224,7 @@ export function SeriesMovieTimelineSection(props: SeriesMovieTimelineContentProp
   const t = useTranslate();
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seriesMovieToggling, setSeriesMovieToggling] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const mediaFiles = getSeriesMovieMediaFiles(
     link,
     mediaFilesByEpisode,
@@ -260,12 +269,10 @@ export function SeriesMovieTimelineSection(props: SeriesMovieTimelineContentProp
   const handleInteractiveSearch = React.useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
-      if (!expanded) {
-        onToggle();
-      }
+      setSearchOpen(true);
       onRunSeriesMovieSearch?.(link);
     },
-    [expanded, link, onRunSeriesMovieSearch, onToggle],
+    [link, onRunSeriesMovieSearch],
   );
 
   return (
@@ -362,6 +369,15 @@ export function SeriesMovieTimelineSection(props: SeriesMovieTimelineContentProp
           <SeriesMovieTimelineContent {...props} />
         </div>
       ) : null}
+      <InteractiveSearchDialog
+        id={selectorId("series-overview-series-movie-search-dialog", link.id)}
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        title={link.movie.title}
+        description={t("label.interactiveSearch")}
+      >
+        <SeriesMovieSearchResults {...props} />
+      </InteractiveSearchDialog>
     </div>
   );
 }
