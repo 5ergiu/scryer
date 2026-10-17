@@ -48,6 +48,7 @@ impl From<scryer_application::FileScoreEvaluationView> for FileScoreEvaluationPa
                     delta: entry.delta,
                     kind: entry.kind,
                     source: entry.source,
+                    origin: entry.origin,
                 })
                 .collect(),
             rejection_codes: evaluation.rejection_codes,
