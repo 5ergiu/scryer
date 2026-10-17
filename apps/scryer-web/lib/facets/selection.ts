@@ -1,4 +1,4 @@
-import { facetById, type FacetDefinition } from "./registry.ts";
+import { FACET_IDS, facetById, type FacetDefinition } from "./registry.ts";
 
 /**
  * Facet values as rule sets and post-processing scripts persist them. Delay
@@ -15,13 +15,16 @@ export type FacetSelectOption<T extends string> = {
   facet: FacetDefinition;
 };
 
+/** Options in the registry's order (Movies, Series, Anime), whatever order the values arrive in. */
 export function facetSelectOptions<T extends string>(
   values: readonly T[],
 ): FacetSelectOption<T>[] {
-  return values.flatMap((value) => {
-    const facet = facetById(value.trim().toUpperCase());
-    return facet ? [{ value, facet }] : [];
-  });
+  return values
+    .flatMap((value) => {
+      const facet = facetById(value.trim().toUpperCase());
+      return facet ? [{ value, facet }] : [];
+    })
+    .sort((a, b) => FACET_IDS.indexOf(a.facet.id) - FACET_IDS.indexOf(b.facet.id));
 }
 
 export function isFacetSelected<T extends string>(
