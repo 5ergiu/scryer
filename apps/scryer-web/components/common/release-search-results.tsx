@@ -532,6 +532,11 @@ function SearchResultRow({
               {queueUnavailableReason}
             </p>
           ) : null}
+          {expanded && hasLog ? (
+            <div className="overflow-x-auto rounded-md border border-border">
+              <ScoringLogPanel decision={decision} />
+            </div>
+          ) : null}
           <div className="flex flex-row-reverse flex-wrap gap-2 pt-0.5">
             <Button
               id={queueButtonId}
@@ -587,11 +592,6 @@ function SearchResultRow({
             ) : null}
           </div>
         </div>
-        {expanded && hasLog ? (
-          <div className="-mx-2.5 -mb-2 mt-2 overflow-x-auto border-t border-border">
-            <ScoringLogPanel decision={decision} />
-          </div>
-        ) : null}
       </div>
     );
   }
