@@ -567,7 +567,11 @@ const SUB_NAV_MENU_CLASS =
   "mx-0 mb-0.5 ml-[17px] mt-0.5 gap-0.5 border-[var(--scry-border2)] px-0 py-0 pl-[11px]";
 
 const TOP_NAV_BADGE_GROUP_CLASS =
-  "pointer-events-none absolute right-1 flex items-center gap-1 select-none peer-data-[size=sm]/menu-button:top-1 peer-data-[size=default]/menu-button:top-1.5 peer-data-[size=lg]/menu-button:top-2.5 group-data-[collapsible=icon]:hidden";
+  "pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1 select-none group-data-[collapsible=icon]:hidden";
+
+// The stock menu badge is pinned for an h-8 button; top-level rows are
+// taller, so centre badges on the row instead.
+const TOP_NAV_BADGE_CENTER_CLASS = "!top-1/2 -translate-y-1/2";
 
 const TOP_NAV_BADGE_BASE_CLASS =
   "inline-flex h-5 min-w-5 items-center justify-center rounded-md px-1 text-xs font-medium tabular-nums";
@@ -1234,7 +1238,10 @@ function RootSidebarContent({
                           </SidebarMenuButton>
                           {pendingMediaRequestCount > 0 ? (
                             <SidebarMenuBadge
-                              className={navBadgeToneClass("request")}
+                              className={cn(
+                                TOP_NAV_BADGE_CENTER_CLASS,
+                                navBadgeToneClass("request"),
+                              )}
                             >
                               {pendingMediaRequestCount}
                             </SidebarMenuBadge>
@@ -1381,7 +1388,7 @@ function RootSidebarContent({
                             {item.label}
                           </SidebarMenuButton>
                           {item.id === "activity" && hasActivityImportBadge ? (
-                            <SidebarMenuBadge className="bg-primary text-primary-foreground" title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
+                            <SidebarMenuBadge className={cn(TOP_NAV_BADGE_CENTER_CLASS, "bg-primary text-primary-foreground")} title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
                               {activityImportBadgeText}
                             </SidebarMenuBadge>
                           ) : null}
@@ -1459,7 +1466,7 @@ function RootSidebarContent({
                           </span>
                         </SidebarMenuButton>
                         {item.id === "activity" && hasActivityImportBadge ? (
-                          <SidebarMenuBadge className="bg-primary text-primary-foreground" title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
+                          <SidebarMenuBadge className={cn(TOP_NAV_BADGE_CENTER_CLASS, "bg-primary text-primary-foreground")} title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
                             {activityImportBadgeText}
                           </SidebarMenuBadge>
                         ) : null}
@@ -1468,7 +1475,7 @@ function RootSidebarContent({
                           // that is not running outranks one with an update.
                           <SidebarMenuBadge
                             className={cn(
-                              "!top-1/2 -translate-y-1/2",
+                              TOP_NAV_BADGE_CENTER_CLASS,
                               navBadgeToneClass("danger"),
                             )}
                           >
@@ -1477,7 +1484,7 @@ function RootSidebarContent({
                         ) : isSettingsTop && pluginUpdateCount > 0 ? (
                           <SidebarMenuBadge
                             className={cn(
-                              "!top-1/2 -translate-y-1/2",
+                              TOP_NAV_BADGE_CENTER_CLASS,
                               navBadgeToneClass("warning"),
                             )}
                           >
