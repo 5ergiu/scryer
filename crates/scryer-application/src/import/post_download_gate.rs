@@ -1952,7 +1952,9 @@ pub(crate) fn compute_post_download_acquisition_decision(
         title,
         parsed,
         context.required_audio_languages(),
-        None,
+        listing
+            .as_ref()
+            .map(|listing| listing.snapshot.indexer_languages.as_slice()),
     );
 
     // The grab's frozen listing snapshot, anchored at the grab: the same

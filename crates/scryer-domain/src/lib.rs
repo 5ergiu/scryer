@@ -4453,6 +4453,10 @@ pub struct ScoringSnapshotEntry {
     pub delta: i32,
     pub kind: String,
     pub source: Option<String>,
+    /// `"user"` or `"system"` for a rule contribution, `None` for a built-in
+    /// one. Absent on entries saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Release facts captured at grab time, for history and notifications.

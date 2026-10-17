@@ -156,11 +156,36 @@ pub(crate) fn announced_metadata_for_title(
     required_audio_languages: &[String],
     indexer_languages: Option<&[String]>,
 ) -> crate::ParsedReleaseMetadata {
-    let language_context = crate::title_audio_language_context(
+    announced_metadata_for_audio_context(
+        parsed,
         title.language.as_deref(),
         title.country.as_deref(),
-        Some(title.facet.as_str()),
+        title.facet.as_str(),
         &title.tags,
+        required_audio_languages,
+        indexer_languages,
+    )
+}
+
+/// [`announced_metadata_for_title`] from the title facts a [`ScoringContext`]
+/// already carries, for the lanes that score a stored row without the title
+/// (the incumbent bar, rescore, the rule tester).
+///
+/// [`ScoringContext`]: crate::canonical_scoring::ScoringContext
+pub(crate) fn announced_metadata_for_audio_context(
+    parsed: &crate::ParsedReleaseMetadata,
+    original_language: Option<&str>,
+    original_country: Option<&str>,
+    facet: &str,
+    title_tags: &[String],
+    required_audio_languages: &[String],
+    indexer_languages: Option<&[String]>,
+) -> crate::ParsedReleaseMetadata {
+    let language_context = crate::title_audio_language_context(
+        original_language,
+        original_country,
+        Some(facet),
+        title_tags,
     );
     let mut enriched = parsed.clone();
     enriched.languages_audio = crate::release_audio_language_hints_for_title(

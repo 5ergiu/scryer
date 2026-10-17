@@ -462,7 +462,7 @@ export const TITLE_MEDIA_FILE_FIELDS = `
 export const TITLE_MEDIA_FILE_SCORE_FIELDS = `
       currentScoreEvaluation {
         score evaluatedAt needsRefresh timeSensitive rejectionCodes
-        entries { code delta kind source }
+        entries { code delta kind source origin }
       }`;
 
 const WANTED_ITEM_FIELDS = `
@@ -752,7 +752,7 @@ export const TITLE_MUTATION_RESULT_FIELDS = `
 
 const HISTORY_SCORING_FIELDS = `scoring {
   candidateScore previousScore delta decisionCode
-  entries { code delta kind source }
+  entries { code delta kind source origin }
   comparisons { fileId episodeIds previousScore delta }
 }`;
 

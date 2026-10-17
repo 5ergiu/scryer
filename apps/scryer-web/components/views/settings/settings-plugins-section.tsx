@@ -724,12 +724,13 @@ export function SettingsPluginsSection({
       {/* Equal columns: every action takes the width of the widest, so the
           update count badge does not make Update All the odd one out. */}
       <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:auto-cols-fr sm:grid-flow-col sm:grid-cols-none">
+      {upgradeCount > 0 || upgradingAll ? (
       <TextActionButton
         id="settings-plugins-upgrade-all"
         tone="upgrade"
         size="sm"
         className="w-full"
-        disabled={upgradingAll || remoteActionsBlocked.upgrade || upgradeCount === 0}
+        disabled={upgradingAll || remoteActionsBlocked.upgrade}
         onClick={onUpgradeAllPlugins}
         leadingIcon={upgradingAll ? <LoadingMark className="h-4 w-4" /> : <ArrowUpCircle className="h-4 w-4" />}
       >
@@ -743,6 +744,7 @@ export function SettingsPluginsSection({
           </Badge>
         ) : null}
       </TextActionButton>
+      ) : null}
       <Button
         id="settings-plugins-manual-toggle"
         variant="outline"

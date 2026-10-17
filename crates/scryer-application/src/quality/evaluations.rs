@@ -53,6 +53,11 @@ impl From<&crate::quality_profile::ScoringEntry> for ScoreEvaluationEntry {
                     Some(name.clone())
                 }
             },
+            origin: match &entry.source {
+                ScoringSource::Builtin => None,
+                ScoringSource::UserRule { .. } => Some("user".to_owned()),
+                ScoringSource::SystemRule { .. } => Some("system".to_owned()),
+            },
         }
     }
 }

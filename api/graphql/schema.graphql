@@ -27354,6 +27354,11 @@ type ScoreEvaluationEntryPayload {
 	Rule name, or null for a built-in contribution.
 	"""
 	source: String
+	"""
+	Rule origin: user or system, or null for a built-in contribution or an
+	entry recorded before origins were kept.
+	"""
+	origin: String
 }
 
 """

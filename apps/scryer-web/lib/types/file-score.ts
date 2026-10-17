@@ -1,4 +1,10 @@
-export type ScoreEntry = { code: string; delta: number; kind: string; source: string | null };
+export type ScoreEntry = {
+  code: string;
+  delta: number;
+  kind: string;
+  source: string | null;
+  origin?: string | null;
+};
 export type FileScoreEvaluation = {
   score: number;
   evaluatedAt: string;

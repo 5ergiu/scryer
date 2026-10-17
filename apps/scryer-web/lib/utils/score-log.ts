@@ -80,11 +80,13 @@ export function toScoreLogEntry(raw: unknown): ScoreLogEntry | null {
   if (typeof record.code !== "string" || !record.code.trim()) return null;
   if (typeof record.delta !== "number" || !Number.isFinite(record.delta)) return null;
   const kind = scoringKind(record.kind);
+  const origin = record.origin === "user" || record.origin === "system" ? record.origin : undefined;
   return {
     code: record.code,
     delta: record.delta,
     ...(kind ? { kind } : {}),
     ...readSource(record.source, record.ruleSetName ?? record.rule_set_name),
+    ...(origin ? { origin } : {}),
   };
 }
 
