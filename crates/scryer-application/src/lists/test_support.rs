@@ -604,7 +604,6 @@ impl UserListPolicyRepository for MemoryListStore {
 pub(crate) enum RecordedAction {
     Add {
         item_key: String,
-        search: bool,
     },
     Request {
         item_key: String,
@@ -681,11 +680,9 @@ impl ListActions for RecordingActions {
         _subscription: &ListSubscription,
         _route: &ListRoute,
         item: &ResolvedItem,
-        search: bool,
     ) -> AppResult<AddedTitle> {
         self.calls.lock().unwrap().push(RecordedAction::Add {
             item_key: item.item.item_key.clone(),
-            search,
         });
         if let Some(refuse) = self.refuse_adds {
             return Err(refuse());

@@ -168,7 +168,7 @@ function FollowListDialogBody({
   const missingParams = source ? missingSourceParams(paramDefinitions, source.params) : [];
   const personal = target.kind === "new" ? !!target.source.credentialId : target.subscription.scope === "PERSONAL";
   const canDirectAdd = draft.kinds.length > 0 && draft.kinds.every((kind) => hasLibraryPermission(user, draft.routes.find((route) => route.kind === kind)?.libraryId, LIBRARY_PERMISSIONS.manageTitles));
-  const modes: readonly ListMode[] = personal ? canDirectAdd ? ["SEARCH", "ADD", "REQUEST"] : ["REQUEST"] : PUBLIC_LIST_MODES;
+  const modes: readonly ListMode[] = personal ? canDirectAdd ? ["ADD", "REQUEST"] : ["REQUEST"] : PUBLIC_LIST_MODES;
   const problems = listDraftProblems(draft);
   const canSave = !saving && problems.length === 0 && missingParams.length === 0 && modes.includes(draft.mode);
 

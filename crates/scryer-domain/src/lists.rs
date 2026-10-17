@@ -49,10 +49,9 @@ impl ListScope {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ListMode {
-    /// Create the title monitored and search for it right away.
+    /// Create the title with the route's monitoring. A monitored title is
+    /// searched by the normal wanted cycle; an unmonitored one is not.
     #[default]
-    Search,
-    /// Create the title monitored and let the normal wanted cycle find it.
     Add,
     /// Submit a request held for review, whatever the owner's grants and the
     /// request rules say.
@@ -68,7 +67,6 @@ pub enum ListMode {
 impl ListMode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Search => "search",
             Self::Add => "add",
             Self::Hold => "hold",
             Self::Request => "request",
@@ -78,7 +76,6 @@ impl ListMode {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "search" => Some(Self::Search),
             "add" => Some(Self::Add),
             "hold" => Some(Self::Hold),
             "request" => Some(Self::Request),
@@ -840,8 +837,6 @@ pub struct ListTitleAddedEventData {
     pub list: ListEventSubject,
     pub title: crate::TitleContextSnapshot,
     pub library_id: String,
-    /// Whether the add also started a search.
-    pub searched: bool,
 }
 
 /// A public list submitted a media request. `held` requests wait for review
@@ -968,7 +963,6 @@ mod tests {
             assert_eq!(ListScope::parse(scope.as_str()), Some(scope));
         }
         for mode in [
-            ListMode::Search,
             ListMode::Add,
             ListMode::Hold,
             ListMode::Request,

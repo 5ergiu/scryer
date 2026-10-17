@@ -456,7 +456,7 @@ fn draft_subscription(
         provider_url: None,
         kinds,
         enabled: true,
-        mode: ListMode::Search,
+        mode: ListMode::Add,
         routes,
         filters: Vec::new(),
         max_per_sync: None,

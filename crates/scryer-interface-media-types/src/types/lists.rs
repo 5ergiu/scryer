@@ -36,9 +36,8 @@ impl ListScopeValue {
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(name = "ListMode", rename_items = "SCREAMING_SNAKE_CASE")]
 pub enum ListModeValue {
-    /// Add the title monitored and search for it at once.
-    Search,
-    /// Add the title monitored and let the wanted cycle find it.
+    /// Add the title with the route's monitoring. A monitored title is found
+    /// by the wanted cycle; an unmonitored one is not searched.
     Add,
     /// Submit a request that waits for review.
     Hold,
@@ -51,7 +50,6 @@ pub enum ListModeValue {
 impl ListModeValue {
     pub fn from_domain(value: ListMode) -> Self {
         match value {
-            ListMode::Search => Self::Search,
             ListMode::Add => Self::Add,
             ListMode::Hold => Self::Hold,
             ListMode::Request => Self::Request,
@@ -61,7 +59,6 @@ impl ListModeValue {
 
     pub fn into_domain(self) -> ListMode {
         match self {
-            Self::Search => ListMode::Search,
             Self::Add => ListMode::Add,
             Self::Hold => ListMode::Hold,
             Self::Request => ListMode::Request,

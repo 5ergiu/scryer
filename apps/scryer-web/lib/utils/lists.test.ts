@@ -356,7 +356,7 @@ test("public modes exclude member requests and discover cannot be picked yet", (
   assert.equal(PUBLIC_LIST_MODES.includes("REQUEST"), false);
   assert.equal(isListModeSelectable("DISCOVER"), false);
   assert.equal(isListModeSelectable("HOLD"), true);
-  assert.equal(listModeLabelKey("SEARCH"), "lists.mode.search");
+  assert.equal(listModeLabelKey("ADD"), "lists.mode.add");
 });
 
 test("state labels and tones cover every sync and membership state", () => {
@@ -499,7 +499,7 @@ test("subscribe input is public, drops blank parameters and routes for unfollowe
     {
       name: "  Weekend picks ",
       kinds: ["MOVIE"],
-      mode: "SEARCH",
+      mode: "ADD",
       routes: [defaultListRoute("MOVIE", libraries, "MONITORED"), defaultListRoute("SERIES", libraries, "ALL_EPISODES")],
       filters: [],
       maxPerSync: 5,

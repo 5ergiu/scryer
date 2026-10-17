@@ -27,8 +27,8 @@ use crate::events::domain_events::{
     new_global_domain_event, new_title_domain_event, title_context_snapshot,
 };
 use crate::{
-    AppError, AppResult, AppUseCase, MediaRequestAdmission, SubmissionConflictPolicy,
-    SubmitMediaRequestInput, TitleOptionsPatch,
+    AppError, AppResult, AppUseCase, MediaRequestAdmission, SubmitMediaRequestInput,
+    TitleOptionsPatch,
 };
 
 /// The name a list item is created or requested under: its own title when the
@@ -188,7 +188,6 @@ impl ListActions for AppListActions<'_> {
         subscription: &ListSubscription,
         route: &ListRoute,
         item: &ResolvedItem,
-        search: bool,
     ) -> AppResult<AddedTitle> {
         if subscription.is_personal() {
             let owner = self.list_owner(subscription).await?;
@@ -318,25 +317,6 @@ impl ListActions for AppListActions<'_> {
             )
             .await?;
         let created = !outcome.reused_existing_title;
-        if search && created {
-            // The title exists either way; a search that fails to start is
-            // picked up by the ordinary wanted-search schedule.
-            if let Err(error) = self
-                .app
-                .trigger_title_wanted_search(
-                    &actor,
-                    &outcome.title.id,
-                    SubmissionConflictPolicy::from_replace_flag(false),
-                )
-                .await
-            {
-                tracing::warn!(
-                    title_id = %outcome.title.id,
-                    error = %error,
-                    "list add could not start its wanted search"
-                );
-            }
-        }
         if created {
             self.app
                 .append_list_event(if subscription.is_personal() {
@@ -347,7 +327,6 @@ impl ListActions for AppListActions<'_> {
                             list: ListEventSubject::of(subscription),
                             title: title_context_snapshot(&outcome.title),
                             library_id: route.library_id.clone(),
-                            searched: search,
                         }),
                     )
                 } else {
@@ -358,7 +337,6 @@ impl ListActions for AppListActions<'_> {
                             list: ListEventSubject::of(subscription),
                             title: title_context_snapshot(&outcome.title),
                             library_id: route.library_id.clone(),
-                            searched: search,
                         }),
                     )
                 })
