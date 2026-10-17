@@ -1809,6 +1809,7 @@ impl DownloadClient for NzbgetDownloadClient {
                 ),
                 completed_at: None,
                 parameters,
+                posted_file_names: Vec::new(),
             },
             native_delete_paths,
         }))
@@ -1943,6 +1944,7 @@ fn completed_download_from_nzbget_history_entry(
         size_bytes: size_to_bytes(size_mb),
         completed_at,
         parameters,
+        posted_file_names: Vec::new(),
     })
 }
 

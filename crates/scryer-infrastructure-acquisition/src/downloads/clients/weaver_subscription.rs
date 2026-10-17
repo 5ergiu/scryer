@@ -942,6 +942,7 @@ mod tests {
             created_at: Utc::now(),
             completed_at: None,
             attention: None,
+            posted_file_names: Vec::new(),
         }
     }
 
@@ -1284,6 +1285,7 @@ mod tests {
             size_bytes: Some(123),
             completed_at: Some(Utc::now()),
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         };
         bridge.stamp_completed_download(&mut prefetched);
 

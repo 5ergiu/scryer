@@ -3091,6 +3091,20 @@ pub struct CompletedDownload {
     pub size_bytes: Option<i64>,
     pub completed_at: Option<DateTime<Utc>>,
     pub parameters: Vec<(String, String)>,
+    /// Files the client wrote under a different name than they were posted
+    /// with (shortened, cleaned of characters a filesystem refuses, or made
+    /// unique), each with its posted name. Empty when the client reports
+    /// none; only Weaver does.
+    #[serde(default)]
+    pub posted_file_names: Vec<PostedFileName>,
+}
+
+/// A downloaded file's name on disk and the name it was posted with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedFileName {
+    /// The file's name inside the download's `dest_dir`.
+    pub name: String,
+    pub posted_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

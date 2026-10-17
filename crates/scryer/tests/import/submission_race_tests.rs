@@ -248,6 +248,7 @@ impl RaceHarness {
             size_bytes: Some(1_000),
             completed_at: Some(completed_at),
             parameters,
+            posted_file_names: Vec::new(),
         };
         self.ingest
             .publish(TrackedDownloadSnapshotUpdate {

@@ -201,14 +201,31 @@ pub const PARTIAL_COPY_SUFFIX: &str = ".scryer-partial";
 /// Where a copy writes while it is still in progress: a sibling of
 /// `destination` in the same directory, so the promotion is a rename inside one
 /// filesystem and the fsynced directory entry covers both names.
+///
+/// A destination name too long to carry the suffix within
+/// [`FILE_NAME_MAX_BYTES`] is shortened and given a hash of the whole name, so
+/// the staging name stays deterministic and two long names that share a
+/// prefix still stage apart.
 pub fn partial_destination_path(destination: &Path) -> PathBuf {
     let name = destination
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!("{name}{PARTIAL_COPY_SUFFIX}"))
+    if name.len() + PARTIAL_COPY_SUFFIX.len() <= FILE_NAME_MAX_BYTES {
+        return parent.join(format!("{name}{PARTIAL_COPY_SUFFIX}"));
+    }
+    let hash = blake3::hash(name.as_bytes()).to_hex();
+    let hash = &hash.as_str()[..16];
+    let kept = crate::library::rename::truncate_utf8_bytes(
+        &name,
+        FILE_NAME_MAX_BYTES - PARTIAL_COPY_SUFFIX.len() - hash.len() - 1,
+    );
+    parent.join(format!("{kept}-{hash}{PARTIAL_COPY_SUFFIX}"))
 }
+
+/// The longest file name, in bytes, the filesystems Scryer writes to accept.
+pub(crate) const FILE_NAME_MAX_BYTES: usize = 255;
 
 /// Observes bytes as they are written, so a caller can show intra-file progress
 /// for a copy that runs for hours (FR-091).
@@ -1978,5 +1995,53 @@ mod tests {
                 }
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod long_name_tests {
+    use super::*;
+
+    /// A destination name may be as long as the filesystem allows (255
+    /// bytes); the in-progress copy must fit too.
+    #[tokio::test]
+    async fn copy_to_a_destination_near_the_name_limit_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        std::fs::write(&source, b"episode payload").unwrap();
+        let destination = dir.path().join(format!("{}.mkv", "a".repeat(246)));
+        assert_eq!(destination.file_name().unwrap().len(), 250);
+
+        VerifiedCopier::new()
+            .copy(&source, &destination, DestinationClaim::ClaimHere)
+            .await
+            .expect("a 250-byte destination name is legal and must copy");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"episode payload");
+    }
+
+    #[test]
+    fn a_name_with_room_for_the_suffix_stages_beside_itself() {
+        let destination = Path::new("/library/Show/Episode 07.mkv");
+
+        assert_eq!(
+            partial_destination_path(destination),
+            Path::new("/library/Show/Episode 07.mkv.scryer-partial")
+        );
+    }
+
+    #[test]
+    fn a_long_name_stages_under_a_bounded_name_that_is_stable_and_distinct() {
+        let shared = "é".repeat(120);
+        let first = PathBuf::from(format!("/library/{shared} - 07.mkv"));
+        let second = PathBuf::from(format!("/library/{shared} - 08.mkv"));
+
+        let partial = partial_destination_path(&first);
+        let name = partial.file_name().unwrap().to_str().unwrap();
+
+        assert!(name.len() <= FILE_NAME_MAX_BYTES);
+        assert!(name.ends_with(PARTIAL_COPY_SUFFIX));
+        assert_eq!(partial.parent(), first.parent());
+        assert_eq!(partial, partial_destination_path(&first));
+        assert_ne!(partial, partial_destination_path(&second));
     }
 }

@@ -127,6 +127,7 @@ fn scryer_completed(
             ("*scryer_title_id".to_string(), title_id.to_string()),
             ("*scryer_facet".to_string(), facet_id.to_string()),
         ],
+        posted_file_names: Vec::new(),
     }
 }
 
@@ -851,6 +852,7 @@ async fn import_returns_unmatched_when_title_not_found() {
         size_bytes: None,
         completed_at: None,
         parameters: vec![("*scryer_title_id".to_string(), "nonexistent-id".to_string())],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -1116,6 +1118,7 @@ async fn import_movie_decypharr_symlink_release_folder_succeeds() {
             ("*scryer_title_id".to_string(), title.id.clone()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -1206,6 +1209,7 @@ async fn import_movie_decypharr_symlink_release_folder_uses_remote_path_mapping(
             ("*scryer_title_id".to_string(), title.id.clone()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -3449,6 +3453,7 @@ async fn a_titleless_obfuscated_download_matches_and_imports_on_its_recovered_na
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)

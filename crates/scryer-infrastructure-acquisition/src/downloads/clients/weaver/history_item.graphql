@@ -19,5 +19,9 @@ query HistoryItem($id: Int!) {
     attention {
       message
     }
+    postedFileNames {
+      name
+      postedName
+    }
   }
 }

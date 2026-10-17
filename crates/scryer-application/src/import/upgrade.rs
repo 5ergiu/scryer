@@ -1816,12 +1816,14 @@ fn sibling_guard_path(path: &Path, label: &str) -> PathBuf {
     let file_name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("media"));
-    parent.join(format!(
-        ".scryer-upgrade-{}-{}-{}",
-        label,
-        scryer_domain::Id::new().0,
-        file_name.to_string_lossy()
-    ))
+    let prefix = format!(".scryer-upgrade-{}-{}-", label, scryer_domain::Id::new().0);
+    // The id keeps the name unique; the file name only says what it guards,
+    // so it is shortened to keep the whole name within the filesystem limit.
+    let file_name = crate::library::rename::truncate_utf8_bytes(
+        &file_name.to_string_lossy(),
+        crate::location::verify::FILE_NAME_MAX_BYTES.saturating_sub(prefix.len()),
+    );
+    parent.join(format!("{prefix}{file_name}"))
 }
 
 async fn restore_same_path_backup(final_path: &Path, backup_path: &Path) -> AppResult<()> {
@@ -2040,6 +2042,25 @@ async fn remove_imported_replacement(dest_path: &std::path::Path) {
             error = %remove_err,
             path = %dest_path.display(),
             "failed to remove imported replacement after upgrade database failure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod long_name_tests {
+    use super::*;
+
+    /// The longest name the renamer generates must still leave room for the
+    /// same-path upgrade's staging name.
+    #[test]
+    fn same_path_upgrade_staging_name_fits_a_generated_name() {
+        let generated = format!("{}.mkv", "a".repeat(212));
+        assert_eq!(generated.len(), 216);
+        let staged = sibling_guard_path(&Path::new("/library/Show").join(generated), "replacement");
+        let staged_len = staged.file_name().unwrap().len();
+        assert!(
+            staged_len <= 255,
+            "staging name is {staged_len} bytes; filesystems allow 255"
         );
     }
 }

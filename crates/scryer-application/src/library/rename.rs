@@ -5247,7 +5247,7 @@ fn truncate_generated_component(component: &str, preserve_extension: bool) -> St
     }
 }
 
-fn truncate_utf8_bytes(value: &str, budget: usize) -> String {
+pub(crate) fn truncate_utf8_bytes(value: &str, budget: usize) -> String {
     if value.len() <= budget {
         return value.to_string();
     }
