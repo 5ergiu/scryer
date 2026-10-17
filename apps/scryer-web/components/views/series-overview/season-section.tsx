@@ -33,7 +33,7 @@ import { useTranslate } from "@/lib/context/translate-context";
 import type { InteractiveSearchIndexerProgress } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { useIsMobile } from "@/lib/hooks/use-mobile";
+import { useIsNarrowElement } from "@/lib/hooks/use-mobile";
 import {
   seriesOverviewSeasonInteractiveSearchId,
   seriesOverviewSeasonMonitorId,
@@ -71,6 +71,9 @@ import {
 import { LoadingMark } from "@/components/common/loading-mark";
 
 const EMPTY_INDEXER_PROGRESS: InteractiveSearchIndexerProgress[] = [];
+// Below this section width the episode table squeezes titles into a
+// one-word column, so episodes render as cards instead.
+const EPISODE_TABLE_MIN_WIDTH = 720;
 
 export { SeriesMovieTimelineSection } from "./series-movie-row";
 
@@ -239,7 +242,10 @@ function SeasonSectionImpl({
 }: SeasonSectionProps) {
   const t = useTranslate();
   const canRefreshScores = useCanManageOverviewTitle(libraryId);
-  const isMobile = useIsMobile();
+  const sectionRef = React.useRef<HTMLDivElement>(null);
+  // The overview also renders inside a side panel, so the episode table
+  // gives way to cards by the section's own width, not the window's.
+  const isMobile = useIsNarrowElement(sectionRef, EPISODE_TABLE_MIN_WIDTH);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seasonToggling, setSeasonToggling] = React.useState(false);
   const [detailsOpen, setDetailsOpen] = React.useState(false);
@@ -403,6 +409,7 @@ function SeasonSectionImpl({
 
   return (
     <div
+      ref={sectionRef}
       id={seriesOverviewSeasonSectionId(collection.id)}
       data-timeline-kind="collection"
       data-collection-id={collection.id}

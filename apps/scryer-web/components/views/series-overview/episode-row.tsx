@@ -346,7 +346,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
         id={selectorId("series-overview-episode", episode.id)}
         data-episode-id={episode.id}
         className={cn(
-          "rounded-lg border border-border bg-card/50 p-3",
+          "@container rounded-lg border border-border bg-card/50 p-3",
           !episode.monitored && "opacity-60",
         )}
       >
@@ -414,14 +414,14 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               ) : null}
               {episodeSizeLabel ? <span>{episodeSizeLabel}</span> : null}
             </div>
-            <div className="mt-3 flex flex-col gap-2">
+            <div className="mt-3 flex flex-col gap-2 @md:flex-row">
               {onAutoSearchEpisode ? (
                 <TextActionButton
                   id={selectorId("series-overview-episode-auto-search", episode.id)}
                   type="button"
                   size="sm"
                   tone="auto"
-                  className="w-full"
+                  className="w-full @md:w-auto @md:min-w-0 @md:flex-1"
                   onClick={handleAutoSearchClick}
                   disabled={autoSearching}
                   leadingIcon={
@@ -441,7 +441,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                   type="button"
                   size="sm"
                   tone="search"
-                  className="w-full"
+                  className="w-full @md:w-auto @md:min-w-0 @md:flex-1"
                   onClick={handleToggleEpisodeSearch}
                   leadingIcon={<Search className="h-4 w-4" />}
                 >
