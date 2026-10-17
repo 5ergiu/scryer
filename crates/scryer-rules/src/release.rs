@@ -1674,7 +1674,7 @@ score_entry["nzbgeek_thumbs_down"] := penalty if {
         let rego = r#"package scryer.rules.user.original_doesnt_matter
 import rego.v1
 
-score_entry["indexer_language_confirmed"] := 200 if {
+score_entry["indexer_language_confirmed"] := 80 if {
     required := {lower(lang) | some lang in input.profile.required_audio_languages}
     some lang in input.release.indexer_languages
     lower(lang) in required
@@ -1706,7 +1706,7 @@ score_entry["indexer_language_confirmed"] := 200 if {
         let reported = evaluator.evaluate(&input, "movie").unwrap();
         assert_eq!(reported.entries.len(), 1);
         assert_eq!(reported.entries[0].code, "indexer_language_confirmed");
-        assert_eq!(reported.entries[0].delta, 200);
+        assert_eq!(reported.entries[0].delta, 80);
     }
 
     #[test]
