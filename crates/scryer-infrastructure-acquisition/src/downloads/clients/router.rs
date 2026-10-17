@@ -619,6 +619,20 @@ impl DownloadClient for FeedbackTimeoutDownloadClient {
         .await
     }
 
+    async fn posted_file_names_for_source(
+        &self,
+        client_id: &str,
+        client_type: &str,
+        download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        self.run_feedback_read(self.inner.posted_file_names_for_source(
+            client_id,
+            client_type,
+            download_client_item_id,
+        ))
+        .await
+    }
+
     async fn pause_queue_item(&self, id: &str) -> AppResult<()> {
         self.inner.pause_queue_item(id).await
     }
@@ -3777,6 +3791,20 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                 Err(error)
             }
         }
+    }
+
+    async fn posted_file_names_for_source(
+        &self,
+        client_id: &str,
+        client_type: &str,
+        download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        let Some(client) = self.resolve_client_for_id(client_id.trim()).await? else {
+            return Ok(Vec::new());
+        };
+        client
+            .posted_file_names_for_source(client_id, client_type, download_client_item_id)
+            .await
     }
 
     async fn pause_queue_item(&self, id: &str) -> AppResult<()> {

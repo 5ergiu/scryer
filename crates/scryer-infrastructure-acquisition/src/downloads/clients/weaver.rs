@@ -266,6 +266,19 @@ struct HistoryItemsPayload {
     history_items: Vec<WeaverQueueItem>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PostedFileNamesPayload {
+    history_item: Option<PostedFileNamesItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PostedFileNamesItem {
+    #[serde(default)]
+    posted_file_names: Vec<WeaverPostedFileName>,
+}
+
 const TARGETED_HISTORY_FALLBACK_LIMIT: usize = 100;
 const SCRYER_TITLE_ID_ATTRIBUTE_KEY: &str = "*scryer_title_id";
 
@@ -853,31 +866,19 @@ impl WeaverDownloadClient {
         let after = offset.map(|value| {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("off:{value}"))
         });
-        let variables = json!({
-            "filter": if use_title_filter && title_id.is_some() {
-                title_attribute_filter(title_id)
-            } else {
-                None::<serde_json::Value>
-            },
-            "first": limit.and_then(|value| i32::try_from(value).ok()),
-            "after": after,
-        });
-        match self
-            .graphql_request::<HistoryItemsPayload>(
-                graphql_docs::HISTORY_ITEMS_QUERY,
-                variables.clone(),
-            )
-            .await
-        {
-            Err(error) if is_posted_file_names_schema_error(&error) => {
-                self.graphql_request::<HistoryItemsPayload>(
-                    graphql_docs::HISTORY_ITEMS_COMPAT_QUERY,
-                    variables,
-                )
-                .await
-            }
-            result => result,
-        }
+        self.graphql_request::<HistoryItemsPayload>(
+            graphql_docs::HISTORY_ITEMS_QUERY,
+            json!({
+                "filter": if use_title_filter && title_id.is_some() {
+                    title_attribute_filter(title_id)
+                } else {
+                    None::<serde_json::Value>
+                },
+                "first": limit.and_then(|value| i32::try_from(value).ok()),
+                "after": after,
+            }),
+        )
+        .await
         .map(|data| data.history_items)
     }
 
@@ -906,22 +907,12 @@ impl WeaverDownloadClient {
     }
 
     async fn query_history_item(&self, id: i32) -> AppResult<Option<WeaverQueueItem>> {
-        let data = match self
+        let data = self
             .graphql_request::<serde_json::Value>(
                 graphql_docs::HISTORY_ITEM_QUERY,
                 json!({ "id": id }),
             )
-            .await
-        {
-            Err(error) if is_posted_file_names_schema_error(&error) => {
-                self.graphql_request::<serde_json::Value>(
-                    graphql_docs::HISTORY_ITEM_COMPAT_QUERY,
-                    json!({ "id": id }),
-                )
-                .await?
-            }
-            result => result?,
-        };
+            .await?;
         let item = data.get("historyItem").ok_or_else(|| {
             AppError::Repository("weaver historyItem response is missing its result".into())
         })?;
@@ -965,6 +956,43 @@ impl WeaverDownloadClient {
         };
 
         Ok(item.as_ref().and_then(weaver_item_to_completed_download))
+    }
+
+    /// The names Weaver reports this job's renamed files were posted with.
+    ///
+    /// A Weaver that does not report them refuses the field; that, a job Weaver
+    /// no longer holds, or one with nothing renamed all read as an empty list.
+    pub async fn posted_file_names(
+        &self,
+        download_client_item_id: &str,
+    ) -> AppResult<Vec<PostedFileName>> {
+        let Ok(job_id) = download_client_item_id.trim().parse::<i32>() else {
+            return Ok(Vec::new());
+        };
+        let data = match self
+            .graphql_request::<PostedFileNamesPayload>(
+                graphql_docs::HISTORY_ITEM_POSTED_FILE_NAMES_QUERY,
+                json!({ "id": job_id }),
+            )
+            .await
+        {
+            Ok(data) => data,
+            Err(error) if is_posted_file_names_schema_error(&error) => {
+                debug!(job_id, "weaver does not report posted file names");
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(data
+            .history_item
+            .map(|item| item.posted_file_names)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| PostedFileName {
+                name: file.name,
+                posted_name: file.posted_name,
+            })
+            .collect())
     }
 
     /// One bounded `historyItems` page, with the pre-`historyItems` compat
@@ -1308,8 +1336,7 @@ fn compat_timestamp_to_utc(raw: Option<f64>) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-// A Weaver older than the posted-name record refuses the field; the history
-// read is sent again without it.
+// A Weaver older than the posted-name record refuses the field.
 fn is_posted_file_names_schema_error(error: &AppError) -> bool {
     is_weaver_schema_error(error, "Unknown field \"postedFileNames\"")
 }
@@ -1854,6 +1881,15 @@ impl DownloadClient for WeaverDownloadClient {
         download_client_item_id: &str,
     ) -> AppResult<Option<CompletedDownload>> {
         self.get_completed_download(download_client_item_id).await
+    }
+
+    async fn posted_file_names_for_source(
+        &self,
+        _client_id: &str,
+        _client_type: &str,
+        download_client_item_id: &str,
+    ) -> AppResult<Vec<PostedFileName>> {
+        self.posted_file_names(download_client_item_id).await
     }
 
     async fn pause_queue_item(&self, id: &str) -> AppResult<()> {
@@ -3693,50 +3729,30 @@ mod tests {
         assert_eq!(download.name, "8f1d2c3b4a59687766554433221100ff");
     }
 
-    fn completed_history_item_json() -> serde_json::Value {
-        json!({
-            "id": 10002,
-            "name": "Fixture Job",
-            "state": "COMPLETE",
-            "error": null,
-            "progressPercent": 100.0,
-            "totalBytes": 123456789_u64,
-            "category": "5070",
-            "attributes": [],
-            "clientRequestId": null,
-            "outputDir": "/data/complete/Fixture Job",
-            "createdAt": "2024-01-01T00:00:00Z",
-            "completedAt": "2024-01-01T00:10:00Z",
-            "attention": null
-        })
-    }
-
     #[tokio::test]
-    async fn completed_download_carries_the_names_files_were_posted_with() {
+    async fn posted_file_names_reads_the_names_files_were_posted_with() {
         let server = MockServer::start().await;
         let client = WeaverDownloadClient::new(server.uri(), None);
-        let mut item = completed_history_item_json();
-        item["postedFileNames"] = json!([{
-            "name": "Fixture Show - shortened.mkv",
-            "postedName": "Fixture Show - the full posted name - 07.mkv"
-        }]);
         Mock::given(method("POST"))
             .and(body_string_contains("postedFileNames"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"historyItem": item}})),
-            )
+            .and(body_string_contains("\"id\":10002"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"historyItem": {"postedFileNames": [{
+                    "name": "Fixture Show - shortened.mkv",
+                    "postedName": "Fixture Show - the full posted name - 07.mkv"
+                }]}}
+            })))
             .expect(1)
             .mount(&server)
             .await;
 
-        let download = client
-            .get_completed_download("10002")
+        let posted_file_names = client
+            .posted_file_names("10002")
             .await
-            .expect("completed download lookup should load")
-            .expect("completed download should exist");
+            .expect("posted names should load");
 
         assert_eq!(
-            download.posted_file_names,
+            posted_file_names,
             vec![scryer_domain::PostedFileName {
                 name: "Fixture Show - shortened.mkv".to_string(),
                 posted_name: "Fixture Show - the full posted name - 07.mkv".to_string(),
@@ -3745,7 +3761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_reads_from_a_weaver_without_posted_file_names_resend_without_them() {
+    async fn a_weaver_without_posted_file_names_yields_none_from_one_request() {
         let server = MockServer::start().await;
         let client = WeaverDownloadClient::new(server.uri(), None);
         Mock::given(method("POST"))
@@ -3753,60 +3769,40 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "errors": [{"message": "Unknown field \"postedFileNames\" on type \"HistoryItem\"."}]
             })))
-            .with_priority(1)
-            .expect(2)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("historyItem(id"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"data": {"historyItem": completed_history_item_json()}})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("historyItems("))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!({"data": {"historyItems": [completed_history_item_json()]}}),
-                ),
-            )
             .expect(1)
             .mount(&server)
             .await;
 
-        let download = client
-            .get_completed_download("10002")
+        let posted_file_names = client
+            .posted_file_names("10002")
             .await
-            .expect("completed download lookup should load")
-            .expect("completed download should exist");
-        assert!(download.posted_file_names.is_empty());
+            .expect("a refused field should not fail the read");
 
-        let downloads = client
-            .list_recent_completed_downloads(10)
-            .await
-            .expect("history page should load");
-        assert_eq!(downloads.len(), 1);
+        assert!(posted_file_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn posted_file_names_reports_other_failures() {
+        let server = MockServer::start().await;
+        let client = WeaverDownloadClient::new(server.uri(), None);
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors": [{"message": "history item lookup failed"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(client.posted_file_names("10002").await.is_err());
     }
 
     #[test]
-    fn compat_history_documents_differ_only_by_posted_file_names() {
-        let selection = "    postedFileNames {\n      name\n      postedName\n    }\n";
-        for (current, compat) in [
-            (
-                super::graphql_docs::HISTORY_ITEM_QUERY,
-                super::graphql_docs::HISTORY_ITEM_COMPAT_QUERY,
-            ),
-            (
-                super::graphql_docs::HISTORY_ITEMS_QUERY,
-                super::graphql_docs::HISTORY_ITEMS_COMPAT_QUERY,
-            ),
-        ] {
-            assert!(current.contains(selection));
-            assert_eq!(current.replace(selection, ""), compat);
-        }
+    fn history_reads_ask_only_for_what_every_weaver_serves() {
+        assert!(!super::graphql_docs::HISTORY_ITEM_QUERY.contains("postedFileNames"));
+        assert!(!super::graphql_docs::HISTORY_ITEMS_QUERY.contains("postedFileNames"));
+        assert!(
+            super::graphql_docs::HISTORY_ITEM_POSTED_FILE_NAMES_QUERY.contains("postedFileNames")
+        );
     }
 
     #[tokio::test]

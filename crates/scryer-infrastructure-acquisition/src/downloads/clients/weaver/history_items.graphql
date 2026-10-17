@@ -19,9 +19,5 @@ query HistoryItems($filter: QueueFilterInput, $first: Int, $after: String) {
     attention {
       message
     }
-    postedFileNames {
-      name
-      postedName
-    }
   }
 }

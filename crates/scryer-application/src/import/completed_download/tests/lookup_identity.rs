@@ -620,6 +620,7 @@ async fn load_completed_download_lookup_for_items_fetches_client_history_once_pe
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -665,6 +666,7 @@ async fn load_completed_download_lookup_for_items_scopes_to_completed_item_clien
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -711,6 +713,7 @@ async fn load_completed_download_lookup_for_items_scopes_import_pending_items() 
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -750,6 +753,7 @@ async fn load_completed_download_lookup_for_items_uses_exact_id_when_client_id_i
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -783,6 +787,7 @@ async fn load_completed_download_lookup_for_items_uses_type_scope_for_idless_ite
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -1122,6 +1127,7 @@ async fn completed_lookup_reuses_the_rows_the_snapshot_read_already_returned() {
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -1193,6 +1199,7 @@ async fn completed_lookup_applies_the_snapshot_limit_per_client() {
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -1252,6 +1259,7 @@ async fn completed_lookup_falls_back_when_the_snapshot_rows_miss_a_client() {
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());
@@ -1306,6 +1314,7 @@ async fn completed_lookup_reads_only_the_clients_the_snapshot_did_not_cover() {
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app =
         build_app_with_download_client(vec![], vec![], vec![], vec![], download_client.clone());

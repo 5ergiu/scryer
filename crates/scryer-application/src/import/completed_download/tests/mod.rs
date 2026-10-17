@@ -1389,6 +1389,8 @@ struct TestDownloadClient {
     completed_download_calls: Arc<AtomicUsize>,
     recent_completed_download_calls: Arc<AtomicUsize>,
     scoped_recent_completed_calls: Arc<Mutex<ScopedRecentCompletedCalls>>,
+    posted_file_names: Vec<scryer_domain::PostedFileName>,
+    posted_file_names_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -1461,6 +1463,16 @@ impl DownloadClient for TestDownloadClient {
             }
         });
         Ok(items)
+    }
+
+    async fn posted_file_names_for_source(
+        &self,
+        _client_id: &str,
+        _client_type: &str,
+        _download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        self.posted_file_names_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.posted_file_names.clone())
     }
 }
 
@@ -2067,5 +2079,6 @@ fn test_download_client_with_completed(completed: CompletedDownload) -> Arc<Test
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     })
 }

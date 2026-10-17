@@ -211,6 +211,29 @@ async fn run_recovery_import_named(
     lookup: Arc<FakeSrrdbLookup>,
     manual_title_id: Option<&str>,
 ) -> ImportResult {
+    run_recovery_import_with_client(
+        dir,
+        release_name,
+        client_type,
+        enabled,
+        lookup,
+        manual_title_id,
+        Arc::new(TestDownloadClient::default()),
+    )
+    .await
+}
+
+/// `run_recovery_import_named` against `download_client`, which is handed the
+/// completed download to report.
+async fn run_recovery_import_with_client(
+    dir: &Path,
+    release_name: Option<&str>,
+    client_type: &str,
+    enabled: bool,
+    lookup: Arc<FakeSrrdbLookup>,
+    manual_title_id: Option<&str>,
+    download_client: Arc<TestDownloadClient>,
+) -> ImportResult {
     let import_repo = Arc::new(TestImportRepo::default());
     let mut completed = build_completed_download(
         release_name.unwrap_or("obfuscated download"),
@@ -219,6 +242,11 @@ async fn run_recovery_import_named(
     );
     completed.release_name = release_name.map(str::to_string);
     completed.client_type = client_type.to_string();
+    download_client
+        .completed_downloads
+        .lock()
+        .await
+        .push(completed.clone());
     let libraries = crate::lib_tests::bootstrap()
         .0
         .services
@@ -257,7 +285,7 @@ async fn run_recovery_import_named(
         vec![],
         vec![],
         TestAppRepositories {
-            download_client: test_download_client_with_completed(completed.clone()),
+            download_client,
             download_client_configs: Arc::new(NullDownloadClientConfigRepository),
             download_submissions: Arc::new(
                 crate::null_repositories::NullDownloadSubmissionRepository,
@@ -620,6 +648,82 @@ async fn a_usable_release_name_that_matches_no_title_is_never_looked_up() {
         lookup.call_count().await,
         0,
         "a usable release name is never second-guessed through srrdb: {result:?}"
+    );
+    assert_eq!(result.decision, ImportDecision::Unmatched, "{result:?}");
+}
+
+// ── names the download client reports files were posted with ───────────────
+
+/// An obfuscated name of the length a client leaves after cutting a longer
+/// one: no title or episode of its own.
+fn cut_member_name() -> String {
+    format!("{}.mkv", "d4e5f6a7b8c9d0e1f2a3".repeat(11))
+}
+
+#[tokio::test]
+async fn a_cut_name_takes_the_name_it_was_posted_with_from_one_request() {
+    let (_root, dir) = completed_dir();
+    let dir = dir.as_path();
+    let name = cut_member_name();
+    let member = write_member(dir, &name, false);
+    let download_client = Arc::new(TestDownloadClient {
+        posted_file_names: vec![scryer_domain::PostedFileName {
+            name: name.clone(),
+            posted_name: "Harbor.Pals.S01E02.1080p.WEB.H264-LANTERNS.mkv".to_string(),
+        }],
+        ..TestDownloadClient::default()
+    });
+
+    let result = run_recovery_import_with_client(
+        dir,
+        None,
+        "weaver",
+        false,
+        Arc::new(FakeSrrdbLookup::default()),
+        None,
+        download_client.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        download_client
+            .posted_file_names_calls
+            .load(Ordering::SeqCst),
+        1,
+        "the posted names are asked for once per import"
+    );
+    assert_eq!(
+        result.title_id.as_deref(),
+        Some("title-series"),
+        "the posted name is what identifies the title: {result:?}"
+    );
+    assert_ne!(result.decision, ImportDecision::Unmatched, "{result:?}");
+    assert!(member.exists(), "the file on disk keeps its name");
+}
+
+#[tokio::test]
+async fn posted_names_are_not_asked_for_when_no_name_looks_cut() {
+    let (_root, dir) = completed_dir();
+    let dir = dir.as_path();
+    write_member(dir, OBFUSCATED_MEMBERS[0], false);
+    let download_client = Arc::new(TestDownloadClient::default());
+
+    let result = run_recovery_import_with_client(
+        dir,
+        None,
+        "weaver",
+        false,
+        Arc::new(FakeSrrdbLookup::default()),
+        None,
+        download_client.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        download_client
+            .posted_file_names_calls
+            .load(Ordering::SeqCst),
+        0
     );
     assert_eq!(result.decision, ImportDecision::Unmatched, "{result:?}");
 }
