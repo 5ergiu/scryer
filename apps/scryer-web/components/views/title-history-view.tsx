@@ -2,7 +2,6 @@ import { LibraryMultiSelect } from "@/components/common/library-multi-select";
 import { TitleAutocompletePicker } from "@/components/common/title-autocomplete-picker";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { UnderlineFilterButton } from "@/components/common/underline-filter-button";
 import {
   HISTORY_TABLE_SHELL_CLASS,
   HistoryEventTable,
@@ -10,8 +9,7 @@ import {
 import type { LibraryRecord, TitleHistoryEvent, TitleRecord } from "@/lib/types";
 import { useTranslate } from "@/lib/context/translate-context";
 import { cn } from "@/lib/utils";
-import { HistoryEventIcon } from "@/components/common/history-event-icon";
-import { getTitleHistoryFilterLabel } from "@/components/common/title-history-event-meta";
+import { HistoryEventTypeMultiSelect } from "@/components/common/history-event-type-multi-select";
 import { LoadingMark } from "@/components/common/loading-mark";
 
 export function TitleHistoryView({
@@ -29,8 +27,7 @@ export function TitleHistoryView({
   pageSize,
   onSelectedTitleChange,
   onSelectedLibraryIdsChange,
-  onToggleFilter,
-  onClearFilters,
+  onActiveFiltersChange,
   onPreviousPage,
   onNextPage,
   onRetry,
@@ -51,8 +48,7 @@ export function TitleHistoryView({
   pageSize: number;
   onSelectedTitleChange: (title: TitleRecord | null) => void;
   onSelectedLibraryIdsChange: (libraryIds: string[]) => void;
-  onToggleFilter: (eventType: string) => void;
-  onClearFilters: () => void;
+  onActiveFiltersChange: (eventTypes: string[]) => void;
   onPreviousPage: () => void;
   onNextPage: () => void;
   onRetry?: (importId: string, password?: string) => Promise<void>;
@@ -82,25 +78,13 @@ export function TitleHistoryView({
               disabled={librariesLoading}
               triggerClassName="h-10 w-full rounded-[10px] border-[var(--scry-border2)] bg-[var(--scry-inset)] text-[13px] text-[var(--scry-body)] shadow-none sm:w-[200px]"
             />
-          </div>
-          <div className="relative top-px flex min-h-10 min-w-0 max-w-full flex-wrap items-center justify-start gap-x-5 gap-y-1 border-0 bg-transparent p-0 shadow-none">
-            <UnderlineFilterButton
-              selected={activeFilters.length === 0}
-              onClick={onClearFilters}
-              label={t("history.allEvents")}
+            <HistoryEventTypeMultiSelect
+              id="history-event-types"
+              eventTypes={availableFilters}
+              selectedEventTypes={activeFilters}
+              onSelectedEventTypesChange={onActiveFiltersChange}
+              triggerClassName="h-10 w-full rounded-[10px] border-[var(--scry-border2)] bg-[var(--scry-inset)] text-[13px] text-[var(--scry-body)] shadow-none sm:w-[320px]"
             />
-            {availableFilters.map((eventType) => {
-              const isActive = activeFilters.includes(eventType);
-              return (
-                <UnderlineFilterButton
-                  key={eventType}
-                  selected={isActive}
-                  onClick={() => onToggleFilter(eventType)}
-                  icon={<HistoryEventIcon eventType={eventType} size={14} />}
-                  label={getTitleHistoryFilterLabel(eventType, t)}
-                />
-              );
-            })}
           </div>
         </div>
         {loading && events.length === 0 ? (

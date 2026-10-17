@@ -3834,6 +3834,8 @@ const en: LocaleDictionary = {
   "history.date": "Date",
   "history.actor": "Actor",
   "history.allEvents": "All Events",
+  "history.eventTypes": "Event types",
+  "history.eventTypesSelected": "{{count}} event types",
   "history.grabbed": "Grabbed",
   "history.downloadFailed": "Download Failed",
   "history.blocklisted": "Blocklisted",

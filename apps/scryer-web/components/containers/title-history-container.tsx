@@ -171,18 +171,9 @@ export function TitleHistoryContainer({
     [refreshAliasId, refreshDomainEventTypes, registerReactiveRefresh],
   );
 
-  const toggleFilter = React.useCallback((eventType: string) => {
+  const changeFilters = React.useCallback((eventTypes: string[]) => {
     setPage(0);
-    setActiveFilters((prev) =>
-      prev.includes(eventType)
-        ? prev.filter((current) => current !== eventType)
-        : [...prev, eventType],
-    );
-  }, []);
-
-  const clearFilters = React.useCallback(() => {
-    setPage(0);
-    setActiveFilters([]);
+    setActiveFilters(eventTypes);
   }, []);
 
   const handleSelectedTitleChange = React.useCallback((title: TitleRecord | null) => {
@@ -244,8 +235,7 @@ export function TitleHistoryContainer({
       pageSize={PAGE_SIZE}
       onSelectedTitleChange={handleSelectedTitleChange}
       onSelectedLibraryIdsChange={handleSelectedLibraryIdsChange}
-      onToggleFilter={toggleFilter}
-      onClearFilters={clearFilters}
+      onActiveFiltersChange={changeFilters}
       onPreviousPage={handlePreviousPage}
       onNextPage={handleNextPage}
       onRetry={showRetryActions ? handleRetry : undefined}
