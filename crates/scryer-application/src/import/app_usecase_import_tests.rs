@@ -3330,3 +3330,93 @@ fn test_admission_subject(
         }),
     )
 }
+
+const LONG_TITLE_WORDS: &[&str] = &[
+    "the", "quiet", "harbor", "keeper", "who", "never", "learned", "to", "sail", "finally",
+    "meets", "a", "wandering", "lantern", "maker", "and", "discovers", "that", "every", "tide",
+    "remembers", "her", "name",
+];
+
+/// An essay-length title of `word_count` plain words.
+fn long_title(word_count: usize) -> String {
+    (0..word_count)
+        .map(|index| LONG_TITLE_WORDS[index % LONG_TITLE_WORDS.len()])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// An anime-style release name: the episode number follows the whole title.
+fn anime_release_name(title: &str) -> String {
+    format!("[Fixture] {title} - 07 (1080p) [ABCD1234]")
+}
+
+/// The name Weaver gives a completed file whose posted name is too long: the
+/// stem is cut to fit 240 bytes and the extension is kept.
+fn weaver_bounded_filename(stem: &str, extension: &str) -> String {
+    let mut end = (240 - extension.len() - 1).min(stem.len());
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let stem = stem[..end]
+        .trim_end_matches(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '_'));
+    format!("{stem}.{extension}")
+}
+
+fn parsed_episode_number(parsed: &crate::ParsedReleaseMetadata) -> Option<u32> {
+    let episode = parsed.episode.as_ref()?;
+    episode
+        .absolute_episode
+        .or_else(|| episode.absolute_episode_numbers.first().copied())
+        .or_else(|| episode.episode_numbers.first().copied())
+}
+
+fn long_titled_import_episode(release_words: usize, file_name: &str) -> Option<u32> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join(file_name);
+    std::fs::write(&file_path, b"episode").expect("write file");
+    let mut completed = test_completed_download("downloader display label", dir.path());
+    completed.release_name = Some(anime_release_name(&long_title(release_words)));
+    let title = titled(MediaFacet::Anime, "Quiet Harbor Keeper", None);
+
+    let parsed = build_augmented_episode_import_metadata_for_title(
+        &file_path,
+        &observation_evidence(&completed),
+        &title,
+        false,
+    );
+    parsed_episode_number(&parsed)
+}
+
+#[test]
+fn release_parse_reads_the_episode_after_a_moderately_long_title() {
+    let parsed = parse_release_metadata(&anime_release_name(&long_title(200)));
+    assert_eq!(parsed_episode_number(&parsed), Some(7));
+}
+
+#[test]
+fn release_parse_reads_the_episode_after_an_essay_length_title() {
+    let parsed = parse_release_metadata(&anime_release_name(&long_title(300)));
+    assert_eq!(
+        parsed_episode_number(&parsed),
+        Some(7),
+        "the episode number after a 300-word title must still be read"
+    );
+}
+
+#[test]
+fn import_falls_back_to_a_complete_file_name_after_an_essay_length_release_title() {
+    let file_name = format!("{}.mkv", anime_release_name("Quiet Harbor Keeper"));
+    assert_eq!(long_titled_import_episode(300, &file_name), Some(7));
+}
+
+#[test]
+fn import_finds_the_episode_of_an_essay_length_anime_download() {
+    let release_name = anime_release_name(&long_title(300));
+    let file_name = weaver_bounded_filename(&release_name, "mkv");
+    assert!(file_name.ends_with(".mkv") && file_name.len() <= 240);
+    assert_eq!(
+        long_titled_import_episode(300, &file_name),
+        Some(7),
+        "a playable {file_name:?} must not lose its episode"
+    );
+}
