@@ -7,9 +7,8 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::domain_events::DomainEventActor;
 use crate::library_discovery::{
-    BackgroundRefreshProbeOutcome, MovieTopLevelEntry, elapsed_ms_u64, list_child_directories,
-    list_movie_top_level_entries, matching_movie_nfo_path, run_background_refresh_probe_with_delta,
-    stream_child_directories_batched, stream_movie_top_level_entries_batched,
+    BackgroundRefreshProbeOutcome, MovieTopLevelEntry, elapsed_ms_u64, matching_movie_nfo_path,
+    run_background_refresh_probe_with_delta,
 };
 use crate::library_scan::LibraryDirectoryScanResult;
 use crate::library_scan_coordinator::LibraryScanCoordinator;
@@ -57,7 +56,7 @@ mod scan_pipeline;
 #[path = "scan/refresh.rs"]
 mod scan_refresh;
 #[path = "scan/title_files.rs"]
-mod scan_title_files;
+pub(crate) mod scan_title_files;
 #[path = "scan/title_finalize.rs"]
 mod scan_title_finalize;
 #[path = "scan/title_scan.rs"]
@@ -1405,8 +1404,15 @@ impl AppUseCase {
                     .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Movie) => {
-                    background_refresh_movies(self, actor, library_id, library_path, session_id)
-                        .await?
+                    background_refresh_movies(
+                        self,
+                        actor,
+                        library_id,
+                        library_path,
+                        session_id,
+                        cancel_token.clone(),
+                    )
+                    .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Series | MediaFacet::Anime) => {
                     background_refresh_series(
@@ -1416,6 +1422,7 @@ impl AppUseCase {
                         library_id,
                         library_path,
                         session_id,
+                        cancel_token.clone(),
                     )
                     .await?
                 }

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
 import { FolderOpen, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -64,6 +65,7 @@ import {
 import {
   buildSeriesTimelineItems,
   sortDbCollections,
+  seasonHeading,
   findLatestSeasonKey,
   episodeSortValue,
   isSpecialsCollection,
@@ -317,11 +319,17 @@ function SeriesOverviewViewImpl({
   const [selectedEpisodeIds, setSelectedEpisodeIds] = React.useState<Set<string>>(
     () => new Set(),
   );
+  const selectedSeasons = Object.entries(episodesByCollection).filter(([, episodes]) =>
+    episodes.length > 0 && episodes.every((episode) => selectedEpisodeIds.has(episode.id)),
+  );
+  const selectedSeasonEpisodes = new Set(selectedSeasons.flatMap(([, episodes]) => episodes.map((episode) => episode.id)));
+  const wholeSeasonsSelected = selectedSeasonEpisodes.size === selectedEpisodeIds.size && selectedSeasons.length > 0;
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [historyEpisodeScope, setHistoryEpisodeScope] = React.useState<{
     episodeId: string;
     episodeLabel: string;
   } | null>(null);
+  const [historyCollectionScope, setHistoryCollectionScope] = React.useState<{ titleId: string; collectionId: string; collectionLabel: string } | null>(null);
   const [episodePanel, dispatchEpisodePanel] = React.useReducer(episodePanelReducer, initialEpisodePanelState);
   const [searchBlockedByEpisode, setSearchBlockedByEpisode] = React.useState<Record<string, boolean>>({});
   const [searchBlockedByCollection, setSearchBlockedByCollection] = React.useState<Record<string, boolean>>({});
@@ -444,11 +452,13 @@ function SeriesOverviewViewImpl({
   }, [hasDownloadClients]);
 
   const handleOpenTitleHistory = React.useCallback(() => {
+    setHistoryCollectionScope(null);
     setHistoryEpisodeScope(null);
     setHistoryOpen(true);
   }, []);
 
   const handleOpenEpisodeHistory = React.useCallback((episode: CollectionEpisode) => {
+    setHistoryCollectionScope(null);
     setHistoryEpisodeScope({
       episodeId: episode.id,
       episodeLabel:
@@ -459,6 +469,12 @@ function SeriesOverviewViewImpl({
     });
     setHistoryOpen(true);
   }, []);
+
+  const handleOpenSeasonHistory = React.useCallback((collection: TitleCollection) => {
+    setHistoryEpisodeScope(null);
+    setHistoryCollectionScope({ titleId: collection.titleId, collectionId: collection.id, collectionLabel: seasonHeading(collection, t) });
+    setHistoryOpen(true);
+  }, [t]);
 
   const defaultExpandedRef = React.useRef(false);
   const lastDeepLinkedEpisodeIdRef = React.useRef<string | null>(null);
@@ -1304,6 +1320,7 @@ function SeriesOverviewViewImpl({
               <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                 {episodeSelectionEnabled && selectedEpisodeIds.size > 0 ? (
                   <>
+                    {wholeSeasonsSelected ? <RefreshScoresButton selection={{ seasonIds: selectedSeasons.map(([id]) => id) }} /> : null}
                     <Button
                       id={SERIES_OVERVIEW_CLEAR_EPISODE_SELECTION_ID}
                       type="button"
@@ -1414,6 +1431,7 @@ function SeriesOverviewViewImpl({
                     autoSearchLoadingByEpisode={episodePanel.autoSearchLoadingByEpisode}
                     onRunEpisodeSearch={canManageTitle ? handleRunEpisodeSearch : undefined}
                     onOpenEpisodeHistory={canManageTitle ? handleOpenEpisodeHistory : undefined}
+                    onOpenSeasonHistory={canManageTitle ? handleOpenSeasonHistory : undefined}
                     onQueueFromEpisodeSearch={canManageTitle ? handleQueueFromEpisodeSearch : undefined}
                     onQueueAdditionalFromEpisodeSearch={
                       canManageTitle ? handleQueueAdditionalFromEpisodeSearch : undefined
@@ -1482,9 +1500,10 @@ function SeriesOverviewViewImpl({
         <TitleHistoryModal
           open={historyOpen}
           onOpenChange={setHistoryOpen}
-          titleId={title.id}
+          titleId={historyCollectionScope?.titleId ?? title.id}
           titleName={title.name}
           scopedEpisode={historyEpisodeScope}
+          scopedCollection={historyCollectionScope}
         />
       ) : null}
       {replaceConflictDialog}

@@ -711,6 +711,29 @@ fn media_row_as_import_would_write(
     }
 }
 
+#[test]
+fn legacy_media_rows_reconstruct_numbered_revision_from_retained_names() {
+    let profile = movie_profile();
+    let tags = Vec::new();
+    let context = ctx(&profile, &tags);
+    let mut evidence = announced(8.0).with_analysis(analyzed(7.2, None));
+    evidence.parsed = parse_release_metadata("Movie.2024.1080p.WEB-DL.REPACK3.H.264-GROUP");
+    let score = score_release(&evidence, &context);
+    assert_eq!(score.revision, 3);
+    let mut row = media_row_as_import_would_write(&evidence, &score);
+    // Old rows have no revision column; scene_name is sufficient.
+    row.release_group = None;
+    assert_eq!(score_media_file(&row, &context).revision, 3);
+    assert_eq!(
+        announced_parse_from_media_file(&row)
+            .release_group
+            .as_deref(),
+        Some("GROUP")
+    );
+    row.grabbed_release_title = Some("Movie.2024.1080p.WEB-DL.REPACK4.H.264-GROUP".into());
+    assert_eq!(score_media_file(&row, &context).revision, 4);
+}
+
 /// **The round-trip invariant.** Re-deriving an incumbent's bar from its row
 /// must reproduce the number the import computed. Every comparison re-derives,
 /// so any evidence the row cannot reconstruct becomes a permanent gap between
@@ -2214,6 +2237,7 @@ fn a_stream_pointer_is_not_rejected_for_the_size_of_its_url() {
 /// can move `now` around it.
 fn frozen_listing() -> crate::quality::release_listing::ReleaseListingSnapshot {
     crate::quality::release_listing::ReleaseListingSnapshot {
+        grab_scoring: None,
         published_at: Some("2024-01-02T00:00:00Z".into()),
         thumbs_up: Some(7),
         thumbs_down: Some(1),

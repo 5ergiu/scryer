@@ -79,6 +79,7 @@ function qualityProfileCatalogEntryFromDraft(draft: QualityProfileDraft): Parsed
       prefer_remux: draft.prefer_remux,
       allow_bd_disk: draft.allow_bd_disk,
       allow_upgrades: draft.allow_upgrades,
+      ignore_proper_repack: draft.ignore_proper_repack,
       scoring_overrides: draft.scoring_overrides,
       cutoff_tier: draft.cutoff_tier || null,
       min_score_to_grab: draft.min_score_to_grab,

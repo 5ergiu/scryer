@@ -219,8 +219,40 @@ async fn run_recovery_import_named(
     );
     completed.release_name = release_name.map(str::to_string);
     completed.client_type = client_type.to_string();
+    let libraries = crate::lib_tests::bootstrap()
+        .0
+        .services
+        .catalog
+        .libraries
+        .clone();
+    let mut titles = recovery_titles();
+    for title in &mut titles {
+        let library = libraries
+            .get_by_id(&title.library_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let root = dir
+            .parent()
+            .unwrap()
+            .join(format!("{}-library", title.facet.as_str()));
+        std::fs::create_dir_all(&root).expect("create isolated import root");
+        let configured = libraries
+            .update(
+                &library.id,
+                library.name,
+                library.slug,
+                vec![crate::LibraryRootDraft {
+                    path: root.to_string_lossy().into_owned(),
+                    is_default: true,
+                }],
+            )
+            .await
+            .expect("configure import fixture library");
+        title.root_folder_id = configured.roots[0].id.clone();
+    }
     let app = build_app_with_download_client_configs_submissions_and_settings(
-        recovery_titles(),
+        titles,
         vec![],
         vec![],
         vec![],
@@ -235,6 +267,7 @@ async fn run_recovery_import_named(
     )
     .with_test_overrides(|services| {
         services
+            .with_libraries(libraries)
             .with_imports(import_repo.clone())
             .with_srrdb_filename_lookup(lookup as Arc<dyn SrrdbFilenameLookup>)
     });
@@ -388,18 +421,21 @@ async fn a_recovered_movie_name_matches_a_titleless_movie_download() {
         ImportDecision::Unmatched,
         "the recovered name must identify the title: {result:?}"
     );
-    // The movie facet is proof of which title was chosen: this fixture app has
-    // no configured library root, so the import gets as far as resolving the
-    // movie title's own library and stops there.
+    assert_eq!(
+        result.title_id.as_deref(),
+        Some("title-movie"),
+        "the recovered name must select the movie title: {result:?}"
+    );
+    // This fixture resolves real library roots but deliberately has no file
+    // importer. The source guard must stop it before changing any files.
+    assert_eq!(result.decision, ImportDecision::Skipped, "{result:?}");
     assert!(
         result
             .error_message
             .as_deref()
             .unwrap_or_default()
-            .contains(&scryer_domain::default_library_id_for_facet(
-                &MediaFacet::Movie
-            )),
-        "the import must have landed on the movie title: {result:?}"
+            .contains("file importer is not configured"),
+        "the unconfigured importer must refuse the source: {result:?}"
     );
     assert!(
         member.exists(),

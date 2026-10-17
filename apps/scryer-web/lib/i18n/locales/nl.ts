@@ -900,6 +900,8 @@ const nl: LocaleDictionary = {
   "settings.folderValidationUnknownToken":
     "Maptemplates ondersteunen {title}, {year} en externe ID-tokens. Ongeldig token: {{token}}",
   "settings.folderValidationEmpty": "Maptemplate mag niet leeg zijn",
+  "settings.folderValidationLeafTitleToken":
+    "De laatste map in de template moet een titel- of extern ID-token bevatten",
   "settings.folderValidationIllegalCharacter":
     "Maptemplate bevat een ongeldig teken: {{character}}",
   "settings.renameTemplateLabel": "Template voor hernoemen",
@@ -1551,12 +1553,12 @@ const nl: LocaleDictionary = {
   "queue.releaseHeldSourcesPreservedRemovalFailed": "verwijderen mislukt",
   "queue.releaseHeldSourcesPreservedDownloadNotImported": "de download is niet aantoonbaar geïmporteerd",
   "queue.releaseHeldSourcesPreservedLookupIncomplete": "niet elke map kon worden gecontroleerd",
-  "queue.markFailedSearchAgain": "Als mislukt markeren en opnieuw zoeken",
-  "queue.markFailedOnly": "Alleen als mislukt markeren",
+  "queue.markFailedSearchAgain": "Blokkeer, verwijder gegevens en zoek opnieuw",
+  "queue.markFailedOnly": "Blokkeer en verwijder gegevens",
   "queue.markFailedSearchSuccess":
-    "Download als mislukt gemarkeerd; wordt opnieuw opgehaald.",
+    "Blokkeren en gegevens verwijderen aangevraagd; opnieuw zoeken ingeschakeld.",
   "queue.markFailedOnlySuccess":
-    "Download als mislukt gemarkeerd zonder opnieuw op te halen.",
+    "Blokkeren en gegevens verwijderen aangevraagd zonder opnieuw te zoeken.",
   "queue.markFailedFailed": "Download als mislukt markeren mislukt.",
   "queue.bulkIgnoreSuccess": "{{count}} downloads genegeerd.",
   "queue.bulkIgnorePartial": "{{count}} downloads genegeerd; {{failed}} mislukt.",
@@ -3773,7 +3775,8 @@ const nl: LocaleDictionary = {
   "lists.detail.title": "Titel",
   "lists.detail.state": "Status",
   "lists.detail.noTitles": "Nog geen titels vastgelegd.",
-  "lists.detail.pageRange": "{{from}}–{{to}} van {{total}}",
+  "lists.detail.sourceRank": "Bronrang",
+  "lists.detail.pageRange": "Items {{from}}–{{to}} van {{total}}",
   "lists.detail.previousPage": "Vorige",
   "lists.detail.nextPage": "Volgende",
   "lists.detail.history": "Synchronisatiegeschiedenis",

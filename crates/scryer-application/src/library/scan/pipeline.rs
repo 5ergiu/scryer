@@ -7,8 +7,8 @@ use crate::library_scan_metadata::{
     split_ready_metadata_candidates,
 };
 use crate::library_scan_unmatched::{
-    IgnoredLibraryScanItemArgs, LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
-    persist_ignored_library_scan_item,
+    IgnoredLibraryScanItemArgs, LIBRARY_SCAN_INVALID_TITLE_BOUNDARY,
+    LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE, persist_ignored_library_scan_item,
 };
 use crate::stored_paths::path_to_stored_string;
 use std::collections::VecDeque;
@@ -94,6 +94,11 @@ impl ScanPipelineCandidate {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static INCOMPLETE_DISCOVERY_OBSERVER: Arc<tokio::sync::Notify>;
+}
+
 /// Events emitted by the root enumerator and candidate jobs.
 enum ScanCandidateJobEvent {
     Candidate {
@@ -105,11 +110,15 @@ enum ScanCandidateJobEvent {
     EvidenceFailed {
         item_path: String,
         error: AppError,
+        invalid_boundary: bool,
     },
     EvidenceDone {
         metrics: CandidateJobMetrics,
     },
     DiscoveryFailed {
+        error: AppError,
+    },
+    DiscoveryIncomplete {
         error: AppError,
     },
 }
@@ -236,6 +245,16 @@ pub(super) struct LibraryScanPipelineRequest<'a> {
 pub(super) async fn run_library_scan_pipeline(
     request: LibraryScanPipelineRequest<'_>,
 ) -> AppResult<LibraryScanSummary> {
+    run_library_scan_pipeline_with_discovery(request, None).await
+}
+
+type TitleBoundaryBatchReceiver =
+    tokio::sync::mpsc::Receiver<AppResult<Vec<crate::library_discovery::TitleFolderBoundary>>>;
+
+async fn run_library_scan_pipeline_with_discovery(
+    request: LibraryScanPipelineRequest<'_>,
+    discovered: Option<TitleBoundaryBatchReceiver>,
+) -> AppResult<LibraryScanSummary> {
     let LibraryScanPipelineRequest {
         app,
         actor,
@@ -260,18 +279,25 @@ pub(super) async fn run_library_scan_pipeline(
     let (match_events_tx, mut match_events_rx) = tokio::sync::mpsc::unbounded_channel();
     let (storage_watch_tx, storage_watch_rx) = tokio::sync::watch::channel(0usize);
 
-    let jobs_handle = spawn_candidate_jobs(CandidateJobContext {
-        app: app.clone(),
-        session_id: session_id.to_string(),
-        library_path: library_path.to_string(),
-        kind,
-        scan_hints,
-        mark_discovery_complete_on_drain,
-        cancel_token: cancel_token.clone(),
-        candidate_events: candidate_events_tx,
-        inventory_events: inventory_events_tx,
-        storage_watch: storage_watch_rx,
-    })?;
+    let jobs_handle = spawn_candidate_jobs(
+        CandidateJobContext {
+            app: app.clone(),
+            session_id: session_id.to_string(),
+            library_path: library_path.to_string(),
+            facet: facet.clone(),
+            library_id: library_id.to_string(),
+            kind,
+            scan_hints,
+            mark_discovery_complete_on_drain,
+            cancel_token: cancel_token.clone(),
+            candidate_events: candidate_events_tx,
+            inventory_events: inventory_events_tx,
+            storage_watch: storage_watch_rx,
+            #[cfg(test)]
+            incomplete_discovery_observer: INCOMPLETE_DISCOVERY_OBSERVER.try_with(Arc::clone).ok(),
+        },
+        discovered,
+    )?;
 
     let worker_handle = tokio::spawn(run_scan_match_worker(
         ScanMatchWorkerContext {
@@ -315,6 +341,10 @@ pub(super) async fn run_library_scan_pipeline(
     let mut candidates: HashMap<ScanCandidateKey, CandidateRuntime> = HashMap::new();
     let mut early_inventory: HashMap<ScanCandidateKey, CandidateInventoryState> = HashMap::new();
     let mut forward_queue: VecDeque<(ScanCandidateKey, ScanPipelineCandidate)> = VecDeque::new();
+    // Paths this scan recorded as ignored before they became candidates
+    // (refused title boundaries, unusable evidence). Reconcile must keep
+    // their rows, so they count as seen alongside the candidates.
+    let mut ignored_paths: HashSet<String> = HashSet::new();
     let mut match_input_tx = Some(match_input_tx);
     let mut evidence_done = false;
     let mut inventory_done = false;
@@ -324,6 +354,7 @@ pub(super) async fn run_library_scan_pipeline(
     let mut file_total_marked = false;
     let mut media_file_total_counted = 0usize;
     let mut discovery_error: Option<AppError> = None;
+    let mut incomplete_discovery_error: Option<AppError> = None;
     // Duplicate candidates resolving to already-covered title work are
     // deduplicated by the analysis pool; they correct matched totals but are
     // not user-visible skipped imports.
@@ -388,7 +419,9 @@ pub(super) async fn run_library_scan_pipeline(
                             candidates: &mut candidates,
                             early_inventory: &mut early_inventory,
                             forward_queue: &mut forward_queue,
+                            ignored_paths: &mut ignored_paths,
                             discovery_error: &mut discovery_error,
+                            incomplete_discovery_error: &mut incomplete_discovery_error,
                         }, event).await {
                             discovery_error = Some(error);
                         }
@@ -628,7 +661,9 @@ pub(super) async fn run_library_scan_pipeline(
                         candidates: &mut candidates,
                         early_inventory: &mut early_inventory,
                         forward_queue: &mut forward_queue,
+                        ignored_paths: &mut ignored_paths,
                         discovery_error: &mut discovery_error,
+                        incomplete_discovery_error: &mut incomplete_discovery_error,
                     },
                     event,
                 )
@@ -825,8 +860,13 @@ pub(super) async fn run_library_scan_pipeline(
             "library scan analysis phase completed"
         );
 
+        if !canceled && let Some(error) = incomplete_discovery_error {
+            return Err(error);
+        }
+
         if !canceled {
             let mut seen_paths = report.seen_paths;
+            seen_paths.extend(ignored_paths);
             for runtime in candidates.values() {
                 let trimmed = runtime.item_path.trim();
                 if !trimmed.is_empty() {
@@ -975,7 +1015,9 @@ struct CandidateEventContext<'a> {
     candidates: &'a mut HashMap<ScanCandidateKey, CandidateRuntime>,
     early_inventory: &'a mut HashMap<ScanCandidateKey, CandidateInventoryState>,
     forward_queue: &'a mut VecDeque<(ScanCandidateKey, ScanPipelineCandidate)>,
+    ignored_paths: &'a mut HashSet<String>,
     discovery_error: &'a mut Option<AppError>,
+    incomplete_discovery_error: &'a mut Option<AppError>,
 }
 
 async fn handle_candidate_job_event(
@@ -1011,7 +1053,11 @@ async fn handle_candidate_job_event(
             );
             ctx.forward_queue.push_back((key, candidate));
         }
-        ScanCandidateJobEvent::EvidenceFailed { item_path, error } => {
+        ScanCandidateJobEvent::EvidenceFailed {
+            item_path,
+            error,
+            invalid_boundary,
+        } => {
             warn!(
                 item_path = %item_path,
                 error = %error,
@@ -1034,7 +1080,11 @@ async fn handle_candidate_job_event(
                     display_name: &display_name,
                     query: &display_name,
                     year_hint: None,
-                    reason_code: LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE,
+                    reason_code: if invalid_boundary {
+                        LIBRARY_SCAN_INVALID_TITLE_BOUNDARY
+                    } else {
+                        LIBRARY_SCAN_SKIPPED_UNUSABLE_TITLE_EVIDENCE
+                    },
                     error_message: Some(error.to_string()),
                     // Evidence failed before any file metadata was gathered.
                     size_bytes: None,
@@ -1047,6 +1097,11 @@ async fn handle_candidate_job_event(
                     error = %persist_error,
                     "failed to persist ignored library scan evidence failure"
                 );
+            } else {
+                let normalized = normalize_library_scan_item_path(&item_path);
+                if !normalized.is_empty() {
+                    ctx.ignored_paths.insert(normalized);
+                }
             }
             ctx.summary.scanned += 1;
             ctx.summary.skipped += 1;
@@ -1059,6 +1114,9 @@ async fn handle_candidate_job_event(
         }
         ScanCandidateJobEvent::DiscoveryFailed { error } => {
             *ctx.discovery_error = Some(error);
+        }
+        ScanCandidateJobEvent::DiscoveryIncomplete { error } => {
+            *ctx.incomplete_discovery_error = Some(error);
         }
     }
     Ok(())
@@ -1747,6 +1805,8 @@ struct CandidateJobContext {
     app: AppUseCase,
     session_id: String,
     library_path: String,
+    facet: MediaFacet,
+    library_id: String,
     kind: LibraryScanPipelineKind,
     scan_hints: Option<LibraryScanHintSet>,
     mark_discovery_complete_on_drain: bool,
@@ -1754,15 +1814,42 @@ struct CandidateJobContext {
     candidate_events: tokio::sync::mpsc::UnboundedSender<ScanCandidateJobEvent>,
     inventory_events: tokio::sync::mpsc::UnboundedSender<ScanInventoryJobEvent>,
     storage_watch: tokio::sync::watch::Receiver<usize>,
+    #[cfg(test)]
+    incomplete_discovery_observer: Option<Arc<tokio::sync::Notify>>,
+}
+
+fn report_incomplete_discovery(ctx: &CandidateJobContext, error: AppError) {
+    let delivered = ctx
+        .candidate_events
+        .send(ScanCandidateJobEvent::DiscoveryIncomplete { error })
+        .is_ok();
+    #[cfg(not(test))]
+    let _ = delivered;
+    #[cfg(test)]
+    if delivered && let Some(observer) = &ctx.incomplete_discovery_observer {
+        observer.notify_one();
+    }
 }
 
 fn spawn_candidate_jobs(
     ctx: CandidateJobContext,
+    discovered: Option<TitleBoundaryBatchReceiver>,
 ) -> AppResult<tokio::task::JoinHandle<AppResult<()>>> {
     Ok(tokio::spawn(async move {
-        let result = match ctx.kind {
-            LibraryScanPipelineKind::Movie => run_movie_candidate_jobs(&ctx).await,
-            LibraryScanPipelineKind::Series => run_series_candidate_jobs(&ctx).await,
+        let result = match (ctx.kind, discovered) {
+            (LibraryScanPipelineKind::Movie, Some(discovered)) => {
+                run_movie_candidate_jobs_from_discovery(&ctx, discovered).await
+            }
+            (LibraryScanPipelineKind::Series, Some(discovered)) => {
+                run_series_candidate_jobs_from_discovery(
+                    &ctx,
+                    PathBuf::from(&ctx.library_path),
+                    discovered,
+                )
+                .await
+            }
+            (LibraryScanPipelineKind::Movie, None) => run_movie_candidate_jobs(&ctx).await,
+            (LibraryScanPipelineKind::Series, None) => run_series_candidate_jobs(&ctx).await,
         };
         if let Err(error) = &result {
             let _ = ctx
@@ -1787,6 +1874,7 @@ enum EvidenceJobOutput {
     Failed {
         item_path: String,
         error: AppError,
+        invalid_boundary: bool,
     },
 }
 
@@ -1873,11 +1961,19 @@ impl<'a> CandidateJobRunner<'a> {
                 }
                 true
             }
-            EvidenceJobOutput::Failed { item_path, error } => {
+            EvidenceJobOutput::Failed {
+                item_path,
+                error,
+                invalid_boundary,
+            } => {
                 self.metrics.failed = self.metrics.failed.saturating_add(1);
                 self.ctx
                     .candidate_events
-                    .send(ScanCandidateJobEvent::EvidenceFailed { item_path, error })
+                    .send(ScanCandidateJobEvent::EvidenceFailed {
+                        item_path,
+                        error,
+                        invalid_boundary,
+                    })
                     .is_ok()
             }
         }
@@ -2129,8 +2225,28 @@ impl<'a> CandidateJobRunner<'a> {
 
 async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     let root = require_directory_library_path(&ctx.library_path)?.to_path_buf();
-    let discovered_entries =
-        stream_movie_top_level_entries_batched(&root, LIBRARY_SCAN_MOVIE_BATCH_SIZE).await?;
+    let policy = crate::library_discovery::TitleFolderBoundaryPolicy::load(
+        &ctx.app,
+        &ctx.facet,
+        &ctx.library_id,
+        &root,
+    )
+    .await?;
+    let discovered_entries = crate::library_discovery::stream_title_folder_boundaries(
+        root,
+        policy,
+        LIBRARY_SCAN_MOVIE_BATCH_SIZE,
+        ctx.cancel_token.clone().unwrap_or_default(),
+    );
+    run_movie_candidate_jobs_from_discovery(ctx, discovered_entries).await
+}
+
+async fn run_movie_candidate_jobs_from_discovery(
+    ctx: &CandidateJobContext,
+    discovered_entries: tokio::sync::mpsc::Receiver<
+        AppResult<Vec<crate::library_discovery::TitleFolderBoundary>>,
+    >,
+) -> AppResult<()> {
     let mut queued_entries = spawn_library_discovery_queue(
         ctx.app.clone(),
         ctx.session_id.clone(),
@@ -2141,8 +2257,10 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     );
 
     let mut runner = CandidateJobRunner::new(ctx);
-    let mut pending_entries: VecDeque<MovieTopLevelEntry> = VecDeque::new();
+    let mut pending_entries: VecDeque<crate::library_discovery::TitleFolderBoundary> =
+        VecDeque::new();
     let mut discovery_closed = false;
+    let mut discovery_error = None;
 
     loop {
         if library_scan_cancel_requested(ctx.cancel_token.as_ref()) {
@@ -2156,6 +2274,20 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
         while runner.evidence_set.len() < LIBRARY_SCAN_EVIDENCE_CONCURRENCY {
             let Some(entry) = pending_entries.pop_front() else {
                 break;
+            };
+            if let Some(reason) = entry.rejection {
+                runner
+                    .forward_evidence_output(EvidenceJobOutput::Failed {
+                        item_path: path_to_stored_string(&entry.path),
+                        error: AppError::Validation(reason),
+                        invalid_boundary: true,
+                    })
+                    .await;
+                continue;
+            }
+            let entry = MovieTopLevelEntry {
+                path: entry.path,
+                is_dir: true,
             };
             let key = runner.allocate_key();
             let scanner = ctx.app.services.library.library_scanner.clone();
@@ -2188,7 +2320,12 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
                             "library scan candidate producer received discovery batch"
                         );
                     }
-                    Some(Err(error)) => return Err(error),
+                    Some(Err(error)) => {
+                        // Earlier batches still own healthy evidence and
+                        // inventory work; settle them before reporting failure.
+                        discovery_error = Some(error);
+                        discovery_closed = true;
+                    }
                     None => discovery_closed = true,
                 }
             }
@@ -2218,6 +2355,11 @@ async fn run_movie_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
         return Ok(());
     }
     runner.settle().await?;
+    if let Some(error) = discovery_error
+        && !library_scan_cancel_requested(ctx.cancel_token.as_ref())
+    {
+        report_incomplete_discovery(ctx, error);
+    }
     Ok(())
 }
 
@@ -2242,14 +2384,39 @@ async fn movie_evidence_job(
             inventory_target: (inline_inventory.is_none() && is_dir).then_some(entry_path),
             inline_inventory,
         },
-        Err(error) => EvidenceJobOutput::Failed { item_path, error },
+        Err(error) => EvidenceJobOutput::Failed {
+            item_path,
+            error,
+            invalid_boundary: false,
+        },
     }
 }
 
 async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     let root = require_directory_library_path(&ctx.library_path)?.to_path_buf();
-    let discovered_folders =
-        stream_child_directories_batched(&root, LIBRARY_SCAN_SERIES_BATCH_SIZE).await?;
+    let policy = crate::library_discovery::TitleFolderBoundaryPolicy::load(
+        &ctx.app,
+        &ctx.facet,
+        &ctx.library_id,
+        &root,
+    )
+    .await?;
+    let discovered_folders = crate::library_discovery::stream_title_folder_boundaries(
+        root.clone(),
+        policy,
+        LIBRARY_SCAN_SERIES_BATCH_SIZE,
+        ctx.cancel_token.clone().unwrap_or_default(),
+    );
+    run_series_candidate_jobs_from_discovery(ctx, root, discovered_folders).await
+}
+
+async fn run_series_candidate_jobs_from_discovery(
+    ctx: &CandidateJobContext,
+    root: PathBuf,
+    discovered_folders: tokio::sync::mpsc::Receiver<
+        AppResult<Vec<crate::library_discovery::TitleFolderBoundary>>,
+    >,
+) -> AppResult<()> {
     let mut queued_folders = spawn_library_discovery_queue(
         ctx.app.clone(),
         ctx.session_id.clone(),
@@ -2261,8 +2428,10 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
 
     let coordinator = LibraryScanCoordinator::new(ctx.app.clone(), ctx.session_id.clone());
     let mut runner = CandidateJobRunner::new(ctx);
-    let mut pending_folders: VecDeque<PathBuf> = VecDeque::new();
+    let mut pending_folders: VecDeque<crate::library_discovery::TitleFolderBoundary> =
+        VecDeque::new();
     let mut discovery_closed = false;
+    let mut discovery_error = None;
 
     loop {
         if library_scan_cancel_requested(ctx.cancel_token.as_ref()) {
@@ -2277,6 +2446,17 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
             let Some(folder) = pending_folders.pop_front() else {
                 break;
             };
+            if let Some(reason) = folder.rejection {
+                runner
+                    .forward_evidence_output(EvidenceJobOutput::Failed {
+                        item_path: path_to_stored_string(&folder.path),
+                        error: AppError::Validation(reason),
+                        invalid_boundary: true,
+                    })
+                    .await;
+                continue;
+            }
+            let folder = folder.path;
             let key = runner.allocate_key();
             let scan_hints = ctx.scan_hints.clone();
             runner
@@ -2306,7 +2486,12 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
                             "library scan candidate producer received discovery batch"
                         );
                     }
-                    Some(Err(error)) => return Err(error),
+                    Some(Err(error)) => {
+                        // Earlier batches still own healthy evidence and
+                        // inventory work; settle them before reporting failure.
+                        discovery_error = Some(error);
+                        discovery_closed = true;
+                    }
                     None => discovery_closed = true,
                 }
             }
@@ -2334,7 +2519,7 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
 
     // A title owns a directory, never the library root. Loose root-level media
     // remains untouched and outside the catalog until the operator organizes it.
-    if !library_scan_cancel_requested(ctx.cancel_token.as_ref()) {
+    if discovery_error.is_none() && !library_scan_cancel_requested(ctx.cancel_token.as_ref()) {
         let loose_root_file_count = count_series_loose_root_files(&root).await?;
         if loose_root_file_count > 0 {
             warn!(
@@ -2349,6 +2534,7 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
     // complete; the title-match total is now deterministic even though
     // evidence and inventory jobs may still be running.
     if ctx.mark_discovery_complete_on_drain
+        && discovery_error.is_none()
         && !library_scan_cancel_requested(ctx.cancel_token.as_ref())
     {
         coordinator.mark_discovery_complete(false).await;
@@ -2359,6 +2545,11 @@ async fn run_series_candidate_jobs(ctx: &CandidateJobContext) -> AppResult<()> {
         return Ok(());
     }
     runner.settle().await?;
+    if let Some(error) = discovery_error
+        && !library_scan_cancel_requested(ctx.cancel_token.as_ref())
+    {
+        report_incomplete_discovery(ctx, error);
+    }
     Ok(())
 }
 
@@ -2375,7 +2566,11 @@ async fn series_evidence_job(
             inline_inventory: None,
             inventory_target: Some(folder),
         },
-        Err(error) => EvidenceJobOutput::Failed { item_path, error },
+        Err(error) => EvidenceJobOutput::Failed {
+            item_path,
+            error,
+            invalid_boundary: false,
+        },
     }
 }
 
@@ -3184,4 +3379,362 @@ async fn fail_candidates_for_chunk(
     }
     coordinator.publish_progress().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_wait::TEST_WAIT_DEADLINE;
+    use async_trait::async_trait;
+
+    struct GatedDiscoveryInventory {
+        started: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl GatedDiscoveryInventory {
+        fn files(root: &str) -> Vec<LibraryFile> {
+            vec![LibraryFile {
+                path: path_to_stored_string(Path::new(root).join("Fixture.S01E01.mkv")),
+                display_name: "Fixture.S01E01".into(),
+                nfo_path: None,
+                size_bytes: None,
+                source_signature_scheme: None,
+                source_signature_value: None,
+            }]
+        }
+    }
+
+    #[async_trait]
+    impl LibraryScanner for GatedDiscoveryInventory {
+        async fn scan_library(&self, root: &str) -> AppResult<Vec<LibraryFile>> {
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            Ok(Self::files(root))
+        }
+
+        async fn scan_directory_children(&self, root: &str) -> AppResult<Vec<LibraryFile>> {
+            Ok(Self::files(root))
+        }
+
+        async fn scan_library_batched(
+            &self,
+            _root: &str,
+            _batch_size: usize,
+        ) -> AppResult<LibraryFileBatchReceiver> {
+            unreachable!("candidate inventory uses directory scanning")
+        }
+
+        async fn scan_directory_batched(
+            &self,
+            _root: &str,
+            _batch_size: usize,
+        ) -> AppResult<LibraryFileBatchReceiver> {
+            unreachable!("candidate inventory uses directory scanning")
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_discovery_finishes_healthy_titles_before_failing_pipeline() {
+        for facet in [MediaFacet::Movie, MediaFacet::Series] {
+            let root = tempfile::tempdir().unwrap();
+            let mut expected = Vec::new();
+            for name in ["Alpha Horizon", "Beta Harbor"] {
+                let folder = root.path().join(format!("{name} (2024)"));
+                let file = if facet == MediaFacet::Movie {
+                    folder.join(format!("{name}.2024.mkv"))
+                } else {
+                    folder.join("Season_1").join(format!("{name}.S01E01.mkv"))
+                };
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"synthetic media").unwrap();
+                expected.push((name, folder, file));
+            }
+            let started = Arc::new(tokio::sync::Semaphore::new(0));
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (app, actor) = crate::lib_tests::bootstrap_nested_discovery_app(Arc::new(
+                crate::lib_tests::NestedDiscoveryGateway::gated(started.clone(), release.clone()),
+            ));
+            let library = app
+                .create_library(
+                    &actor,
+                    facet.clone(),
+                    "Discovery Fixture".into(),
+                    vec![crate::LibraryRootDraft {
+                        path: path_to_stored_string(root.path()),
+                        is_default: true,
+                    }],
+                    None,
+                )
+                .await
+                .unwrap();
+            let root_path = path_to_stored_string(root.path());
+            let pending_path = path_to_stored_string(root.path().join("Previously Unknown"));
+            let mut pending = crate::library_scan_unmatched::build_ignored_library_scan_item(
+                &facet,
+                &library.id,
+                IgnoredLibraryScanItemArgs {
+                    title_id: None,
+                    session_id: Some("previous-fixture-session"),
+                    library_path: &root_path,
+                    item_path: &pending_path,
+                    display_name: "Previously Unknown",
+                    query: "Previously Unknown",
+                    year_hint: None,
+                    reason_code: "metadata_search_no_match",
+                    error_message: None,
+                    size_bytes: None,
+                },
+            );
+            pending.status = crate::PendingImportStatus::Pending;
+            app.services
+                .library
+                .library_scan_unmatched_items
+                .upsert_library_scan_unmatched_item(&pending)
+                .await
+                .unwrap();
+            let (source_tx, source_rx) = tokio::sync::mpsc::channel(2);
+            source_tx
+                .send(Ok(expected
+                    .iter()
+                    .map(
+                        |(_, path, _)| crate::library_discovery::TitleFolderBoundary {
+                            path: path.clone(),
+                            rejection: None,
+                        },
+                    )
+                    .collect()))
+                .await
+                .unwrap();
+            source_tx
+                .send(Err(AppError::Repository(
+                    "fixture incomplete discovery".into(),
+                )))
+                .await
+                .unwrap();
+            drop(source_tx);
+            let scan_app = app.clone();
+            let scan_actor = actor.clone();
+            let scan_facet = facet.clone();
+            let scan_library_id = library.id.clone();
+            let scan_root_path = root_path.clone();
+            let incomplete_reported = Arc::new(tokio::sync::Notify::new());
+            let observer = incomplete_reported.clone();
+            let task = tokio::spawn(async move {
+                INCOMPLETE_DISCOVERY_OBSERVER
+                    .scope(
+                        observer,
+                        run_library_scan_pipeline_with_discovery(
+                            LibraryScanPipelineRequest {
+                                app: &scan_app,
+                                actor: &scan_actor,
+                                facet: &scan_facet,
+                                library_id: &scan_library_id,
+                                library_path: &scan_root_path,
+                                session_id: "fixture-incomplete-session",
+                                mark_discovery_complete_on_drain: true,
+                                cancel_token: None,
+                                scan_hints: None,
+                                kind: if scan_facet == MediaFacet::Movie {
+                                    LibraryScanPipelineKind::Movie
+                                } else {
+                                    LibraryScanPipelineKind::Series
+                                },
+                            },
+                            Some(source_rx),
+                        ),
+                    )
+                    .await
+            });
+            tokio::time::timeout(TEST_WAIT_DEADLINE, started.acquire())
+                .await
+                .expect("healthy metadata matching must start")
+                .unwrap()
+                .forget();
+            tokio::time::timeout(TEST_WAIT_DEADLINE, incomplete_reported.notified())
+                .await
+                .expect(
+                    "terminal discovery error must reach the pipeline before metadata completes",
+                );
+            release.add_permits(2);
+            let error = tokio::time::timeout(TEST_WAIT_DEADLINE, task)
+                .await
+                .expect("healthy matching and media must settle")
+                .unwrap()
+                .expect_err("incomplete discovery must fail the pipeline");
+            assert!(
+                matches!(error, AppError::Repository(message) if message == "fixture incomplete discovery")
+            );
+            let remaining = app
+                .services
+                .library
+                .library_scan_unmatched_items
+                .list_library_scan_unmatched_items(
+                    Some(facet.clone()),
+                    Some(&root_path),
+                    None,
+                    50,
+                    0,
+                )
+                .await
+                .unwrap();
+            assert!(remaining.iter().any(|item| item.item_path == pending_path
+                && item.status == crate::PendingImportStatus::Pending));
+            let titles = app
+                .list_titles_unpaged(&actor, Some(facet.clone()), None, None)
+                .await
+                .unwrap();
+            assert_eq!(titles.len(), expected.len());
+            for (name, folder, file) in expected {
+                let title = titles.iter().find(|title| title.name == name).unwrap();
+                assert_eq!(title.folder_path.as_deref(), Some(folder.to_str().unwrap()));
+                let files = app
+                    .services
+                    .library
+                    .media_files
+                    .list_media_files_for_title(&title.id)
+                    .await
+                    .unwrap();
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].file_path, path_to_stored_string(&file));
+                assert_eq!(std::fs::read(file).unwrap(), b"synthetic media");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_discovery_error_drains_healthy_candidate_work_before_returning() {
+        for kind in [
+            LibraryScanPipelineKind::Movie,
+            LibraryScanPipelineKind::Series,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let count = LIBRARY_SCAN_EVIDENCE_CONCURRENCY + 1;
+            let expected: HashSet<_> = (0..count)
+                .map(|index| path_to_stored_string(root.path().join(format!("Fixture {index}"))))
+                .collect();
+            for path in &expected {
+                std::fs::create_dir(path).unwrap();
+                std::fs::write(
+                    Path::new(path).join("Fixture.S01E01.mkv"),
+                    b"synthetic media",
+                )
+                .unwrap();
+            }
+            let boundaries = expected
+                .iter()
+                .map(|path| crate::library_discovery::TitleFolderBoundary {
+                    path: PathBuf::from(path),
+                    rejection: None,
+                })
+                .collect();
+            let (source_tx, source_rx) = tokio::sync::mpsc::channel(2);
+            source_tx.send(Ok(boundaries)).await.unwrap();
+            source_tx
+                .send(Err(AppError::Repository(
+                    "fixture discovery I/O failure".into(),
+                )))
+                .await
+                .unwrap();
+            drop(source_tx);
+
+            let scanner = Arc::new(GatedDiscoveryInventory {
+                started: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+            });
+            let (app, _) = crate::lib_tests::bootstrap();
+            let app =
+                app.with_test_overrides(|builder| builder.with_library_scanner(scanner.clone()));
+            let (candidate_tx, mut candidate_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (inventory_tx, mut inventory_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_storage_tx, storage_rx) = tokio::sync::watch::channel(0);
+            let facet = match kind {
+                LibraryScanPipelineKind::Movie => MediaFacet::Movie,
+                LibraryScanPipelineKind::Series => MediaFacet::Series,
+            };
+            let ctx = CandidateJobContext {
+                app,
+                session_id: "fixture-session".into(),
+                library_path: path_to_stored_string(root.path()),
+                library_id: scryer_domain::default_library_id_for_facet(&facet),
+                facet,
+                kind,
+                scan_hints: None,
+                mark_discovery_complete_on_drain: true,
+                cancel_token: None,
+                candidate_events: candidate_tx,
+                inventory_events: inventory_tx,
+                storage_watch: storage_rx,
+                incomplete_discovery_observer: None,
+            };
+            let root_path = root.path().to_path_buf();
+            let task = tokio::spawn(async move {
+                match kind {
+                    LibraryScanPipelineKind::Movie => {
+                        run_movie_candidate_jobs_from_discovery(&ctx, source_rx).await
+                    }
+                    LibraryScanPipelineKind::Series => {
+                        run_series_candidate_jobs_from_discovery(&ctx, root_path, source_rx).await
+                    }
+                }
+            });
+
+            tokio::time::timeout(TEST_WAIT_DEADLINE, async {
+                let mut candidates = 0;
+                loop {
+                    match candidate_rx
+                        .recv()
+                        .await
+                        .expect("evidence phase must drain")
+                    {
+                        ScanCandidateJobEvent::Candidate { .. } => candidates += 1,
+                        ScanCandidateJobEvent::EvidenceDone { metrics } => {
+                            assert_eq!(candidates, count);
+                            assert_eq!(metrics.candidates_emitted, count);
+                            break;
+                        }
+                        _ => panic!("healthy fixtures must produce candidate evidence"),
+                    }
+                }
+                scanner.started.acquire().await.unwrap().forget();
+            })
+            .await
+            .expect("healthy evidence and inventory must start before failure returns");
+            assert!(
+                !task.is_finished(),
+                "inventory must settle before returning the discovery error"
+            );
+            scanner.release.add_permits(count);
+            tokio::time::timeout(TEST_WAIT_DEADLINE, task)
+                .await
+                .expect("inventory must settle")
+                .unwrap()
+                .unwrap();
+            let error = match candidate_rx
+                .recv()
+                .await
+                .expect("discovery error must follow settled work")
+            {
+                ScanCandidateJobEvent::DiscoveryIncomplete { error } => error,
+                _ => panic!("terminal discovery failure must be retained"),
+            };
+            assert!(
+                matches!(error, AppError::Repository(message) if message == "fixture discovery I/O failure")
+            );
+
+            let mut inventoried = HashSet::new();
+            while let Some(event) = inventory_rx.recv().await {
+                match event {
+                    ScanInventoryJobEvent::Inventory { files, .. } => {
+                        assert_eq!(files.len(), 1);
+                        inventoried.insert(path_to_stored_string(
+                            Path::new(&files[0].path).parent().unwrap(),
+                        ));
+                    }
+                    _ => panic!("healthy inventory must finish before discovery failure returns"),
+                }
+            }
+            assert_eq!(inventoried, expected);
+        }
+    }
 }

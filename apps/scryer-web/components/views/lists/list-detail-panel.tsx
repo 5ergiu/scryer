@@ -230,7 +230,8 @@ export function ListDetailPanel({
                   </div>
                 ))}
               </dl>
-              {subscription.source.provider === "simkl" ? <SimklAttribution /> : subscription.providerUrl ? (
+              {subscription.source.provider === "simkl" ? <SimklAttribution /> : null}
+              {subscription.providerUrl ? (
                 <a
                   href={subscription.providerUrl}
                   target="_blank"
@@ -263,7 +264,7 @@ export function ListDetailPanel({
                   <Table id="list-detail-memberships" density="dense" wrapperClassName="rounded-[12px] border border-[var(--scry-border3)]">
                     <TableHeader>
                       <TableRow className={TITLE_TABLE_HEADER_ROW_CLASS}>
-                        <TableHead className={`w-12 text-center ${TITLE_TABLE_HEADER_CELL_CLASS}`}>#</TableHead>
+                        <TableHead className={`w-20 text-center ${TITLE_TABLE_HEADER_CELL_CLASS}`}>{t("lists.detail.sourceRank")}</TableHead>
                         <TableHead className={TITLE_TABLE_HEADER_CELL_CLASS}>{t("lists.detail.title")}</TableHead>
                         <TableHead className={TITLE_TABLE_HEADER_CELL_CLASS}>{t("lists.detail.state")}</TableHead>
                       </TableRow>

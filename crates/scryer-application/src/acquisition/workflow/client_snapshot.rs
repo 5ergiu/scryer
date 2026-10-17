@@ -133,6 +133,10 @@ pub(crate) enum FailureHandlingOutcome {
     RecordedOnly,
     RecordedNoReacquire,
     AlreadyHandled,
+    /// No destructive cleanup may follow an unconfirmed blocklist write.
+    RecordingFailed,
+    /// No usable release identity exists; repeating the write cannot repair it.
+    MissingBlocklistKey,
 }
 /// Result of walking a scope's saved search results, best first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1138,7 +1142,18 @@ pub(crate) async fn process_download_failure_for_download(
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
 ) -> FailureHandlingOutcome {
-    let outcome = handle_download_failure_for_download(app, canonical_download_id, context).await;
+    process_download_failure_with_cleanup_intent(app, canonical_download_id, context, false).await
+}
+
+pub(crate) async fn process_download_failure_with_cleanup_intent(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    context: DownloadFailureContext,
+    manual_cleanup: bool,
+) -> FailureHandlingOutcome {
+    let outcome =
+        handle_download_failure_for_download(app, canonical_download_id, context, manual_cleanup)
+            .await;
     if outcome == FailureHandlingOutcome::Reopened {
         app.runtime
             .acquisition
@@ -1152,6 +1167,7 @@ async fn handle_download_failure_for_download(
     app: &AppUseCase,
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     context: DownloadFailureContext,
+    manual_cleanup: bool,
 ) -> FailureHandlingOutcome {
     let failed_submission =
         find_failed_submission_for_download(app, canonical_download_id, &context).await;
@@ -1163,7 +1179,11 @@ async fn handle_download_failure_for_download(
             release_title = context.release_title.as_str(),
             "skipping automatic failed download handling without scryer grab history"
         );
-        return FailureHandlingOutcome::RecordedOnly;
+        return if manual_cleanup {
+            FailureHandlingOutcome::RecordingFailed
+        } else {
+            FailureHandlingOutcome::RecordedOnly
+        };
     }
 
     let resolved_title_id = context
@@ -1180,6 +1200,14 @@ async fn handle_download_failure_for_download(
     let preferred_source_title =
         preferred_failed_release_title(&context, failed_submission.as_ref());
     let normalized_source_title = normalize_release_name(preferred_source_title.as_deref());
+    if manual_cleanup
+        && (resolved_title_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+            || normalized_source_title.is_none())
+    {
+        return FailureHandlingOutcome::MissingBlocklistKey;
+    }
     let normalized_source_hint = resolved_failed_release_hint(failed_submission.as_ref());
     // Both halves of the blocklist key come off the submission: source_provider_id
     // has carried the indexer id since 0150, info_hash since 0192.
@@ -1251,7 +1279,7 @@ async fn handle_download_failure_for_download(
         false
     };
 
-    if failure_already_recorded && !context.skip_reacquire {
+    if failure_already_recorded && !context.skip_reacquire && !manual_cleanup {
         return FailureHandlingOutcome::AlreadyHandled;
     }
 
@@ -1302,7 +1330,6 @@ async fn handle_download_failure_for_download(
         .blocklist_reason
         .clone()
         .unwrap_or_else(|| format!("download client failure: {}", context.reason));
-    let mut failure_recorded = false;
 
     let (outcome, failure_reason) = if operator_submission {
         (
@@ -1363,78 +1390,17 @@ async fn handle_download_failure_for_download(
                 ),
             )
         }
-    } else if let Some(items) = failed_pack_items.as_ref() {
+    } else if failed_pack_items.is_some() {
         let message = format!(
             "pack download failed for '{}': {}; re-opened covered episodes under existing coverage",
             release_title_for_matching, context.reason
         );
-        record_failed_release_outcome(
-            app,
-            resolved_title_id.as_deref(),
-            &attribution,
-            normalized_source_title.clone(),
-            normalized_source_hint.clone(),
-            blocklist_indexer_id.clone(),
-            blocklist_info_hash.clone(),
-            download_id.clone(),
-            Some(context.client_id.clone()),
-            context.client_name.clone(),
-            Some(context.client_type.clone()),
-            quality.clone(),
-            Some(message.clone()),
-            Some(blocklist_reason.clone()),
-            None,
-        )
-        .await;
-        failure_recorded = true;
-        // A failed pack re-opens every covered episode scope after its
-        // release is blocklisted. Coverage is kept: the cursor walks each
-        // scope's saved search results before it would query an indexer.
-        for item in items {
-            app.reopen_wanted_scope_for_acquisition(item, CoverageReopen::Keep)
-                .await;
-        }
-
-        info!(
-            title_id = resolved_title_id.as_deref().unwrap_or(""),
-            affected_wanted_items = items.len(),
-            release_title = release_title_for_matching,
-            "re-opened covered episode scopes after failed pack download"
-        );
-
         (FailureHandlingOutcome::Reopened, message)
-    } else if let Some(item) = wanted_item.as_ref() {
+    } else if wanted_item.is_some() {
         let failure_reason = format!(
             "download failed for '{}': {}; re-opened scope to try its saved search results",
             release_title_for_matching, context.reason
         );
-        record_failed_release_outcome(
-            app,
-            resolved_title_id.as_deref(),
-            &attribution,
-            normalized_source_title.clone(),
-            normalized_source_hint.clone(),
-            blocklist_indexer_id.clone(),
-            blocklist_info_hash.clone(),
-            download_id.clone(),
-            Some(context.client_id.clone()),
-            context.client_name.clone(),
-            Some(context.client_type.clone()),
-            quality.clone(),
-            Some(failure_reason.clone()),
-            Some(blocklist_reason.clone()),
-            None,
-        )
-        .await;
-        failure_recorded = true;
-        // Blocklisted first, then re-opened under its existing coverage: the
-        // cursor walks the scope's saved search results (`try_saved_candidates`)
-        // before it would spend an indexer query, and a scope whose saved results
-        // are exhausted simply stays converged. Never a coverage prune here — a
-        // failure must not cost a re-search.
-        app.reopen_wanted_scope_for_acquisition(item, CoverageReopen::Keep)
-            .await;
-
         (FailureHandlingOutcome::Reopened, failure_reason)
     } else {
         (
@@ -1446,7 +1412,7 @@ async fn handle_download_failure_for_download(
         )
     };
 
-    if !failure_already_recorded && !failure_recorded {
+    if !failure_already_recorded {
         record_failed_release_outcome(
             app,
             resolved_title_id.as_deref(),
@@ -1465,6 +1431,57 @@ async fn handle_download_failure_for_download(
             None,
         )
         .await;
+    }
+
+    if manual_cleanup {
+        let confirmed = if let (Some(title_id), Some(release_name)) = (
+            resolved_title_id.as_deref(),
+            normalized_source_title.as_deref(),
+        ) {
+            app.services
+                .workflow
+                .blocklist_repo
+                .is_blocked(
+                    title_id,
+                    &blocklist_indexer_id,
+                    release_name,
+                    blocklist_info_hash.as_deref(),
+                )
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !confirmed {
+            return FailureHandlingOutcome::RecordingFailed;
+        }
+    }
+
+    // Manual blocklisting must be confirmed before reopening any scope: saved
+    // candidates can be walked as soon as the wanted state changes. Keep the
+    // existing coverage so a failure does not force another indexer search.
+    if matches!(outcome, FailureHandlingOutcome::Reopened) {
+        if let Some(items) = failed_pack_items.as_ref() {
+            for item in items {
+                app.reopen_wanted_scope_for_acquisition(item, CoverageReopen::Keep)
+                    .await;
+            }
+            info!(
+                title_id = resolved_title_id.as_deref().unwrap_or(""),
+                affected_wanted_items = items.len(),
+                release_title = release_title_for_matching,
+                "re-opened covered episode scopes after failed pack download"
+            );
+        } else if let Some(item) = wanted_item.as_ref() {
+            app.reopen_wanted_scope_for_acquisition(item, CoverageReopen::Keep)
+                .await;
+        }
+    }
+
+    if manual_cleanup {
+        // The tracker persists the terminal state and explicit cleanup intent
+        // together. Do not enqueue automatic cleanup before that durable write.
+        return outcome;
     }
 
     // NZBGet must retain history until terminal cleanup has inspected its payload.

@@ -27,6 +27,7 @@ function makeEntry(id: string, name: string): ParsedQualityProfileEntry {
       prefer_remux: false,
       allow_bd_disk: true,
       allow_upgrades: true,
+    ignore_proper_repack: false,
       scoring_overrides: {},
       cutoff_tier: null,
       min_score_to_grab: null,
@@ -52,6 +53,7 @@ function makeDraft(id: string, name: string): QualityProfileDraft {
     prefer_remux: false,
     allow_bd_disk: true,
     allow_upgrades: true,
+    ignore_proper_repack: false,
     scoring_overrides: {},
     cutoff_tier: "",
     min_score_to_grab: null,
@@ -103,4 +105,13 @@ test("quality profile choices expose 8k", () => {
       (choice) => choice.value === "4320P" && choice.label.includes("8K"),
     ),
   );
+});
+
+
+test("profile draft save and clone preserve Ignore PROPER/REPACK", () => {
+  const draft = { ...makeDraft("default", "Cinema"), ignore_proper_repack: true };
+  const saved = commitQualityProfileDraftToEntries([makeEntry("default", "Cinema")], draft);
+  assert.equal(saved.catalogEntries[0]?.criteria.ignore_proper_repack, true);
+  const cloned = commitQualityProfileDraftToEntries(saved.catalogEntries, { ...draft, id: "", name: "Clone" });
+  assert.equal(cloned.draftEntry.criteria.ignore_proper_repack, true);
 });

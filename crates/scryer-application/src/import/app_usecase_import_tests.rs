@@ -1062,11 +1062,7 @@ fn is_sample_file_detects_sample_in_stem() {
 
 #[test]
 fn is_sample_file_allows_normal_video_file() {
-    // Non-existent path → metadata fails → size defaults to 0, but file doesn't
-    // contain "sample" so the filename check returns false; the size check on a
-    // nonexistent file returns Ok(0) via unwrap_or(false)... actually
-    // std::fs::metadata on a non-existent path returns Err, so unwrap_or(false)
-    // → false. So this test should pass.
+    // A filename alone must not be rejected for lacking size evidence.
     assert!(!is_sample_file(std::path::Path::new(
         "/nonexistent/Show.S01E01.1080p.mkv"
     )));
@@ -1808,8 +1804,8 @@ async fn find_video_files_filters_samples_when_flag_set() {
     use std::io::{Seek, SeekFrom, Write};
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // movie.mkv must be >= 50 MB so the size check doesn't also flag it as a sample.
-    // Use a sparse file (seek past threshold, write one byte) to avoid allocating 50 MB.
+    // Explicit sample naming filters independently of the main file's size.
+    // Keep the main fixture sparse to avoid allocating its payload.
     let main_path = dir.path().join("movie.mkv");
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -1828,6 +1824,32 @@ async fn find_video_files_filters_samples_when_flag_set() {
     // sample file is filtered; only movie.mkv remains
     assert_eq!(files.len(), 1);
     assert!(!files[0].to_str().unwrap().contains("sample"));
+}
+
+#[test]
+fn find_video_files_retains_small_episodes_for_runtime_validation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sizes = [15_000_000, 38_690_608, 43_320_725];
+    let mut expected = Vec::new();
+    for (index, size) in sizes.into_iter().enumerate() {
+        let path = dir
+            .path()
+            .join(format!("Short.Show.S01E{:02}.mkv", index + 1));
+        std::fs::File::create(&path)
+            .expect("create episode")
+            .set_len(size)
+            .expect("set sparse length");
+        assert!(!is_sample_file(&path));
+        assert_eq!(
+            find_video_files(&path, true).expect("direct file"),
+            vec![path.clone()]
+        );
+        expected.push(path);
+    }
+    std::fs::write(dir.path().join("Short.Show.sample.mkv"), b"sample").expect("sample");
+    let mut found = find_video_files(dir.path(), true).expect("directory");
+    found.sort();
+    assert_eq!(found, expected);
 }
 
 #[test]

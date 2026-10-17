@@ -1,4 +1,7 @@
 import * as React from "react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { FileScoreSummary } from "@/components/common/score-breakdown";
+import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
 import {
   File as FileIcon,
   HardDrive,
@@ -21,7 +24,7 @@ import { MediaInfoButton } from "@/components/common/media-info-dialog";
 import { audioStreamsForFile, formatMediaFileSize } from "@/lib/utils/media-info-format";
 import { SubtitleSearchModal } from "@/components/views/subtitle-search-modal";
 import { useAuth } from "@/lib/hooks/use-auth";
-import { canManageLibrarySubtitles } from "@/lib/utils/permissions";
+import { canManageLibrarySubtitles, hasLibraryPermission, LIBRARY_PERMISSIONS } from "@/lib/utils/permissions";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import type { ExternalSubtitleRecord } from "@/lib/types/subtitles";
@@ -118,6 +121,9 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
   const { user } = useAuth();
+  const canRefreshScores = hasLibraryPermission(user, libraryId, LIBRARY_PERMISSIONS.manageTitles);
+  const [selectedFiles, setSelectedFiles] = React.useState<Set<string>>(() => new Set());
+  const selectedFileIds = mediaFiles.filter((file) => selectedFiles.has(file.id)).map((file) => file.id);
   const [subtitleSearchTarget, setSubtitleSearchTarget] = React.useState<{
     mediaFileId: string;
     filePath: string;
@@ -162,6 +168,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
       ) : null}
       {orderedMediaFiles.length > 0 ? (
         <div className={cn(selectedTitlePresentation ? "space-y-4" : "space-y-2")}>
+          {canRefreshScores && selectedFileIds.length > 0 ? <RefreshScoresButton selection={{ fileIds: selectedFileIds }} /> : null}
           {orderedMediaFiles.map((file, fileIndex) => {
             const downloads = subtitleDownloadsByMediaFile[file.id] ?? [];
             const role = file.role?.toLowerCase() ?? "";
@@ -297,12 +304,18 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         </span>
                       ) : null}
                       {fileDate ? <span>{fileDate}</span> : null}
-                      {file.acquisitionScore != null ? (
-                        <span title={file.scoringLog ?? undefined}>
-                          {t("mediaFile.score", { score: file.acquisitionScore })}
-                        </span>
-                      ) : null}
+                      {file.releaseGroup?.trim() ? <span>{file.releaseGroup}</span> : null}
                     </div>
+                    <FileScoreSummary evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} />
+                    {canRefreshScores ? <div className="flex items-center gap-2">
+                      <Checkbox aria-label={`${t("scoring.selectFile")}: ${file.filePath}`}
+                        checked={selectedFiles.has(file.id)} onCheckedChange={(checked) => setSelectedFiles((previous) => {
+                          const next = new Set(previous);
+                          if (checked) next.add(file.id); else next.delete(file.id);
+                          return next;
+                        })} />
+                      <RefreshScoresButton single selection={{ fileIds: [file.id] }} />
+                    </div> : null}
                     {selectedTitlePresentation ? (
                       <div className="flex flex-wrap gap-1.5">
                         {selectedTitleBadges.map((badge, badgeIndex) => (

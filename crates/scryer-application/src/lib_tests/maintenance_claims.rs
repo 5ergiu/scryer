@@ -230,7 +230,43 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
         )
         .await;
     fixture.open_gates(true, true).await;
+    let root = tempfile::tempdir().expect("claim fixture root");
+    fixture
+        .app
+        .update_media_settings(
+            &fixture.user,
+            MediaFacet::Movie,
+            empty_update_media_settings_with_roots(vec![build_root_folder_entry(
+                root.path(),
+                true,
+            )]),
+        )
+        .await
+        .expect("configure claim fixture root");
     let title = seed_title(&fixture.app, &fixture.user, "Leased").await;
+    let folder = root.path().join("Leased");
+    std::fs::create_dir(&folder).expect("create claimed title folder");
+    let media_path = folder.join("Leased.mkv");
+    std::fs::write(&media_path, b"video").expect("write owned media");
+    fixture
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: media_path.to_string_lossy().into_owned(),
+            size_bytes: 5,
+            role: MediaFileRole::Primary,
+            ..Default::default()
+        })
+        .await
+        .expect("record owned media");
+    let unrelated = root.path().join("unrelated.txt");
+    std::fs::write(&unrelated, b"preserved").expect("write unrelated file");
+    super::maintenance_title_completion::record_fixture_title_folder(
+        &fixture.app,
+        &title.id,
+        &folder,
+    )
+    .await;
     fixture.evaluate().await;
     fixture
         .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(1))
@@ -275,10 +311,17 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
                     .await
                     .expect("read title")
                     .is_none(),
-                "with nothing holding it, the armed destructive rule deletes the title"
+                "with nothing holding it, the armed destructive rule deletes the title: {report:?}; {candidate:?}; {:?}",
+                fixture.evaluation.all_action_runs().await
             );
         }
     }
+    assert_eq!(
+        media_path.exists(),
+        expected_hold.is_some(),
+        "only a spent claim permits deleting the owned file"
+    );
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"preserved");
 }
 
 #[tokio::test]

@@ -1493,10 +1493,17 @@ async fn build_prepared_movie_library_scan_candidate(
 
     let nfo_meta = read_valid_movie_nfo_metadata(file.nfo_path.as_deref()).await;
     let file_path = stored_path_to_path_buf(&file.path);
-    let library_root = stored_path_to_path_buf(&library_path);
+    // A folder representative stands for the title folder itself. Whatever
+    // sits above it is an organizing folder (an alphabetical bucket under a
+    // nested template, or the library root), never title evidence, so the
+    // parent is treated as the root the same way series folders are.
+    let evidence_root = representative_is_directory
+        .then(|| file_path.parent().map(Path::to_path_buf))
+        .flatten()
+        .unwrap_or_else(|| stored_path_to_path_buf(&library_path));
     let filename_parse = parse_library_filename(&LibraryFilenameParseInput::title_only(
         file_path.as_path(),
-        Some(library_root.as_path()),
+        Some(evidence_root.as_path()),
     ));
     let parsed_release = filename_parse.parsed_release.clone();
     let query_evidence = filename_parse.query_evidence;
@@ -2288,6 +2295,44 @@ mod tests {
             select_safe_batch_match(&[pelton_tvdb_signal]).map(|item| item.name),
             Some("Pelton".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn folder_representative_never_queries_its_organizing_folder() {
+        let folder = Path::new("/movies/Z/Zqvx Empty Placeholder (1999)");
+        let file = LibraryFile {
+            path: path_to_stored_string(folder),
+            display_name: "Zqvx Empty Placeholder (1999)".to_string(),
+            nfo_path: None,
+            size_bytes: None,
+            source_signature_scheme: None,
+            source_signature_value: None,
+        };
+
+        let candidate = build_prepared_movie_library_scan_candidate(
+            file,
+            true,
+            Vec::new(),
+            path_to_stored_string(Path::new("/movies")),
+            None,
+        )
+        .await
+        .expect("candidate");
+
+        assert!(
+            candidate
+                .query_variants
+                .iter()
+                .any(|query| query == "Zqvx Empty Placeholder"),
+            "queries: {:?}",
+            candidate.query_variants
+        );
+        assert!(
+            !candidate.query_variants.iter().any(|query| query == "Z"),
+            "the alphabetical bucket leaked into the queries: {:?}",
+            candidate.query_variants
+        );
+        assert_eq!(candidate.year_hint, Some(1999));
     }
 
     #[tokio::test]

@@ -78,11 +78,17 @@
          leaves the old binaries running. The old product's own StopTrayBeforeRemoval runs too
          late to help, so locate the installed tray and ask it to shut down before validation.
          The tray's shutdown command returns success when no tray is running. -->
-    <Property Id="INSTALLEDTRAYEXE">
-      <DirectorySearch Id="InstalledScryerFolder" Path="[ProgramFiles64Folder]Scryer Media\Scryer">
-        <FileSearch Id="InstalledScryerTrayExe" Name="scryer-tray.exe" />
-      </DirectorySearch>
+    <!-- Without a FileSearch signature, AppSearch returns the registered key file's
+         directory. This also finds installs made with a custom INSTALLFOLDER. -->
+    <Property Id="INSTALLEDAPPLICATIONFOLDER">
+      <ComponentSearch Id="InstalledScryerFolder"
+                       Guid="$(var.ApplicationFilesComponentGuid)" Type="file" />
     </Property>
+    <SetProperty Id="INSTALLEDTRAYEXE"
+                 Value="[INSTALLEDAPPLICATIONFOLDER]scryer-tray.exe"
+                 Before="StopInstalledTrayBeforeValidate"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER" />
     <CustomAction
         Id="StopInstalledTrayBeforeValidate"
         Property="INSTALLEDTRAYEXE"
@@ -90,23 +96,63 @@
         Execute="immediate"
         Return="ignore"
         Impersonate="yes" />
+    <!-- The installed tray's shutdown is the installed product's code. Releases before the
+         forced stop below existed only stop the tray itself, so a server nobody owns (orphaned
+         by a killed tray or an interrupted upgrade, or started by hand) keeps scryer.exe locked
+         and InstallValidate still finds files in use. Once the graceful stop has had its turn,
+         force-stop the scryer.exe and scryer-tray.exe processes that remain, so the upgrade
+         never depends on code it is replacing. The stop is scoped to executables inside the
+         installed folder, so a portable or development copy running elsewhere survives; a
+         process whose path cannot be read (another user's) is skipped and left to Restart
+         Manager. The installed folder is never pasted into the script: an install path can
+         hold an apostrophe, which would end a PowerShell literal early and fail the whole
+         command. Instead the script asks Windows Installer for the key path of the installed
+         product's application files component (the same component INSTALLEDAPPLICATIONFOLDER
+         is searched from), using the product codes FindRelatedProducts recorded in
+         WIX_UPGRADE_DETECTED; GUIDs carry no quoting hazard. The command is MSI formatted
+         text, so it must not contain a .NET type literal such as [System.IO.Path] (it reads
+         as a property reference and is blanked) and no script block may contain a resolved
+         property (formatting strips the braces around one). Failures are ignored. There is
+         no tree kill and the upgrade helper runs as scryer-upgrade-helper.exe, which is not
+         in the name list, so an in-app upgrade keeps its helper. This must run immediately
+         before InstallValidate, which precedes InstallInitialize, so it cannot be deferred;
+         it runs with the installing user's token. -->
+    <SetProperty Id="FORCESTOPPOWERSHELLEXE"
+                 Value="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
+                 Before="ForceStopScryerProcessesBeforeValidate"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER" />
+    <CustomAction
+        Id="ForceStopScryerProcessesBeforeValidate"
+        Property="FORCESTOPPOWERSHELLEXE"
+        ExeCommand="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;$msi = New-Object -ComObject WindowsInstaller.Installer; $folders = @(); foreach ($product in '[WIX_UPGRADE_DETECTED]'.Split(';')) { if (-not $product) { continue }; try { $keyPath = $msi.GetType().InvokeMember('ComponentPath', 'GetProperty', $null, $msi, @($product, '$(var.ApplicationFilesComponentGuid)')); if ($keyPath) { $folders += ((Split-Path -Parent $keyPath).TrimEnd('\') + '\') } } catch { } }; if ($folders.Count -gt 0) { Get-Process scryer,scryer-tray -ErrorAction SilentlyContinue | Where-Object { $path = $_.Path; $path -and @($folders | Where-Object { $path.StartsWith($_, 'OrdinalIgnoreCase') }).Count -gt 0 } | Stop-Process -Force }&quot;"
+        Execute="immediate"
+        Return="ignore"
+        Impersonate="yes" />
     <InstallExecuteSequence>
       <Custom Action="StopInstalledTrayBeforeValidate"
-              Before="InstallValidate"
+              Before="ForceStopScryerProcessesBeforeValidate"
               Condition="WIX_UPGRADE_DETECTED AND INSTALLEDTRAYEXE" />
+      <Custom Action="ForceStopScryerProcessesBeforeValidate"
+              Before="InstallValidate"
+              Condition="WIX_UPGRADE_DETECTED AND INSTALLEDAPPLICATIONFOLDER AND FORCESTOPPOWERSHELLEXE" />
     </InstallExecuteSequence>
 
     <!-- These commands affect only the uninstalling user: their HKCU Run entry, the tray
          process they own, and their Scryer desktop profile. A major upgrade removes the old
          product as part of installing the new one; UPGRADINGPRODUCTCODE is set only in that
          removal, so the startup preference and the profile both survive an upgrade and are
-         cleared only by a real uninstall. -->
+         cleared only by a real uninstall. A missing tray, or one that cannot be started (for
+         example quarantined by antivirus), must never turn an uninstall or the removal half of
+         an upgrade into a rollback, so the stop's result is ignored: an upgrade has already
+         force-stopped the remaining Scryer processes before InstallValidate, and the
+         installer's own file handling covers anything still in use. -->
     <CustomAction
         Id="StopTrayBeforeRemoval"
         FileRef="ScryerTrayExe"
         ExeCommand="--shutdown"
         Execute="immediate"
-        Return="check"
+        Return="ignore"
         Impersonate="yes" />
     <CustomAction
         Id="RemoveTrayStartupBeforeRemoval"

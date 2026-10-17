@@ -1,5 +1,7 @@
 pub(crate) mod canonical;
 pub(crate) mod canonical_context;
+pub mod evaluations;
+pub(crate) mod grab_scoring;
 pub(crate) mod landed_bar_memo;
 
 /// Canonicality invariants for [`canonical`]: one term set, two evidence

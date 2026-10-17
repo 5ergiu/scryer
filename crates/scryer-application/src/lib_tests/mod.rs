@@ -69,6 +69,7 @@ mod root_change;
 mod root_move;
 mod routing_settings;
 mod rule_tester_listing;
+mod score_evaluation;
 mod script_interpreter_settings;
 mod search_cutoff;
 mod security_auth;
@@ -95,6 +96,7 @@ mod support_imports;
 mod support_indexers_metadata;
 mod support_library_show;
 mod support_settings_scan;
+pub(crate) use library_scan::{NestedDiscoveryGateway, bootstrap_nested_discovery_app};
 use support_acquisition_downloads::*;
 pub(crate) use support_bootstrap_fixtures::bootstrap;
 #[cfg(unix)]

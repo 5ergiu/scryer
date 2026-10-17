@@ -100,6 +100,11 @@
           "descKey": "settings.refReleaseIsProper"
         },
         {
+          "field": "revision",
+          "type": "int",
+          "descKey": "settings.refReleaseRevision"
+        },
+        {
           "field": "is_repack",
           "type": "bool",
           "descKey": "settings.refReleaseIsRepack"

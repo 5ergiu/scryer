@@ -71,9 +71,54 @@ pub struct ExternalSubtitleBlocklistEntryPayload {
 // Title History
 // ---------------------------------------------------------------------------
 
+/// A recorded score contribution, including rule attribution and rejections.
+#[derive(SimpleObject, Clone)]
+pub struct ScoreEvaluationEntryPayload {
+    /// Stable scoring rule or contribution code.
+    pub code: String,
+    /// Signed score difference.
+    pub delta: i32,
+    /// Contribution category: score_contribution, mandatory_rejection, or final_score_rejection.
+    pub kind: String,
+    /// Rule name, or null for a built-in contribution.
+    pub source: Option<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// One incumbent file comparison captured at acquisition time.
+pub struct HistoryScoreComparisonPayload {
+    /// Existing file compared with the candidate at decision time.
+    pub file_id: ID,
+    /// Episodes covered by the compared file.
+    pub episode_ids: Vec<ID>,
+    /// Recorded score of the compared incumbent file.
+    pub previous_score: i32,
+    /// Signed score difference.
+    pub delta: Long,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Immutable scoring evidence from the decision that produced a history event.
+pub struct HistoryScoringPayload {
+    /// Candidate score recorded at decision time.
+    pub candidate_score: i32,
+    /// Recorded incumbent score, or null when no single incumbent score applies.
+    pub previous_score: Option<i32>,
+    /// Signed score difference.
+    pub delta: Option<Long>,
+    /// Recorded acquisition decision code.
+    pub decision_code: String,
+    /// Individual incumbent comparisons without aggregating different scores.
+    pub comparisons: Vec<HistoryScoreComparisonPayload>,
+    /// Contributions and rejections recorded for the candidate.
+    pub entries: Vec<ScoreEvaluationEntryPayload>,
+}
+
 #[derive(SimpleObject, Clone)]
 /// One event in a title's acquisition and file history.
 pub struct TitleHistoryEventPayload {
+    /// Immutable decision-time evidence; absent for legacy events without scores.
+    pub scoring: Option<HistoryScoringPayload>,
     /// History event ID.
     pub id: ID,
     /// Title ID associated with the event, or null when the event has no
@@ -242,6 +287,8 @@ pub struct TitleHistoryFilterInput {
     pub download_id: Option<String>,
     /// Episode ID to include, or null for all episodes.
     pub episode_id: Option<ID>,
+    /// Season collection ID to include, or null for all collections.
+    pub collection_id: Option<ID>,
     /// Whether equivalent events should be grouped.
     pub group_by_event: Option<bool>,
     /// Maximum number of events to return.

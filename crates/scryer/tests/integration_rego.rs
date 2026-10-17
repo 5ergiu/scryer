@@ -172,6 +172,7 @@ fn test_input() -> scryer_rules::UserRuleInput {
             is_bd_disk: false,
             is_proper_upload: false,
             is_repack: false,
+            revision: 0,
             is_ai_enhanced: false,
             is_hardcoded_subs: false,
             is_password_protected: Some(false),

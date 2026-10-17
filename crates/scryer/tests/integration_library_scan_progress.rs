@@ -302,6 +302,16 @@ async fn graphql_allows_concurrent_scans_for_distinct_libraries_in_same_facet() 
         .expect("create first movie folder");
     std::fs::create_dir_all(second_root.join("Second Unknown Movie (2026)"))
         .expect("create second movie folder");
+    for (root, title) in [
+        (&first_root, "First Unknown Movie (2025)"),
+        (&second_root, "Second Unknown Movie (2026)"),
+    ] {
+        std::fs::write(
+            root.join(title).join(format!("{title}.mkv")),
+            b"synthetic media",
+        )
+        .expect("write discovery media");
+    }
     let first_library = ctx
         .app
         .create_library(

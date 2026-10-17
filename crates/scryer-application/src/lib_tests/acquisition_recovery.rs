@@ -131,6 +131,30 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
 
 const STANDBY_LISTING_SNAPSHOT: &str = r#"{"v":1,"thumbs_up":4,"extra":{"synthetic_listing_attribute":"standby"},"captured_at":"2026-01-01T00:00:00Z"}"#;
 
+fn assert_scored_1080p_listing(actual: Option<&str>, expected: Option<String>, decision: &str) {
+    let mut actual: serde_json::Value =
+        serde_json::from_str(actual.expect("recorded listing")).unwrap();
+    let scoring = actual.as_object_mut().unwrap().remove("grab_scoring");
+    assert_eq!(
+        scoring,
+        Some(serde_json::json!({
+            "candidate_score": 100,
+            "previous_score": null,
+            "delta": null,
+            "decision_code": decision,
+            "comparisons": [],
+            "entries": [{"code": "quality_resolution_1080p", "delta": 100,
+                "kind": "score_contribution", "source": null}]
+        }))
+    );
+    let expected: serde_json::Value =
+        serde_json::from_str(&expected.expect("expected listing")).unwrap();
+    assert_eq!(
+        actual, expected,
+        "all original listing facts remain unchanged"
+    );
+}
+
 /// The standby row's frozen facts, stamped at the instant the row was grabbed.
 fn standby_listing_stamped_at(grabbed_at: &str) -> String {
     use crate::quality::release_listing::ReleaseListingSnapshot;
@@ -378,10 +402,10 @@ async fn failed_grab_retries_standby_candidate(
             submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
         })
         .expect("standby submission");
-    assert_eq!(
-        standby_submission.release_listing_json,
+    assert_scored_1080p_listing(
+        standby_submission.release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(standby_grabbed_at)),
-        "the standby grab carries the facts frozen when the row was saved, stamped at the grab"
+        "initial",
     );
     let identities = download_submissions.identities.lock().await;
     assert!(
@@ -1341,6 +1365,8 @@ async fn import_gate_rejection_blocklists_under_its_own_reason_and_reopens_the_s
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: true,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -1520,6 +1546,8 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -1631,13 +1659,15 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
-    let (app, user) = bootstrap_with_acquisition_tracking(
+    let (mut app, user) = bootstrap_with_acquisition_tracking(
         download_client,
         download_submissions.clone(),
         pending_releases.clone(),
         wanted_items.clone(),
     );
 
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    app.services.workflow.blocklist_repo = blocklist.clone();
     let title = app
         .add_title(
             &user,
@@ -1725,21 +1755,74 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
         .await
         .expect("record failed submission");
 
-    let outcome = crate::acquisition_workflow::process_download_failure(
+    let failure = || crate::acquisition_workflow::DownloadFailureContext {
+        wanted_item: Some(wanted.clone()),
+        title_id: Some(title.id.clone()),
+        client_id: "primary".to_string(),
+        client_type: "nzbget".to_string(),
+        client_name: Some("Primary".to_string()),
+        client_item_id: "failed-job".to_string(),
+        release_title: "Failed.Release.1080p.WEB-DL".to_string(),
+        reason: "download failed".to_string(),
+        remove_from_client_if_configured: false,
+        blocklist_reason: None,
+        skip_reacquire: false,
+    };
+    blocklist
+        .fail_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
         &app,
-        crate::acquisition_workflow::DownloadFailureContext {
-            wanted_item: Some(wanted.clone()),
-            title_id: Some(title.id.clone()),
-            client_id: "primary".to_string(),
-            client_type: "nzbget".to_string(),
-            client_name: Some("Primary".to_string()),
-            client_item_id: "failed-job".to_string(),
-            release_title: "Failed.Release.1080p.WEB-DL".to_string(),
-            reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
-            blocklist_reason: None,
-            skip_reacquire: false,
-        },
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        failed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert!(blocklist.entries.lock().await.is_empty());
+    blocklist
+        .fail_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    blocklist
+        .fail_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unconfirmed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        unconfirmed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert_eq!(blocklist.entries.lock().await.len(), 1);
+    blocklist
+        .fail_reads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
     )
     .await;
 
@@ -1997,6 +2080,7 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
                 title_search: None,
                 download_id: Some("failed-duplicate".to_string()),
                 episode_id: None,
+                collection_id: None,
                 group_by_event: false,
                 limit: 10,
                 offset: 0,
@@ -2360,6 +2444,8 @@ async fn tracked_download_failure_prefers_tracked_source_title_for_blocklist_ide
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2599,6 +2685,8 @@ async fn parse_matched_observed_failed_download_does_not_blocklist_or_requeue() 
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: true,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2872,6 +2960,8 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
         import_execution_retry: None,
         import_hold: None,
         skip_reacquire_on_failure: false,
+        manual_failure_cleanup: false,
+        blocklist_confirmation_failed: false,
         burned_by_import_gate: false,
         snapshot_missing_since: None,
         retained_in_client_after_cleanup: false,
@@ -2933,6 +3023,7 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
                 title_search: None,
                 download_id: Some("failed-season-pack".to_string()),
                 episode_id: None,
+                collection_id: None,
                 group_by_event: false,
                 limit: 10,
                 offset: 0,
@@ -4084,6 +4175,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
                             preference_score: 100,
                             tier_index: Some(0),
                             size_fit_penalty: 0,
+                            revision_preference: 0,
                         },
                     ),
                     extra: Default::default(),
@@ -6094,12 +6186,12 @@ async fn automatic_search_grab_persists_the_listing_it_was_offered() {
     .with_timezone(&chrono::Utc);
     // The lane scores and grabs at one instant, so the snapshot it persists is
     // the offered listing captured exactly when the grab was recorded.
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, grabbed_at,
         ),
-        "the grab persists the snapshot it scored, captured at the lane's grab time"
+        "initial",
     );
 }
 
@@ -6162,12 +6254,12 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     );
     let added_at =
         crate::quality_profile::parse_published_at(&row.added_at).expect("valid first-seen time");
-    assert_eq!(
-        row.release_listing_json,
+    assert_scored_1080p_listing(
+        row.release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, added_at,
         ),
-        "the hold freezes the listing it scored and parked, captured at park time"
+        "release_age_unknown",
     );
     let delay_until = crate::quality_profile::parse_published_at(&row.delay_until)
         .expect("valid escalation deadline");
@@ -7792,10 +7884,10 @@ async fn a_cycle_with_nothing_due_and_nothing_pending_does_no_work() {
 
 #[tokio::test]
 async fn scheduled_rss_fetches_before_deciding_due_pending_releases() {
-    let pending_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
-    // A strictly better revision makes the fresh winner deterministic. Equal
+    let pending_title = "Scheduled.Pending.Movie.2024.720p.WEB-DL-GRP";
+    // A higher quality tier makes the fresh winner deterministic. Equal
     // releases may legitimately select the durable pending row as the winner.
-    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL.REPACK-GRP";
+    let rss_title = "Scheduled.Pending.Movie.2024.1080p.WEB-DL-GRP";
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
@@ -8381,10 +8473,10 @@ async fn expired_pending_release_grabs_with_its_frozen_listing_snapshot() {
         .grabbed_at
         .as_deref()
         .expect("promotion records its grab instant");
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(promoted_at)),
-        "promotion keeps every fact frozen at park time and stamps it at the promotion instant"
+        "initial",
     );
 }
 
@@ -8415,15 +8507,16 @@ async fn automatic_promotion_grabs_a_pending_release_at_the_current_minimum_seed
     // capture from the row itself.
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         Some(
             crate::quality::release_listing::ReleaseListingSnapshot::capture_from_pending_release(
                 &row,
                 captured_at,
             )
-            .to_json_string()
-        )
+            .to_json_string(),
+        ),
+        "initial",
     );
 }
 
@@ -10790,6 +10883,8 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
         serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
     let mut input = external_test_input();
+    // With no incumbent, use a tier upgrade rather than a revision-only tie.
+    input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
     input.published_at = Some(Utc::now());
     input.flags = vec!["freeleech".into()];
     let first = app
@@ -11202,13 +11297,13 @@ async fn rss_grabs_missing_movie_with_no_wanted_row_and_creates_state_row() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the RSS grab persists the listing it was offered"
+        "initial",
     );
 }
 
@@ -11248,13 +11343,13 @@ async fn manual_best_release_grab_persists_the_listing_it_was_offered() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the manual grab persists the listing it was offered"
+        "initial",
     );
 }
 
@@ -12011,6 +12106,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                                 preference_score: 100,
                                 tier_index: Some(0),
                                 size_fit_penalty: 0,
+                                revision_preference: 0,
                             },
                         ),
                         extra: Default::default(),
@@ -16270,6 +16366,28 @@ async fn assert_upgrade_waits_for_the_client_queue_then_grabs(
 }
 
 #[tokio::test]
+async fn expired_pending_ranking_prefers_revision_of_queued_group() {
+    let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
+    let (app, title, _) = season_pack_downloading_fixture(vec![queued_pack]).await;
+    let wanted = season_scope_states(&app, &title, "7").await.remove(0);
+    let mut unrelated = pending_movie_release(
+        &wanted.id,
+        &title,
+        "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB",
+        PendingReleaseStatus::Waiting,
+    );
+    unrelated.id = "a-unrelated-group".into();
+    unrelated.release_size_bytes = None;
+    let mut revision = unrelated.clone();
+    revision.id = "b-queued-group-revision".into();
+    revision.release_title = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".into();
+    let mut releases = vec![unrelated, revision];
+    app.order_expired_releases_by_rank(&wanted, &mut releases, Utc::now())
+        .await;
+    assert_eq!(releases[0].id, "b-queued-group-revision");
+}
+
+#[tokio::test]
 async fn saved_proper_of_the_downloading_pack_is_grabbed() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let proper_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();
@@ -16576,7 +16694,7 @@ async fn a_queue_covered_saved_pack_costs_no_writes_until_the_queued_pack_leaves
 async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
     let covered_single = "Recent.Failed.Season.Pack.S07E23.1080p.WEB-DL-GroupB".to_string();
-    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupC".to_string();
+    let series_pack = "Recent.Failed.Season.Pack.S07-S08.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     seed_season_eight_scopes(&app, &title).await;
@@ -16629,7 +16747,7 @@ async fn a_covered_row_does_not_hide_a_series_pack_reaching_beyond_it() {
 #[tokio::test]
 async fn a_covered_episode_row_does_not_hide_a_refused_pack_below_it() {
     let queued_pack = "Recent.Failed.Season.Pack.S07.1080p.WEB-DL-GroupA".to_string();
-    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupB".to_string();
+    let refused_pack = "Recent.Failed.Season.Pack.S07.PROPER.1080p.WEB-DL-GroupA".to_string();
     let (app, title, download_client) =
         season_pack_downloading_fixture(vec![queued_pack.clone()]).await;
     let anchor = season_scope_states(&app, &title, "7")

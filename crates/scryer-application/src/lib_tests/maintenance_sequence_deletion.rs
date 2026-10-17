@@ -52,6 +52,12 @@ fn write_media_file(path: &Path) {
 
 async fn add_movie_file(app: &AppUseCase, title_id: &str, path: &Path) -> String {
     write_media_file(path);
+    super::maintenance_title_completion::record_fixture_title_folder(
+        app,
+        title_id,
+        path.parent().unwrap(),
+    )
+    .await;
     app.services
         .library
         .media_files
@@ -464,8 +470,20 @@ async fn episode_sequence_unmonitor_then_delete_files_preserves_other_season_rec
 #[tokio::test]
 async fn a_fresh_re_monitor_cancels_the_sequence_delete_files_step_and_preserves_files() {
     let fixture = execution_app(None);
-    let target = seed_title(&fixture.app, &fixture.user, "Re-monitored target", true).await;
     let tempdir = tempfile::tempdir().expect("tempdir");
+    fixture
+        .app
+        .update_media_settings(
+            &fixture.user,
+            MediaFacet::Movie,
+            empty_update_media_settings_with_roots(vec![build_root_folder_entry(
+                tempdir.path(),
+                true,
+            )]),
+        )
+        .await
+        .expect("configure isolated movie root");
+    let target = seed_title(&fixture.app, &fixture.user, "Re-monitored target", true).await;
     let target_path = tempdir.path().join("target/movie.mkv");
     let target_file_id = add_movie_file(&fixture.app, &target.id, &target_path).await;
     let (_rule_set_id, candidate) =

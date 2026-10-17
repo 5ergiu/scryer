@@ -137,6 +137,8 @@ function SeriesMovieTimelineContent({
             {t("title.searchReleasesAction")}
           </p>
           <SearchResultBuckets
+            titleId={link.seriesTitleId}
+            ownedScope={{ seriesMovieLinkId: link.id }}
             results={searchResults}
             onQueue={(release) => onQueueFromSeriesMovieSearch(link, release)}
             onQueueAdditional={onQueueAdditionalFromSeriesMovieSearch

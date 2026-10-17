@@ -7321,6 +7321,54 @@ type FacetScoringPersonaSelectionPayload {
 }
 
 """
+Current-rule evaluation, separate from the score recorded on acquisition.
+"""
+type FileScoreEvaluationPayload {
+	"""
+	Score under the rules used by this saved evaluation.
+	"""
+	score: Int!
+	"""
+	UTC evaluation time in RFC 3339 format.
+	"""
+	evaluatedAt: String!
+	"""
+	Whether the scoring inputs have changed since this evaluation.
+	"""
+	needsRefresh: Boolean!
+	"""
+	Whether scoring rules read the clock, so the saved score can age.
+	"""
+	timeSensitive: Boolean!
+	"""
+	Recorded contributions and rejections from this evaluation.
+	"""
+	entries: [ScoreEvaluationEntryPayload!]!
+	"""
+	Reasons the file failed the evaluated quality policy.
+	"""
+	rejectionCodes: [String!]!
+}
+
+"""
+Explicit scope for an on-demand score refresh. Exactly one selection kind is required.
+"""
+input FileScoreSelectionInput @oneOf {
+	"""
+	Media file IDs to evaluate, limited to 1000 selections.
+	"""
+	fileIds: [ID!]
+	"""
+	Season IDs whose live files should be evaluated, limited to 1000 selections.
+	"""
+	seasonIds: [ID!]
+	"""
+	Title IDs whose live files should be evaluated, limited to 1000 selections.
+	"""
+	titleIds: [ID!]
+}
+
+"""
 Policy for filler episodes or scenes.
 """
 enum FillerPolicyValue {
@@ -7732,6 +7780,58 @@ enum HeldWorkspacePreservedValue {
 	The download was not proven imported, so nothing of it was removed.
 	"""
 	DOWNLOAD_NOT_IMPORTED
+}
+
+"""
+One incumbent file comparison captured at acquisition time.
+"""
+type HistoryScoreComparisonPayload {
+	"""
+	Existing file compared with the candidate at decision time.
+	"""
+	fileId: ID!
+	"""
+	Episodes covered by the compared file.
+	"""
+	episodeIds: [ID!]!
+	"""
+	Recorded score of the compared incumbent file.
+	"""
+	previousScore: Int!
+	"""
+	Signed score difference.
+	"""
+	delta: Long!
+}
+
+"""
+Immutable scoring evidence from the decision that produced a history event.
+"""
+type HistoryScoringPayload {
+	"""
+	Candidate score recorded at decision time.
+	"""
+	candidateScore: Int!
+	"""
+	Recorded incumbent score, or null when no single incumbent score applies.
+	"""
+	previousScore: Int
+	"""
+	Signed score difference.
+	"""
+	delta: Long
+	"""
+	Recorded acquisition decision code.
+	"""
+	decisionCode: String!
+	"""
+	Individual incumbent comparisons without aggregating different scores.
+	"""
+	comparisons: [HistoryScoreComparisonPayload!]!
+	"""
+	Contributions and rejections recorded for the candidate.
+	"""
+	entries: [ScoreEvaluationEntryPayload!]!
 }
 
 """
@@ -9298,6 +9398,10 @@ enum JobKeyValue {
 	Media-file deletion.
 	"""
 	MEDIA_FILE_DELETION
+	"""
+	On-demand file score refresh.
+	"""
+	MEDIA_FILE_RESCORE
 	"""
 	Recycle-bin restore.
 	"""
@@ -16313,6 +16417,32 @@ input MediaRenameBulkApplyInput {
 }
 
 """
+Effective language and root-relative title placement used by a rename preview.
+"""
+type MediaRenameNamingContextPayload {
+	"""
+	Title whose folder is being previewed.
+	"""
+	titleId: ID!
+	"""
+	Metadata language used for language-sensitive naming tokens.
+	"""
+	language: String!
+	"""
+	Current title folder relative to its root, or null when no valid folder is recorded.
+	"""
+	currentRelativePath: String
+	"""
+	Complete proposed title folder relative to its root.
+	"""
+	proposedRelativePath: String!
+	"""
+	Whether the organizing directories above this title folder change.
+	"""
+	organizingFolderChanged: Boolean!
+}
+
+"""
 One media rename plan item with current and proposed paths and decision details.
 """
 type MediaRenamePlanItemPayload {
@@ -16411,6 +16541,14 @@ type MediaRenamePlanPayload {
 	title folder; applying the plan records the planned folder for them.
 	"""
 	folderRepairs: Int!
+	"""
+	Per-title naming language and complete relative folder placement.
+	"""
+	namingContext: [MediaRenameNamingContextPayload!]!
+	"""
+	Number of titles whose organizing directories change in this plan.
+	"""
+	organizingFolderChanges: Int!
 	"""
 	Plan items in deterministic service order.
 	"""
@@ -19501,6 +19639,24 @@ type MutationRoot {
 		discTitleId: String
 	): TitleMediaFilePayload!
 	"""
+	Refresh stored-file scores for an explicit selection without acquiring or modifying media.
+	"""
+	refreshFileScores(
+		"""
+		Exactly one bounded selection of file, season, or title IDs.
+		"""
+		selection: FileScoreSelectionInput!
+	): JobRunPayload!
+	"""
+	Cancel queued or active scoring work, retaining evaluations already saved.
+	"""
+	cancelFileScoreRefresh(
+		"""
+		ID of the score refresh job started by the current user.
+		"""
+		runId: ID!
+	): Boolean!
+	"""
 	Accept a background job to delete a media file, optionally removing it from disk.
 	"""
 	deleteMediaFile(
@@ -21190,6 +21346,10 @@ type ParsedReleasePayload {
 	Whether the release is marked as a proper upload.
 	"""
 	isProperUpload: Boolean!
+	"""
+	Numeric release revision; zero denotes the original release.
+	"""
+	revision: Int!
 	"""
 	Whether the release is a remux.
 	"""
@@ -22910,6 +23070,11 @@ input QualityProfileCriteriaInput {
 	"""
 	allowUpgrades: Boolean!
 	"""
+	Let scores decide without automatic PROPER/REPACK preference.
+	Omission preserves the stored policy when updating a profile.
+	"""
+	ignoreProperRepack: Boolean
+	"""
 	Additional scoring preferences.
 	"""
 	scoringOverrides: ScoringOverridesInput!
@@ -22989,6 +23154,10 @@ type QualityProfileCriteriaPayload {
 	Whether quality upgrades are allowed.
 	"""
 	allowUpgrades: Boolean!
+	"""
+	Let scores decide without automatic PROPER/REPACK preference.
+	"""
+	ignoreProperRepack: Boolean!
 	"""
 	Optional boolean scoring overrides.
 	"""
@@ -27169,6 +27338,28 @@ enum ScheduleWeekdayValue {
 }
 
 """
+A recorded score contribution, including rule attribution and rejections.
+"""
+type ScoreEvaluationEntryPayload {
+	"""
+	Stable scoring rule or contribution code.
+	"""
+	code: String!
+	"""
+	Signed score difference.
+	"""
+	delta: Int!
+	"""
+	Contribution category: score_contribution, mandatory_rejection, or final_score_rejection.
+	"""
+	kind: String!
+	"""
+	Rule name, or null for a built-in contribution.
+	"""
+	source: String
+}
+
+"""
 One scoring rule contribution used in a quality decision.
 """
 type ScoringEntryPayload {
@@ -29856,6 +30047,10 @@ One event in a title's acquisition and file history.
 """
 type TitleHistoryEventPayload {
 	"""
+	Immutable decision-time evidence; absent for legacy events without scores.
+	"""
+	scoring: HistoryScoringPayload
+	"""
 	History event ID.
 	"""
 	id: ID!
@@ -30105,6 +30300,10 @@ input TitleHistoryFilterInput {
 	Episode ID to include, or null for all episodes.
 	"""
 	episodeId: ID
+	"""
+	Season collection ID to include, or null for all collections.
+	"""
+	collectionId: ID
 	"""
 	Whether equivalent events should be grouped.
 	"""
@@ -30412,6 +30611,10 @@ type TitleMediaFilePayload {
 	the file was not grabbed by Scryer or the stored snapshot is unreadable.
 	"""
 	releaseListing: ReleaseListingPayload
+	"""
+	Read saved evidence and its freshness; reading never runs the scorer.
+	"""
+	currentScoreEvaluation: FileScoreEvaluationPayload
 	"""
 	Parent title for this media file, or null if it is no longer available to the caller.
 	"""

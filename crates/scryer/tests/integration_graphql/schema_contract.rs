@@ -817,7 +817,7 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Abandoning an account link the member walked away from adds
     // `cancelListAccountLink`: 272->273.
     assert_eq!(
-        mutation_field_count, 273,
+        mutation_field_count, 275,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1139,9 +1139,22 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     for name in ["ListMemberKeyPayload", "ListAccountKeyLinkPayload"] {
         assert!(public_type_names.contains(&name), "missing type {name}");
     }
-    assert_eq!(public_types.len(), 964);
-    assert_eq!(kind_count("OBJECT"), 518);
-    assert_eq!(kind_count("INPUT_OBJECT"), 239);
+    // Rename previews now expose the existing per-title naming context.
+    assert!(public_type_names.contains(&"MediaRenameNamingContextPayload"));
+    for name in [
+        "FileScoreEvaluationPayload",
+        "FileScoreSelectionInput",
+        "HistoryScoreComparisonPayload",
+        "HistoryScoringPayload",
+        "ScoreEvaluationEntryPayload",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert!(mutation_field_names.contains(&"refreshFileScores"));
+    assert!(mutation_field_names.contains(&"cancelFileScoreRefresh"));
+    assert_eq!(public_types.len(), 970);
+    assert_eq!(kind_count("OBJECT"), 523);
+    assert_eq!(kind_count("INPUT_OBJECT"), 240);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
@@ -2467,6 +2480,9 @@ async fn graphql_introspection_title_history_filter_uses_event_type_enum() {
     let episode_id = id_list_input("episodeId");
     assert_eq!(episode_id["type"]["kind"], "SCALAR");
     assert_eq!(episode_id["type"]["name"], "ID");
+    let collection_id = id_list_input("collectionId");
+    assert_eq!(collection_id["type"]["kind"], "SCALAR");
+    assert_eq!(collection_id["type"]["name"], "ID");
 
     let names: Vec<&str> = body["data"]["eventType"]["enumValues"]
         .as_array()

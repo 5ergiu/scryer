@@ -63,6 +63,7 @@ pub(crate) enum PendingJudgement {
 
 /// What the grab half needs from a judgement that admitted the release.
 pub(crate) struct AdmittedPendingRelease {
+    scoring: scryer_domain::GrabScoringSnapshot,
     title: Title,
     pending_scope: SubmissionScope,
     candidate_score: i32,
@@ -232,7 +233,7 @@ impl AppUseCase {
     /// The admission ladder remains unchanged. A scope whose title
     /// or profile cannot be resolved keeps the stored order: an unorderable
     /// group is still worth trying, and the gate refuses whatever it should.
-    async fn order_expired_releases_by_rank(
+    pub(crate) async fn order_expired_releases_by_rank(
         &self,
         wanted: &AcquisitionScopeState,
         releases: &mut [PendingRelease],
@@ -273,6 +274,8 @@ impl AppUseCase {
             .await
             .unwrap_or_default();
 
+        let reads = crate::acquisition::title_reads::TitleCatalogReads::new(&title.id);
+        let dl_snapshot = super::acquisition_workflow::DownloadClientSnapshot::fetch(self).await;
         let mut keys: std::collections::HashMap<String, (bool, usize, i32, i32, i32)> =
             std::collections::HashMap::with_capacity(releases.len());
         for release in releases.iter() {
@@ -285,12 +288,47 @@ impl AppUseCase {
                 &catalog_collections,
                 &context,
             );
+            let scope = facts
+                .coverage
+                .submission_scope_or(&wanted.submission_scope());
+            let admission = self
+                .admission_subject_for_scope_with_reads(
+                    &title,
+                    &scope,
+                    &context,
+                    facts.size_basis.total_runtime_minutes,
+                    crate::quality::canonical_context::SubjectIntent::Grab,
+                    &reads,
+                )
+                .await;
+            let queued = self
+                .pending_queued_releases(
+                    &title,
+                    &scope,
+                    &context,
+                    &reads,
+                    &dl_snapshot,
+                    &catalog_episodes,
+                    &catalog_collections,
+                )
+                .await;
+            let admission = admission.with_queued(queued);
+            let candidate = crate::admission::CandidateFacts::new(
+                facts.tier_index,
+                facts.revision,
+                facts.score,
+            )
+            .with_revision_policy(
+                facts.release_group.as_deref(),
+                profile.criteria.ignore_proper_repack,
+            );
+            let revision_preference = crate::admission::revision_preference(candidate, &admission);
             keys.insert(
                 release.id.clone(),
                 (
                     !facts.allowed,
                     crate::admission::tier_sort_key(facts.tier_index),
-                    facts.revision.saturating_neg(),
+                    revision_preference.saturating_neg(),
                     facts.score.saturating_neg(),
                     facts.size_fit_penalty,
                 ),
@@ -301,6 +339,83 @@ impl AppUseCase {
                 .cmp(&keys.get(&right.id))
                 .then_with(|| left.id.cmp(&right.id))
         });
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "uses the caller's batched catalog and queue snapshots"
+    )]
+    async fn pending_queued_releases(
+        &self,
+        title: &Title,
+        scope: &SubmissionScope,
+        context: &crate::quality::canonical_context::ResolvedScoringContext,
+        reads: &crate::acquisition::title_reads::TitleCatalogReads,
+        dl_snapshot: &crate::acquisition_workflow::DownloadClientSnapshot,
+        catalog_episodes: &[scryer_domain::Episode],
+        catalog_collections: &[scryer_domain::Collection],
+    ) -> Vec<crate::admission::QueuedRelease> {
+        // D18: whatever is already downloading for this scope is a
+        // pseudo-incumbent. A parked release has no submission of its own yet,
+        // so nothing here can self-block.
+        let mut queued = Vec::new();
+        if !dl_snapshot.queue_listing_failed() {
+            let submissions = self
+                .services
+                .workflow
+                .download_submissions
+                .list_for_title(&title.id)
+                .await
+                .unwrap_or_default();
+            if !submissions.is_empty() {
+                let identities = submissions
+                    .iter()
+                    .map(crate::contracts::ClientJobLocator::from_submission)
+                    .collect::<Vec<_>>();
+                let tracked_states = self
+                    .services
+                    .workflow
+                    .download_submissions
+                    .list_identity_tracked_states_for_client_items(&identities)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(identity, state)| {
+                        scryer_domain::TrackedDownloadState::from_str_opt(&state)
+                            .map(|state| (identity, state))
+                    })
+                    .collect();
+                let membership = self
+                    .scope_membership_for_with_reads(title, scope, reads)
+                    .await;
+                queued = self
+                    .queued_releases_for_scope(
+                        title,
+                        &membership.view(),
+                        context,
+                        &submissions,
+                        &tracked_states,
+                        dl_snapshot,
+                        catalog_episodes,
+                        catalog_collections,
+                    )
+                    .await;
+            }
+        }
+        // The ledger's recorded grab claims the scope even when the client
+        // shows nothing for it this pass.
+        let membership = self
+            .scope_membership_for_with_reads(title, scope, reads)
+            .await;
+        self.queued_releases_with_grabbed_claims(
+            queued,
+            title,
+            &membership.view(),
+            context,
+            catalog_episodes,
+            catalog_collections,
+        )
+        .await
     }
 
     /// Park the best candidate of a scope for human review (Pillar A3): the
@@ -1285,64 +1400,13 @@ impl AppUseCase {
                 &reads,
             )
             .await;
-        // D18: whatever is already downloading for this scope is a
-        // pseudo-incumbent. A parked release has no submission of its own yet,
-        // so nothing here can self-block.
-        let mut queued = Vec::new();
-        if !dl_snapshot.queue_listing_failed() {
-            let submissions = self
-                .services
-                .workflow
-                .download_submissions
-                .list_for_title(&title.id)
-                .await
-                .unwrap_or_default();
-            if !submissions.is_empty() {
-                let identities = submissions
-                    .iter()
-                    .map(crate::contracts::ClientJobLocator::from_submission)
-                    .collect::<Vec<_>>();
-                let tracked_states = self
-                    .services
-                    .workflow
-                    .download_submissions
-                    .list_identity_tracked_states_for_client_items(&identities)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|(identity, state)| {
-                        scryer_domain::TrackedDownloadState::from_str_opt(&state)
-                            .map(|state| (identity, state))
-                    })
-                    .collect();
-                let membership = self
-                    .scope_membership_for_with_reads(&title, &pending_scope, &reads)
-                    .await;
-                queued = self
-                    .queued_releases_for_scope(
-                        &title,
-                        &membership.view(),
-                        &scoring_context,
-                        &submissions,
-                        &tracked_states,
-                        &dl_snapshot,
-                        &catalog_episodes,
-                        &catalog_collections,
-                    )
-                    .await;
-            }
-        }
-        // The ledger's recorded grab claims the scope even when the client
-        // shows nothing for it this pass.
-        let membership = self
-            .scope_membership_for_with_reads(&title, &pending_scope, &reads)
-            .await;
         let queued = self
-            .queued_releases_with_grabbed_claims(
-                queued,
+            .pending_queued_releases(
                 &title,
-                &membership.view(),
+                &pending_scope,
                 &scoring_context,
+                &reads,
+                &dl_snapshot,
                 &catalog_episodes,
                 &catalog_collections,
             )
@@ -1368,7 +1432,11 @@ impl AppUseCase {
             facts.revision,
             candidate_score,
         )
-        .with_release_title(&pr.release_title);
+        .with_release_title(&pr.release_title)
+        .with_revision_policy(
+            facts.release_group.as_deref(),
+            upgrade_context.profile.criteria.ignore_proper_repack,
+        );
         // The same candidate-aware cutoff gate the search and RSS lanes run
         // (D15). It used to be a scope-level `if cutoff_reached { return }`
         // above the score, which meant a PROPER parked behind a delay profile
@@ -1413,6 +1481,12 @@ impl AppUseCase {
         }
         Ok(PendingJudgement::Admitted(Box::new(
             AdmittedPendingRelease {
+                scoring: crate::quality::grab_scoring::capture_values(
+                    candidate_score,
+                    &facts.scoring_log,
+                    &admission,
+                    "eligible",
+                ),
                 title,
                 pending_scope,
                 candidate_score,
@@ -1434,6 +1508,7 @@ impl AppUseCase {
         initiated_by: &DomainEventActor,
     ) -> AppResult<PendingGrabOutcome> {
         let AdmittedPendingRelease {
+            mut scoring,
             title,
             pending_scope,
             candidate_score,
@@ -1561,6 +1636,13 @@ impl AppUseCase {
         .is_some_and(|episode| episode.full_season);
 
         let release_listing_json = ReleaseListingSnapshot::json_for_pending_release(pr, *now);
+        if matches!(trigger, PendingGrabTrigger::Operator) {
+            scoring.decision_code = "manual_override".into();
+        }
+        let release_listing_json = crate::quality::grab_scoring::with_snapshot(
+            release_listing_json,
+            Some(scoring.clone()),
+        );
         let canonical_result = self
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
                 request: DownloadClientAddRequest {
@@ -1689,7 +1771,8 @@ impl AppUseCase {
                         grab_indexer.clone(),
                         grab.client_id.as_deref(),
                     )
-                    .await;
+                    .await
+                    .with_scoring(Some(scoring));
                 let _ = self
                     .append_domain_event(new_title_domain_event(
                         initiated_by.clone(),

@@ -1,5 +1,7 @@
 use super::*;
-use crate::stored_paths::{path_to_stored_string, stored_path_to_path_buf};
+#[cfg(test)]
+use crate::stored_paths::path_to_stored_string;
+use crate::stored_paths::stored_path_to_path_buf;
 use scryer_domain::{
     MediaFacet, RootFolderEntry, Title, is_image_file, is_subtitle_file, is_video_file,
 };
@@ -172,6 +174,7 @@ struct TitleDeleteContext {
     folder_path: Option<String>,
     root_folders: Vec<RootFolderEntry>,
     other_titles: Vec<TrackedTitleFolder>,
+    recorded_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,20 +426,17 @@ impl AppUseCase {
             .filter(|candidate| candidate.title_id.as_str() != title.title_id.as_str())
             .cloned()
             .collect();
-        let folder_path =
-            if let Some(folder_path) = normalize_optional_path_string(title.folder_path) {
-                Some(folder_path)
-            } else {
-                self.services
-                    .library
-                    .media_files
-                    .list_media_files_for_title(&title.title_id)
-                    .await
-                    .ok()
-                    .and_then(|media_files| {
-                        infer_title_folder_path_from_media_files(&root_folders, &media_files)
-                    })
-            };
+        let folder_path = Some(required_title_delete_folder(title.folder_path)?);
+
+        let recorded_paths = self
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.title_id)
+            .await?
+            .into_iter()
+            .map(|file| file.file_path)
+            .collect();
 
         let manifest = self
             .build_delete_manifest(UserDeleteContext::Title(TitleDeleteContext {
@@ -446,6 +446,7 @@ impl AppUseCase {
                 folder_path,
                 root_folders,
                 other_titles,
+                recorded_paths,
             }))
             .await?;
         Ok(manifest.to_preview())
@@ -625,6 +626,20 @@ impl AppUseCase {
         authorization: &PolicyDeleteAuthorization,
     ) -> AppResult<()> {
         let context = self.resolve_title_delete_context(title_id).await?;
+        // The owned multi-disc exception is for explicit user deletion only.
+        // Preserve the existing maintenance-policy boundary.
+        if let UserDeleteContext::Title(title) = &context
+            && let Some(folder) = title.folder_path.as_deref()
+        {
+            let path = stored_path_to_path_buf(folder);
+            if path.is_dir() {
+                let patterns =
+                    crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
+                crate::library_discovery::ensure_existing_title_boundary(&path, &patterns)
+                    .await
+                    .map_err(title_delete_boundary_error)?;
+            }
+        }
         self.execute_delete_context(
             context,
             preview_fingerprint,
@@ -869,9 +884,46 @@ impl AppUseCase {
         &self,
         context: UserDeleteContext,
     ) -> AppResult<UserDeleteManifest> {
-        tokio::task::spawn_blocking(move || build_delete_manifest_sync(context))
+        let title = if let UserDeleteContext::Title(title) = &context {
+            Some(title.clone())
+        } else {
+            None
+        };
+        let manifest = tokio::task::spawn_blocking(move || build_delete_manifest_sync(context))
             .await
-            .map_err(|error| AppError::Repository(format!("delete preview task failed: {error}")))?
+            .map_err(|error| {
+                AppError::Repository(format!("delete preview task failed: {error}"))
+            })??;
+        if let Some(title) = title {
+            if let Some(folder) = title.folder_path.as_deref() {
+                let path = stored_path_to_path_buf(folder);
+                if path.is_dir() {
+                    let patterns =
+                        crate::library_discovery::episode_folder_patterns(self, &title.facet)
+                            .await?;
+                    ensure_owned_title_delete_boundary(&title, &path, &patterns, &manifest).await?;
+                }
+            }
+            let paths = manifest
+                .entries
+                .iter()
+                .map(|entry| crate::stored_paths::path_to_stored_string(&entry.path))
+                .collect::<Vec<_>>();
+            for chunk in paths.chunks(256) {
+                if self
+                    .services
+                    .library
+                    .media_files
+                    .list_media_files_by_paths(chunk)
+                    .await?
+                    .iter()
+                    .any(|(_, file)| file.title_id != title.title_id)
+                {
+                    return Err(AppError::Validation("title folder contains media recorded for another title; files and catalog rows were preserved".into()));
+                }
+            }
+        }
+        Ok(manifest)
     }
 
     async fn execute_delete_context(
@@ -1006,20 +1058,17 @@ impl AppUseCase {
             .filter(|candidate| candidate.id != title.id)
             .filter_map(tracked_title_folder_from_title)
             .collect();
-        let folder_path =
-            if let Some(folder_path) = normalize_optional_path_string(title.folder_path) {
-                Some(folder_path)
-            } else {
-                self.services
-                    .library
-                    .media_files
-                    .list_media_files_for_title(&title.id)
-                    .await
-                    .ok()
-                    .and_then(|media_files| {
-                        infer_title_folder_path_from_media_files(&root_folders, &media_files)
-                    })
-            };
+        let folder_path = Some(required_title_delete_folder(title.folder_path)?);
+
+        let recorded_paths = self
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await?
+            .into_iter()
+            .map(|file| file.file_path)
+            .collect();
 
         Ok(UserDeleteContext::Title(TitleDeleteContext {
             title_id: title.id,
@@ -1028,6 +1077,7 @@ impl AppUseCase {
             folder_path,
             root_folders,
             other_titles,
+            recorded_paths,
         }))
     }
 
@@ -1049,6 +1099,35 @@ impl AppUseCase {
             .get_by_id(&media_file.title_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("title {}", media_file.title_id)))?;
+        crate::folder_ownership::ensure_title_folder_is_not_a_library_root(self, &title).await?;
+        let owned_folder = required_title_delete_folder(title.folder_path.clone())?;
+        let owned_path = crate::folder_ownership::resolved_folder_identity(
+            &stored_path_to_path_buf(&owned_folder),
+        )?;
+        let source_path = crate::folder_ownership::resolved_folder_identity(
+            &stored_path_to_path_buf(&media_file.file_path),
+        )?;
+        if source_path == owned_path || !source_path.starts_with(&owned_path) {
+            return Err(AppError::Validation(
+                "recorded media path is outside its title's owned folder".into(),
+            ));
+        }
+        for owner in self
+            .services
+            .catalog
+            .titles
+            .list_delete_preview_info()
+            .await?
+        {
+            if owner.title_id != title.id
+                && let Some(folder) = owner.folder_path
+                && crate::folder_ownership::title_folders_overlap(&owned_folder, &folder)?
+            {
+                return Err(AppError::Validation(
+                    "title folder overlaps another title; refusing media deletion".into(),
+                ));
+            }
+        }
         let root_folders = self
             .root_folders_for_library(&title.library_id, &title.facet)
             .await?;
@@ -1058,6 +1137,17 @@ impl AppUseCase {
             .subtitle_downloads
             .list_for_media_file(file_id)
             .await?;
+
+        for subtitle in &subtitles {
+            let path = crate::folder_ownership::resolved_folder_identity(
+                &stored_path_to_path_buf(&subtitle.file_path),
+            )?;
+            if path == owned_path || !path.starts_with(&owned_path) {
+                return Err(AppError::Validation(
+                    "recorded subtitle path is outside its title's owned folder".into(),
+                ));
+            }
+        }
 
         Ok(UserDeleteContext::MediaFile(MediaFileDeleteContext {
             title_id: media_file.title_id,
@@ -1131,66 +1221,56 @@ fn normalize_optional_path_string(path: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn infer_title_folder_path_from_media_files(
-    root_folders: &[RootFolderEntry],
-    media_files: &[crate::TitleMediaFile],
-) -> Option<String> {
-    infer_title_folder_path_from_paths(
-        root_folders,
-        media_files
-            .iter()
-            .map(|media_file| stored_path_to_path_buf(&media_file.file_path)),
-    )
+/// Delete refuses a recorded folder that holds other titles or a mixed
+/// layout; the message says how to resolve it instead of naming a selection.
+fn title_delete_boundary_error(error: AppError) -> AppError {
+    match error {
+        AppError::Validation(_) => AppError::Validation(
+            "title folder also holds other titles or a mixed layout; change this title's folder to the one that directly holds its media, then delete again".into(),
+        ),
+        error => error,
+    }
 }
 
-fn infer_title_folder_path_from_paths<I>(
-    root_folders: &[RootFolderEntry],
-    file_paths: I,
-) -> Option<String>
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let normalized_roots = root_folders
-        .iter()
-        .filter_map(|entry| normalize_optional_path_string(Some(entry.path.clone())))
-        .filter_map(|path| normalize_absolute_path(Path::new(&path)).ok())
-        .collect::<Vec<_>>();
-    if normalized_roots.is_empty() {
-        return None;
-    }
+fn required_title_delete_folder(folder_path: Option<String>) -> AppResult<String> {
+    normalize_optional_path_string(folder_path).ok_or_else(|| {
+        AppError::Validation(
+            "title folder ownership is missing; resolve the title folder before deleting files"
+                .into(),
+        )
+    })
+}
 
-    let mut candidates = BTreeSet::new();
-    for file_path in file_paths {
-        let normalized_file_path = match normalize_absolute_path(&file_path) {
-            Ok(path) => path,
-            Err(_) => continue,
-        };
-        let Some(parent) = normalized_file_path.parent() else {
-            continue;
-        };
-
-        for root in &normalized_roots {
-            if !path_is_under_root(&normalized_file_path, root) {
-                continue;
+async fn ensure_owned_title_delete_boundary(
+    title: &TitleDeleteContext,
+    path: &Path,
+    patterns: &[regex::Regex],
+    manifest: &UserDeleteManifest,
+) -> AppResult<()> {
+    let boundary_error =
+        match crate::library_discovery::ensure_existing_title_boundary(path, patterns).await {
+            Ok(()) => return Ok(()),
+            Err(error @ AppError::Validation(_)) if title.facet == MediaFacet::Movie => {
+                title_delete_boundary_error(error)
             }
-
-            let Ok(relative_parent) = parent.strip_prefix(root) else {
-                continue;
-            };
-            let Some(Component::Normal(first_segment)) = relative_parent.components().next() else {
-                continue;
-            };
-
-            candidates.insert(root.join(first_segment));
-            break;
-        }
+            Err(error) => return Err(title_delete_boundary_error(error)),
+        };
+    // Discovery cannot distinguish a movie's disc folders from nested titles.
+    // Only catalog ownership of every media file can establish this exception.
+    let recorded = title
+        .recorded_paths
+        .iter()
+        .map(|path| normalize_absolute_path(&stored_path_to_path_buf(path)))
+        .collect::<AppResult<HashSet<_>>>()?;
+    if manifest.media_count == 0
+        || manifest
+            .entries
+            .iter()
+            .any(|entry| is_video_file(&entry.path) && !recorded.contains(&entry.path))
+    {
+        return Err(boundary_error);
     }
-
-    if candidates.len() != 1 {
-        return None;
-    }
-
-    candidates.into_iter().next().map(path_to_stored_string)
+    Ok(())
 }
 
 fn build_delete_manifest_sync(context: UserDeleteContext) -> AppResult<UserDeleteManifest> {
@@ -1209,6 +1289,7 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
         folder_path,
         root_folders,
         other_titles,
+        recorded_paths,
     } = context;
 
     let Some(raw_folder_path) = folder_path else {
@@ -1238,24 +1319,10 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
     }
 
     for tracked in other_titles {
-        if crate::stored_paths::folder_paths_match(&raw_folder_path, &tracked.folder_path)
-            || crate::stored_paths::stored_path_is_within_folder(
-                &raw_folder_path,
-                &tracked.folder_path,
-            )
-        {
+        if crate::folder_ownership::title_folders_overlap(&raw_folder_path, &tracked.folder_path)? {
             return Err(AppError::Validation(format!(
                 "refusing to delete title folder {raw_folder_path} because it includes tracked title folder {} ({})",
                 tracked.title_name, tracked.folder_path
-            )));
-        }
-        let other_path = normalize_absolute_path(&stored_path_to_path_buf(&tracked.folder_path))?;
-        if other_path == normalized_folder || path_is_under_root(&other_path, &normalized_folder) {
-            return Err(AppError::Validation(format!(
-                "refusing to delete title folder {} because it includes tracked title folder {} ({})",
-                normalized_folder.display(),
-                tracked.title_name,
-                other_path.display()
             )));
         }
     }
@@ -1290,6 +1357,30 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
                 normalized_folder.display()
             )));
         }
+    }
+
+    let resolved_folder = crate::folder_ownership::resolved_folder_identity(&normalized_folder)?;
+    let resolved_roots = normalized_roots
+        .iter()
+        .map(|root| crate::folder_ownership::resolved_folder_identity(root))
+        .collect::<AppResult<Vec<_>>>()?;
+    if !path_is_under_any_root(&resolved_folder, &resolved_roots)
+        || resolved_roots.contains(&resolved_folder)
+    {
+        return Err(AppError::Validation(
+            "resolved title folder is not strictly within its library root".into(),
+        ));
+    }
+    let has_recorded_media = recorded_paths.iter().any(|path| {
+        let path = stored_path_to_path_buf(path);
+        path.is_file()
+            && path.starts_with(&normalized_folder)
+            && std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(&resolved_folder))
+    });
+    if !has_recorded_media {
+        return Err(AppError::Validation(
+            "title folder has no verified recorded media, so nothing was deleted; rescan the title folder to record its files, then delete again".into(),
+        ));
     }
 
     let entries = collect_directory_manifest_entries(&normalized_folder)?;
@@ -1865,40 +1956,136 @@ mod tests {
         }
     }
 
-    #[test]
-    fn infer_title_folder_path_from_paths_uses_title_root_under_configured_root() {
-        let root_folders = vec![RootFolderEntry {
-            path: "/data/anime".to_string(),
-            is_default: true,
-        }];
+    fn multi_disc_context(root: &Path) -> TitleDeleteContext {
+        let folder = root.join("Movie");
+        let mut recorded_paths = Vec::new();
+        for disc in ["Disc 1", "Disc 2"] {
+            let media = folder.join(disc).join("movie.mkv");
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"owned media").unwrap();
+            recorded_paths.push(path_to_stored_string(&media));
+        }
+        TitleDeleteContext {
+            title_id: "movie".into(),
+            title_name: "Movie".into(),
+            facet: MediaFacet::Movie,
+            folder_path: Some(path_to_stored_string(&folder)),
+            root_folders: vec![test_root_entry(root)],
+            other_titles: vec![],
+            recorded_paths,
+        }
+    }
 
-        let inferred = infer_title_folder_path_from_paths(
-            &root_folders,
-            vec![
-                PathBuf::from("/data/anime/Emberfall/Season 01/Emberfall - S01E01.mkv"),
-                PathBuf::from("/data/anime/Emberfall/Season 02/Emberfall - S02E01.mkv"),
-            ],
+    #[tokio::test]
+    async fn owned_multi_disc_delete_removes_only_selected_title() {
+        let root = tempfile::tempdir().unwrap();
+        let context = multi_disc_context(root.path());
+        let sibling = root.path().join("Other/movie.mkv");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, b"unrelated").unwrap();
+        let folder = root.path().join("Movie");
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
+            .await
+            .unwrap();
+        assert_eq!(manifest.to_preview().media_count, 2);
+        apply_delete_manifest(&manifest).await.unwrap();
+        assert!(!folder.exists());
+        assert_eq!(std::fs::read(sibling).unwrap(), b"unrelated");
+    }
+
+    #[tokio::test]
+    async fn owned_series_delete_accepts_conventional_season_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Show");
+        let media = folder.join("Series 1/Show.S01E01.mkv");
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"owned media").unwrap();
+        let context = TitleDeleteContext {
+            title_id: "show".into(),
+            title_name: "Show".into(),
+            facet: MediaFacet::Series,
+            folder_path: Some(path_to_stored_string(&folder)),
+            root_folders: vec![test_root_entry(root.path())],
+            other_titles: vec![],
+            recorded_paths: vec![path_to_stored_string(&media)],
+        };
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        ensure_owned_title_delete_boundary(&context, &folder, &patterns, &manifest)
+            .await
+            .unwrap();
+        assert_eq!(manifest.to_preview().media_count, 1);
+        assert_eq!(std::fs::read(media).unwrap(), b"owned media");
+    }
+
+    #[tokio::test]
+    async fn owned_multi_disc_delete_rejects_unrecorded_nested_media() {
+        let root = tempfile::tempdir().unwrap();
+        let context = multi_disc_context(root.path());
+        let folder = root.path().join("Movie");
+        // `Other` is an extras folder; use a folder that reads as another title.
+        let unowned = folder.join("Other Title/movie.mkv");
+        std::fs::create_dir_all(unowned.parent().unwrap()).unwrap();
+        std::fs::write(&unowned, b"unowned").unwrap();
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        let error = ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
+            .await
+            .expect_err("nested title must be refused");
+        assert!(
+            error.to_string().contains("directly holds its media"),
+            "{error}"
         );
-
-        assert_eq!(inferred.as_deref(), Some("/data/anime/Emberfall"));
+        assert_eq!(std::fs::read(unowned).unwrap(), b"unowned");
+        for path in context.recorded_paths {
+            assert!(stored_path_to_path_buf(&path).exists());
+        }
     }
 
     #[test]
-    fn infer_title_folder_path_from_paths_returns_none_for_mixed_title_roots() {
-        let root_folders = vec![RootFolderEntry {
-            path: "/data/anime".to_string(),
-            is_default: true,
-        }];
+    fn owned_multi_disc_delete_rejects_overlapping_title_and_root() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = multi_disc_context(root.path());
+        context.other_titles.push(TrackedTitleFolder {
+            title_id: "other".into(),
+            title_name: "Other".into(),
+            folder_path: path_to_stored_string(root.path().join("Movie/Disc 1")),
+        });
+        assert!(build_title_delete_manifest(context.clone()).is_err());
+        context.other_titles.clear();
+        context.root_folders = vec![test_root_entry(&root.path().join("Movie"))];
+        assert!(build_title_delete_manifest(context.clone()).is_err());
+        for path in context.recorded_paths {
+            assert!(stored_path_to_path_buf(&path).exists());
+        }
+    }
 
-        let inferred = infer_title_folder_path_from_paths(
-            &root_folders,
-            vec![
-                PathBuf::from("/data/anime/Emberfall/Season 01/Emberfall - S01E01.mkv"),
-                PathBuf::from("/data/anime/Stormleaf/Season 01/Stormleaf - S01E01.mkv"),
-            ],
+    #[cfg(unix)]
+    #[test]
+    fn owned_multi_disc_delete_rejects_linked_title_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = multi_disc_context(root.path());
+        let linked = root.path().join("Linked");
+        std::os::unix::fs::symlink(root.path().join("Movie"), &linked).unwrap();
+        context.folder_path = Some(path_to_stored_string(&linked));
+        assert!(build_title_delete_manifest(context.clone()).is_err());
+        for path in context.recorded_paths {
+            assert!(stored_path_to_path_buf(&path).exists());
+        }
+    }
+
+    #[test]
+    fn deletion_requires_stored_ownership_without_inferring_a_bucket() {
+        assert!(required_title_delete_folder(None).is_err());
+        assert!(required_title_delete_folder(Some("  ".into())).is_err());
+        assert_eq!(
+            required_title_delete_folder(Some("/data/movies/E/Example".into())).unwrap(),
+            "/data/movies/E/Example"
         );
-
-        assert_eq!(inferred, None);
     }
 
     #[test]
@@ -2062,6 +2249,7 @@ mod tests {
             folder_path: Some(path_to_stored_string(&title_dir)),
             root_folders: vec![test_root_entry(tempdir.path())],
             other_titles: Vec::new(),
+            recorded_paths: vec![path_to_stored_string(&media_path)],
         })
         .expect("build title manifest");
 

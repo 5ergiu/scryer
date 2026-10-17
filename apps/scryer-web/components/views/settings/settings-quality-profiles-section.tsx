@@ -77,6 +77,7 @@ type QualityProfileCriteriaPayload = {
   prefer_remux: boolean;
   allow_bd_disk: boolean;
   allow_upgrades: boolean;
+  ignore_proper_repack: boolean;
   scoring_overrides: ScoringOverridesPayload;
   cutoff_tier: string | null;
   min_score_to_grab: number | null;
@@ -99,6 +100,7 @@ type QualityProfileDraft = {
   prefer_remux: boolean;
   allow_bd_disk: boolean;
   allow_upgrades: boolean;
+  ignore_proper_repack: boolean;
   scoring_overrides: ScoringOverridesPayload;
   cutoff_tier: string;
   min_score_to_grab: number | null;
@@ -1203,6 +1205,24 @@ export function SettingsQualityProfilesSection({
                     <InfoHelp
                       ariaLabel={t("qualityProfile.allowUpgrades")}
                       text={t("qualityProfile.allowUpgradesInfo")}
+                    />
+                  </span>
+                </label>
+                <label className="mb-2 flex items-center gap-3">
+                  <Checkbox
+                    id="quality-profile-ignore-proper-repack"
+                    checked={qualityProfileDraft.ignore_proper_repack}
+                    onCheckedChange={(checked) =>
+                      updateQualityProfileDraft({
+                        ignore_proper_repack: checked === true,
+                      })
+                    }
+                  />
+                  <span className="inline-flex items-center gap-2 text-sm">
+                    {t("qualityProfile.ignoreProperRepack")}
+                    <InfoHelp
+                      ariaLabel={t("qualityProfile.ignoreProperRepack")}
+                      text={t("qualityProfile.ignoreProperRepackInfo")}
                     />
                   </span>
                 </label>

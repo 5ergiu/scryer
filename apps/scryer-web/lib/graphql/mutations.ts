@@ -1248,6 +1248,7 @@ const qualityProfileCriteriaFields = `
       preferRemux
       allowBdDisk
       allowUpgrades
+      ignoreProperRepack
       scoringOverrides {
         allowX265Non4K
         blockDvWithoutFallback

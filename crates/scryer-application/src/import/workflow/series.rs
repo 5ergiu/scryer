@@ -72,6 +72,7 @@ async fn import_series_download(
     started_at: chrono::DateTime<Utc>,
     subtitle_deliveries: &mut Vec<(PathBuf, PathBuf)>,
 ) -> AppResult<ImportResult> {
+    let title = &app.title_for_naming(title).await;
     let ImportPathSettings {
         media_root,
         rename_enabled,
@@ -2038,6 +2039,14 @@ pub(crate) async fn resolve_import_paths(
         default_folder_template,
         title.facet.as_str(),
     );
+    if title
+        .folder_path
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        let naming_title = app.title_for_naming(title).await;
+        crate::library::rename::validate_title_folder_rendering(&naming_title, &folder_template)?;
+    }
     let season_folder_template = crate::normalize_season_folder_template_or_default(
         app.read_setting_string_value_for_scope(
             super::SETTINGS_SCOPE_SYSTEM,
@@ -2746,13 +2755,8 @@ async fn persist_file_import_artifact(
     }
     Ok(())
 }
-// 50 MB
-
-/// Name-only sample detection: the file stem contains "sample"
-/// (case-insensitive). Unlike `is_sample_file` this carries no size heuristic,
-/// so a legitimately small movie (short film, old cartoon, low-bitrate SD) is
-/// never mistaken for a sample; the automatic movie path never size-filters,
-/// and manual import must not be stricter than it.
+/// Explicit sample naming is excluded during discovery. File size alone cannot
+/// distinguish a short episode from a sample; that requires the runtime gate.
 pub(crate) fn is_sample_named_file(path: &Path) -> bool {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
@@ -2761,18 +2765,21 @@ pub(crate) fn is_sample_named_file(path: &Path) -> bool {
 
 pub(crate) fn is_sample_file(path: &Path) -> bool {
     if is_sample_named_file(path) {
+        tracing::debug!(path = %path.display(), "excluding explicitly sample-named video");
         return true;
     }
 
-    if scryer_domain::canonical_video_extension(path) == Some("strm") {
-        return false;
+    if scryer_domain::canonical_video_extension(path) != Some("strm")
+        && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() < SAMPLE_SIZE_THRESHOLD)
+    {
+        tracing::debug!(
+            path = %path.display(),
+            "small video retained for runtime-aware sample validation"
+        );
     }
-
-    // Small files in multi-episode directories are almost certainly samples/promos
-    std::fs::metadata(path)
-        .map(|m| m.len() < SAMPLE_SIZE_THRESHOLD)
-        .unwrap_or(false)
+    false
 }
+
 /// The same resolution, asked of the catalog instead of a slice of it.
 ///
 /// The slice form below exists for callers that already hold their candidate

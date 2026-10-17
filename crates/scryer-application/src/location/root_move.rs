@@ -505,14 +505,27 @@ impl RootMoveTitleDraft {
             .and_then(DestinationIdentityOutcome::merge_target)
     }
 
-    /// The destination folder name differs from the source folder name, so the
-    /// naming policy repaired it (FR-013, US2.2).
+    /// The naming policy changes the title's path relative to its root,
+    /// including changes confined to shared organizing directories.
     pub fn repairs_folder_name(&self) -> bool {
         match (
             self.source_folder_path.as_ref(),
             self.destination_folder_path.as_ref(),
         ) {
-            (Some(source), Some(destination)) => source.file_name() != destination.file_name(),
+            (Some(source), Some(destination)) => {
+                let before = self
+                    .source_root_path
+                    .as_ref()
+                    .and_then(|root| source.strip_prefix(root).ok());
+                let after = self
+                    .destination_root_path
+                    .as_ref()
+                    .and_then(|root| destination.strip_prefix(root).ok());
+                match (before, after) {
+                    (Some(before), Some(after)) => before != after,
+                    _ => source.file_name() != destination.file_name(),
+                }
+            }
             _ => false,
         }
     }
@@ -834,10 +847,13 @@ pub(super) fn plan_title(
                 .with_reason_code(plan_reasons::FOLDER_NAME_REPAIR)
                 .with_detail(format!(
                     "the destination naming policy renames this folder to \"{}\"",
-                    destination_folder
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default()
+                    path_to_stored_string(
+                        draft
+                            .destination_root_path
+                            .as_ref()
+                            .and_then(|root| destination_folder.strip_prefix(root).ok())
+                            .unwrap_or(&destination_folder)
+                    )
                 )),
         );
     }
@@ -1539,6 +1555,16 @@ mod tests {
             associations: TitleAssociationFacts::default(),
             merge_summary: None,
         }
+    }
+
+    #[test]
+    fn nested_title_root_move_reports_organizing_path_changes() {
+        let mut title = draft(TitleLocationClass::RootMove);
+        title.source_folder_path = Some(PathBuf::from("/a/E/Example"));
+        title.destination_folder_path = Some(PathBuf::from("/b/English/E/Example"));
+        assert!(title.repairs_folder_name());
+        title.destination_folder_path = Some(PathBuf::from("/b/E/Example"));
+        assert!(!title.repairs_folder_name());
     }
 
     fn request(titles: Vec<RootMoveTitleDraft>) -> RootMovePlanRequest {

@@ -382,6 +382,21 @@ fn title_history_record_matches(record: &TitleHistoryRecord, filter: &TitleHisto
             .is_none_or(|expected| record.episode_id.as_deref() == Some(expected.as_str()))
 }
 
+fn title_history_collection_matches(
+    record: &TitleHistoryRecord,
+    collection_id: Option<&str>,
+    episode_ids: Option<&HashSet<String>>,
+) -> bool {
+    let Some(collection_id) = collection_id else {
+        return true;
+    };
+    record.collection_id.as_deref() == Some(collection_id)
+        || episode_ids.is_some_and(|ids| match record.episode_id.as_ref() {
+            Some(id) => ids.contains(id),
+            None => record.episode_ids.iter().any(|id| ids.contains(id)),
+        })
+}
+
 /// `include_titleless` says whether records with no catalog title behind them
 /// belong on this page. An unlinked grab (FR-026) is recorded against the
 /// release and the indexer and has no title and no library, so it can only ever
@@ -436,7 +451,26 @@ async fn project_title_history_page(
     let include_request_history =
         should_include_request_history(filter, effective_title_ids.as_deref());
 
-    if filter.group_by_event && filter.episode_id.is_none() && !include_request_history {
+    let collection_episode_ids = if let Some(collection_id) = &filter.collection_id {
+        Some(
+            app.services
+                .catalog
+                .shows
+                .list_episodes_for_collection(collection_id)
+                .await?
+                .into_iter()
+                .map(|episode| episode.id)
+                .collect::<HashSet<_>>(),
+        )
+    } else {
+        None
+    };
+
+    if filter.group_by_event
+        && filter.episode_id.is_none()
+        && filter.collection_id.is_none()
+        && !include_request_history
+    {
         let limit = filter.limit.max(1);
         let total_count = app
             .services
@@ -549,7 +583,13 @@ async fn project_title_history_page(
                 {
                     continue;
                 }
-                if !title_history_record_matches(&record, filter) {
+                if !title_history_record_matches(&record, filter)
+                    || !title_history_collection_matches(
+                        &record,
+                        filter.collection_id.as_deref(),
+                        collection_episode_ids.as_ref(),
+                    )
+                {
                     continue;
                 }
 
@@ -1741,6 +1781,21 @@ impl AppUseCase {
             .authorized_library_ids(actor, None, scryer_domain::LibraryPermission::View)
             .await?;
         let mut scoped_filter = filter.clone();
+        if let Some(collection_id) = &filter.collection_id {
+            let collection = self.get_collection(actor, collection_id).await?;
+            scoped_filter.title_ids = Some(
+                collection
+                    .into_iter()
+                    .filter(|collection| {
+                        filter
+                            .title_ids
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&collection.title_id))
+                    })
+                    .map(|collection| collection.title_id)
+                    .collect(),
+            );
+        }
         scoped_filter.library_ids = Some(match filter.library_ids.as_ref() {
             Some(requested_library_ids) => {
                 let allowed_library_ids = library_ids.into_iter().collect::<HashSet<_>>();
@@ -1837,6 +1892,7 @@ impl AppUseCase {
                 title_search: None,
                 download_id: None,
                 episode_id: None,
+                collection_id: None,
                 group_by_event: false,
                 limit,
                 offset,

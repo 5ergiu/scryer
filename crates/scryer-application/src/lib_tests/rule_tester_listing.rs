@@ -211,6 +211,7 @@ async fn a_stored_file_scores_from_its_frozen_snapshot_exactly_as_its_bar() {
     let mut extra = std::collections::BTreeMap::new();
     extra.insert("freeleech".to_string(), serde_json::json!(true));
     let snapshot = crate::quality::release_listing::ReleaseListingSnapshot {
+        grab_scoring: None,
         // 151 days old at the grab, 516 days old now.
         published_at: Some("2025-01-01T12:00:00Z".into()),
         thumbs_up: Some(12),

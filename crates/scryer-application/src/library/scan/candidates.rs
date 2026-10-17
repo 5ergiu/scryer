@@ -103,7 +103,12 @@ async fn claim_series_candidate_folder(
     title: &mut Title,
     candidate: &PreparedSeriesLibraryScanCandidate,
 ) -> AppResult<()> {
-    crate::folder_ownership::claim_title_folder_if_missing(app, title, &candidate.folder_path).await
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
+        app,
+        title,
+        &candidate.folder_path,
+    )
+    .await
 }
 
 #[expect(
@@ -252,28 +257,16 @@ fn scanned_movie_entry_folder_path(
     }
 
     let item_path = stored_path_to_path_buf(representative_path);
-    if let Ok(relative) = item_path.strip_prefix(scan_root)
-        && let Some(first_component) = relative.components().next()
-    {
-        let entry_path = scan_root.join(first_component.as_os_str());
-        let entry_path = path_to_stored_string(&entry_path).trim().to_string();
-        if entry_path.is_empty() {
-            return None;
-        }
-        if entry_path == representative_path {
-            return representative_is_directory.then_some(entry_path);
-        }
-        return Some(entry_path);
-    }
-
-    let parent = path_to_stored_string(item_path.parent()?)
-        .trim()
-        .to_string();
-    if parent.is_empty() || parent == path_to_stored_string(scan_root) {
-        None
+    let boundary = if representative_is_directory {
+        item_path.as_path()
     } else {
-        Some(parent)
-    }
+        item_path.parent()?
+    };
+    crate::title_folder_rules::path_is_strictly_within(
+        &path_to_stored_string(boundary),
+        &path_to_stored_string(scan_root),
+    )
+    .then(|| path_to_stored_string(boundary))
 }
 
 async fn sync_movie_title_folder_path_for_scan(
@@ -332,7 +325,7 @@ async fn sync_movie_title_folder_path_for_scan_inner(
         return Ok((None, scan_folder_path));
     };
 
-    crate::folder_ownership::claim_title_folder_if_missing(
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
         app,
         title,
         &stored_path_to_path_buf(folder_path),
@@ -760,7 +753,7 @@ async fn merge_series_title_work_for_index(
     mode: LibraryScanTitleWalkMode,
     created_in_scan: bool,
 ) -> AppResult<()> {
-    crate::folder_ownership::claim_title_folder_if_missing(
+    crate::folder_ownership::claim_title_folder_for_scan_if_missing(
         app,
         &mut existing_titles[index],
         folder_path,
@@ -882,12 +875,23 @@ async fn resolve_movie_metadata_match(
         ));
     }
 
+    let new_title = build_new_title_from_metadata_match(facet, &selected);
+    if candidate.representative_is_directory
+        && let Err(error) = crate::library_discovery::verify_new_scan_title_boundary(
+            Path::new(&candidate.file.path),
+            &new_title,
+        )
+        .await
+    {
+        return Ok(MovieMetadataResolution::CreateFailed(error));
+    }
+
     match create_title_without_hydration_for_library_scan(
         app,
         actor,
         library_id,
         library_path,
-        build_new_title_from_metadata_match(facet, &selected),
+        new_title,
     )
     .await
     {
@@ -1582,12 +1586,36 @@ pub(super) async fn process_resolved_series_full_scan_candidate(
         return Ok(());
     }
 
+    let new_title = build_new_title_from_metadata_match(facet, &selected);
+    // Validate the resolved boundary before creating even an unhydrated title.
+    // A failed verification must not leave a catalog row behind.
+    if let Err(error) =
+        crate::library_discovery::verify_new_scan_title_boundary(&candidate.folder_path, &new_title)
+            .await
+    {
+        let item = build_series_unmatched_scan_item(
+            facet,
+            library_id,
+            session_id,
+            library_path,
+            &candidate,
+            batch_search_results,
+            Some("title_folder_boundary_unresolved"),
+            Some(error.to_string()),
+        );
+        persist_library_scan_unmatched_item(app, &item).await?;
+        unmatched_items.push(item);
+        summary.unmatched += 1;
+        coordinator.mark_title_match_completed(1).await;
+        return Ok(());
+    }
+
     match create_title_without_hydration_for_library_scan(
         app,
         actor,
         library_id,
         library_path,
-        build_new_title_from_metadata_match(facet, &selected),
+        new_title,
     )
     .await
     {
@@ -1825,12 +1853,32 @@ pub(super) async fn process_resolved_series_refresh_candidate(
         return Ok(());
     }
 
+    let new_title = build_new_title_from_metadata_match(facet, &selected);
+    if let Err(error) =
+        crate::library_discovery::verify_new_scan_title_boundary(&candidate.folder_path, &new_title)
+            .await
+    {
+        let item = build_series_unmatched_scan_item(
+            facet,
+            library_id,
+            session_id,
+            library_path,
+            &candidate,
+            batch_search_results,
+            Some("title_folder_boundary_unresolved"),
+            Some(error.to_string()),
+        );
+        persist_library_scan_unmatched_item(app, &item).await?;
+        summary.unmatched += 1;
+        return Ok(());
+    }
+
     match create_title_without_hydration_for_library_scan(
         app,
         actor,
         library_id,
         library_path,
-        build_new_title_from_metadata_match(facet, &selected),
+        new_title,
     )
     .await
     {

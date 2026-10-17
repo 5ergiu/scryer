@@ -7,6 +7,7 @@ import { useIsMobile } from "@/lib/hooks/use-mobile";
 import type { ListMembership } from "@/lib/types/lists";
 import {
   listKindLabelKey,
+  listTitleWithoutYear,
   listMembershipMetadataLookup,
   listMembershipStateLabelKey,
   listMembershipTitleHref,
@@ -30,7 +31,7 @@ export function ListMembershipTitle({ membership }: { membership: ListMembership
   // an entry the service cannot describe keeps the plain flyout.
   const [metadata, requestMetadata] = useListTitleMetadata(listMembershipMetadataLookup(membership));
   const timer = React.useRef<number | null>(null);
-  const label = membership.displayTitle ?? membership.itemKey;
+  const label = listTitleWithoutYear(membership.displayTitle ?? membership.itemKey, membership.year);
   const href = listMembershipTitleHref(membership.kind, membership.titleId, membership.seriesMovieLinkId);
   const FacetIcon = facetById(membership.kind)?.icon;
 

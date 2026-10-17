@@ -181,6 +181,12 @@ async fn add_movie_file(fixture: &TitleFixture, relative_path: &str) -> (PathBuf
 async fn add_movie_file_at(fixture: &TitleFixture, path: &Path) -> String {
     std::fs::create_dir_all(path.parent().expect("media parent")).expect("create media parent");
     std::fs::write(path, b"video").expect("write media file");
+    super::maintenance_title_completion::record_fixture_title_folder(
+        &fixture.execution.app,
+        &fixture.title.id,
+        path.parent().unwrap(),
+    )
+    .await;
     fixture
         .execution
         .app

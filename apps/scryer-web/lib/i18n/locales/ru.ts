@@ -957,6 +957,8 @@ const ru: LocaleDictionary = {
     "settings.folderValidationUnknownToken":
         "Шаблоны папок поддерживают токены {title}, {year} и идентификаторы внешних сервисов. Недопустимый токен: {{token}}",
     "settings.folderValidationEmpty": "Шаблон папки не может быть пустым.",
+    "settings.folderValidationLeafTitleToken":
+        "Последняя папка в шаблоне должна содержать токен названия или внешнего идентификатора",
     "settings.folderValidationIllegalCharacter":
         "Шаблон папки содержит недопустимый символ файловой системы: {{character}}",
     "settings.renameTemplateLabel": "Шаблон переименования",
@@ -1781,12 +1783,12 @@ const ru: LocaleDictionary = {
     "queue.releaseHeldSourcesPreservedDownloadNotImported": "импорт загрузки не подтверждён",
     "queue.releaseHeldSourcesPreservedLookupIncomplete": "не все папки удалось проверить",
 
-    "queue.markFailedSearchAgain": "Пометить как ошибочную и выполнить повторный поиск",
-    "queue.markFailedOnly": "Только пометить как ошибочную",
+    "queue.markFailedSearchAgain": "Заблокировать, удалить данные и искать снова",
+    "queue.markFailedOnly": "Заблокировать и удалить данные",
     "queue.markFailedSearchSuccess":
-        "Загрузка помечена как ошибочная. Будет выполнен повторный поиск.",
+        "Запрошены блокировка и удаление данных; повторный поиск включён.",
     "queue.markFailedOnlySuccess":
-        "Загрузка помечена как ошибочная без повторного поиска.",
+        "Запрошены блокировка и удаление данных без повторного поиска.",
     "queue.markFailedFailed":
         "Не удалось пометить загрузку как ошибочную.",
 
@@ -6424,7 +6426,8 @@ const ru: LocaleDictionary = {
   "lists.detail.title": "Тайтл",
   "lists.detail.state": "Состояние",
   "lists.detail.noTitles": "Тайтлы ещё не записаны.",
-  "lists.detail.pageRange": "{{from}}–{{to}} из {{total}}",
+  "lists.detail.sourceRank": "Место в источнике",
+  "lists.detail.pageRange": "Записи {{from}}–{{to}} из {{total}}",
   "lists.detail.previousPage": "Назад",
   "lists.detail.nextPage": "Далее",
   "lists.detail.history": "История синхронизаций",

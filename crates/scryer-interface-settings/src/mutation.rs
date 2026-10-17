@@ -613,6 +613,7 @@ fn normalize_quality_profile(profile: QualityProfile) -> QualityProfile {
             prefer_remux: criteria.prefer_remux,
             allow_bd_disk: criteria.allow_bd_disk,
             allow_upgrades: criteria.allow_upgrades,
+            ignore_proper_repack: criteria.ignore_proper_repack,
             prefer_dual_audio: criteria.prefer_dual_audio,
             required_audio_languages: normalize_list(criteria.required_audio_languages),
             scoring_persona: criteria.scoring_persona,
@@ -675,6 +676,9 @@ fn quality_profile_from_input(
             prefer_remux: criteria.prefer_remux,
             allow_bd_disk: criteria.allow_bd_disk,
             allow_upgrades: criteria.allow_upgrades,
+            ignore_proper_repack: criteria.ignore_proper_repack.unwrap_or_else(|| {
+                existing.is_some_and(|profile| profile.criteria.ignore_proper_repack)
+            }),
             prefer_dual_audio: false,
             required_audio_languages: Vec::new(),
             scoring_persona: scryer_application::ScoringPersona::Balanced,
@@ -2576,6 +2580,40 @@ impl SettingsMutations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_revision_policy_preserves_existing_profile() {
+        use async_graphql::InputType;
+
+        let mut input = serde_json::json!({
+            "id": "revision-policy", "name": "Revision policy",
+            "criteria": {
+                "qualityTiers": ["1080P"], "archivalQuality": "1080P",
+                "allowUnknownQuality": false,
+                "sourceAllowlist": [], "sourceBlocklist": [],
+                "videoCodecAllowlist": [], "videoCodecBlocklist": [],
+                "audioCodecAllowlist": [], "audioCodecBlocklist": [],
+                "dolbyVisionAllowed": true, "detectedHdrAllowed": true,
+                "preferRemux": false, "allowBdDisk": true,
+                "allowUpgrades": true, "scoringOverrides": {}
+            }
+        });
+        let parse = |value| {
+            QualityProfileInput::parse(Some(async_graphql::Value::from_json(value).unwrap()))
+                .unwrap_or_else(|_| panic!("invalid profile input"))
+        };
+        let mut existing = quality_profile_from_input(parse(input.clone()), None).unwrap();
+        assert!(!existing.criteria.ignore_proper_repack);
+        existing.criteria.ignore_proper_repack = true;
+        let preserved = quality_profile_from_input(parse(input.clone()), Some(&existing)).unwrap();
+        assert!(preserved.criteria.ignore_proper_repack);
+        for explicit in [false, true] {
+            input["criteria"]["ignoreProperRepack"] = explicit.into();
+            let updated =
+                quality_profile_from_input(parse(input.clone()), Some(&existing)).unwrap();
+            assert_eq!(updated.criteria.ignore_proper_repack, explicit);
+        }
+    }
 
     #[test]
     fn media_server_login_requires_effective_form_login() {

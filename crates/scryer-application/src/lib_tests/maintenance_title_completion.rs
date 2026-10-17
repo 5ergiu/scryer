@@ -137,6 +137,22 @@ pub(super) async fn season_and_episode(
     (collection, episode)
 }
 
+pub(super) async fn record_fixture_title_folder(app: &AppUseCase, title_id: &str, folder: &Path) {
+    let mut title = app
+        .services
+        .catalog
+        .titles
+        .get_by_id(title_id)
+        .await
+        .unwrap()
+        .unwrap();
+    if title.folder_path.is_none() {
+        crate::folder_ownership::claim_title_folder_if_missing(app, &mut title, folder)
+            .await
+            .expect("fixture claims its title folder, never the library root");
+    }
+}
+
 pub(super) async fn add_episode_file(
     fixture: &TitleFixture,
     episode: &Episode,
@@ -144,6 +160,10 @@ pub(super) async fn add_episode_file(
 ) -> String {
     let path = fixture.root.join(relative_path);
     write_file(&path);
+    let folder = fixture
+        .root
+        .join(Path::new(relative_path).components().next().unwrap());
+    record_fixture_title_folder(&fixture.execution.app, &fixture.title.id, &folder).await;
     let file_id = fixture
         .execution
         .app
@@ -453,6 +473,12 @@ async fn movie_title_file_only_deletion_retains_title_and_metadata_records() {
     let fixture = title_fixture("Last Picture", MediaFacet::Movie).await;
     let movie_path = fixture.root.join("Last Picture/last-picture.mkv");
     write_file(&movie_path);
+    record_fixture_title_folder(
+        &fixture.execution.app,
+        &fixture.title.id,
+        movie_path.parent().unwrap(),
+    )
+    .await;
     let movie_collection = fixture
         .execution
         .app

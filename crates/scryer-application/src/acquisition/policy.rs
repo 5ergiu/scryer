@@ -1,7 +1,6 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use crate::scoring_weights::ScoringPersona;
-use crate::types::IndexerSearchResult;
 
 /// Episodes become searchable six hours before air time.
 pub(crate) const EPISODE_PRE_AIR_WINDOW_HOURS: i64 = 6;
@@ -161,67 +160,6 @@ mod tests {
         let compatible = AcquisitionThresholds::for_persona(&ScoringPersona::Compatible);
         assert_eq!(balanced, compatible);
     }
-}
-
-/// Whether a REPACK candidate must be skipped because it comes from a
-/// different group than the file it would replace.
-///
-/// A REPACK is a group re-releasing its **own** encode to fix their own
-/// mistake. Another group's repack fixes problems you do not have, so it is a
-/// false upgrade — Sonarr's `RepackSpecification`.
-///
-/// Scoped exactly the way Sonarr scopes it (D16), which is the whole change
-/// here. The rule only engages where a repack could actually be a false
-/// upgrade: an existing primary file in the same tier that the candidate is a
-/// *revision* upgrade over. Everything else falls through and is accepted —
-/// a REPACK filling a **missing** episode, a REPACK of a better tier, a
-/// same-revision release that merely carries the token.
-///
-/// The old shape asked a title-wide file list a scope-shaped question through
-/// `SubmissionScope::episode_id()`, which is `Some` only for a single-episode
-/// scope: every pack, batch, title and link scope compared against whichever
-/// row the store happened to return first. It also returned "skip" for an
-/// unparsed candidate group *before* looking for an existing file, so a repack
-/// with no group could never fill a missing episode. Both go away by asking the
-/// admission subject instead: it already holds exactly the primary files in the
-/// way, each with its tier, revision and release group.
-pub(crate) fn repack_group_mismatch(
-    candidate: &IndexerSearchResult,
-    candidate_facts: crate::admission::CandidateFacts,
-    subject: &crate::admission::AdmissionSubject,
-) -> bool {
-    let Some(parsed) = candidate
-        .parsed_release_metadata
-        .as_ref()
-        .filter(|parsed| parsed.is_repack)
-    else {
-        return false;
-    };
-
-    let candidate_group = parsed
-        .release_group
-        .as_deref()
-        .map(str::trim)
-        .filter(|group| !group.is_empty());
-
-    subject.incumbents().iter().any(|incumbent| {
-        // Sonarr's `IsRevisionUpgrade`: same quality, higher revision. Equality
-        // of `Option<usize>` is `admission::tier_cmp(..) == Equal` — both listed
-        // at the same position, or both unlisted.
-        if candidate_facts.tier_index != incumbent.tier_index
-            || candidate_facts.revision <= incumbent.revision
-        {
-            return false;
-        }
-        // An unknown group on either side is a mismatch, because the one thing
-        // that would make this repack legitimate cannot be established.
-        match (candidate_group, incumbent.release_group.as_deref()) {
-            (Some(candidate_group), Some(incumbent_group)) => {
-                !candidate_group.eq_ignore_ascii_case(incumbent_group)
-            }
-            _ => true,
-        }
-    })
 }
 
 #[cfg(test)]

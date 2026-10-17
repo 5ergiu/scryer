@@ -1,4 +1,10 @@
 import * as React from "react";
+import { useQuery } from "urql";
+import { useActivityEventStream } from "@/lib/hooks/use-activity-event-stream";
+import { TITLE_OVERVIEW_IMPORT_REFRESH_KINDS } from "@/lib/utils/title-overview-refresh-policy";
+import type { CurrentReleaseScope } from "@/lib/utils/current-release";
+import { currentReleaseFilesQuery } from "@/lib/graphql/queries";
+import { currentReleaseNames, releaseIdentityName, type CurrentReleaseFile } from "@/lib/utils/current-release";
 import {
   Ban,
   ArrowDown,
@@ -140,6 +146,7 @@ function ScoringLogPanel({
 
 function SearchResultRow({
   result,
+  currentFile = false,
   onQueue,
   onQueueAdditional,
   disabled = false,
@@ -148,6 +155,7 @@ function SearchResultRow({
   presentation = "default",
 }: {
   result: Release;
+  currentFile?: boolean;
   onQueue: (r: Release) => Promise<void> | void;
   onQueueAdditional?: (r: Release) => Promise<void> | void;
   disabled?: boolean;
@@ -179,6 +187,15 @@ function SearchResultRow({
         Approved
       </span>
     ) : null;
+  const currentFileBadge = currentFile ? (
+    <span
+      data-ui="release-search-result-current-file"
+      className="inline-flex items-center gap-1 rounded-[6px] bg-[var(--scry-success-bg-strong)] px-[7px] py-px text-[10px] font-bold text-[var(--scry-success-text-soft)]"
+    >
+      <Check className="h-2.5 w-2.5 shrink-0" />
+      {t("nzb.currentFile")}
+    </span>
+  ) : null;
   // A pack answers an episode search by covering that episode among others.
   // The row says so, because "1 GB" and "15 GB" for the same episode is only
   // explicable once you know one of them is the whole season.
@@ -361,7 +378,7 @@ function SearchResultRow({
               </>
             ) : null}
             {approvedBadge}
-            {packBadge}
+            {currentFileBadge}{packBadge}
             {rejectionBadge}
           </div>
           {selectedTitleTags.length > 0 ? (
@@ -511,7 +528,7 @@ function SearchResultRow({
             <span className="font-[var(--font-code)] font-medium text-foreground/80">
               {bytesToWholeReadable(result.sizeBytes)}
             </span>
-            {packBadge}
+            {currentFileBadge}{packBadge}
             {rejectionBadge}
           </div>
           {parsedBits.length > 0 ? (
@@ -631,7 +648,7 @@ function SearchResultRow({
                   <span>{result.publishedAt}</span>
                 </>
               ) : null}
-              {packBadge}
+              {currentFileBadge}{packBadge}
               {rejectionBadge}
             </div>
             {parsedBits.length > 0 ? (
@@ -770,8 +787,47 @@ function SearchResultRow({
   );
 }
 
+const EMPTY_CURRENT_RELEASES = new Set<string>();
+const OWNED_RELEASE_REFRESH_KINDS = new Set([...TITLE_OVERVIEW_IMPORT_REFRESH_KINDS, "system_notice", "file_analyzed"]);
+type SearchResultBucketsProps = Omit<
+  React.ComponentProps<typeof SearchResultBucketsContent>,
+  "currentNames"
+> & { ownedScope?: CurrentReleaseScope };
+
 export function SearchResultBuckets({
+  titleId,
+  ...props
+}: SearchResultBucketsProps & { titleId?: string }) {
+  return titleId ? (
+    <TitleSearchResultBuckets titleId={titleId} {...props} />
+  ) : (
+    <SearchResultBucketsContent {...props} />
+  );
+}
+
+function TitleSearchResultBuckets({
+  titleId,
+  ownedScope,
+  ...props
+}: SearchResultBucketsProps & { titleId: string }) {
+  const [{ data }, refresh] = useQuery<{ title: { id: string; mediaFiles: CurrentReleaseFile[] } | null }>({
+    query: currentReleaseFilesQuery,
+    variables: { id: titleId },
+    requestPolicy: "cache-and-network",
+  });
+  useActivityEventStream({ titleId, kinds: OWNED_RELEASE_REFRESH_KINDS,
+    onStart: () => refresh({ requestPolicy: "network-only" }),
+    onEvent: () => refresh({ requestPolicy: "network-only" }) });
+  const currentNames = React.useMemo(
+    () => currentReleaseNames(data?.title?.id === titleId ? data.title.mediaFiles : [], ownedScope),
+    [data, titleId, ownedScope],
+  );
+  return <SearchResultBucketsContent {...props} currentNames={currentNames} />;
+}
+
+function SearchResultBucketsContent({
   results,
+  currentNames = EMPTY_CURRENT_RELEASES,
   onQueue,
   onQueueAdditional,
   canQueueAdditional,
@@ -786,6 +842,7 @@ export function SearchResultBuckets({
   presentation = "default",
 }: {
   results: Release[];
+  currentNames?: Set<string>;
   onQueue: (r: Release) => Promise<void> | void;
   onQueueAdditional?: (r: Release) => Promise<void> | void;
   canQueueAdditional?: (r: Release) => boolean;
@@ -889,6 +946,7 @@ export function SearchResultBuckets({
               <SearchResultRow
                 key={`${result.source}-${result.title}-${result.link}`}
                 result={result}
+                currentFile={currentNames.has(releaseIdentityName(result.title))}
                 onQueue={onQueue}
                 onQueueAdditional={
                   onQueueAdditional &&
@@ -949,6 +1007,7 @@ export function SearchResultBuckets({
                   <SearchResultRow
                     key={`${result.source}-${result.title}-${result.link}`}
                     result={result}
+                    currentFile={currentNames.has(releaseIdentityName(result.title))}
                     onQueue={onQueue}
                     onQueueAdditional={
                       onQueueAdditional &&
@@ -968,6 +1027,7 @@ export function SearchResultBuckets({
     },
     [
       canQueueAdditional,
+      currentNames,
       compact,
       disabled,
       handleSort,
@@ -989,6 +1049,7 @@ export function SearchResultBuckets({
             <SearchResultRow
               key={`${result.source}-${result.title}-${result.link}`}
               result={result}
+              currentFile={currentNames.has(releaseIdentityName(result.title))}
               onQueue={onQueue}
               onQueueAdditional={
                 onQueueAdditional &&
@@ -1006,6 +1067,7 @@ export function SearchResultBuckets({
     },
     [
       canQueueAdditional,
+      currentNames,
       disabled,
       onQueue,
       onQueueAdditional,

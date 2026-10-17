@@ -566,7 +566,7 @@ impl AppUseCase {
                 request_signature: request_signature.clone(),
                 source_provider_name: source_provider_name.clone(),
                 release_size_bytes: size_bytes,
-                release_listing_json,
+                release_listing_json: release_listing_json.clone(),
             })
             .await;
 
@@ -726,7 +726,10 @@ impl AppUseCase {
                 source_provider_name.clone(),
                 grab.client_id.as_deref(),
             )
-            .await;
+            .await
+            .with_scoring(crate::quality::grab_scoring::from_listing(
+                release_listing_json.as_deref(),
+            ));
         tracing::debug!(
             title_id = %title.id,
             download_client_item_id = %grab.job_id,
@@ -910,6 +913,9 @@ impl AppUseCase {
     fn listing_json_at_grab(&self, listing: Option<ReleaseListingSnapshot>) -> Option<String> {
         listing.map(|mut listing| {
             listing.captured_at = self.runtime.environment.now();
+            if let Some(scoring) = listing.grab_scoring.as_mut() {
+                scoring.decision_code = "manual_override".into();
+            }
             listing.to_json_string()
         })
     }
@@ -1338,7 +1344,7 @@ impl AppUseCase {
                 None,
                 now,
             )
-                .await;
+            .await;
         }
         let Some(best_index) = results
             .iter()
@@ -1512,6 +1518,7 @@ mod auto_eligibility_reason_tests {
                 preference_score: 0,
                 tier_index: None,
                 size_fit_penalty: 0,
+                revision_preference: 0,
             }),
             extra: Default::default(),
             response_attributes: Default::default(),

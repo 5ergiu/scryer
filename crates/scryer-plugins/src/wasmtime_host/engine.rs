@@ -144,6 +144,55 @@ pub(crate) fn cache_statistics() -> (usize, usize) {
     (cache.cache_hits(), cache.cache_misses())
 }
 
+/// Wasmtime 48 leaves expired cleanup markers in place before creating its
+/// PID-named marker with create_new. PID reuse (notably container PID 1) then
+/// prevents cleanup forever. Repair only that collision, on compilation demand.
+pub(crate) fn prepare_cache_cleanup() {
+    let interval = CacheConfig::new().cleanup_interval();
+    if let Err(error) = reclaim_expired_cleanup_marker(
+        configured_cache_dir(),
+        std::process::id(),
+        std::time::SystemTime::now(),
+        interval,
+    ) {
+        tracing::warn!(%error, "could not reclaim expired Wasmtime cleanup marker");
+    }
+}
+
+fn reclaim_expired_cleanup_marker(
+    directory: &Path,
+    pid: u32,
+    now: std::time::SystemTime,
+    interval: Duration,
+) -> std::io::Result<()> {
+    // Serialize our check/remove pairs: a second compiler must not remove a
+    // fresh marker created by Wasmtime after the first compiler reclaimed it.
+    static RECLAIM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = RECLAIM.lock().unwrap_or_else(|error| error.into_inner());
+    let marker = directory.join(format!(".cleanup.wip-{pid}"));
+    let metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() || metadata.len() != 0 {
+        return Ok(());
+    }
+    // Match Wasmtime's expiration interval, but preserve future timestamps.
+    // No directory scan, recursion, or compiled-module deletion is involved.
+    if now
+        .duration_since(metadata.modified()?)
+        .is_ok_and(|age| age > interval)
+    {
+        match fs::remove_file(marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn probe_cache_directory(cache_dir: &Path) -> Result<(), String> {
     let probe = cache_dir.join(format!(
         ".scryer-wasmtime-probe-{}-{}",
@@ -433,13 +482,8 @@ mod tests {
 
     #[test]
     fn expired_same_pid_cleanup_lock_does_not_prevent_cache_reuse() {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        // Keep the synthetic cache for inspection; no production cache is touched.
-        let directory = tempfile::Builder::new()
-            .prefix("expired-cleanup-lock-")
-            .tempdir_in(env!("OUT_DIR"))
-            .expect("synthetic cache directory")
-            .keep();
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().to_path_buf();
         let lock_path = directory.join(format!(".cleanup.wip-{}", std::process::id()));
         let lock = OpenOptions::new()
             .write(true)
@@ -450,6 +494,14 @@ mod tests {
         lock.set_times(std::fs::FileTimes::new().set_modified(old_time))
             .unwrap();
         drop(lock);
+        reclaim_expired_cleanup_marker(
+            &directory,
+            std::process::id(),
+            std::time::SystemTime::now(),
+            CacheConfig::new().cleanup_interval(),
+        )
+        .unwrap();
+        assert!(!lock_path.exists());
         let wasm = wat::parse_str("(module (func (export \"entry\")))").unwrap();
         let writer_cache = cache_for(&directory);
         let writer_engine = engine_with_cache(writer_cache.clone());
@@ -477,19 +529,106 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "the writer's cache worker never recorded the sentinel module"
             );
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::yield_now();
         }
-        assert_eq!(
-            fs::metadata(&lock_path).unwrap().modified().unwrap(),
-            old_time
+        assert!(fs::metadata(&lock_path).unwrap().modified().unwrap() > old_time);
+    }
+
+    #[test]
+    fn cleanup_marker_recovery_preserves_unrelated_and_unexpired_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let interval = Duration::from_secs(100);
+        let marker = temp.path().join(".cleanup.wip-1");
+        let other_pid = temp.path().join(".cleanup.wip-2");
+        let module = temp.path().join("module");
+        fs::write(&other_pid, b"").unwrap();
+        fs::write(&module, b"compiled module").unwrap();
+        for (contents, age, expected_removed) in [
+            (b"".as_slice(), 101, true),
+            (b"".as_slice(), 100, false),
+            (b"".as_slice(), 0, false),
+            (b"".as_slice(), -100, false),
+            (b"not a marker".as_slice(), 101, false),
+        ] {
+            fs::write(&marker, contents).unwrap();
+            let modified = if age < 0 {
+                now + Duration::from_secs((-age) as u64)
+            } else {
+                now - Duration::from_secs(age as u64)
+            };
+            OpenOptions::new()
+                .write(true)
+                .open(&marker)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            reclaim_expired_cleanup_marker(temp.path(), 1, now, interval).unwrap();
+            assert_eq!(!marker.exists(), expected_removed);
+            assert!(other_pid.exists());
+            assert_eq!(fs::read(&module).unwrap(), b"compiled module");
+        }
+        fs::remove_file(&marker).unwrap();
+        fs::create_dir(&marker).unwrap();
+        reclaim_expired_cleanup_marker(temp.path(), 1, now, interval).unwrap();
+        assert!(marker.is_dir());
+        assert!(reclaim_expired_cleanup_marker(&module, 1, now, interval).is_err());
+    }
+
+    #[test]
+    fn cleanup_marker_recovery_handles_concurrent_calls_and_repeated_expiry() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join(".cleanup.wip-1");
+        let interval = Duration::from_secs(100);
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        for _ in 0..2 {
+            fs::write(&marker, b"").unwrap();
+            OpenOptions::new()
+                .write(true)
+                .open(&marker)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(now))
+                .unwrap();
+            for (check_at, should_exist) in [(now, true), (now + interval * 2, false)] {
+                std::thread::scope(|scope| {
+                    let mut calls = Vec::new();
+                    for _ in 0..8 {
+                        let directory = temp.path();
+                        calls.push(scope.spawn(move || {
+                            reclaim_expired_cleanup_marker(directory, 1, check_at, interval)
+                        }));
+                    }
+                    for call in calls {
+                        call.join().unwrap().unwrap();
+                    }
+                });
+                assert_eq!(marker.exists(), should_exist);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_marker_recovery_preserves_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("keep");
+        fs::write(&target, b"").unwrap();
+        let marker = temp.path().join(".cleanup.wip-1");
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        reclaim_expired_cleanup_marker(
+            temp.path(),
+            1,
+            std::time::SystemTime::now() + Duration::from_secs(100),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(
+            fs::symlink_metadata(marker)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
-        let error = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .expect_err("expired lock still collides with the reused PID");
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        eprintln!("preserved synthetic cache fixture: {}", directory.display());
+        assert!(target.exists());
     }
 
     #[test]

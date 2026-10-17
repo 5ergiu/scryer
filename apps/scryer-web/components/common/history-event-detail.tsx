@@ -1,4 +1,6 @@
 import type { TitleHistoryEvent } from "@/lib/types";
+import { ScoreBreakdown } from "@/components/common/score-breakdown";
+import { useTranslate } from "@/lib/context/translate-context";
 import { LazyCodeEditor } from "@/components/common/lazy-code-editor";
 import { formatSanitizedHistoryValue } from "@/lib/utils/history-redaction";
 import { cn } from "@/lib/utils";
@@ -131,7 +133,7 @@ export function buildHistoryEventDetail(event: TitleHistoryEvent): {
   const rawDetails = Object.entries(data ?? {}).filter(
     ([key]) => !structuredDataKeys.has(key),
   );
-  const hasDetail = structuredDetails.length > 0 || rawDetails.length > 0;
+  const hasDetail = Boolean(event.scoring) || structuredDetails.length > 0 || rawDetails.length > 0;
 
   return {
     structuredDetails,
@@ -141,6 +143,8 @@ export function buildHistoryEventDetail(event: TitleHistoryEvent): {
 }
 
 export function HistoryEventDetailContent({ event }: { event: TitleHistoryEvent }) {
+  const t = useTranslate();
+  const scoring = event.scoring;
   const { structuredDetails, rawDetails, hasDetail } = buildHistoryEventDetail(event);
 
   if (!hasDetail) {
@@ -149,6 +153,16 @@ export function HistoryEventDetailContent({ event }: { event: TitleHistoryEvent 
 
   return (
     <div className="space-y-1.5">
+      {scoring ? <div className="space-y-1 text-xs">
+        <div>{t("scoring.score")}: {scoring.candidateScore}</div>
+        {scoring.previousScore != null ? <div>{t("scoring.previous")}: {scoring.previousScore}</div> : null}
+        {scoring.delta != null ? <div>{t("scoring.change")}: {scoring.delta > 0 ? "+" : ""}{scoring.delta}</div> : null}
+        <div>{t("scoring.decision")}: {scoring.decisionCode === "initial" ? t("history.initial") : scoring.decisionCode === "upgrade" ? t("history.upgrade") : scoring.decisionCode === "manual_override" ? t("scoring.manualOverride") : scoring.decisionCode}</div>
+        {scoring.comparisons.length > 1 ? <ul>{scoring.comparisons.map((comparison) => <li key={comparison.fileId}>
+          {comparison.episodeIds.join(", ") || comparison.fileId}: {comparison.previousScore} → {scoring.candidateScore} ({comparison.delta > 0 ? "+" : ""}{comparison.delta})
+        </li>)}</ul> : null}
+        <ScoreBreakdown entries={scoring.entries} />
+      </div> : null}
       {structuredDetails.map(({ key, value }) => (
         <div key={key} className="grid grid-cols-[auto_1fr] gap-x-3 text-xs">
           <span className="whitespace-nowrap text-muted-foreground">{formatKey(key)}</span>

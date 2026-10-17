@@ -462,6 +462,211 @@ impl FolderMatchFixture {
     }
 }
 
+#[tokio::test]
+async fn nested_title_folder_match_rejects_bucket_and_preserves_files_and_associations() {
+    let fixture = FolderMatchFixture::new().await;
+    let original = fixture.folder("Original");
+    let original_file = fixture.write_media(&original, "original.mkv");
+    let title = fixture.create_title_with_folder("Example", &original).await;
+    fixture.seed_media_row(&title.id, &original_file).await;
+    let selected = fixture.folder("E/Example");
+    fixture.write_media(&selected, "example.mkv");
+    let sibling = fixture.folder("E/Echo");
+    fixture.write_media(&sibling, "echo.mkv");
+    let before = snapshot_tree(fixture.root.path());
+    let rows = fixture.media_paths(&title.id).await;
+    assert!(
+        fixture
+            .app
+            .change_title_folder_preview(
+                &fixture.user,
+                &title.id,
+                &fixture.root.path().join("E").to_string_lossy()
+            )
+            .await
+            .is_err()
+    );
+    fixture
+        .app
+        .change_title_folder_preview(&fixture.user, &title.id, &selected.to_string_lossy())
+        .await
+        .unwrap();
+    assert_eq!(snapshot_tree(fixture.root.path()), before);
+    assert_eq!(fixture.media_paths(&title.id).await, rows);
+}
+
+#[tokio::test]
+async fn nested_title_claim_keeps_nonempty_bucket_and_invalid_path_guards() {
+    let fixture = FolderMatchFixture::new().await;
+    let original = fixture.folder("Original");
+    let mut title = fixture.create_title_with_folder("Example", &original).await;
+    fixture
+        .app
+        .services
+        .catalog
+        .titles
+        .clear_folder_path(&title.id)
+        .await
+        .unwrap();
+    title.folder_path = None;
+    let child = fixture.folder("E/Echo");
+    fixture.write_media(&child, "echo.mkv");
+    let plain_file = fixture.root.path().join("not-a-directory");
+    std::fs::write(&plain_file, b"preserve").unwrap();
+    let before = snapshot_tree(fixture.root.path());
+    for path in [fixture.root.path().join("E"), plain_file] {
+        assert!(
+            crate::folder_ownership::claim_title_folder_if_missing(&fixture.app, &mut title, &path)
+                .await
+                .is_err()
+        );
+        assert!(title.folder_path.is_none());
+        assert!(fixture.folder_path_of(&title.id).await.is_none());
+    }
+    assert_eq!(snapshot_tree(fixture.root.path()), before);
+    assert!(fixture.media_paths(&title.id).await.is_empty());
+}
+
+#[tokio::test]
+async fn nested_title_destination_guard_allows_empty_siblings_but_refuses_overlaps() {
+    let fixture = FolderMatchFixture::new().await;
+    let owned = fixture.folder("E/Example");
+    let media = fixture.write_media(&owned, "example.mkv");
+    let owner = fixture.create_title_with_folder("Example", &owned).await;
+    fixture.seed_media_row(&owner.id, &media).await;
+    let current = fixture.folder("Original");
+    let title = fixture.create_title_with_folder("Echo", &current).await;
+    let before = snapshot_tree(fixture.root.path());
+    for rejected in [
+        owned.clone(),
+        owned.join("New"),
+        fixture.root.path().join("E"),
+    ] {
+        assert!(
+            crate::folder_ownership::ensure_folder_move_available_to_title(
+                &fixture.app,
+                &title,
+                &rejected
+            )
+            .await
+            .is_err()
+        );
+    }
+    crate::folder_ownership::ensure_folder_move_available_to_title(
+        &fixture.app,
+        &title,
+        &fixture.root.path().join("E/Echo"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot_tree(fixture.root.path()), before);
+    assert_eq!(
+        fixture.media_paths(&owner.id).await,
+        vec![media.to_string_lossy().to_string()]
+    );
+    assert_eq!(
+        fixture.folder_path_of(&title.id).await.as_deref(),
+        current.to_str()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nested_title_destination_guard_refuses_linked_owner_aliases() {
+    let fixture = FolderMatchFixture::new().await;
+    // A title owns a linked folder whose target lies elsewhere in the root.
+    let target = fixture.folder("Store/Linked Target");
+    let link = fixture.root.path().join("Linked Owner");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let owner = fixture.create_title_with_folder("Linked", &link).await;
+    // Another title owns a folder spelled through a linked organizing folder.
+    let real = fixture.folder("Real Bucket");
+    let alias = fixture.root.path().join("Alias Bucket");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let aliased = fixture
+        .create_title_with_folder("Aliased", &alias.join("Aliased Title"))
+        .await;
+    let title = fixture
+        .create_title_with_folder("Mover", &fixture.folder("Original"))
+        .await;
+    for rejected in [
+        target.clone(),
+        target.join("Season 1"),
+        fixture.root.path().join("Store"),
+        real.join("Aliased Title"),
+    ] {
+        let error = crate::folder_ownership::ensure_folder_move_available_to_title(
+            &fixture.app,
+            &title,
+            &rejected,
+        )
+        .await
+        .expect_err("overlapping destination must be refused");
+        assert!(
+            error.to_string().contains(&owner.id) || error.to_string().contains(&aliased.id),
+            "{error}"
+        );
+    }
+    crate::folder_ownership::ensure_folder_move_available_to_title(
+        &fixture.app,
+        &title,
+        &fixture.root.path().join("Store/Other Title"),
+    )
+    .await
+    .unwrap();
+    assert!(target.is_dir());
+    assert!(real.is_dir());
+}
+
+#[tokio::test]
+async fn nested_title_restore_guard_preserves_siblings_and_refuses_changed_ownership() {
+    let fixture = FolderMatchFixture::new().await;
+    let owned = fixture.folder("E/Example");
+    let media = fixture.write_media(&owned, "example.mkv");
+    let owner = fixture.create_title_with_folder("Example", &owned).await;
+    fixture.seed_media_row(&owner.id, &media).await;
+    let recycled = fixture.folder(".scryer-recycle/entry");
+    fixture.write_media(&recycled, "original.mkv");
+    let before = snapshot_tree(fixture.root.path());
+    crate::folder_ownership::ensure_restore_ownership(
+        &fixture.app,
+        None,
+        &fixture.root.path().join("E/Echo/original.mkv"),
+    )
+    .await
+    .unwrap();
+    crate::folder_ownership::ensure_restore_ownership(
+        &fixture.app,
+        Some(&owner.id),
+        &owned.join("original.mkv"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::folder_ownership::ensure_restore_ownership(
+            &fixture.app,
+            None,
+            &owned.join("original.mkv")
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::folder_ownership::ensure_restore_ownership(
+            &fixture.app,
+            Some(&owner.id),
+            &fixture.root.path().join("E/Echo/original.mkv")
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(snapshot_tree(fixture.root.path()), before);
+    assert_eq!(
+        fixture.media_paths(&owner.id).await,
+        vec![media.to_string_lossy().to_string()]
+    );
+}
+
 /// Directory snapshot used to prove the filesystem never changed (SC-001).
 fn snapshot_tree(root: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
     fn walk(dir: &Path, out: &mut Vec<(String, Vec<u8>, std::time::SystemTime)>) {
@@ -703,6 +908,7 @@ async fn assignment_detach_failure_restores_the_previous_folder() {
     let fixture = FolderMatchFixture::new().await;
     let previous_folder = fixture.folder("Previous Match (2019)");
     let selected_folder = fixture.folder("Selected Match (2024)");
+    fixture.write_media(&selected_folder, "Selected.Match.2024.mkv");
     let previous_file = fixture.write_media(&previous_folder, "Previous.Match.2019.1080p.mkv");
     fixture.scanner.set_files(&[previous_file.as_path()]).await;
 
@@ -1303,6 +1509,7 @@ async fn assigning_an_owned_folder_is_refused_and_names_the_owner() {
     let fixture = FolderMatchFixture::new().await;
     let first_folder = fixture.folder("Requester (2020)");
     let owned_folder = fixture.folder("Owner (2021)");
+    fixture.write_media(&owned_folder, "Owner.2021.mkv");
 
     let first = create_movie_title_with_folder(
         &fixture.app,
@@ -1956,7 +2163,8 @@ async fn folder_reconciliation_handles_empty_and_unavailable_folders() {
     let old = fixture.folder("Old");
     let empty = fixture.folder("Empty");
     let title = fixture.create_title_with_folder("Selected", &old).await;
-    let result = fixture
+    let before = snapshot_tree(fixture.root.path());
+    let error = fixture
         .app
         .apply_title_folder_change(
             &fixture.user,
@@ -1965,8 +2173,8 @@ async fn folder_reconciliation_handles_empty_and_unavailable_folders() {
             FolderMatchResolution::Assign,
         )
         .await
-        .unwrap();
-    assert_eq!(result.scan.unwrap().scanned, 0);
+        .expect_err("empty directories do not establish ownership");
+    assert!(error.to_string().contains("organizing folder"));
     let unavailable = fixture.root.path().join("Unavailable");
     assert!(
         fixture
@@ -1982,9 +2190,10 @@ async fn folder_reconciliation_handles_empty_and_unavailable_folders() {
     );
     assert_eq!(
         fixture.folder_path_of(&title.id).await.as_deref(),
-        empty.to_str()
+        old.to_str()
     );
     assert!(!unavailable.exists());
+    assert_eq!(snapshot_tree(fixture.root.path()), before);
     assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.metadata.calls.load(Ordering::SeqCst), 0);
 }
@@ -2030,6 +2239,89 @@ async fn folder_reconciliation_does_not_reuse_analysis_for_changed_bytes() {
         .await
         .unwrap();
     assert_eq!(fixture.analyzer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn legacy_season_folders_preserve_title_boundaries() {
+    use crate::library::discovery::{
+        TitleFolderBoundaryPolicy, ensure_existing_title_boundary, episode_folder_patterns,
+        stream_title_folder_boundaries,
+    };
+
+    let fixture = FolderMatchFixture::new_series().await;
+    fixture
+        .app
+        .services
+        .config
+        .settings
+        .upsert_setting_json(
+            SETTINGS_SCOPE_SYSTEM,
+            crate::SEASON_FOLDER_TEMPLATE_KEY,
+            Some(MediaFacet::Series.as_str().to_string()),
+            serde_json::to_string("Cycle {season:02}").unwrap(),
+            "test",
+            None,
+        )
+        .await
+        .unwrap();
+    let patterns = episode_folder_patterns(&fixture.app, &MediaFacet::Series)
+        .await
+        .unwrap();
+    for name in ["S01", "s02", "Season 03", "Specials", "Cycle 04"] {
+        let title = fixture.folder(&format!("Show-{name}"));
+        let season = title.join(name);
+        std::fs::create_dir_all(&season).unwrap();
+        fixture.write_media(&season, "S01E01.mkv");
+        ensure_existing_title_boundary(&title, &patterns)
+            .await
+            .unwrap();
+
+        let mut stream = stream_title_folder_boundaries(
+            title.parent().unwrap().into(),
+            TitleFolderBoundaryPolicy {
+                facet: MediaFacet::Series,
+                stored_folders: if name == "Cycle 04" {
+                    vec![title.clone()]
+                } else {
+                    vec![]
+                },
+                other_roots: vec![],
+            },
+            1,
+            Default::default(),
+        );
+        let discovered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut found = false;
+            while let Some(batch) = stream.recv().await {
+                found |= batch
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.path == title && entry.rejection.is_none());
+            }
+            found
+        })
+        .await
+        .unwrap();
+        assert!(discovered, "legacy title must be discoverable: {name}");
+
+        // A second title is still a boundary even if its media uses a legacy
+        // season folder, and a mixed parent must never own that child's files.
+        let nested = title.join("Other Show").join("S01");
+        std::fs::create_dir_all(&nested).unwrap();
+        fixture.write_media(&nested, "Other.S01E01.mkv");
+        assert!(
+            ensure_existing_title_boundary(&title, &patterns)
+                .await
+                .is_err()
+        );
+        ensure_existing_title_boundary(nested.parent().unwrap(), &patterns)
+            .await
+            .unwrap();
+    }
+    let movie_patterns = episode_folder_patterns(&fixture.app, &MediaFacet::Movie)
+        .await
+        .unwrap();
+    assert!(movie_patterns.is_empty());
 }
 
 /// Reconciling a title's own, unchanged folder keeps every analysis-derived

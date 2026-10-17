@@ -192,6 +192,7 @@ pub enum JobKey {
     TitleDeletion,
     TitleRename,
     MediaFileDeletion,
+    MediaFileRescore,
     RecycleBinRestore,
     RecycleBinPurge,
     AcquisitionSearch,
@@ -246,6 +247,7 @@ impl JobKey {
             Self::TitleImageCacheRefresh => "title_image_cache_refresh",
             Self::TitleDeletion => "title_deletion",
             Self::TitleRename => "title_rename",
+            Self::MediaFileRescore => "media_file_rescore",
             Self::MediaFileDeletion => "media_file_deletion",
             Self::RecycleBinRestore => "recycle_bin_restore",
             Self::RecycleBinPurge => "recycle_bin_purge",
@@ -283,6 +285,7 @@ impl JobKey {
             "title_image_cache_refresh" => Some(Self::TitleImageCacheRefresh),
             "title_deletion" => Some(Self::TitleDeletion),
             "title_rename" => Some(Self::TitleRename),
+            "media_file_rescore" => Some(Self::MediaFileRescore),
             "media_file_deletion" => Some(Self::MediaFileDeletion),
             "recycle_bin_restore" => Some(Self::RecycleBinRestore),
             "recycle_bin_purge" => Some(Self::RecycleBinPurge),
@@ -321,6 +324,7 @@ impl JobKey {
             Self::TitleImageCacheRefresh => "Title Image Cache Refresh",
             Self::TitleDeletion => "Title Deletion",
             Self::TitleRename => "Title Rename",
+            Self::MediaFileRescore => "Refresh File Scores",
             Self::MediaFileDeletion => "Media File Deletion",
             Self::RecycleBinRestore => "Recycle Bin Restore",
             Self::RecycleBinPurge => "Recycle Bin Purge",
@@ -378,6 +382,7 @@ impl JobKey {
             }
             Self::TitleDeletion => "Delete selected titles from the catalog.",
             Self::TitleRename => "Rename files for selected titles.",
+            Self::MediaFileRescore => "Evaluate selected files under current scoring rules.",
             Self::MediaFileDeletion => "Delete a media file from disk and the catalog.",
             Self::RecycleBinRestore => "Restore a recycled file to its library.",
             Self::RecycleBinPurge => "Permanently delete selected recycled files.",
@@ -425,6 +430,7 @@ impl JobKey {
             | Self::TitleDeletion
             | Self::TitleRename
             | Self::MediaFileDeletion
+            | Self::MediaFileRescore
             | Self::RecycleBinRestore
             | Self::RecycleBinPurge
             | Self::ApplicationUpgrade
@@ -476,6 +482,7 @@ impl JobKey {
             | Self::TitleDeletion
             | Self::TitleRename
             | Self::MediaFileDeletion
+            | Self::MediaFileRescore
             | Self::RecycleBinRestore
             | Self::RecycleBinPurge
             | Self::PendingReleaseProcessing
@@ -514,6 +521,7 @@ impl JobKey {
             | Self::TitleDeletion
             | Self::TitleRename
             | Self::MediaFileDeletion
+            | Self::MediaFileRescore
             | Self::RecycleBinRestore
             | Self::RecycleBinPurge
             | Self::AcquisitionSearch
@@ -565,6 +573,7 @@ impl JobKey {
                 | Self::TitleDeletion
                 | Self::TitleRename
                 | Self::MediaFileDeletion
+                | Self::MediaFileRescore
                 | Self::RecycleBinRestore
                 | Self::RecycleBinPurge
                 | Self::AcquisitionSearch

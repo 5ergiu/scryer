@@ -3118,6 +3118,34 @@ file = "postgres/migrations/0288_preserve_retired_imdb_follows.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 289
+description = "repair title folders using live media only"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "rust"
+hook_id = "repair_live_title_folders"
+engine = "all"
+scope = "all"
+
+[[migration]]
+version = 290
+description = "store on-demand file score evaluations"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0290_media_file_score_evaluation.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0290_media_file_score_evaluation.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

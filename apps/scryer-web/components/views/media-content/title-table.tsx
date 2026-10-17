@@ -899,6 +899,7 @@ export const TitleTable = React.memo(function TitleTable({
                   </p>
                 ) : (
                   <SearchResultBuckets
+                    titleId={item.id}
                     results={interactiveSearchResults}
                     onQueue={(release) => onQueueFromInteractive(item, release)}
                     onQueueAdditional={

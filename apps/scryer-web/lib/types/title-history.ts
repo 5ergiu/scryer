@@ -1,4 +1,9 @@
 export type TitleHistoryEvent = {
+  scoring?: {
+    candidateScore: number; previousScore: number | null; delta: number | null; decisionCode: string;
+    entries: import("./file-score").ScoreEntry[];
+    comparisons: { fileId: string; episodeIds: string[]; previousScore: number; delta: number }[];
+  } | null;
   id: string;
   // Null for an event with no catalog title behind it: an unlinked grab is
   // recorded against the release and the indexer (FR-026).

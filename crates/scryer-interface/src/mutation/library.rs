@@ -457,6 +457,46 @@ impl LibraryMutations {
         Ok(crate::mappers::from_title_media_file(file))
     }
 
+    /// Refresh stored-file scores for an explicit selection without acquiring or modifying media.
+    async fn refresh_file_scores(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Exactly one bounded selection of file, season, or title IDs.")]
+        selection: FileScoreSelectionInput,
+    ) -> GqlResult<JobRunPayload> {
+        use scryer_application::ScoreRefreshSelection;
+        let selection = match selection {
+            FileScoreSelectionInput::FileIds(ids) => {
+                ScoreRefreshSelection::Files(ids.into_iter().map(String::from).collect())
+            }
+            FileScoreSelectionInput::SeasonIds(ids) => {
+                ScoreRefreshSelection::Seasons(ids.into_iter().map(String::from).collect())
+            }
+            FileScoreSelectionInput::TitleIds(ids) => {
+                ScoreRefreshSelection::Titles(ids.into_iter().map(String::from).collect())
+            }
+        };
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        app.refresh_selected_file_scores(&actor, selection)
+            .await
+            .map(from_job_run)
+            .map_err(to_gql_error)
+    }
+
+    /// Cancel queued or active scoring work, retaining evaluations already saved.
+    async fn cancel_file_score_refresh(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "ID of the score refresh job started by the current user.")] run_id: ID,
+    ) -> GqlResult<bool> {
+        let app = app_from_ctx(ctx)?;
+        let actor = actor_from_ctx(ctx)?;
+        app.cancel_file_score_refresh(&actor, run_id.as_str())
+            .await
+            .map_err(to_gql_error)
+    }
+
     /// Accept a background job to delete a media file, optionally removing it from disk.
     async fn delete_media_file(
         &self,

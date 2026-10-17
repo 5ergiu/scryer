@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 use application_updater::helper_plan::ApplicationUpgradeHelperPlan;
-use application_updater::helper_plan::reboot_required_completion_allowed;
+use application_updater::helper_plan::{RebootRequiredOutcome, reboot_required_outcome};
 use application_updater::pipeline::{
     DownloadProgress, FetchedUpgradeManifest, PortablePromotionFailure, PortableUpgradePaths,
     ProgressFuture, rename_path,
@@ -389,6 +389,20 @@ impl AppUseCase {
         .await?;
         verify_artifact_hash(&download_path, &artifact)?;
         validate_archive_members(&download_path, &artifact)?;
+        // Windows Installer may need its original source during a later repair
+        // or major upgrade. Never register disposable staging as that source.
+        let download_path = if artifact.archive
+            == application_updater::manifest::UpgradeArchive::Msi
+        {
+            let cache = self.application_upgrade_root_dir().join("installer-cache");
+            std::fs::create_dir_all(&cache).map_err(|e| {
+                AppError::Repository(format!("failed to create installer cache: {e}"))
+            })?;
+            (dependencies.ensure_available_space)(&cache, staging_space_requirement(&artifact))?;
+            super::msi_source::retain_installer(&download_path, &cache, &artifact)?
+        } else {
+            download_path
+        };
 
         self.update_application_upgrade_progress(
             run,
@@ -825,15 +839,60 @@ impl AppUseCase {
         let expected_executable_booted =
             canonical_path(&booted_path) == canonical_path(&journal.executable_path);
         if journal.phase == phases::REBOOT_REQUIRED {
-            if reboot_required_completion_allowed(
-                journal.written_at,
+            // A journal that predates `written_at` is measured from the run's
+            // own start, which is earlier still and so never mistakes a boot
+            // before the install for one after it.
+            let written_at = match journal.written_at {
+                Some(written_at) => Some(written_at),
+                None => self
+                    .services
+                    .events
+                    .job_runs
+                    .get_job_run(&journal.run_id)
+                    .await?
+                    .map(|run| run.started_at),
+            };
+            match reboot_required_outcome(
+                written_at,
                 boot_time.map(DateTime::<Utc>::from),
                 expected_version_booted,
                 expected_executable_booted,
             ) {
-                self.complete_journal_application_upgrade(&journal, &journal_path)
+                RebootRequiredOutcome::Complete => {
+                    self.complete_journal_application_upgrade(&journal, &journal_path)
+                        .await?;
+                    return Ok(Vec::new());
+                }
+                // Windows restarted and this version came back: the install
+                // the restart was meant to finish never happened. Holding the
+                // run open would refuse every later upgrade with nothing the
+                // operator can do about it, so the run fails and admission
+                // reopens. The journal and every backup stay where they are;
+                // a later upgrade replaces the journal, and the next boot
+                // finds this run already finished.
+                RebootRequiredOutcome::NotInstalled => {
+                    let message = reboot_required_not_installed_message(
+                        &journal.expected_version,
+                        self.application_upgrade_msi_log_path(&journal.run_id)
+                            .filter(|path| path.is_file())
+                            .as_deref(),
+                    );
+                    tracing::warn!(
+                        run_id = %journal.run_id,
+                        expected_version = %journal.expected_version,
+                        running_version = SCRYER_VERSION,
+                        "{message}"
+                    );
+                    self.finish_journal_application_upgrade(
+                        &journal,
+                        JobRunStatus::Failed,
+                        None,
+                        Some(message),
+                    )
                     .await?;
-                return Ok(Vec::new());
+                    return Ok(Vec::new());
+                }
+                RebootRequiredOutcome::AwaitReboot => {}
             }
             // The run stays Running until the operator reboots. Rehydrate the
             // in-memory tracker so single-flight admission still sees it and a
@@ -1060,6 +1119,14 @@ impl AppUseCase {
         self.application_upgrade_root_dir().join("journal.json")
     }
 
+    /// Where the Windows upgrade helper asked `msiexec` to log this run.
+    fn application_upgrade_msi_log_path(&self, run_id: &str) -> Option<PathBuf> {
+        application_updater::msi_log_path_beside_journal(
+            &self.application_upgrade_journal_path(),
+            run_id,
+        )
+    }
+
     fn cleanup_application_upgrade_staging(&self) {
         if let Err(error) = remove_dir_if_exists(&self.application_upgrade_staging_dir()) {
             tracing::warn!(error = %error, "failed to clean application upgrade staging directory");
@@ -1074,6 +1141,18 @@ impl AppUseCase {
 // maps the shared error onto `AppError`. The messages, checks and ordering are
 // the shared core's, which are the ones this module used before the extraction.
 // ---------------------------------------------------------------------------
+
+/// The failure recorded for a reboot-required run whose restart brought back
+/// the version it was meant to replace.
+fn reboot_required_not_installed_message(expected_version: &str, msi_log: Option<&Path>) -> String {
+    let mut message = format!(
+        "the upgrade to {expected_version} did not complete: Windows restarted and Scryer {SCRYER_VERSION} started again"
+    );
+    if let Some(msi_log) = msi_log {
+        message.push_str(&format!("; installer log: {}", msi_log.display()));
+    }
+    message
+}
 
 fn application_upgrade_http_client() -> AppResult<reqwest::Client> {
     application_updater::pipeline::application_upgrade_http_client(&SCRYER_PRODUCT)
@@ -2952,6 +3031,152 @@ mod tests {
         );
         assert!(backup_path.exists());
         assert!(app.application_upgrade_journal_path().exists());
+    }
+
+    #[cfg(unix)]
+    fn write_reboot_required_journal(
+        app: &AppUseCase,
+        written_at: Option<DateTime<Utc>>,
+    ) -> (JobRunRecord, PathBuf) {
+        let request = test_request(std::env::current_exe().expect("current executable"));
+        let run = test_run(&request);
+        let backup_path = app
+            .application_upgrade_root_dir()
+            .parent()
+            .expect("config dir")
+            .join("scryer.pre-upgrade");
+        fs::create_dir_all(backup_path.parent().expect("backup parent")).expect("create parent");
+        fs::write(&backup_path, b"backup").expect("write backup");
+        write_journal(
+            &app.application_upgrade_journal_path(),
+            &ApplicationUpgradeJournal {
+                schema: JOURNAL_SCHEMA.to_string(),
+                run_id: run.id.clone(),
+                expected_version: request.expected_version.clone(),
+                expected_tag: request.expected_tag.clone(),
+                executable_path: request.executable_path.clone().expect("executable path"),
+                backup_path: backup_path.clone(),
+                backup_paths: vec![backup_path.clone()],
+                phase: phases::REBOOT_REQUIRED.to_string(),
+                helper_error: None,
+                written_at,
+                macos_bundle_upgrade: false,
+                staging_dir: None,
+            },
+        )
+        .expect("write journal");
+        (run, backup_path)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restart_that_brings_back_the_old_version_fails_the_reboot_run_and_reopens_upgrades()
+    {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        let (run, backup_path) =
+            write_reboot_required_journal(&app, Some(Utc::now() - chrono::Duration::minutes(10)));
+        job_runs.seed(run.clone()).await;
+        let msi_log = app
+            .application_upgrade_msi_log_path(&run.id)
+            .expect("run ids are file-name safe");
+        fs::write(&msi_log, b"MSI (s) log").expect("write installer log");
+
+        assert!(
+            app.finalize_application_upgrade_journal_with_boot_time(Some(SystemTime::now()))
+                .await
+                .expect("finalize reboot journal")
+                .is_empty(),
+            "a run whose install never happened is not left awaiting a reboot"
+        );
+        let failed = job_runs
+            .get_job_run(&run.id)
+            .await
+            .expect("load run")
+            .expect("run exists");
+        assert_eq!(failed.status, JobRunStatus::Failed);
+        let error = failed.error_text.expect("failure recorded");
+        assert!(error.contains("did not complete"), "{error}");
+        assert!(error.contains(&msi_log.display().to_string()), "{error}");
+        assert!(
+            !app.runtime
+                .jobs
+                .job_run_tracker
+                .has_active_job(JobKey::ApplicationUpgrade)
+                .await,
+            "admission reopens once the stuck run has failed"
+        );
+        // Failing the run deletes nothing.
+        assert!(backup_path.exists());
+        assert!(msi_log.exists());
+        assert!(app.application_upgrade_journal_path().exists());
+
+        // The next boot finds the run finished and leaves it as it is.
+        assert!(
+            app.finalize_application_upgrade_journal_with_boot_time(Some(SystemTime::now()))
+                .await
+                .expect("finalize again")
+                .is_empty()
+        );
+        let unchanged = job_runs
+            .get_job_run(&run.id)
+            .await
+            .expect("load run")
+            .expect("run exists");
+        assert_eq!(unchanged.error_text.as_deref(), Some(error.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reboot_run_without_a_written_at_is_measured_from_the_run_start() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app, _actor, job_runs) =
+            crate::lib_tests::bootstrap_application_upgrade(temp.path().join("data"));
+        let (run, _backup_path) = write_reboot_required_journal(&app, None);
+        job_runs.seed(run.clone()).await;
+
+        // A boot before the run started is no evidence of a restart.
+        assert_eq!(
+            app.finalize_application_upgrade_journal_with_boot_time(Some(
+                SystemTime::from(run.started_at) - Duration::from_secs(60)
+            ))
+            .await
+            .expect("finalize before restart"),
+            vec![run.id.clone()]
+        );
+        assert_eq!(
+            job_runs
+                .get_job_run(&run.id)
+                .await
+                .expect("load run")
+                .expect("run exists")
+                .status,
+            JobRunStatus::Running
+        );
+
+        // A boot after it is, and the old version is what came back.
+        assert!(
+            app.finalize_application_upgrade_journal_with_boot_time(Some(
+                SystemTime::from(run.started_at) + Duration::from_secs(60)
+            ))
+            .await
+            .expect("finalize after restart")
+            .is_empty()
+        );
+        let failed = job_runs
+            .get_job_run(&run.id)
+            .await
+            .expect("load run")
+            .expect("run exists");
+        assert_eq!(failed.status, JobRunStatus::Failed);
+        assert!(
+            !failed
+                .error_text
+                .expect("failure recorded")
+                .contains("installer log"),
+            "no installer log is named when the helper never wrote one"
+        );
     }
 
     #[cfg(unix)]

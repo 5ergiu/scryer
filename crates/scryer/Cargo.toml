@@ -1,6 +1,6 @@
 [package]
 name = "scryer"
-version = "0.21.16"
+version = "0.21.17"
 edition.workspace = true
 
 [features]
@@ -18,7 +18,7 @@ e2e-harness = []
 jemalloc-prof = []
 
 [dependencies]
-application-updater = { git = "https://github.com/scryer-media/application-updater.git", tag = "v0.1.0" }
+application-updater = { git = "https://github.com/scryer-media/application-updater.git", rev = "e55801ce7f66c744667d4fe27dd12432a4697f33" }
 scryer-application = { path = "../scryer-application", features = ["runtime"] }
 scryer-domain = { path = "../scryer-domain" }
 scryer-interface = { path = "../scryer-interface" }
@@ -110,6 +110,10 @@ scryer-runtime-info = { path = "../scryer-runtime-info" }
 name = "scryer-tray"
 path = "src/tray.rs"
 
+[[bin]]
+name = "scryer-setup"
+path = "src/setup.rs"
+
 [target.'cfg(unix)'.dependencies]
 # `SIGTERM` for the tray's graceful stop of its server child.
 libc = "0.2"
@@ -123,7 +127,14 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_System_Registry",
+  # `SetConsoleCtrlHandler`, to clear an inherited ignore-Ctrl+C flag.
+  "Win32_System_Console",
+  # The tray's kill-on-close job object around the server it starts.
+  "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",
+  # `RegisterApplicationRestart`, so Restart Manager relaunches the tray after
+  # an installer closed it.
+  "Win32_System_Recovery",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_Graphics_Dwm",
