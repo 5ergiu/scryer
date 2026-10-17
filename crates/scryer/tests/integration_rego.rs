@@ -162,6 +162,7 @@ fn test_input() -> scryer_rules::UserRuleInput {
             audio_codecs: vec!["DDP".to_string()],
             audio_channels: Some("5.1".to_string()),
             languages_audio: vec!["eng".to_string()],
+            indexer_languages: vec![],
             languages_subtitles: vec![],
             is_dual_audio: false,
             is_atmos: false,
@@ -778,7 +779,7 @@ async fn rego_engine_rebuilds_after_create() {
     create_rule(&ctx, "Rebuild Test", SIMPLE_BONUS_REGO).await;
 
     // After creating, engine should have the user rule + any plugin-declared
-    // scoring policies (e.g. nzbgeek_vote_penalty, nzbgeek_language_bonus).
+    // scoring policies (e.g. nzbgeek_vote_penalty, indexer_language_confirmed).
     let engine = ctx.app.user_rules_engine_snapshot();
     assert!(
         engine.rule_count() >= 1,

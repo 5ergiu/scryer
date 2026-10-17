@@ -1736,6 +1736,7 @@ fn synthetic_test_input() -> UserRuleInput {
             audio_codecs: vec!["DDP".to_string()],
             audio_channels: Some("5.1".to_string()),
             languages_audio: vec!["eng".to_string()],
+            indexer_languages: vec![],
             languages_subtitles: vec!["eng".to_string()],
             is_dual_audio: false,
             is_atmos: false,
@@ -2149,6 +2150,19 @@ mod tests {
 
         assert!(!result.valid);
         assert!(result.errors[0].contains("runtime error"));
+    }
+
+    #[test]
+    fn indexer_languages_rule_field_validates() {
+        let source = r#"
+            package scryer.rules.user.indexer_languages
+            import rego.v1
+            score_entry["indexer_language_confirmed"] := 50 if {
+                "eng" in input.release.indexer_languages
+            }
+        "#;
+        let result = validate_user_rule(source, "indexer_languages").unwrap();
+        assert!(result.valid, "{:?}", result.errors);
     }
 
     #[test]

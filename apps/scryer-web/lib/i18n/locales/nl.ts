@@ -1800,6 +1800,8 @@ const nl: LocaleDictionary = {
     "Audiokanaalconfiguratie (bijv. 5.1, 7.1, 2.0)",
   "settings.refReleaseLangsAudio":
     "ISO 639-3 audiotaalcodes (bijv. eng, jpn). Bevat de talen die de indexer-listing meldde, vastgelegd toen de release werd gegrabd; bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard, dragen alleen bij wat de naam en het bestand tonen",
+  "settings.refReleaseIndexerLanguages":
+    "ISO 639-3 audiotaalcodes die de indexer-listing zelf meldde, vastgelegd toen de release werd gegrabd. Nooit afgeleid uit de naam of de titel; leeg als de indexer niets meldde",
   "settings.refReleaseLangsSub": "ISO 639-3 ondertitelingstaalcodes",
   "settings.refReleaseIsDualAudio": "True wanneer meerdere audiotracks gedetecteerd zijn",
   "settings.refReleaseIsAtmos": "True wanneer Dolby Atmos-audio aanwezig is",

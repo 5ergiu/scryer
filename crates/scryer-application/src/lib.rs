@@ -314,9 +314,9 @@ pub(crate) use audio_requirements::missing_required_audio_languages;
 #[cfg(feature = "runtime-media-analysis")]
 pub(crate) use audio_requirements::{RequiredAudioVerdict, classify_required_audio};
 pub(crate) use audio_requirements::{
-    normalize_required_audio_requirements, release_audio_language_hints_for_title,
-    required_audio_languages_match, resolve_required_audio_requirements,
-    title_audio_language_context,
+    normalize_required_audio_languages, normalize_required_audio_requirements,
+    release_audio_language_hints_for_title, required_audio_languages_match,
+    resolve_required_audio_requirements, title_audio_language_context,
 };
 pub use catalog::facets::handler::{
     FacetHandler, HydrationResult, movie_to_hydration_result, series_to_hydration_result,

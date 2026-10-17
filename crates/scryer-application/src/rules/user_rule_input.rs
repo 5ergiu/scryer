@@ -86,6 +86,16 @@ pub(crate) fn build_rule_input(
         Some(&title_language_context),
         !profile.criteria.required_audio_languages.is_empty(),
     );
+    // Only what the indexer itself reported. `languages_audio` also carries
+    // languages inferred from the name and the title, so a rule that wants an
+    // indexer's word on the audio reads this list instead.
+    let indexer_languages = crate::normalize_required_audio_languages(
+        release_runtime
+            .indexer_languages
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
 
     let mut stereoscopy_tokens = Vec::new();
     if let Some(stereo) = parsed.stereoscopy {
@@ -138,6 +148,7 @@ pub(crate) fn build_rule_input(
                 .collect(),
             audio_channels: parsed.audio_channels.clone(),
             languages_audio,
+            indexer_languages,
             languages_subtitles: parsed.languages_subtitles.clone(),
             is_dual_audio: parsed.is_dual_audio,
             is_atmos: parsed.is_atmos,
@@ -809,6 +820,91 @@ mod tests {
 
         assert!(input.release.languages_audio.contains(&"fil".to_string()));
         assert!(input.release.languages_audio.contains(&"enm".to_string()));
+    }
+
+    #[test]
+    fn indexer_languages_field_holds_only_what_the_indexer_reported() {
+        let parsed = crate::parse_release_metadata("Test.Movie.2024.FRENCH.2160p.WEB-DL");
+        let input = build_rule_input(
+            &parsed,
+            &test_profile(),
+            &test_decision(),
+            ReleaseRuntimeInfo {
+                size_bytes: None,
+                age_days: None,
+                thumbs_up: None,
+                thumbs_down: None,
+                is_password_protected: None,
+                extra: None,
+                indexer_languages: Some(&[
+                    "English".to_string(),
+                    "english".to_string(),
+                    "German".to_string(),
+                ]),
+            },
+            RuleContextInfo {
+                title_id: None,
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: false,
+                existing_score: None,
+                search_mode: "auto",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: None,
+                is_filler: false,
+            },
+            None,
+        );
+
+        assert_eq!(input.release.indexer_languages, vec!["eng", "deu"]);
+        assert!(input.release.languages_audio.contains(&"fra".to_string()));
+    }
+
+    #[test]
+    fn inferred_audio_languages_never_reach_indexer_languages() {
+        let mut profile = test_profile();
+        profile.criteria.required_audio_languages = vec!["eng".to_string()];
+        let input = build_rule_input(
+            &test_parsed(),
+            &profile,
+            &test_decision(),
+            ReleaseRuntimeInfo {
+                size_bytes: None,
+                age_days: None,
+                thumbs_up: None,
+                thumbs_down: None,
+                is_password_protected: None,
+                extra: None,
+                indexer_languages: None,
+            },
+            RuleContextInfo {
+                title_id: None,
+                library_name: None,
+                category: Some("movie"),
+                original_language: None,
+                original_country: None,
+                title_tags: &[],
+                has_existing_file: false,
+                existing_score: None,
+                search_mode: "auto",
+                runtime_minutes: None,
+                coverage_total_runtime_minutes: None,
+                coverage_member_runtime_minutes: None,
+                coverage_member_count: None,
+                is_filler: false,
+            },
+            None,
+        );
+
+        assert_eq!(input.release.languages_audio, vec!["eng"]);
+        assert!(input.release.indexer_languages.is_empty());
+        let value = serde_json::to_value(&input).expect("serialize");
+        assert_eq!(value["release"]["indexer_languages"], serde_json::json!([]));
     }
 
     #[test]

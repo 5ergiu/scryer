@@ -2135,6 +2135,8 @@ const en: LocaleDictionary = {
     "Audio channel configuration (e.g. 5.1, 7.1, 2.0)",
   "settings.refReleaseLangsAudio":
     "ISO 639-3 audio language codes (e.g. eng, jpn). Includes the languages the indexer listing reported, frozen when the release was grabbed; files that were scanned in, adopted, or imported before listing snapshots were kept contribute only what the name and file show",
+  "settings.refReleaseIndexerLanguages":
+    "ISO 639-3 audio language codes the indexer listing itself reported, frozen when the release was grabbed. Never inferred from the name or title; empty when the indexer said nothing",
   "settings.refReleaseLangsSub": "ISO 639-3 subtitle language codes",
   "settings.refReleaseIsDualAudio": "True when multiple audio tracks detected",
   "settings.refReleaseIsAtmos": "True when Dolby Atmos audio is present",

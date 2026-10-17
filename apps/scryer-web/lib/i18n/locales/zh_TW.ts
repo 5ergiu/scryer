@@ -1783,6 +1783,7 @@ const zh_TW: LocaleDictionary = {
   "settings.refReleaseNormalizedTokens": "發行版本解析器產生的已排序正規化標記",
   "settings.refReleaseAudioChannels": "聲道設定（例如 5.1、7.1、2.0）",
   "settings.refReleaseLangsAudio": "ISO 639-3 音訊語言代碼（例如 eng、jpn）",
+  "settings.refReleaseIndexerLanguages": "索引器列表本身回報的 ISO 639-3 音訊語言代碼，於抓取發行時凍結；從不由名稱或作品推斷，索引器未回報時為空",
   "settings.refReleaseLangsSub": "ISO 639-3 字幕語言代碼",
   "settings.refReleaseIsDualAudio": "偵測到多個音軌時為 true",
   "settings.refReleaseIsAtmos": "存在杜比全景聲 (Dolby Atmos) 音訊時為 true",
