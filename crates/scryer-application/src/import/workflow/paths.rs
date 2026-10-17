@@ -911,8 +911,12 @@ impl ImportVideoFile {
 /// with (Weaver shortens a name past 240 bytes, for one) its posted name to
 /// parse. Only a file directly named by the report and inside the download's
 /// folder takes one; a path separator in the posted name is never followed.
-fn apply_posted_file_names(completed: &CompletedDownload, files: &mut [ImportVideoFile]) {
-    if completed.posted_file_names.is_empty() {
+fn apply_posted_file_names(
+    completed: &CompletedDownload,
+    posted_file_names: &[PostedFileName],
+    files: &mut [ImportVideoFile],
+) {
+    if posted_file_names.is_empty() {
         return;
     }
     let dest_dir = Path::new(&completed.dest_dir);
@@ -923,11 +927,7 @@ fn apply_posted_file_names(completed: &CompletedDownload, files: &mut [ImportVid
         let Some(name) = file.physical.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let Some(posted) = completed
-            .posted_file_names
-            .iter()
-            .find(|posted| posted.name == name)
-        else {
+        let Some(posted) = posted_file_names.iter().find(|posted| posted.name == name) else {
             continue;
         };
         let posted_name = posted.posted_name.trim().replace(['/', '\\'], "_");
@@ -941,6 +941,16 @@ fn apply_posted_file_names(completed: &CompletedDownload, files: &mut [ImportVid
         );
         file.logical_name = Some(posted_name);
     }
+}
+
+/// Download clients cut a file name to fit their own limit (Weaver at 240
+/// bytes, SABnzbd at 245), and the cut lands just under it once a split
+/// character and trailing separators are dropped. A name at least this long
+/// was probably cut.
+const LIKELY_CUT_FILE_NAME_MIN_BYTES: usize = 224;
+
+fn file_name_looks_cut(name: &str) -> bool {
+    name.len() >= LIKELY_CUT_FILE_NAME_MIN_BYTES
 }
 
 /// srrdb filename recovery for one `run_import` call.
@@ -959,6 +969,8 @@ struct SrrdbFilenameRecovery {
     resolved: HashMap<PathBuf, Option<String>>,
     /// Set by the first timeout, transport failure, 429 or 5xx.
     tripped: bool,
+    /// The client's posted names for this download, once asked for.
+    posted_file_names: Option<Vec<PostedFileName>>,
 }
 
 impl SrrdbFilenameRecovery {
@@ -986,6 +998,58 @@ impl SrrdbFilenameRecovery {
         parsed_usable_release_from_file_stem(path).is_none()
     }
 
+    /// The names this download's files were posted with: the ones the
+    /// completed download already carries, else, when a file name looks cut,
+    /// the client's answer, asked for at most once per import. A failure reads
+    /// as no names, which is what the import did before clients reported them.
+    ///
+    /// TODO(2026-11-17): once Weaver's history reads carry `postedFileNames`,
+    /// read them from `completed` alone and drop the cut-name check and this
+    /// second request.
+    async fn posted_file_names<'a>(
+        &'a mut self,
+        app: &AppUseCase,
+        completed: &'a CompletedDownload,
+        files: &[ImportVideoFile],
+    ) -> &'a [PostedFileName] {
+        if !completed.posted_file_names.is_empty() {
+            return &completed.posted_file_names;
+        }
+        if self.posted_file_names.is_none() {
+            let dest_dir = Path::new(&completed.dest_dir);
+            let any_cut = files.iter().any(|file| {
+                file.physical.starts_with(dest_dir)
+                    && file
+                        .physical
+                        .file_name()
+                        .is_some_and(|name| file_name_looks_cut(&name.to_string_lossy()))
+            });
+            if !any_cut {
+                return &[];
+            }
+            let names = app
+                .services
+                .integrations
+                .download_client
+                .posted_file_names_for_source(
+                    &completed.client_id,
+                    &completed.client_type,
+                    &completed.download_client_item_id,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::debug!(
+                        error = %error,
+                        download_client_item_id = %completed.download_client_item_id,
+                        "could not read the posted file names; parsing the names on disk"
+                    );
+                    Vec::new()
+                });
+            self.posted_file_names = Some(names);
+        }
+        self.posted_file_names.as_deref().unwrap_or_default()
+    }
+
     /// Pair each physical video file with the name parsing should read.
     ///
     /// `needs_own_name` is the caller's judgement that these files have to
@@ -1006,7 +1070,8 @@ impl SrrdbFilenameRecovery {
             .into_iter()
             .map(ImportVideoFile::physical)
             .collect();
-        apply_posted_file_names(completed, &mut files);
+        let posted_file_names = self.posted_file_names(app, completed, &files).await;
+        apply_posted_file_names(completed, posted_file_names, &mut files);
 
         // The port is absent in every assembly that does not wire the
         // production adapter, which is indistinguishable from the switch being

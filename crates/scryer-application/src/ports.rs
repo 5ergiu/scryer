@@ -11157,6 +11157,17 @@ pub trait DownloadClient: Send + Sync {
             }))
     }
 
+    /// The names a completed download's renamed files were posted with, for a
+    /// client that records them. Empty for every other client.
+    async fn posted_file_names_for_source(
+        &self,
+        _client_id: &str,
+        _client_type: &str,
+        _download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        Ok(Vec::new())
+    }
+
     /// Fetch a single completed download by its client-scoped source
     /// reference.
     ///

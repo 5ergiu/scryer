@@ -3463,7 +3463,7 @@ fn shortened_file_import_episode(posted_file_names: Vec<PostedFileName>) -> Opti
         .collect();
     let mut files = vec![ImportVideoFile::physical(file_path)];
 
-    apply_posted_file_names(&completed, &mut files);
+    apply_posted_file_names(&completed, &completed.posted_file_names, &mut files);
 
     let parsed = build_augmented_episode_import_metadata_for_title(
         &files[0].parse_path(),
@@ -3479,6 +3479,17 @@ fn posted(name: &str, posted_name: &str) -> PostedFileName {
         name: name.to_string(),
         posted_name: posted_name.to_string(),
     }
+}
+
+#[test]
+fn only_a_name_near_a_client_cut_limit_looks_cut() {
+    let stem = |len: usize| format!("{}.mkv", "a".repeat(len - 4));
+    assert!(!file_name_looks_cut(&stem(223)));
+    assert!(file_name_looks_cut(&stem(224)));
+    assert!(file_name_looks_cut(&stem(240)));
+    assert!(!file_name_looks_cut(
+        "Harbor.Pals.S01E02.1080p.WEB.H264-LANTERNS.mkv"
+    ));
 }
 
 #[test]
@@ -3514,7 +3525,7 @@ fn a_posted_name_never_reaches_outside_its_own_file() {
         ImportVideoFile::physical(outside.clone()),
     ];
 
-    apply_posted_file_names(&completed, &mut files);
+    apply_posted_file_names(&completed, &completed.posted_file_names, &mut files);
 
     assert_eq!(
         files[0].logical_name.as_deref(),
