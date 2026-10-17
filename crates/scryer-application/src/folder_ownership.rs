@@ -702,6 +702,18 @@ enum TitleFolderClaimLayout {
     Conventional,
 }
 
+/// Every check [`claim_title_folder_if_missing`] makes before recording
+/// `folder_path` for a title that has no folder, without recording it.
+pub(crate) async fn ensure_title_folder_claimable(
+    app: &AppUseCase,
+    title: &Title,
+    folder_path: &Path,
+) -> AppResult<()> {
+    ensure_folder_available_to_title(app, title, folder_path).await?;
+    ensure_unowned_folder_claimable(app, title, folder_path, TitleFolderClaimLayout::Configured)
+        .await
+}
+
 async fn claim_title_folder_with_layout(
     app: &AppUseCase,
     title: &mut Title,
@@ -713,6 +725,23 @@ async fn claim_title_folder_with_layout(
         return Ok(());
     }
 
+    ensure_unowned_folder_claimable(app, title, folder_path, layout).await?;
+    let folder_path = path_to_stored_string(folder_path);
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, &folder_path)
+        .await?;
+    title.folder_path = Some(folder_path);
+    Ok(())
+}
+
+async fn ensure_unowned_folder_claimable(
+    app: &AppUseCase,
+    title: &Title,
+    folder_path: &Path,
+    layout: TitleFolderClaimLayout,
+) -> AppResult<()> {
     ensure_folder_move_available_to_title(app, title, folder_path).await?;
     // Imports reserve missing or empty destinations before writing media. A
     // destination with contents must not hold other titles' folders; stray
@@ -771,12 +800,6 @@ async fn claim_title_folder_with_layout(
             "cannot claim a title folder outside its library roots".into(),
         ));
     }
-    app.services
-        .catalog
-        .titles
-        .set_folder_path(&title.id, &folder_path)
-        .await?;
-    title.folder_path = Some(folder_path);
     Ok(())
 }
 

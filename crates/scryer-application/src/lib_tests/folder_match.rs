@@ -2395,3 +2395,108 @@ async fn folder_reconciliation_of_an_unchanged_folder_keeps_analysis_and_layout_
         folder.to_str()
     );
 }
+
+impl FolderMatchFixture {
+    async fn create_title_without_folder(&self, name: &str) -> Title {
+        self.app
+            .add_title(
+                &self.user,
+                NewTitle {
+                    name: name.into(),
+                    facet: self.facet.clone(),
+                    monitored: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create title")
+    }
+
+    async fn stored_folder_path(&self, title_id: &str) -> Option<String> {
+        self.app
+            .services
+            .catalog
+            .titles
+            .get_by_id(title_id)
+            .await
+            .expect("load title")
+            .expect("title exists")
+            .folder_path
+            .filter(|path| !path.trim().is_empty())
+    }
+}
+
+#[tokio::test]
+async fn a_title_rescan_records_the_folder_its_files_are_in() {
+    let fixture = FolderMatchFixture::new().await;
+    let folder = fixture.folder("Quillmere (2026)");
+    let file = fixture.write_media(&folder, "Quillmere.2026.mkv");
+    fixture.scanner.set_files(&[&file]).await;
+    let title = fixture.create_title_without_folder("Quillmere").await;
+    fixture.seed_media_row(&title.id, &file).await;
+
+    fixture
+        .app
+        .scan_title_library(&fixture.user, &title.id)
+        .await
+        .expect("rescan the title");
+
+    assert_eq!(
+        fixture.stored_folder_path(&title.id).await.as_deref(),
+        Some(folder.to_string_lossy().as_ref())
+    );
+    assert!(file.exists());
+    let files = fixture
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+}
+
+#[tokio::test]
+async fn a_title_rescan_records_no_folder_it_cannot_settle() {
+    let fixture = FolderMatchFixture::new().await;
+    let first = fixture.write_media(&fixture.folder("Quillmere (2026)"), "Quillmere.2026.mkv");
+    let second = fixture.write_media(&fixture.folder("Quillmere Copy"), "Quillmere.2026.mkv");
+    let loose = fixture.write_media(fixture.root.path(), "Vellicor.2026.mkv");
+    let owned_folder = fixture.folder("Ossery (2026)");
+    let owned = fixture.write_media(&owned_folder, "Ossery.2026.mkv");
+    let stray = fixture.write_media(&owned_folder, "Brindle.2026.mkv");
+    fixture
+        .scanner
+        .set_files(&[&first, &second, &loose, &owned, &stray])
+        .await;
+    let split = fixture.create_title_without_folder("Quillmere").await;
+    fixture.seed_media_row(&split.id, &first).await;
+    fixture.seed_media_row(&split.id, &second).await;
+    let at_root = fixture.create_title_without_folder("Vellicor").await;
+    fixture.seed_media_row(&at_root.id, &loose).await;
+    let owner = fixture
+        .create_title_with_folder("Ossery", &owned_folder)
+        .await;
+    fixture.seed_media_row(&owner.id, &owned).await;
+    let intruder = fixture.create_title_without_folder("Brindle").await;
+    fixture.seed_media_row(&intruder.id, &stray).await;
+
+    for title in [&split, &at_root, &intruder] {
+        fixture
+            .app
+            .scan_title_library(&fixture.user, &title.id)
+            .await
+            .expect("rescan the title");
+        assert_eq!(
+            fixture.stored_folder_path(&title.id).await,
+            None,
+            "{}",
+            title.name
+        );
+    }
+    assert_eq!(
+        fixture.stored_folder_path(&owner.id).await.as_deref(),
+        Some(owned_folder.to_string_lossy().as_ref())
+    );
+    for path in [&first, &second, &loose, &owned, &stray] {
+        assert!(path.exists(), "{}", path.display());
+    }
+}

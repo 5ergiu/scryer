@@ -79,6 +79,7 @@ mod series_metadata;
 mod series_title_hydration;
 mod subtitle_permissions;
 mod title_catalog_reads;
+mod title_delete_missing_folder;
 mod title_hydration;
 mod title_image_cache;
 mod title_matcher_invalidation;
