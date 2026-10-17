@@ -1670,39 +1670,43 @@ score_entry["nzbgeek_thumbs_down"] := penalty if {
     }
 
     #[test]
-    fn plugin_language_bonus_policy() {
+    fn plugin_indexer_language_policy_ignores_inferred_languages() {
         let rego = r#"package scryer.rules.user.original_doesnt_matter
 import rego.v1
 
-score_entry["nzbgeek_english_confirmed"] := 200 if {
-    langs := input.release.extra.languages
-    count(langs) > 0
-    some lang in langs
-    lower(lang) == "english"
+score_entry["indexer_language_confirmed"] := 200 if {
+    required := {lower(lang) | some lang in input.profile.required_audio_languages}
+    some lang in input.release.indexer_languages
+    lower(lang) in required
 }
 "#;
-        let id = "plugin_nzbgeek_nzbgeek_language_bonus";
-        let rewritten = rewrite_package_declaration(rego, id);
-
+        let id = "plugin_newznab_indexer_language_confirmed";
         let policy = UserPolicy {
             id: id.to_string(),
             name: id.to_string(),
-            rego_source: rewritten,
+            rego_source: rewrite_package_declaration(rego, id),
             origin: PolicyOrigin::User,
             applied_facets: vec![],
         };
-
         let engine = UserRulesEngine::build(&[policy]).unwrap();
         let mut evaluator = engine.evaluator();
+
         let mut input = test_input();
-        input.release.extra.insert(
-            "languages".to_string(),
-            serde_json::json!(["English", "French"]),
-        );
-        let result = evaluator.evaluate(&input, "movie").unwrap();
-        assert_eq!(result.entries.len(), 1);
-        assert_eq!(result.entries[0].code, "nzbgeek_english_confirmed");
-        assert_eq!(result.entries[0].delta, 200);
+        input.profile.required_audio_languages = vec!["eng".to_string()];
+        input.release.languages_audio = vec!["eng".to_string()];
+        input.release.indexer_languages = vec![];
+        let inferred = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(inferred.entries.is_empty(), "{:?}", inferred.entries);
+
+        input.release.indexer_languages = vec!["fra".to_string()];
+        let other = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(other.entries.is_empty(), "{:?}", other.entries);
+
+        input.release.indexer_languages = vec!["fra".to_string(), "eng".to_string()];
+        let reported = evaluator.evaluate(&input, "movie").unwrap();
+        assert_eq!(reported.entries.len(), 1);
+        assert_eq!(reported.entries[0].code, "indexer_language_confirmed");
+        assert_eq!(reported.entries[0].delta, 200);
     }
 
     #[test]

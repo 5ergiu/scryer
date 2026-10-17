@@ -779,7 +779,7 @@ async fn rego_engine_rebuilds_after_create() {
     create_rule(&ctx, "Rebuild Test", SIMPLE_BONUS_REGO).await;
 
     // After creating, engine should have the user rule + any plugin-declared
-    // scoring policies (e.g. nzbgeek_vote_penalty, nzbgeek_language_bonus).
+    // scoring policies (e.g. nzbgeek_vote_penalty, indexer_language_confirmed).
     let engine = ctx.app.user_rules_engine_snapshot();
     assert!(
         engine.rule_count() >= 1,
