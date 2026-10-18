@@ -9520,7 +9520,7 @@ async fn resolve_pending_import_creates_unmonitored_movie_title_and_keeps_item_b
     assert_eq!(result.title.name, "Matched Movie");
     assert!(result.title.tags.is_empty());
     assert_ne!(result.title.root_folder_id, "should-be-cleared");
-    assert_eq!(result.title.min_availability.as_deref(), Some("announced"));
+    assert_eq!(result.title.min_availability.as_deref(), Some("released"));
     assert!(result.library_scan.is_none());
     assert!(matches!(
         result.metadata_hydration_state,
