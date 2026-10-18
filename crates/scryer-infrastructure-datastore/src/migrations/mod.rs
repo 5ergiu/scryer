@@ -10,6 +10,9 @@ pub mod canonical_download_identity;
 #[cfg(test)]
 #[path = "cropped_resolution_relabel_upgrade_tests.rs"]
 mod cropped_resolution_relabel_upgrade_tests;
+pub mod delay_profile_tables;
+#[cfg(test)]
+mod delay_profile_tables_upgrade_tests;
 #[cfg(test)]
 mod discovery_query_indexes_upgrade_tests;
 pub mod event_storage;
@@ -893,6 +896,9 @@ async fn run_rust_hook(
         }
         "scrub_stored_release_url_credentials" => {
             release_url_scrub::scrub_stored_release_url_credentials_sqlite(tx).await
+        }
+        "import_delay_profile_catalog" => {
+            delay_profile_tables::import_delay_profile_catalog_sqlite(tx).await
         }
         #[cfg(test)]
         "test_insert_hook_marker" => {

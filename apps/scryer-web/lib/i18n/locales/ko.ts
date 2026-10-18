@@ -546,6 +546,9 @@ const ko: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "적용 대상",
   "settings.delayProfileFacetsHelp":
     "이 프로필이 적용되는 콘텐츠 유형입니다. 모두 선택 해제하면 모든 유형에 적용됩니다.",
+  "settings.delayProfileLibrariesLabel": "라이브러리",
+  "settings.delayProfileLibrariesHelp": "이 프로필이 적용되는 라이브러리입니다. 모두 선택된 상태로 두면 모든 라이브러리에 적용됩니다. 프로필의 마지막 라이브러리를 삭제하면 프로필이 비활성화됩니다.",
+  "settings.delayProfileUnknownLibrary": "알 수 없는 라이브러리",
   "settings.delayProfileAllFacets": "전체",
   "settings.delayProfileTagsLabel": "태그",
   "settings.delayProfileTagsPlaceholder":

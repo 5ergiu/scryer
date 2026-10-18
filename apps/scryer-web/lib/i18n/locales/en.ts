@@ -827,6 +827,9 @@ const en: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "Applies to",
   "settings.delayProfileFacetsHelp":
     "Which content types this profile applies to. Leave all unchecked for all types.",
+  "settings.delayProfileLibrariesLabel": "Libraries",
+  "settings.delayProfileLibrariesHelp": "Libraries this profile applies to. Leave all selected to apply to every library. Deleting a profile's last library disables the profile.",
+  "settings.delayProfileUnknownLibrary": "Unknown library",
   "settings.delayProfileAllFacets": "All",
   "settings.delayProfileTagsLabel": "Tags",
   "settings.delayProfileTagsPlaceholder":

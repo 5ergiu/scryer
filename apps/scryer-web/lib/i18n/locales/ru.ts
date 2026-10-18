@@ -770,6 +770,9 @@ const ru: LocaleDictionary = {
     "settings.delayProfileFacetsLabel": "Применяется к",
     "settings.delayProfileFacetsHelp":
         "Типы контента, к которым применяется этот профиль. Оставьте все флажки снятыми, чтобы применять ко всем типам.",
+    "settings.delayProfileLibrariesLabel": "Библиотеки",
+    "settings.delayProfileLibrariesHelp": "Библиотеки, к которым применяется этот профиль. Оставьте выбранными все, чтобы применять его ко всем библиотекам. При удалении последней библиотеки профиля профиль отключается.",
+    "settings.delayProfileUnknownLibrary": "Неизвестная библиотека",
     "settings.delayProfileAllFacets": "Все",
     "settings.delayProfileTagsLabel": "Теги",
     "settings.delayProfileTagsPlaceholder":

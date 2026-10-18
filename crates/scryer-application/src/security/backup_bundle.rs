@@ -679,6 +679,22 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         classification: BackupTableClassification::ResetOnRestore,
     },
     BackupTableCatalogEntry {
+        table: "delay_profiles",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "delay_profile_facets",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "delay_profile_tags",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
+        table: "delay_profile_libraries",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
         table: "domain_events",
         classification: BackupTableClassification::Export,
     },

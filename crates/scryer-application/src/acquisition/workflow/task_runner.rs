@@ -4461,6 +4461,7 @@ async fn process_single_target(
                             &delay_profiles,
                             &search_title.tags,
                             &search_title.facet,
+                            &search_title.library_id,
                         )
                         .map(|profile| {
                             profile.release_age_unknown_escalation_deadline(

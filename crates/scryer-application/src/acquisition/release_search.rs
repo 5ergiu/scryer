@@ -1756,6 +1756,7 @@ pub(crate) fn automatic_candidate_delay_decision(
         delay_profiles,
         &title.tags,
         &title.facet,
+        &title.library_id,
         candidate.source_kind,
         candidate
             .published_at

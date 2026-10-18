@@ -27,6 +27,7 @@ use scryer_application::{
     SubtitleDownloadRepository,
 };
 use scryer_infrastructure_acquisition::{
+    delay_profile_store::DelayProfileStore,
     downloads::{
         clients::NzbgetDownloadClient, config_store::DownloadClientConfigStore,
         staged_nzb_store::FileSystemStagedNzbStore,
@@ -985,6 +986,7 @@ impl TestContext {
         .with_housekeeping(Arc::new(housekeeping_store))
         .with_subtitle_downloads(Arc::new(subtitle_download_store))
         .with_libraries(Arc::new(library_store.clone()))
+        .with_delay_profiles(Arc::new(DelayProfileStore::new(datastore.clone())))
         .with_external_account_store(Arc::new(user_store.clone()))
         .with_user_ui_settings_store(ui_settings)
         .with_external_identity_verifier(external_identity_verifier)

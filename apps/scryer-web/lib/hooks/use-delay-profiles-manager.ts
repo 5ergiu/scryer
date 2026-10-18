@@ -3,7 +3,7 @@ import {
   deleteDelayProfileMutation,
   upsertDelayProfileMutation,
 } from "@/lib/graphql/mutations";
-import { delayProfilesQuery } from "@/lib/graphql/queries";
+import { delayProfilesQuery, librariesQuery } from "@/lib/graphql/queries";
 import { useClient } from "urql";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
@@ -14,6 +14,7 @@ import {
   validateDelayProfileDraft,
 } from "@/lib/utils/delay-profiles";
 import type { DelayProfileDraft, ParsedDelayProfile } from "@/lib/types/delay-profiles";
+import type { LibraryRecord } from "@/lib/types";
 import { useSettingsSubscription } from "@/lib/hooks/use-settings-subscription";
 
 type DelayProfilePayload = {
@@ -29,6 +30,7 @@ type DelayProfilePayload = {
   bypassIfHighestQuality?: boolean;
   appliesToFacets: Array<"MOVIE" | "SERIES" | "ANIME">;
   tags: string[];
+  libraryIds: string[];
   priority: number;
   enabled: boolean;
 };
@@ -47,6 +49,7 @@ function fromDelayProfilePayload(profile: DelayProfilePayload): ParsedDelayProfi
     bypass_if_highest_quality: profile.bypassIfHighestQuality ?? false,
     applies_to_facets: profile.appliesToFacets,
     tags: profile.tags,
+    library_ids: profile.libraryIds,
     priority: profile.priority,
     enabled: profile.enabled,
   };
@@ -66,6 +69,7 @@ function toDelayProfileInput(profile: ParsedDelayProfile) {
     bypassIfHighestQuality: profile.bypass_if_highest_quality,
     appliesToFacets: profile.applies_to_facets,
     tags: profile.tags,
+    libraryIds: profile.library_ids,
     priority: profile.priority,
     enabled: profile.enabled,
   };
@@ -76,6 +80,7 @@ function cloneDelayProfileDraft(profile: DelayProfileDraft): DelayProfileDraft {
     ...profile,
     applies_to_facets: [...profile.applies_to_facets],
     tags: [...profile.tags],
+    library_ids: [...profile.library_ids],
   };
 }
 
@@ -87,6 +92,7 @@ export function useDelayProfilesManager() {
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [profiles, setProfiles] = React.useState<ParsedDelayProfile[]>([]);
+  const [libraries, setLibraries] = React.useState<LibraryRecord[]>([]);
   const [draft, setDraft] = React.useState<DelayProfileDraft>(() =>
     cloneDelayProfileDraft(buildDelayProfileTemplate([])),
   );
@@ -95,10 +101,18 @@ export function useDelayProfilesManager() {
   const loadProfiles = React.useCallback(async () => {
     setLoading(true);
     try {
-      const result = await client.query(delayProfilesQuery, {}).toPromise();
+      // Deleting a library can unlink and disable profiles, so both lists
+      // reload together on the same settings event.
+      const [result, libraryResult] = await Promise.all([
+        client.query(delayProfilesQuery, {}, { requestPolicy: "network-only" }).toPromise(),
+        client.query(librariesQuery, {}, { requestPolicy: "network-only" }).toPromise(),
+      ]);
       if (result.error) throw result.error;
       const parsed = (result.data?.delayProfiles ?? []).map(fromDelayProfilePayload);
       setProfiles(parsed);
+      if (!libraryResult.error) {
+        setLibraries((libraryResult.data?.libraries ?? []) as LibraryRecord[]);
+      }
       setParseError("");
     } catch (err) {
       setParseError(String(err));
@@ -211,6 +225,7 @@ export function useDelayProfilesManager() {
     loading,
     saving,
     profiles,
+    libraries,
     parseError,
     draft,
     setDraft,

@@ -380,6 +380,7 @@ fn from_delay_profile(profile: scryer_application::DelayProfile) -> DelayProfile
             .filter_map(|facet| MediaFacetValue::parse(&facet))
             .collect(),
         tags: profile.tags,
+        library_ids: profile.library_ids.into_iter().map(ID::from).collect(),
         priority: profile.priority,
         enabled: profile.enabled,
     }
@@ -1428,11 +1429,23 @@ impl SettingsMutations {
             require_config_app_permission(ctx, scryer_domain::AppPermission::ManageCatalogSettings)
                 .await?;
 
+        let profile_id = input.id.to_string();
+        let library_ids = match input.library_ids {
+            Some(library_ids) => library_ids.into_iter().map(|id| id.to_string()).collect(),
+            None => app
+                .get_delay_profiles(&actor)
+                .await
+                .map_err(to_gql_error)?
+                .into_iter()
+                .find(|profile| profile.id.trim() == profile_id.trim())
+                .map(|profile| profile.library_ids)
+                .unwrap_or_default(),
+        };
         let profile = app
             .upsert_delay_profile(
                 &actor,
                 scryer_application::DelayProfile {
-                    id: input.id.to_string(),
+                    id: profile_id,
                     name: input.name,
                     usenet_delay_minutes: input.usenet_delay_minutes as i64,
                     torrent_delay_minutes: input.torrent_delay_minutes as i64,
@@ -1448,6 +1461,7 @@ impl SettingsMutations {
                         .map(|facet| facet.into_domain().as_str().to_string())
                         .collect(),
                     tags: input.tags,
+                    library_ids,
                     priority: input.priority,
                     enabled: input.enabled,
                 },

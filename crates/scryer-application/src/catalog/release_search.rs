@@ -1083,6 +1083,7 @@ impl AppUseCase {
                 &delay_profiles,
                 &scored_title.tags,
                 &scored_title.facet,
+                &scored_title.library_id,
             );
             let preferred_source_kind = delay_profile
                 .map(|profile| match profile.preferred_protocol {

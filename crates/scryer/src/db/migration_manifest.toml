@@ -3180,6 +3180,29 @@ file = "postgres/migrations/0292_download_submission_grabbed_file_names.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 293
+description = "delay profile tables"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0293_delay_profile_tables.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0293_delay_profile_tables.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration.steps]]
+kind = "rust"
+hook_id = "import_delay_profile_catalog"
+engine = "all"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

@@ -157,29 +157,6 @@ fn merge_quality_profiles(
     }
     merged
 }
-fn normalize_delay_profile(mut profile: crate::DelayProfile) -> crate::DelayProfile {
-    profile.id = profile.id.trim().to_string();
-    profile.name = profile.name.trim().to_string();
-
-    let mut seen_facets = HashSet::new();
-    profile.applies_to_facets = profile
-        .applies_to_facets
-        .into_iter()
-        .filter_map(|facet| MediaFacet::parse(&facet).map(|parsed| parsed.as_str().to_string()))
-        .filter(|facet| seen_facets.insert(facet.clone()))
-        .collect();
-
-    let mut seen_tags = HashSet::new();
-    profile.tags = profile
-        .tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .filter(|tag| seen_tags.insert(tag.to_ascii_lowercase()))
-        .collect();
-
-    profile
-}
 fn parse_scoring_persona_setting(value: Option<String>) -> Option<ScoringPersona> {
     match value?.trim() {
         "Balanced" | "balanced" => Some(ScoringPersona::Balanced),
@@ -316,20 +293,39 @@ impl AppUseCase {
 }
 impl AppUseCase {
     pub(crate) async fn delay_profiles(&self) -> AppResult<Vec<crate::DelayProfile>> {
-        let profiles = self
-            .read_setting_json_value::<Vec<crate::DelayProfile>>(
-                crate::delay_profile::DELAY_PROFILE_CATALOG_KEY,
-                None,
-            )
+        self.services.config.delay_profiles.list().await
+    }
+
+    /// Reject library ids that name no library. The table's foreign key would
+    /// refuse them too, but as a repository error rather than a message an
+    /// operator can act on.
+    async fn validate_delay_profile_libraries(
+        &self,
+        profile: &crate::DelayProfile,
+    ) -> AppResult<()> {
+        if profile.library_ids.is_empty() {
+            return Ok(());
+        }
+        let known = self
+            .services
+            .catalog
+            .libraries
+            .list(None)
             .await?
-            .unwrap_or_default()
             .into_iter()
-            .map(normalize_delay_profile)
-            .collect::<Vec<_>>();
-
-        crate::validate_delay_profile_catalog(&profiles).map_err(AppError::Validation)?;
-
-        Ok(profiles)
+            .map(|library| library.id)
+            .collect::<HashSet<_>>();
+        if let Some(unknown) = profile
+            .library_ids
+            .iter()
+            .find(|library_id| !known.contains(*library_id))
+        {
+            return Err(AppError::Validation(format!(
+                "delay profile '{}' names an unknown library '{unknown}'",
+                profile.id
+            )));
+        }
+        Ok(())
     }
 }
 impl AppUseCase {
@@ -924,7 +920,7 @@ impl AppUseCase {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageCatalogSettings)
             .await?;
 
-        let profile = normalize_delay_profile(profile);
+        let profile = crate::normalize_delay_profile(profile);
         if profile.id.is_empty() {
             return Err(AppError::Validation(
                 "delay profile id is required".to_string(),
@@ -942,12 +938,12 @@ impl AppUseCase {
         }
 
         crate::validate_delay_profile_catalog(&profiles).map_err(AppError::Validation)?;
-        self.upsert_system_setting_json(
-            crate::delay_profile::DELAY_PROFILE_CATALOG_KEY,
-            &profiles,
-            Some(actor.id.clone()),
-        )
-        .await?;
+        self.validate_delay_profile_libraries(&profile).await?;
+        self.services
+            .config
+            .delay_profiles
+            .save_many(vec![profile.clone()])
+            .await?;
 
         self.emit_configuration_changed_event(
             actor,
@@ -976,21 +972,15 @@ impl AppUseCase {
             ));
         }
 
-        let profiles = self.delay_profiles().await?;
-        if !profiles.iter().any(|profile| profile.id == profile_id) {
+        if !self
+            .services
+            .config
+            .delay_profiles
+            .delete(&profile_id)
+            .await?
+        {
             return Err(AppError::NotFound(format!("delay profile {profile_id}")));
         }
-
-        let next_profiles: Vec<crate::DelayProfile> = profiles
-            .into_iter()
-            .filter(|profile| profile.id != profile_id)
-            .collect();
-        self.upsert_system_setting_json(
-            crate::delay_profile::DELAY_PROFILE_CATALOG_KEY,
-            &next_profiles,
-            Some(actor.id.clone()),
-        )
-        .await?;
 
         self.emit_configuration_changed_event(
             actor,

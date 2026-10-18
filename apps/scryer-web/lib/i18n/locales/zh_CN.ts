@@ -535,6 +535,9 @@ const zh_CN: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "适用于",
   "settings.delayProfileFacetsHelp":
     "此配置适用的内容类型。全部取消选中则适用于所有类型。",
+  "settings.delayProfileLibrariesLabel": "媒体库",
+  "settings.delayProfileLibrariesHelp": "此配置适用的媒体库。保持全选则适用于所有媒体库。删除配置的最后一个媒体库会停用该配置。",
+  "settings.delayProfileUnknownLibrary": "未知媒体库",
   "settings.delayProfileAllFacets": "全部",
   "settings.delayProfileTagsLabel": "标签",
   "settings.delayProfileTagsPlaceholder": "逗号分隔的标签（留空 = 默认通用）",

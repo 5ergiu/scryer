@@ -554,6 +554,9 @@ const ja: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "適用対象",
   "settings.delayProfileFacetsHelp":
     "このプロファイルが適用されるコンテンツタイプです。すべてチェックを外すとすべてのタイプに適用されます。",
+  "settings.delayProfileLibrariesLabel": "ライブラリ",
+  "settings.delayProfileLibrariesHelp": "このプロファイルを適用するライブラリ。すべて選択したままにすると、すべてのライブラリに適用されます。プロファイルの最後のライブラリを削除すると、プロファイルは無効になります。",
+  "settings.delayProfileUnknownLibrary": "不明なライブラリ",
   "settings.delayProfileAllFacets": "すべて",
   "settings.delayProfileTagsLabel": "タグ",
   "settings.delayProfileTagsPlaceholder":

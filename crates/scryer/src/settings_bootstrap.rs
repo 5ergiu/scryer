@@ -1066,14 +1066,6 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             default_value_json: "null",
             is_sensitive: false,
         },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.delay_profiles",
-            data_type: "json",
-            default_value_json: "[]",
-            is_sensitive: false,
-        },
         // NFO sidecar writing on import
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_MEDIA,

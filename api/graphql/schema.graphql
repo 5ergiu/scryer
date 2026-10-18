@@ -3041,6 +3041,10 @@ input DelayProfileInput {
 	"""
 	tags: [String!]!
 	"""
+	Libraries the profile is limited to; an empty list applies it to every library. Null keeps the libraries an existing profile already has.
+	"""
+	libraryIds: [ID!]
+	"""
 	Relative priority among delay profiles.
 	"""
 	priority: Int!
@@ -3102,6 +3106,10 @@ type DelayProfilePayload {
 	Tags used to select this profile.
 	"""
 	tags: [String!]!
+	"""
+	Libraries the profile is limited to; empty applies it to every library.
+	"""
+	libraryIds: [ID!]!
 	"""
 	Lower values run with higher priority according to service ordering.
 	"""

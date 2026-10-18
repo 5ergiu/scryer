@@ -3074,6 +3074,7 @@ export const delayProfilesQuery = `query DelayProfiles {
     bypassIfHighestQuality
     appliesToFacets
     tags
+    libraryIds
     priority
     enabled
   }

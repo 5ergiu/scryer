@@ -597,24 +597,16 @@ async fn standby_delay_parks_the_best_row_stops_the_walk_and_promotion_grabs_whe
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Standby Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "standby-delay",
-                "name": "Standby delay",
-                "usenet_delay_minutes": 10,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "standby-delay",
+            "name": "Standby delay",
+            "usenet_delay_minutes": 10,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let now = Utc::now();
     let mut best = pending_movie_release(
         &wanted_id,
@@ -957,24 +949,16 @@ async fn waiting_promotion_reparks_when_the_delay_profile_grows() {
         .insert_pending_release(&waiting)
         .await
         .expect("seed waiting release");
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "grown-delay",
-                "name": "Grown delay",
-                "usenet_delay_minutes": 30,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("lengthen delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "grown-delay",
+            "name": "Grown delay",
+            "usenet_delay_minutes": 30,
+        }]),
+    )
+    .await
+    .expect("lengthen delay profile");
     let wanted = wanted_items
         .get_acquisition_scope_state_by_id(&wanted_id)
         .await
@@ -1028,24 +1012,16 @@ async fn operator_pending_grab_ignores_the_delay_profile() {
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Operator Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "operator-delay",
-                "name": "Operator delay",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "operator-delay",
+            "name": "Operator delay",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let pending = pending_movie_release(
         &wanted_id,
         &title,
@@ -6213,24 +6189,16 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Unknown Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age-search",
-                "name": "Unknown age search",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age-search",
+            "name": "Unknown age search",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -6284,25 +6252,17 @@ async fn automatic_search_parks_hard_minimum_age_until_publication_deadline() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Minimum Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "minimum-age-search",
-                "name": "Minimum age search",
-                "usenet_delay_minutes": 0,
-                "min_age_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "minimum-age-search",
+            "name": "Minimum age search",
+            "usenet_delay_minutes": 0,
+            "min_age_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -8820,24 +8780,16 @@ async fn the_rss_park_path_stores_the_reported_seeder_count_on_the_pending_row()
     // only client the acquisition harness enables; the capture under test reads
     // `extra["seeders"]` and is indifferent to the protocol, and the production
     // park site is the same single call either way.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delay-torrents",
-                "name": "Delay torrents",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delay-torrents",
+            "name": "Delay torrents",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -8874,24 +8826,16 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
             indexer_client,
         );
     let _title = add_rss_target_movie(&app, &user, &wanted_items, "Rss Unknown Age Movie").await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age",
-                "name": "Unknown age",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age",
+            "name": "Unknown age",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -10880,8 +10824,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
         Arc::new(MockIndexerClient),
     );
     let title = add_rss_target_movie(&app, &user, &wanted, "Convergent Skyline").await;
-    app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
-        serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
+    replace_delay_profiles(&app, serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}])).await.unwrap();
     let mut input = external_test_input();
     // With no incumbent, use a tier upgrade rather than a revision-only tie.
     input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
@@ -10927,17 +10870,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     assert_eq!(pending.store.lock().await.len(), 2);
     // A policy edit makes the ordinary delay admission check eligible;
     // no wall-clock sleep and no RSS/indexer request is needed.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            "[]".into(),
-            "test",
-            None,
-        )
+    replace_delay_profiles(&app, serde_json::json!([]))
         .await
         .unwrap();
     assert_eq!(app.process_external_pending_releases().await.unwrap(), 1);
@@ -13095,24 +13028,16 @@ async fn a_delayed_season_pack_no_longer_suppresses_its_episode_search() {
     );
     let (app, _title, indexer_client, download_client) =
         seed_recent_failed_season_pack_fixture_with_indexer(indexer_client).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delayed-pack",
-                "name": "Delayed pack",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delayed-pack",
+            "name": "Delayed pack",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -16978,4 +16903,19 @@ async fn a_covered_walk_prunes_the_coverage_of_a_source_gone_row() {
         vec!["kept-indexer".to_string()],
         "the gone source's coverage is pruned so the next cycle re-queries it"
     );
+}
+
+/// Replace every stored delay profile with `catalog`, written in the JSON shape
+/// the profiles used to be stored in.
+async fn replace_delay_profiles(app: &AppUseCase, catalog: serde_json::Value) -> AppResult<()> {
+    let repository = &app.services.config.delay_profiles;
+    for profile in repository.list().await? {
+        repository.delete(&profile.id).await?;
+    }
+    let profiles = crate::parse_delay_profile_catalog(&catalog.to_string())
+        .map_err(|error| AppError::Validation(error.to_string()))?
+        .into_iter()
+        .map(crate::normalize_delay_profile)
+        .collect();
+    repository.save_many(profiles).await
 }
