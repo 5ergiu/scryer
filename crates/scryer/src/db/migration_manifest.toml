@@ -3203,6 +3203,23 @@ hook_id = "import_delay_profile_catalog"
 engine = "all"
 scope = "all"
 
+[[migration]]
+version = 294
+description = "title folder recovery"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0294_title_folder_recovery.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0294_title_folder_recovery.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

@@ -52,6 +52,8 @@ mod security_settings;
 mod title_catalog;
 #[path = "integration_graphql/title_credits.rs"]
 mod title_credits;
+#[path = "integration_graphql/title_folder_recovery.rs"]
+mod title_folder_recovery;
 #[path = "integration_graphql/title_image_cache.rs"]
 mod title_image_cache;
 #[path = "integration_graphql/title_match.rs"]

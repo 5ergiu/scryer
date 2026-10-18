@@ -1473,7 +1473,7 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
     for tracked in other_titles {
         if crate::folder_ownership::title_folders_overlap(&raw_folder_path, &tracked.folder_path)? {
             return Err(AppError::Validation(format!(
-                "refusing to delete title folder {raw_folder_path} because it includes tracked title folder {} ({})",
+                "refusing to delete title folder {raw_folder_path} because it overlaps another title's recorded folder {} ({})",
                 tracked.title_name, tracked.folder_path
             )));
         }

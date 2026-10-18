@@ -12168,6 +12168,10 @@ enum LocationExecutionModeValue {
 	"""
 	MOVE_WITH_SCRYER
 	"""
+	Internal recovery copies verified files and preserves their sources.
+	"""
+	COPY_PRESERVE_SOURCES
+	"""
 	The user moved the files themselves; Scryer trusts that move and
 	updates the catalog mappings only.
 	"""
@@ -12979,6 +12983,10 @@ enum LocationOperationTypeValue {
 	Correct which folder a title owns; file content is never touched.
 	"""
 	FOLDER_REASSIGNMENT
+	"""
+	Repair invalid title ownership while retaining original files.
+	"""
+	TITLE_FOLDER_RECOVERY
 	"""
 	Move selected titles to another root inside the same library.
 	"""

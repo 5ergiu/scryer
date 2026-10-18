@@ -1949,6 +1949,8 @@ async fn bootstrap_application(
         .spawn_empty_duplicate_title_folder_cleanup(&app_use_case, previous_version)
         .await;
 
+    application_migrator.spawn_title_folder_recovery(&app_use_case);
+
     // A location operation is persisted and checkpointed precisely so a restart
     // can pick it up where it stopped, without repeating verified work
     // (FR-033). This runs after root reconciliation because a resumed move

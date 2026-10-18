@@ -54,6 +54,7 @@ pub mod root_scope;
 pub mod root_scope_execution;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod title_folder_recovery;
 pub mod transfer;
 pub mod transfer_effects;
 pub mod verify;

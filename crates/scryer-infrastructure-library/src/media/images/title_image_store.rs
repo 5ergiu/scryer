@@ -789,7 +789,7 @@ async fn fetch_optional_blob(
         .transpose()
 }
 
-async fn append_domain_event_tx(
+pub(crate) async fn append_domain_event_tx(
     tx: &mut SqlTx<'_>,
     event: &NewDomainEvent,
 ) -> AppResult<DomainEvent> {

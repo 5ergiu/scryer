@@ -1698,6 +1698,8 @@ const en: LocaleDictionary = {
   "pendingImports.pageRange": "{{start}}–{{end}} / {{total}}",
   "pendingImports.library": "Library:",
   "pendingImports.knownTitle": "Known title:",
+  "pendingImports.reason.invalid_title_folder_ownership": "Title folder needs recovery",
+  "pendingImports.invalidOwnershipHelp": "This title incorrectly claims a library root or its parent. Check title folder recovery in Activity. Original files are preserved; do not move files into the recorded root.",
   "pendingImports.reason.title_already_owns_another_folder": "Title already owns another folder",
   "pendingImports.reason.metadata_id_lookup_unresolved":
     "Metadata lookup could not resolve this folder's external id; the next scan retries it",
@@ -5232,6 +5234,7 @@ const en: LocaleDictionary = {
   "move.checkpointState.SKIPPED": "Skipped",
   "move.checkpointState.BLOCKED": "Blocked",
   "move.checkpointState.FAILED": "Failed",
+  "move.operationType.TITLE_FOLDER_RECOVERY": "Title folder recovery (originals preserved)",
   "move.operationType.FOLDER_REASSIGNMENT": "Folder reassignment",
   "move.operationType.ROOT_MOVE": "Root move",
   "move.operationType.ROOT_CHANGE": "Root change",

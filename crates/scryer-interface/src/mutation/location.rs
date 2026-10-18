@@ -251,6 +251,11 @@ impl LocationMutations {
             .map_err(to_gql_error)?
         {
             LocationResumeDecision::Resume(plan) => *plan,
+            LocationResumeDecision::Recovery(plan) => {
+                app.spawn_title_folder_recovery(operation_id.clone(), *plan);
+                return Ok(from_resumed_location_operation(&operation_id, true, None));
+            }
+
             LocationResumeDecision::NotResumable(reason) => {
                 return Ok(from_resumed_location_operation(
                     &operation_id,

@@ -866,6 +866,12 @@ impl AppUseCase {
                 "this operation has already finished, so there is nothing to retry",
             ));
         }
+        if operation.operation_type == LocationOperationType::TitleFolderRecovery {
+            return self
+                .resume_title_folder_recovery(&operation)
+                .await
+                .map(|plan| LocationResumeDecision::Recovery(Box::new(plan)));
+        }
         // A cross-library transfer is a root move that also flips catalog
         // ownership (FR-056): both are planned by the same planner, persisted
         // as the same `RootMoveExecutionPlan`, and walked by the same runner, so
@@ -1135,6 +1141,10 @@ impl AppUseCase {
                 // schedules a retry: a startup path that decided on its own
                 // that a user's half-finished move was over would be worse than
                 // one that waits to be asked.
+                Ok(LocationResumeDecision::Recovery(plan)) => {
+                    self.spawn_title_folder_recovery(operation.id.clone(), *plan);
+                    resumed += 1;
+                }
                 Ok(LocationResumeDecision::NotResumable(reason)) => tracing::warn!(
                     operation_id = %operation.id,
                     operation_type = operation.operation_type.as_str(),
@@ -1455,7 +1465,7 @@ impl AppUseCase {
     /// and everything it had finished is intact, which is the same reading a
     /// canceled library scan gets (`JobRun::from_record`). Only an error — or a
     /// run that never returned an outcome at all — is a failure.
-    async fn close_location_operation_job_run_for(
+    pub(super) async fn close_location_operation_job_run_for(
         &self,
         job_run_id: &str,
         outcome: &AppResult<OperationRunOutcome>,
@@ -1759,9 +1769,9 @@ impl AppUseCase {
 // ── Activity job runs ────────────────────────────────────────────────────────
 
 /// Mirrors the runner's throttled progress pulse onto one Activity job run.
-struct LocationJobRunProgress {
-    app: AppUseCase,
-    job_run_id: String,
+pub(super) struct LocationJobRunProgress {
+    pub(super) app: AppUseCase,
+    pub(super) job_run_id: String,
 }
 
 #[async_trait::async_trait]
@@ -1812,13 +1822,14 @@ pub enum LocationAbandonDecision {
 }
 
 /// What a resume decided to do (FR-033).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LocationResumeDecision {
     /// Pick the operation back up with this plan.
     ///
     /// Boxed because the execution plan is much larger than the refusal, and an
     /// enum sized by its biggest variant would be paid for on every call.
     Resume(Box<RootMoveExecutionPlan>),
+    Recovery(Box<super::title_folder_recovery::RecoveryPlan>),
     /// Nothing was started, and why. The operation keeps its state — an
     /// interrupted one stays interrupted and resumable later, a failed or
     /// canceled one stays terminal and retryable later. The one refusal that
@@ -1836,7 +1847,7 @@ impl LocationResumeDecision {
     pub fn plan(self) -> Option<RootMoveExecutionPlan> {
         match self {
             Self::Resume(plan) => Some(*plan),
-            Self::NotResumable(_) => None,
+            Self::NotResumable(_) | Self::Recovery(_) => None,
         }
     }
 }
@@ -2904,7 +2915,7 @@ impl AppUseCase {
     }
 
     /// The destination library's active folder-naming policy (FR-013).
-    async fn title_folder_template_for(&self, facet: &MediaFacet) -> AppResult<String> {
+    pub(super) async fn title_folder_template_for(&self, facet: &MediaFacet) -> AppResult<String> {
         let raw = self
             .read_setting_string_value(crate::FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
             .await?;

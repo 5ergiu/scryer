@@ -562,9 +562,25 @@ impl AppUseCase {
             return Ok(());
         }
 
+        let roots = self
+            .services
+            .catalog
+            .libraries
+            .list(None)
+            .await?
+            .into_iter()
+            .flat_map(|library| library.roots)
+            .collect::<Vec<_>>();
+        let mut invalid_ownership = HashSet::new();
         let mut known_titles = HashMap::with_capacity(title_ids.len());
         for title_id in title_ids {
             if let Some(title) = self.services.catalog.titles.get_by_id(title_id).await? {
+                if crate::location::title_folder_recovery::eligible(
+                    title.folder_path.as_deref(),
+                    &roots,
+                ) {
+                    invalid_ownership.insert(title.id.clone());
+                }
                 known_titles.insert(
                     title_id.to_string(),
                     (title.name, title.slug, title.folder_path),
@@ -586,6 +602,11 @@ impl AppUseCase {
                 item.title_name = Some(title_name.clone());
                 item.title_slug = title_slug.clone();
                 item.title_folder_path = title_folder_path.clone();
+                if item.reason == "title_already_owns_another_folder"
+                    && invalid_ownership.contains(title_id)
+                {
+                    item.reason = "invalid_title_folder_ownership".into();
+                }
             }
         }
 

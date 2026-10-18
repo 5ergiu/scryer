@@ -580,6 +580,29 @@ impl VerifiedCopier {
         }
     }
 
+    /// Copy to a caller-journaled staging name with an exclusive claim.
+    /// Recovery retains failed staging attempts; this path never removes or
+    /// truncates a file, including one that races the exclusive create.
+    pub(crate) async fn copy_to_journaled_staging(
+        &self,
+        source: &Path,
+        staging: &Path,
+        progress: &CopyProgress,
+    ) -> AppResult<StreamedContentHashes> {
+        progress.phase(scryer_domain::ImportTransferPhase::Waiting, 0);
+        let _permit = super::transfer::CopyCoordinator::shared()
+            .acquire_destination(staging)
+            .await;
+        progress.phase(scryer_domain::ImportTransferPhase::Copying, 0);
+        let source = source.to_path_buf();
+        let staging = staging.to_path_buf();
+        let progress = progress.clone();
+        spawn_verify_blocking(move || {
+            copy_with_streamed_hashes(&source, &staging, DestinationClaim::ClaimHere, &progress)
+        })
+        .await?
+    }
+
     /// Write to the partial name, then promote it onto the destination.
     async fn copy_through_partial(
         &self,
@@ -796,7 +819,7 @@ async fn remove_partial_best_effort(partial: &Path) {
     }
 }
 
-async fn sync_parent_directory_after_promotion(destination: &Path) {
+pub(crate) async fn sync_parent_directory_after_promotion(destination: &Path) {
     let destination = destination.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || {
         sync_parent_directory_best_effort(&destination);

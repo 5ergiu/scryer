@@ -6372,6 +6372,43 @@ pub struct LocationOperationProgress {
 /// of the ownership rows outside the runner.
 #[async_trait]
 pub trait LocationOperationRepository: Send + Sync {
+    /// Bounded ownership evidence for automatic recovery; unsupported stores fail closed.
+    async fn recovery_catalog(
+        &self,
+    ) -> AppResult<crate::location::title_folder_recovery::RecoveryCatalog> {
+        Err(AppError::Repository(
+            "title folder recovery storage is not configured".into(),
+        ))
+    }
+    async fn reserve_recovery_staging(
+        &self,
+        _operation_id: &str,
+        _file: &crate::location::title_folder_recovery::RecoveryFile,
+        _staging_path: &str,
+    ) -> AppResult<()> {
+        Err(AppError::Repository(
+            "recovery staging storage is not configured".into(),
+        ))
+    }
+    async fn replace_recovery_plan(&self, _operation_id: &str, _plan_json: &str) -> AppResult<()> {
+        Err(AppError::Repository(
+            "recovery replanning is not configured".into(),
+        ))
+    }
+    async fn recovery_committed(&self, _operation_id: &str) -> AppResult<bool> {
+        Ok(false)
+    }
+    async fn commit_title_folder_recovery(
+        &self,
+        _operation_id: &str,
+        _plan: &crate::location::title_folder_recovery::RecoveryPlan,
+        _event: &scryer_domain::NewDomainEvent,
+    ) -> AppResult<Option<scryer_domain::DomainEvent>> {
+        Err(AppError::Repository(
+            "title folder recovery storage is not configured".into(),
+        ))
+    }
+
     async fn save_file_resolution(
         &self,
         _record: &crate::location::resolution::FileResolution,
