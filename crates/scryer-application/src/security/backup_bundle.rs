@@ -898,6 +898,10 @@ pub const BACKUP_TABLE_CATALOG: &[BackupTableCatalogEntry] = &[
         classification: BackupTableClassification::Export,
     },
     BackupTableCatalogEntry {
+        table: "location_recovery_staging",
+        classification: BackupTableClassification::Export,
+    },
+    BackupTableCatalogEntry {
         table: "location_transfer_progress",
         classification: BackupTableClassification::Export,
     },
@@ -2354,6 +2358,16 @@ mod tests {
                 "{table} should be exported in logical backups"
             );
         }
+    }
+
+    #[test]
+    fn backup_preserves_recovery_staging_ownership() {
+        assert!(
+            backup_export_table_names()
+                .iter()
+                .any(|table| table == "location_recovery_staging"),
+            "restored recovery operations must retain their staging ownership records"
+        );
     }
 
     #[test]
