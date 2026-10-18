@@ -1311,11 +1311,8 @@ async fn dispatch_completed_import_target(
 /// operator-chosen file was therefore eligible to be refused and its release
 /// blocklisted for the title.
 ///
-/// The manual *link* path does not reach here at all:
-/// `execute_manual_series_movie_import` never calls
-/// `import_series_movie_download`, so it has always been outside the verdict
-/// gate. Pinned by
-/// `a_manual_series_movie_link_import_never_reaches_the_verdict_gate`.
+/// Manual links and additional files use the same manual preparation mode,
+/// but do not enter automatic upgrade competition.
 fn operator_initiated_import(
     runtime_sample_mode: crate::post_download_gate::RuntimeSampleValidationMode,
 ) -> bool {
@@ -1505,6 +1502,7 @@ async fn import_additional_movie_download(
     release_evidence: &ReleaseEvidence,
     source_video: &Path,
     content_qualified: Option<ContentQualifiedVideo>,
+    disc_selection: Option<&scryer_media_types::DiscSelection>,
     source_size: i64,
     parsed: &ParsedReleaseMetadata,
     media_root: &str,
@@ -1517,6 +1515,42 @@ async fn import_additional_movie_download(
     started_at: chrono::DateTime<Utc>,
 ) -> AppResult<ImportResult> {
     let source_title = release_evidence.release_title(Some(source_video));
+    let quality_profile = resolve_import_quality_profile(app, title).await?;
+    let prepared = match crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+        app,
+        title,
+        parsed,
+        &quality_profile,
+        source_video,
+        source_size,
+        !existing_files.is_empty(),
+        None,
+        false,
+        crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+        disc_selection,
+        release_evidence.release_listing_json(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(rejection) => {
+            return hold_replacement_for_manual_resolution(
+                app,
+                title,
+                import_id,
+                completed,
+                release_evidence,
+                source_video,
+                source_size,
+                parsed.quality.clone(),
+                rejection.recycle_reason,
+                rejection.message,
+                started_at,
+            )
+            .await;
+        }
+    };
+    let parsed = &prepared.parsed;
     let title = &app.title_for_naming(title).await;
     let full_folder_path =
         effective_title_folder_path(media_root, title, folder_template, parsed.year);
@@ -1525,7 +1559,7 @@ async fn import_additional_movie_download(
         canonical_dest_path.to_path_buf()
     } else {
         let ext = import_video_destination_extension(source_video, content_qualified).to_string();
-        let tokens = build_rename_tokens(title, parsed, None, &ext);
+        let tokens = build_rename_tokens(title, parsed, prepared.accepted.analysis.as_ref(), &ext);
         let rendered_filename = if rename_enabled {
             render_rename_template(rename_template, &tokens)
         } else {
@@ -1650,7 +1684,7 @@ async fn import_additional_movie_download(
         source_video,
         &dest_path,
         import_mode,
-        None,
+        Some(&prepared.source_snapshot),
         Some(completed),
     )
     .await?;
@@ -1683,8 +1717,12 @@ async fn import_additional_movie_download(
         .insert_or_reuse_media_file(app, &media_file_input)
         .await?
         .media_file_id;
-    analyze_and_persist_imported_media_file(app, &title.id, &imported_media_file_id, &dest_path)
-        .await;
+    crate::post_download_gate::persist_media_analysis_result(
+        &app.services.library.media_files,
+        &imported_media_file_id,
+        &prepared.accepted,
+    )
+    .await?;
     if let Err(error) = crate::subtitles::reconcile_external_subtitles_for_media_file(
         app,
         &title.id,
@@ -1830,6 +1868,7 @@ async fn import_movie_download(
             release_evidence,
             &source_video,
             largest.content_qualified,
+            largest.disc_selection.as_ref(),
             source_size,
             &parsed,
             &media_root,
@@ -2719,6 +2758,7 @@ async fn import_series_movie_download(
             release_evidence,
             &source_video,
             None,
+            largest.disc_selection.as_ref(),
             source_size,
             &parsed,
             &media_root,
