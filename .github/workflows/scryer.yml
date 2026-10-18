@@ -1267,7 +1267,8 @@ jobs:
           # appends these flags after AWS-LC's own -O0 for them. Give AWS-LC
           # the flags without a level: the profile's opt-level still optimizes
           # the library, and nothing overrides the entropy sources' -O0.
-          export AWS_LC_SYS_CFLAGS="${native_flags/-O3 /}"
+          entropy_headers="$(bash .github/scripts/prepare-musl-entropy.sh "$RUNNER_TEMP")"
+          export AWS_LC_SYS_CFLAGS="${native_flags/-O3 /} -idirafter ${entropy_headers}"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
           if [ -n "${{ matrix.extra_rustflags }}" ]; then
             export RUSTFLAGS="${RUSTFLAGS} ${{ matrix.extra_rustflags }}"
