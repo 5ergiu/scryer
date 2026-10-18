@@ -3522,7 +3522,8 @@ async fn queue_replacement_release_from_candidate_token_marks_manual_replacement
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -3838,7 +3839,8 @@ async fn queue_best_release_prefers_first_auto_eligible_candidate() {
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -6101,7 +6103,8 @@ async fn a_grab_saves_every_remaining_eligible_search_result() {
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -7148,7 +7151,7 @@ async fn unknown_movie_availability_requires_explicit_candidate_queue_override()
         .await
         .expect_err("unknown release dates must block a standard manual queue");
     assert!(
-        matches!(error, AppError::Validation(ref message) if message.contains("movie availability gate: release_dates_unknown")),
+        matches!(error, AppError::Validation(ref message) if message.contains("movie availability gate: home_release_date_unknown")),
         "unexpected queue error: {error:?}"
     );
     assert!(
