@@ -2994,6 +2994,69 @@ async fn hydrated_title_metadata_replaces_title_credits() {
 }
 
 #[tokio::test]
+async fn movie_release_dates_text_round_trip_postgres() -> AppResult<()> {
+    let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("skipping PostgreSQL release dates test; SCRYER_TEST_POSTGRES_URL is not set");
+        return Ok(());
+    };
+    let admin = sqlx::PgPool::connect(&raw_url).await.map_err(|error| {
+        AppError::Repository(format!("failed to connect to test postgres: {error}"))
+    })?;
+    let schema = format!("scryer_release_dates_{}", Id::new().0.replace('-', "_"));
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+    let result = async {
+        let mut url = url::Url::parse(&raw_url)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+        let services = crate::PostgresServices::new_with_mode(
+            url.to_string(), crate::MigrationMode::Apply,
+        ).await?;
+        let catalog = TitleStore::new(services.datastore());
+        let mut title = make_test_title("movie-release-dates", None);
+        title.facet = MediaFacet::Movie;
+        title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+        title.root_folder_id = sqlx::query_scalar(
+            "SELECT id FROM library_roots WHERE library_id = $1 ORDER BY is_default DESC, path LIMIT 1",
+        ).bind(&title.library_id).fetch_one(services.pool()).await
+            .map_err(|error| AppError::Repository(error.to_string()))?;
+        let created = TitleRepository::create(&catalog, title).await?;
+        assert!(created.movie_release_dates.is_none());
+        for digital_dates in [vec!["2025-04-01".to_string()], vec![]] {
+            let dates = scryer_domain::MovieReleaseDates {
+                market: "US".into(), fetched: true,
+                theatrical_dates: vec!["2025-01-01".into()],
+                digital_dates, physical_dates: vec![],
+            };
+            let hydrated = TitleRepository::update_title_hydrated_metadata(
+                &catalog, &created.id, TitleMetadataUpdate {
+                    movie_release_dates: Some(dates.clone()),
+                    metadata_fetched_at: Some(Utc::now().to_rfc3339()),
+                    ..Default::default()
+                },
+            ).await?;
+            assert_eq!(hydrated.movie_release_dates, Some(dates.clone()));
+            assert!(hydrated.metadata_fetched_at.is_some());
+            let loaded = TitleRepository::get_by_id(&catalog, &created.id).await?.unwrap();
+            assert_eq!(loaded.movie_release_dates, Some(dates));
+        }
+        services.pool().close().await;
+        Ok(())
+    }.await;
+    let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await;
+    admin.close().await;
+    cleanup.map_err(|error| AppError::Repository(error.to_string()))?;
+    result
+}
+
+#[tokio::test]
 async fn hydrated_title_metadata_replaces_title_credits_postgres() -> AppResult<()> {
     let Some(raw_url) = std::env::var("SCRYER_TEST_POSTGRES_URL")
         .ok()

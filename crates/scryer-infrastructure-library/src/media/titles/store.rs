@@ -3265,7 +3265,10 @@ where
         metadata_fetched_at: row.opt_timestamp("metadata_fetched_at")?,
         min_availability: row.opt_text("min_availability")?,
         digital_release_date: row.opt_text("digital_release_date")?,
-        movie_release_dates: decode_title_json_or_default(row, "movie_release_dates_json")?,
+        movie_release_dates: row
+            .opt_text("movie_release_dates_json")?
+            .map(|value| serde_json::from_str(&value).map_err(repo_err))
+            .transpose()?,
         folder_path: row.opt_text("folder_path")?,
     };
 
