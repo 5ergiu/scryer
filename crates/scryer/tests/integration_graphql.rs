@@ -1377,7 +1377,7 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 scope: "system".into(),
                 key_name: "acquisition.default_movie_availability".into(),
                 data_type: "string".into(),
-                default_value_json: "\"announced\"".into(),
+                default_value_json: "\"released\"".into(),
                 is_sensitive: false,
                 validation_json: None,
             },

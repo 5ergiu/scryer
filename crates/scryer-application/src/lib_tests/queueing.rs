@@ -7047,6 +7047,9 @@ async fn listing_token_fixture() -> ListingTokenFixture {
                 name: "Listing Ticket".into(),
                 facet: MediaFacet::Movie,
                 monitored: true,
+                // The fixture title is never hydrated, so it has no release
+                // dates; these tests are about listings, not availability.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -7145,7 +7148,7 @@ async fn unknown_movie_availability_requires_explicit_candidate_queue_override()
         .await
         .expect_err("unknown release dates must block a standard manual queue");
     assert!(
-        matches!(error, AppError::Validation(ref message) if message.contains("movie availability gate: home_release_date_unknown")),
+        matches!(error, AppError::Validation(ref message) if message.contains("movie availability gate: release_dates_unknown")),
         "unexpected queue error: {error:?}"
     );
     assert!(

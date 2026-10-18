@@ -459,24 +459,68 @@ fn in_cinemas_unavailable_when_date_malformed() {
 // ── released ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn released_available_when_past_digital_release() {
-    let digital = days_ago(5);
+fn released_treats_the_legacy_tmdb_date_as_theatrical() {
+    // The legacy `digital_release_date` column holds TMDB's primary release
+    // date, which is theatrical. Five days past it is not a home release.
+    let now = fixed_release_clock();
+    let five_days_ago = (now - chrono::Duration::days(5)).date_naive().to_string();
+    assert!(!movie_is_available_for_acquisition(
+        None,
+        Some(&five_days_ago),
+        "released",
+        &now
+    ));
+    let decision = movie_availability_decision(
+        None,
+        true,
+        None,
+        Some(&five_days_ago),
+        availability_policy(Some("released"), "US", 0),
+        &now,
+    );
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert!(decision.estimated);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-06-25"));
+}
+
+#[test]
+fn in_cinemas_opens_on_the_legacy_tmdb_date() {
+    let now = fixed_release_clock();
+    let five_days_ago = (now - chrono::Duration::days(5)).date_naive().to_string();
+    let decision = movie_availability_decision(
+        None,
+        true,
+        None,
+        Some(&five_days_ago),
+        availability_policy(Some("in_cinemas"), "US", 0),
+        &now,
+    );
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Available);
+    assert!(!decision.estimated);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-03-27"));
+}
+
+#[test]
+fn released_legacy_tmdb_date_opens_ninety_days_on() {
+    let now = fixed_release_clock();
+    let hundred_days_ago = (now - chrono::Duration::days(100)).date_naive().to_string();
     assert!(movie_is_available_for_acquisition(
         None,
-        Some(&digital),
+        Some(&hundred_days_ago),
         "released",
-        &now_utc()
+        &now
     ));
 }
 
 #[test]
-fn released_unavailable_when_future_digital_release() {
-    let digital = days_from_now(14);
+fn released_unavailable_when_future_legacy_tmdb_date() {
+    let now = fixed_release_clock();
+    let in_two_weeks = (now + chrono::Duration::days(14)).date_naive().to_string();
     assert!(!movie_is_available_for_acquisition(
         None,
-        Some(&digital),
+        Some(&in_two_weeks),
         "released",
-        &now_utc()
+        &now
     ));
 }
 
@@ -513,29 +557,29 @@ fn released_unavailable_when_no_dates() {
 }
 
 #[test]
-fn released_digital_date_takes_priority_over_cinema_fallback() {
-    // digital date is in the past (available), even though cinema + 90 would be in future
-    let digital = days_ago(1);
-    let first_aired = days_ago(10); // cinema only 10d ago, +90 not reached
-    assert!(movie_is_available_for_acquisition(
-        Some(&first_aired),
-        Some(&digital),
+fn released_never_reads_the_legacy_tmdb_date_as_a_home_release() {
+    // A recent legacy TMDB date must not open `released` early: both legacy
+    // dates are theatrical, and the earliest one plus 90 days decides.
+    let now = fixed_release_clock();
+    let yesterday = (now - chrono::Duration::days(1)).date_naive().to_string();
+    let ten_days_ago = (now - chrono::Duration::days(10)).date_naive().to_string();
+    assert!(!movie_is_available_for_acquisition(
+        Some(&ten_days_ago),
+        Some(&yesterday),
         "released",
-        &now_utc()
+        &now
     ));
 }
 
 #[test]
-fn released_malformed_digital_date_falls_back_to_cinema() {
-    let first_aired = days_ago(100);
-    // digital date parse fails → false; the code checks digital_release_date first,
-    // and on parse failure returns false (no fallback within that branch). So this
-    // returns false.
-    assert!(!movie_is_available_for_acquisition(
-        Some(&first_aired),
+fn released_malformed_legacy_tmdb_date_falls_back_to_cinema() {
+    let now = fixed_release_clock();
+    let hundred_days_ago = (now - chrono::Duration::days(100)).date_naive().to_string();
+    assert!(movie_is_available_for_acquisition(
+        Some(&hundred_days_ago),
         Some("bad-date"),
         "released",
-        &now_utc()
+        &now
     ));
 }
 

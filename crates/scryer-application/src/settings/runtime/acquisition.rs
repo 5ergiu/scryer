@@ -15,7 +15,7 @@ pub(crate) const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk
 pub(crate) const DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS: i32 = 60;
 /// Catalog walk cadence when nothing is stored.
 pub(crate) const DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS: i32 = 300;
-pub const DEFAULT_MOVIE_AVAILABILITY: &str = "announced";
+pub const DEFAULT_MOVIE_AVAILABILITY: &str = "released";
 pub const DEFAULT_MOVIE_RELEASE_MARKET: &str = "US";
 
 #[derive(Debug, Clone)]

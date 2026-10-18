@@ -1379,6 +1379,7 @@ const en: LocaleDictionary = {
   "search.addConfigInheritLibrary": "Inherit library",
   "search.addConfigRootFolder": "Root folder",
   "search.addConfigSeasonFolder": "Season folder",
+  "search.addConfigMinAvailabilityNoReleaseDate": "No release date is known yet. Automatic searches wait until one is.",
   "search.addConfigMonitorType": "Monitor type",
   "search.addConfigNoQualityProfiles": "No quality profiles configured.",
   "search.seasonFolder.enabled": "Enabled",

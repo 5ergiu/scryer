@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Plus } from "lucide-react";
+import { useClient } from "urql";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -37,6 +38,7 @@ import {
   INHERIT_CATALOG_QUALITY_PROFILE_VALUE,
 } from "@/lib/utils/catalog-add-quality-profile";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { acquisitionSettingsQuery } from "@/lib/graphql/queries";
 
 type AddToCatalogDialogProps = {
   open: boolean;
@@ -91,6 +93,14 @@ function buildDefaultDraft(
   };
 }
 
+const MOVIE_AVAILABILITY_VALUES = ["announced", "in_cinemas", "released"] as const;
+/** Select value standing for the instance default when it cannot be read. */
+const INSTANCE_DEFAULT_AVAILABILITY_VALUE = "default";
+
+function isMovieAvailabilityValue(value: string | null | undefined): value is string {
+  return MOVIE_AVAILABILITY_VALUES.some((candidate) => candidate === value);
+}
+
 function resultTvdbId(result: MetadataTvdbSearchItem): string {
   return String(result.tvdbId ?? "").trim();
 }
@@ -118,6 +128,7 @@ export function AddToCatalogDialog({
   onAdd,
 }: AddToCatalogDialogProps) {
   const t = useTranslate();
+  const client = useClient();
   const libraries = manageableLibraries;
   const fallbackRootFolders = rootFolderOptions;
   const [draft, setDraft] = React.useState<MetadataCatalogAddOptions>(() =>
@@ -169,6 +180,33 @@ export function AddToCatalogDialog({
     nextDefaultRootFolderId,
     open,
   ]);
+
+  // The instance default is read only to preselect it. Reading it needs the
+  // catalog-settings permission; without it the select offers "use instance
+  // default" instead, and the server applies the same default on add.
+  const [instanceDefaultAvailability, setInstanceDefaultAvailability] =
+    React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!open || facet !== "MOVIE") return;
+    let current = true;
+    void client
+      .query<{ acquisitionSettings?: { defaultMovieAvailability?: string | null } | null }>(
+        acquisitionSettingsQuery,
+        {},
+      )
+      .toPromise()
+      .then(({ data }) => {
+        const value = data?.acquisitionSettings?.defaultMovieAvailability;
+        if (current) setInstanceDefaultAvailability(isMovieAvailabilityValue(value) ? value : null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, facet, open]);
+  const minAvailabilityValue =
+    draft.minAvailability ?? instanceDefaultAvailability ?? INSTANCE_DEFAULT_AVAILABILITY_VALUE;
+  const showNoReleaseDateHint =
+    facet === "MOVIE" && !result.year && minAvailabilityValue !== "announced";
 
   const selectedLibrary =
     libraries.find((library) => library.id === draft.libraryId) ||
@@ -406,6 +444,51 @@ export function AddToCatalogDialog({
                   <SelectItem value="disabled">{t("search.seasonFolder.disabled")}</SelectItem>
                 </SelectContent>
               </Select>
+            </label>
+          ) : null}
+
+          {/* Minimum availability — movie only */}
+          {facet === "MOVIE" ? (
+            <label className="space-y-1">
+              <span className="block text-xs font-medium text-card-foreground">
+                {t("settings.minAvailabilityLabel")}
+              </span>
+              <Select
+                value={minAvailabilityValue}
+                onValueChange={(v) =>
+                  update({
+                    minAvailability: isMovieAvailabilityValue(v) ? v : undefined,
+                  })
+                }
+                disabled={isSubmitting}
+              >
+                <SelectTrigger
+                  id="add-to-catalog-min-availability"
+                  className="h-12 w-full"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {instanceDefaultAvailability ? null : (
+                    <SelectItem value={INSTANCE_DEFAULT_AVAILABILITY_VALUE}>
+                      {t("settings.minAvailability.default")}
+                    </SelectItem>
+                  )}
+                  {MOVIE_AVAILABILITY_VALUES.map((value) => (
+                    <SelectItem key={value} value={value}>
+                      {t(`settings.minAvailability.${value}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {showNoReleaseDateHint ? (
+                <span
+                  id="add-to-catalog-min-availability-hint"
+                  className="block text-xs text-muted-foreground"
+                >
+                  {t("search.addConfigMinAvailabilityNoReleaseDate")}
+                </span>
+              ) : null}
             </label>
           ) : null}
 

@@ -882,7 +882,7 @@ async fn graphql_acquisition_walk_interval_defaults_and_survives_older_clients()
     );
     assert_eq!(
         defaults["data"]["acquisitionSettings"]["defaultMovieAvailability"],
-        "announced"
+        "released"
     );
     assert_eq!(
         defaults["data"]["acquisitionSettings"]["movieReleaseMarket"],

@@ -136,7 +136,8 @@ pub struct AcquisitionSettingsPayload {
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Number of days before long-tail scopes are reconverged.
     pub long_tail_reconverge_days: i32,
-    /// Default threshold applied to newly added movies only.
+    /// Default threshold applied to newly added movies only: `released` unless
+    /// changed. Existing movies keep their own setting.
     pub default_movie_availability: String,
     /// ISO-3166-1 alpha-2 market used for movie release dates.
     pub movie_release_market: String,

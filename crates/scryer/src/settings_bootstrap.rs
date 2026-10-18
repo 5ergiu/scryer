@@ -991,7 +991,7 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             scope: SETTINGS_SCOPE_SYSTEM,
             key_name: "acquisition.default_movie_availability",
             data_type: "string",
-            default_value_json: "\"announced\"",
+            default_value_json: "\"released\"",
             is_sensitive: false,
         },
         ServiceSettingSeed {
@@ -3103,7 +3103,7 @@ mod tests {
             (
                 "acquisition.default_movie_availability",
                 "string",
-                "\"announced\"",
+                "\"released\"",
             ),
             ("acquisition.movie_release_market", "string", "\"US\""),
             ("acquisition.movie_availability_delay_days", "number", "0"),
