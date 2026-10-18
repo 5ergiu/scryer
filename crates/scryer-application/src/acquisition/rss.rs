@@ -1510,9 +1510,12 @@ impl AppUseCase {
             else {
                 continue;
             };
-            let Some(profile) =
-                crate::delay_profile::resolve_delay_profile(&profiles, &title.tags, &title.facet)
-            else {
+            let Some(profile) = crate::delay_profile::resolve_delay_profile(
+                &profiles,
+                &title.tags,
+                &title.facet,
+                &title.library_id,
+            ) else {
                 continue;
             };
             if *now
@@ -2819,6 +2822,7 @@ impl AppUseCase {
                             delay_profiles,
                             &title.tags,
                             &title.facet,
+                            &title.library_id,
                         )
                         .map(|profile| {
                             profile.release_age_unknown_escalation_deadline(

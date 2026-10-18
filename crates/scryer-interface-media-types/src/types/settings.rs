@@ -595,6 +595,8 @@ pub struct DelayProfilePayload {
     pub applies_to_facets: Vec<MediaFacetValue>,
     /// Tags used to select this profile.
     pub tags: Vec<String>,
+    /// Libraries the profile is limited to; empty applies it to every library.
+    pub library_ids: Vec<ID>,
     /// Lower values run with higher priority according to service ordering.
     pub priority: i32,
     /// Whether the profile is enabled.
@@ -1119,6 +1121,8 @@ pub struct DelayProfileInput {
     pub applies_to_facets: Vec<MediaFacetValue>,
     /// Tags restricting the profile's scope.
     pub tags: Vec<String>,
+    /// Libraries the profile is limited to; an empty list applies it to every library. Null keeps the libraries an existing profile already has.
+    pub library_ids: Option<Vec<ID>>,
     /// Relative priority among delay profiles.
     pub priority: i32,
     /// Whether this delay profile is active.

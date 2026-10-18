@@ -555,6 +555,9 @@ const de: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "Gilt für",
   "settings.delayProfileFacetsHelp":
     "Für welche Inhaltstypen dieses Profil gilt. Alles deaktiviert lassen für alle Typen.",
+  "settings.delayProfileLibrariesLabel": "Bibliotheken",
+  "settings.delayProfileLibrariesHelp": "Bibliotheken, für die dieses Profil gilt. Lass alle ausgewählt, damit es für jede Bibliothek gilt. Wird die letzte Bibliothek eines Profils gelöscht, wird das Profil deaktiviert.",
+  "settings.delayProfileUnknownLibrary": "Unbekannte Bibliothek",
   "settings.delayProfileAllFacets": "Alle",
   "settings.delayProfileTagsLabel": "Tags",
   "settings.delayProfileTagsPlaceholder":

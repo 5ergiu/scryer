@@ -16,6 +16,7 @@ function cloneDelayProfileDraft(draft: DelayProfileDraft): DelayProfileDraft {
     ...draft,
     applies_to_facets: [...draft.applies_to_facets],
     tags: [...draft.tags],
+    library_ids: [...draft.library_ids],
   };
 }
 
@@ -136,6 +137,7 @@ export function SettingsDelayProfilesContainer() {
         loading={manager.loading}
         saving={manager.saving}
         profiles={manager.profiles}
+        libraries={manager.libraries}
         parseError={manager.parseError}
         draft={manager.draft}
         setDraft={manager.setDraft}

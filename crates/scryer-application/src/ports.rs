@@ -4785,6 +4785,18 @@ pub trait SeedingProfileRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait DelayProfileRepository: Send + Sync {
+    /// Every profile with its facet, tag and library sets, ordered by priority
+    /// and then id.
+    async fn list(&self) -> AppResult<Vec<crate::DelayProfile>>;
+    /// Insert each profile, or replace the stored profile with the same id,
+    /// in one transaction.
+    async fn save_many(&self, profiles: Vec<crate::DelayProfile>) -> AppResult<()>;
+    /// Returns false when no profile has the id.
+    async fn delete(&self, id: &str) -> AppResult<bool>;
+}
+
+#[async_trait]
 pub trait SubtitleProviderConfigRepository: Send + Sync {
     async fn list(&self, provider_type: Option<String>) -> AppResult<Vec<SubtitleProviderConfig>>;
     async fn get_by_id(&self, id: &str) -> AppResult<Option<SubtitleProviderConfig>>;

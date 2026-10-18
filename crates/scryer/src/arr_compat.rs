@@ -758,9 +758,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an explicitly supplied isolated autobrr application driver"]
     async fn arr_compat_real_autobrr_application() {
-        use scryer_application::{
-            DownloadSubmissionRepository, PendingReleaseRepository, SettingsRepository,
-        };
+        use scryer_application::{DownloadSubmissionRepository, PendingReleaseRepository};
         use scryer_infrastructure_workflow::workflow::stores::DownloadSubmissionStore;
         use std::sync::{Arc, Mutex};
         use wiremock::{
@@ -829,8 +827,9 @@ mod tests {
                 }).await.unwrap();
             }
             crate::settings_bootstrap::seed_service_setting_definitions(context.settings_store.clone()).await.unwrap();
-            context.settings_store.upsert_setting_json("system","acquisition.delay_profiles",None,
-                json!([{"id":"external-delay","name":"Fixture delay","usenet_delay_minutes":120,"tags":["external-delay"]}]).to_string(),"test",None).await.unwrap();
+            context.app.upsert_delay_profile(&admin, scryer_application::DelayProfile {
+                id:"external-delay".into(),name:"Fixture delay".into(),usenet_delay_minutes:120,tags:vec!["external-delay".into()],..Default::default()
+            }).await.unwrap();
             let (scopes, copies) = duplicate_library_fixture(&context, &admin).await;
             let metadata_before = context.smg_server.received_requests().await.unwrap().len();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

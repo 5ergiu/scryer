@@ -559,6 +559,9 @@ const pt_BR: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "Aplica-se a",
   "settings.delayProfileFacetsHelp":
     "A quais tipos de conteúdo este perfil se aplica. Deixe todos desmarcados para todos os tipos.",
+  "settings.delayProfileLibrariesLabel": "Bibliotecas",
+  "settings.delayProfileLibrariesHelp": "Bibliotecas às quais este perfil se aplica. Deixe todas selecionadas para aplicá-lo a todas as bibliotecas. Excluir a última biblioteca de um perfil desativa o perfil.",
+  "settings.delayProfileUnknownLibrary": "Biblioteca desconhecida",
   "settings.delayProfileAllFacets": "Todos",
   "settings.delayProfileTagsLabel": "Etiquetas",
   "settings.delayProfileTagsPlaceholder":

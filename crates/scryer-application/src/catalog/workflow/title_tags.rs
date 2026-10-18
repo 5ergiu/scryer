@@ -70,12 +70,8 @@ impl AppUseCase {
                     "title tag {id} changed while its rename was pending"
                 )));
             }
-            self.rewrite_delay_profile_tag(
-                rename.updated_by_user_id.clone(),
-                &rename.previous_label,
-                Some(&rename.next_label),
-            )
-            .await?;
+            self.rewrite_delay_profile_tag(&rename.previous_label, Some(&rename.next_label))
+                .await?;
             self.rewrite_pending_request_policy_tag(
                 &rename.previous_label,
                 Some(&rename.next_label),
@@ -124,11 +120,7 @@ impl AppUseCase {
                 continue;
             }
             let delay_profiles = self
-                .rewrite_delay_profile_tag(
-                    deletion.updated_by_user_id.clone(),
-                    &deletion.label,
-                    None,
-                )
+                .rewrite_delay_profile_tag(&deletion.label, None)
                 .await?;
             // Pending requests expose their tags to an approver, so they must
             // not retain a label the registry no longer defines.
@@ -308,12 +300,8 @@ impl AppUseCase {
         // These repositories cannot join the registry transaction. Leave the
         // intent durable until both idempotent rewrites have completed.
         let delay_profiles = if renamed {
-            self.rewrite_delay_profile_tag(
-                Some(actor.id.clone()),
-                &previous_label,
-                Some(&definition.label),
-            )
-            .await?
+            self.rewrite_delay_profile_tag(&previous_label, Some(&definition.label))
+                .await?
         } else {
             0
         };
@@ -705,13 +693,11 @@ impl AppUseCase {
     /// profile's tag list, returning how many profiles changed.
     async fn rewrite_delay_profile_tag(
         &self,
-        updated_by_user_id: Option<String>,
         label: &str,
         replacement: Option<&str>,
     ) -> AppResult<u64> {
-        let mut profiles = self.delay_profiles().await?;
-        let mut changed = 0_u64;
-        for profile in profiles.iter_mut() {
+        let mut changed_profiles = Vec::new();
+        for mut profile in self.delay_profiles().await? {
             if !profile.tags.iter().any(|tag| tag == label) {
                 continue;
             }
@@ -721,18 +707,18 @@ impl AppUseCase {
             {
                 profile.tags.push(replacement.to_string());
             }
-            changed += 1;
+            changed_profiles.push(profile);
         }
+        let changed = changed_profiles.len() as u64;
         if changed == 0 {
             return Ok(0);
         }
 
-        self.upsert_system_setting_json(
-            crate::delay_profile::DELAY_PROFILE_CATALOG_KEY,
-            &profiles,
-            updated_by_user_id,
-        )
-        .await?;
+        self.services
+            .config
+            .delay_profiles
+            .save_many(changed_profiles)
+            .await?;
         let _ = self.runtime.events.settings_changed_broadcast.send(vec![
             crate::delay_profile::DELAY_PROFILE_CATALOG_KEY.to_string(),
         ]);

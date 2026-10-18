@@ -281,8 +281,8 @@ pub type AppResult<T> = Result<T, AppError>;
 use crate::quality_profile::resolve_profile_id_for_title;
 pub use acquisition::delay_profile::{
     DELAY_PROFILE_CATALOG_KEY, DelayDecision, DelayProfile, PreferredProtocol, is_usenet_source,
-    parse_delay_profile_catalog, resolve_delay_decision, resolve_delay_profile,
-    validate_delay_profile_catalog,
+    normalize_delay_profile, parse_delay_profile_catalog, resolve_delay_decision,
+    resolve_delay_profile, validate_delay_profile_catalog,
 };
 pub use acquisition::policy::AcquisitionThresholds;
 pub use acquisition::seed_goals::{
@@ -589,8 +589,8 @@ pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, ArchiveExtractorSelection,
     BackgroundIndexerSearchStrategyState, BlocklistRepository,
-    BuiltinDownloadClientConnectionTester, DatastoreInfo, DiscoveryContextTitle,
-    DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
+    BuiltinDownloadClientConnectionTester, DatastoreInfo, DelayProfileRepository,
+    DiscoveryContextTitle, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
     DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
     DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
     DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,

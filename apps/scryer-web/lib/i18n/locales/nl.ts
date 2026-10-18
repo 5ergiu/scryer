@@ -627,6 +627,9 @@ const nl: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "Geldt voor",
   "settings.delayProfileFacetsHelp":
     "Voor welke inhoudstypen dit profiel geldt. Laat alles uitgevinkt voor alle typen.",
+  "settings.delayProfileLibrariesLabel": "Bibliotheken",
+  "settings.delayProfileLibrariesHelp": "Bibliotheken waarop dit profiel van toepassing is. Laat alles geselecteerd om het op elke bibliotheek toe te passen. Als de laatste bibliotheek van een profiel wordt verwijderd, wordt het profiel uitgeschakeld.",
+  "settings.delayProfileUnknownLibrary": "Onbekende bibliotheek",
   "settings.delayProfileAllFacets": "Alles",
   "settings.delayProfileTagsLabel": "Tags",
   "settings.delayProfileTagsPlaceholder":

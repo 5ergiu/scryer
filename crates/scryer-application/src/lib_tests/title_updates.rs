@@ -2293,6 +2293,7 @@ fn tagged_delay_profile(tags: Vec<String>) -> crate::DelayProfile {
         bypass_if_highest_quality: false,
         applies_to_facets: Vec::new(),
         tags,
+        library_ids: Vec::new(),
         priority: 0,
         enabled: true,
     }

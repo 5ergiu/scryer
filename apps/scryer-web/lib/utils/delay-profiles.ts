@@ -62,6 +62,7 @@ export function buildDelayProfileTemplate(existing: ParsedDelayProfile[]): Delay
     bypass_if_highest_quality: false,
     applies_to_facets: [],
     tags: [],
+    library_ids: [],
     priority: maxPriority + 1,
     enabled: true,
   };
@@ -140,6 +141,16 @@ function normalizeDelayProfile(raw: Record<string, unknown>): ParsedDelayProfile
           .filter((v): v is string => typeof v === "string")
           .map((value) => value.trim())
           .filter(Boolean)
+      : [],
+    library_ids: Array.isArray(raw.library_ids)
+      ? Array.from(
+          new Set(
+            raw.library_ids
+              .filter((v): v is string => typeof v === "string")
+              .map((value) => value.trim())
+              .filter(Boolean),
+          ),
+        )
       : [],
     priority: normalizeSignedWholeNumber(raw.priority),
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,

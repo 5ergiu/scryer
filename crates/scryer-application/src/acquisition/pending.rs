@@ -1530,6 +1530,7 @@ impl AppUseCase {
                 &delay_profiles,
                 &title.tags,
                 &title.facet,
+                &title.library_id,
                 source_kind,
                 pr.published_at
                     .as_deref()

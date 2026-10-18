@@ -6480,6 +6480,14 @@ async fn graphql_introspection_exposes_typed_settings_fields() {
             &format!("DelayProfilePayload.{field_name}"),
         );
     }
+    assert_settings_non_null_id_list(
+        settings_output_field("delayProfile", "libraryIds"),
+        "DelayProfilePayload.libraryIds",
+    );
+    assert_settings_optional_id_list(
+        settings_input_field("delayProfileInput", "libraryIds"),
+        "DelayProfileInput.libraryIds",
+    );
     assert_settings_non_null_id(
         settings_output_field("qualityProfile", "id"),
         "QualityProfilePayload.id",
