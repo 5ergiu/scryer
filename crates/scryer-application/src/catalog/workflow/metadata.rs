@@ -53,7 +53,7 @@ impl AppUseCase {
             release_market: settings.movie_release_market,
             minimum_availability: title
                 .min_availability
-                .unwrap_or_else(|| "announced".to_string()),
+                .unwrap_or(settings.default_movie_availability),
         }))
     }
 }

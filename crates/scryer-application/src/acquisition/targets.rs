@@ -112,6 +112,7 @@ pub(crate) fn movie_is_available_for_acquisition(
         digital_release_date,
         MovieAvailabilityPolicy {
             minimum_availability: Some(availability),
+            default_minimum_availability: availability,
             release_market: "US",
             delay_days: 0,
         },
@@ -124,6 +125,8 @@ pub(crate) fn movie_is_available_for_acquisition(
 #[derive(Clone, Copy)]
 pub(crate) struct MovieAvailabilityPolicy<'a> {
     pub minimum_availability: Option<&'a str>,
+    /// The instance default, read when the title has no threshold of its own.
+    pub default_minimum_availability: &'a str,
     pub release_market: &'a str,
     pub delay_days: i32,
 }
@@ -136,7 +139,9 @@ pub(crate) fn movie_availability_decision(
     policy: MovieAvailabilityPolicy<'_>,
     now: &DateTime<Utc>,
 ) -> MovieAvailabilityDecision {
-    let availability = policy.minimum_availability.unwrap_or("announced");
+    let availability = policy
+        .minimum_availability
+        .unwrap_or(policy.default_minimum_availability);
     if !matches!(availability, "in_cinemas" | "released") {
         return movie_availability_result(
             MovieAvailabilityStatus::Available,
@@ -346,6 +351,7 @@ pub(crate) fn movie_availability_decision_for_title(
         title.digital_release_date.as_deref(),
         MovieAvailabilityPolicy {
             minimum_availability: title.min_availability.as_deref(),
+            default_minimum_availability: &settings.default_movie_availability,
             release_market: &settings.movie_release_market,
             delay_days: settings.movie_availability_delay_days,
         },
@@ -654,6 +660,7 @@ impl AppUseCase {
                 title.digital_release_date.as_deref(),
                 MovieAvailabilityPolicy {
                     minimum_availability: title.min_availability.as_deref(),
+                    default_minimum_availability: &acquisition_settings.default_movie_availability,
                     release_market: &acquisition_settings.movie_release_market,
                     delay_days: acquisition_settings.movie_availability_delay_days,
                 },
@@ -781,6 +788,8 @@ impl AppUseCase {
                         item.digital_release_date.as_deref(),
                         MovieAvailabilityPolicy {
                             minimum_availability: item.min_availability.as_deref(),
+                            default_minimum_availability: &acquisition_settings
+                                .default_movie_availability,
                             release_market: &acquisition_settings.movie_release_market,
                             delay_days: acquisition_settings.movie_availability_delay_days,
                         },

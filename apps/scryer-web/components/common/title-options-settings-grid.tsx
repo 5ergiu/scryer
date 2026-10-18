@@ -186,7 +186,12 @@ export function TitleOptionsSettingsGrid({
   const currentFillerPolicy = title.fillerPolicy?.trim() || INHERIT_VALUE;
   const currentRecapPolicy = title.recapPolicy?.trim() || INHERIT_VALUE;
   const currentReleaseNumbering = title.releaseNumbering?.trim() || "AUTO";
-  const currentMinAvailability = title.minAvailability?.trim() || "announced";
+  // A movie with no threshold of its own follows the instance default, which
+  // the availability projection reports; "released" is the built-in default.
+  const currentMinAvailability =
+    title.minAvailability?.trim() ||
+    title.movieAvailability?.minimumAvailability?.trim() ||
+    "released";
   const movieAvailabilityStatus = title.movieAvailability?.status ?? "unknown";
   const movieAvailabilityDate = title.movieAvailability?.effectiveDate;
   const movieAvailabilityReason = t(

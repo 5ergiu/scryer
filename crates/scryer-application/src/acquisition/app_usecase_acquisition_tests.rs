@@ -176,9 +176,39 @@ fn availability_policy<'a>(
 ) -> MovieAvailabilityPolicy<'a> {
     MovieAvailabilityPolicy {
         minimum_availability,
+        default_minimum_availability: "announced",
         release_market,
         delay_days,
     }
+}
+
+#[test]
+fn a_movie_without_its_own_threshold_is_held_under_the_instance_default() {
+    let theatrical = days_ago(10);
+    let decide = |default_minimum_availability| {
+        movie_availability_decision(
+            None,
+            true,
+            Some(theatrical.as_str()),
+            None,
+            MovieAvailabilityPolicy {
+                minimum_availability: None,
+                default_minimum_availability,
+                release_market: "US",
+                delay_days: 0,
+            },
+            &now_utc(),
+        )
+    };
+
+    let held = decide("released");
+    assert_eq!(held.status, crate::MovieAvailabilityStatus::Waiting);
+    assert!(held.estimated);
+
+    assert_eq!(
+        decide("announced").status,
+        crate::MovieAvailabilityStatus::Available
+    );
 }
 
 #[test]

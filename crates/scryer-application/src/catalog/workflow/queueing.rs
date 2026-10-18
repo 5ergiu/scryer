@@ -1216,12 +1216,18 @@ impl AppUseCase {
             scryer_domain::LibraryPermission::ManageTitles,
         )
         .await?;
-        if title.facet != scryer_domain::MediaFacet::Movie
-            || title.min_availability.as_deref().unwrap_or("announced") == "announced"
-        {
+        if title.facet != scryer_domain::MediaFacet::Movie {
             return Ok(());
         }
         let settings = self.acquisition_settings().await?;
+        if title
+            .min_availability
+            .as_deref()
+            .unwrap_or(&settings.default_movie_availability)
+            == "announced"
+        {
+            return Ok(());
+        }
         let now = self.runtime.environment.now();
         let decision = crate::acquisition::targets::movie_availability_decision_for_title(
             &title, &settings, &now,
