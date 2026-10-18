@@ -1485,10 +1485,10 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
                     .iter()
                     .any(|code| code == SOURCE_CHANGED_AFTER_PROBE_CODE) =>
             {
-                None
+                Err(rejection)
             }
             ImportedFileGateDecision::Rejected(rejection) => return Err(rejection),
-            ImportedFileGateDecision::Accepted(accepted) => Some(accepted),
+            ImportedFileGateDecision::Accepted(accepted) => Ok(accepted),
         };
         let source_snapshot_after = app
             .services
@@ -1516,12 +1516,7 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
                 source_snapshot_change_detail(&source_snapshot_before, &source_snapshot_after),
             ));
         }
-        let Some(accepted) = accepted else {
-            return Err(import_source_changed_rejection(
-                path,
-                "source changed during media inspection, despite matching outer snapshots",
-            ));
-        };
+        let accepted = accepted?;
 
         let (parsed, rescore_changes) = rescore_from_mediainfo(parsed, accepted.as_ref());
         if !rescore_changes.is_empty() {

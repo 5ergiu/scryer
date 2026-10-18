@@ -493,3 +493,96 @@ async fn probe_stability_second_validation_still_enforces_runtime_policy() {
     .await
     .expect("bounded policy revalidation");
 }
+
+struct RestoringSnapshotImporter {
+    original_modified: std::time::SystemTime,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl FileImporter for RestoringSnapshotImporter {
+    async fn snapshot_import_source(
+        &self,
+        source: &Path,
+    ) -> AppResult<scryer_domain::ImportSourceSnapshot> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            // Restore only after the native probe has observed the change.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(source)
+                .unwrap()
+                .set_modified(self.original_modified)
+                .unwrap();
+        }
+        CopyingFileImporter.snapshot_import_source(source).await
+    }
+
+    async fn import_file(
+        &self,
+        source: &Path,
+        dest: &Path,
+        mode: scryer_domain::ImportMode,
+        expected_source: Option<&scryer_domain::ImportSourceSnapshot>,
+    ) -> AppResult<scryer_domain::ImportFileResult> {
+        CopyingFileImporter
+            .import_file(source, dest, mode, expected_source)
+            .await
+    }
+
+    async fn remove_import_source_after_verified_import(
+        &self,
+        guard: scryer_domain::ImportSourceCleanupGuard,
+        dest: &Path,
+    ) -> AppResult<()> {
+        CopyingFileImporter
+            .remove_import_source_after_verified_import(guard, dest)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn probe_stability_preserves_inner_rejection_when_outer_snapshots_match() {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("source.mkv");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../scryer-mediainfo/tests/media/h264_aac.mkv"),
+            &path,
+        ).unwrap();
+        let before = CopyingFileImporter.snapshot_import_source(&path).await.unwrap();
+        let original_modified = before.identity.file.modified.unwrap();
+        let importer = Arc::new(RestoringSnapshotImporter {
+            original_modified,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (fixture, _) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+            file_importer: importer.clone(),
+            ..Default::default()
+        }).await;
+        let profile = fixture.app.resolve_quality_profile_for_title(&fixture.title).await.unwrap();
+        let parsed = crate::release_parser::parse_release_metadata("Example.S01E01.mkv");
+        let (release, references) = crate::media::analyzer::hold_native_probe_for_test(path.clone()).await;
+        let (result, ()) = tokio::join!(
+            crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+                &fixture.app, &fixture.title, &parsed, &profile, &path, before.identity.file.len as i64,
+                false, None, false, crate::post_download_gate::RuntimeSampleValidation::manual_override(None), None, None,
+            ),
+            async {
+                while references() < 3 { tokio::task::yield_now().await; }
+                std::fs::OpenOptions::new().write(true).open(&path).unwrap()
+                    .set_modified(original_modified + std::time::Duration::from_secs(60)).unwrap();
+                release.send(()).unwrap();
+            },
+        );
+        let Err(rejection) = result else { panic!("the inner source change must still reject") };
+        assert_eq!(rejection.message, format!(
+            "import source changed after validation probe: {} (validation: media source changed during inspection)",
+            path.display(),
+        ));
+        assert_eq!(rejection.recycle_reason, "import_source_changed_after_probe");
+        assert_eq!(rejection.blocking_rule_codes, vec!["source_changed_after_probe"]);
+        assert!(rejection.requires_review());
+        assert_eq!(CopyingFileImporter.snapshot_import_source(&path).await.unwrap(), before);
+        assert_eq!(importer.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }).await.expect("bounded inner-rejection preservation");
+}
