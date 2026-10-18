@@ -13886,6 +13886,102 @@ async fn automatic_movie_import_and_upgrade_each_send_one_import_completed() {
     }
 }
 
+fn sized_video(dir: &std::path::Path, name: &str, bytes: u64) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::File::create(&path)
+        .expect("create fixture video")
+        .set_len(bytes)
+        .expect("size fixture video");
+    path
+}
+
+/// A movie grab that came down as a season of episodes is held for the
+/// operator: nothing lands in the library and every source file stays put.
+#[tokio::test]
+async fn an_automatic_movie_import_holding_a_season_of_episodes_is_held() {
+    let release_title = "Quillon.2026.1080p.WEB-DL-SYNTH";
+    let fixture = disposition_fixture("Quillon", release_title).await;
+    let download_dir = PathBuf::from(&fixture.completed.dest_dir);
+    let episodes = (1..=12)
+        .map(|episode| {
+            sized_video(
+                &download_dir,
+                &format!("[SynthSubs] Quillon - {episode:02} [1080p].mkv"),
+                300 * 1024 * 1024,
+            )
+        })
+        .collect::<Vec<_>>();
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import_workflow::import_completed_download(
+        &fixture.app,
+        &fixture.user,
+        &fixture.completed,
+    )
+    .await
+    .expect("the import runs to a decision");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Skipped,
+        "{result:?}"
+    );
+    assert!(!result.release_burned, "{result:?}");
+    assert!(result.dest_path.is_none(), "{result:?}");
+    assert!(
+        result
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("12 episode files")),
+        "{result:?}"
+    );
+    assert!(primary_movie_files(&fixture).await.is_empty());
+    assert!(
+        !fixture.title_folder.exists()
+            || std::fs::read_dir(&fixture.title_folder)
+                .expect("read title folder")
+                .next()
+                .is_none(),
+        "nothing lands in the library"
+    );
+    for episode in &episodes {
+        assert!(episode.exists(), "{} is left in place", episode.display());
+    }
+    assert!(download_dir.join(format!("{release_title}.mkv")).exists());
+    assert!(fixture.blocklist_repo.entries.lock().await.is_empty());
+}
+
+/// The feature still imports when the download also carries a sample and an
+/// extra: neither names an episode.
+#[tokio::test]
+async fn an_automatic_movie_import_with_a_sample_and_an_extra_imports_the_feature() {
+    let release_title = "Quillon.2026.1080p.WEB-DL-SYNTH";
+    let fixture = disposition_fixture("Quillon", release_title).await;
+    let download_dir = PathBuf::from(&fixture.completed.dest_dir);
+    sized_video(
+        &download_dir,
+        &format!("{release_title}.sample.mkv"),
+        20 * 1024 * 1024,
+    );
+    sized_video(&download_dir, "Quillon.Featurette.mkv", 40 * 1024 * 1024);
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import_workflow::import_completed_download(
+        &fixture.app,
+        &fixture.user,
+        &fixture.completed,
+    )
+    .await
+    .expect("the import runs to a decision");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{result:?}"
+    );
+    assert_eq!(primary_movie_files(&fixture).await.len(), 1);
+}
+
 /// A movie imported from a Scryer grab keeps that grab's listing snapshot on
 /// its media row, whether it lands fresh or replaces an incumbent.
 #[tokio::test]

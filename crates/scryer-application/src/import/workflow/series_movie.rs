@@ -1776,6 +1776,33 @@ async fn import_additional_movie_download(
     clippy::too_many_arguments,
     reason = "movie import keeps operational completion and release evidence as separate inputs"
 )]
+/// Recorded on the held import's artifact.
+const MOVIE_DOWNLOAD_HOLDS_EPISODES_CODE: &str = "movie_download_holds_episodes";
+
+/// Two different episodes is already a series: a feature with a sample or an
+/// extra names no episode at all.
+const MOVIE_IMPORT_EPISODE_FILE_LIMIT: usize = 2;
+
+/// How many different episodes the download's video files name. Read without
+/// the movie's context, which would never project episode numbering.
+fn distinct_episode_numbered_video_files(video_files: &[ImportVideoFile]) -> usize {
+    video_files
+        .iter()
+        .filter_map(|video| {
+            let parse_path = video.parse_path();
+            let stem = parse_path.file_stem()?.to_string_lossy().into_owned();
+            let episode = crate::parse_release_metadata(&stem).episode?;
+            let numbers = if episode.episode_numbers.is_empty() {
+                episode.absolute_episode_numbers.clone()
+            } else {
+                episode.episode_numbers.clone()
+            };
+            (!numbers.is_empty()).then_some((episode.season, numbers))
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 async fn import_movie_download(
     app: &AppUseCase,
     actor: &User,
@@ -1844,6 +1871,28 @@ async fn import_movie_download(
         .await;
     }
     let manual_replacement = operator_initiated_import(runtime_sample_mode);
+    // A movie grab that turned out to be a season of episodes must not land
+    // its largest episode as the film. The download is held as it is, with
+    // nothing moved or removed; an operator can still import it by hand.
+    let episode_files = distinct_episode_numbered_video_files(video_files);
+    if !manual_replacement && episode_files >= MOVIE_IMPORT_EPISODE_FILE_LIMIT {
+        return hold_replacement_for_manual_resolution(
+            app,
+            title,
+            import_id,
+            completed,
+            release_evidence,
+            &source_video,
+            source_size,
+            None,
+            MOVIE_DOWNLOAD_HOLDS_EPISODES_CODE,
+            format!(
+                "This download holds {episode_files} episode files, not a movie. Automatic import is held; use Manual Import if it is the right content."
+            ),
+            started_at,
+        )
+        .await;
+    }
     let existing_files = existing_files
         .into_iter()
         .filter(|file| file.role.is_primary())
@@ -3664,5 +3713,58 @@ mod archive_relocation_tests {
     fn unrelated_rename_error_is_not_cross_device() {
         let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         assert!(!crate::fs_safety::is_cross_device_error(&error));
+    }
+}
+
+#[cfg(test)]
+mod movie_episode_file_tests {
+    use super::*;
+
+    fn files(names: &[&str]) -> Vec<ImportVideoFile> {
+        names
+            .iter()
+            .map(|name| ImportVideoFile::physical(PathBuf::from(format!("/fixture/{name}"))))
+            .collect()
+    }
+
+    #[test]
+    fn episodes_are_counted_once_each_and_a_feature_names_none() {
+        assert_eq!(
+            distinct_episode_numbered_video_files(&files(&[
+                "Quillon.S01E01.1080p.WEB-DL-SYNTH.mkv",
+                "Quillon.S01E02.1080p.WEB-DL-SYNTH.mkv",
+                "Quillon.S01E02.1080p.WEB-DL-SYNTH.proof.mkv",
+            ])),
+            2
+        );
+        assert_eq!(
+            distinct_episode_numbered_video_files(&files(&[
+                "[SynthSubs] Quillon - 01 [1080p].mkv",
+                "[SynthSubs] Quillon - 02 [1080p].mkv",
+            ])),
+            2
+        );
+        assert_eq!(
+            distinct_episode_numbered_video_files(&files(&[
+                "Quillon.2028.1080p.WEB-DL-SYNTH.mkv",
+                "Quillon.2028.1080p.WEB-DL-SYNTH.sample.mkv",
+                "Quillon.Featurette.mkv",
+            ])),
+            0
+        );
+    }
+
+    #[test]
+    fn a_feature_split_across_discs_is_not_a_season() {
+        for split in [
+            ["Quillon.2028.CD1.DVDRip-SYNTH.avi", "Quillon.2028.CD2.DVDRip-SYNTH.avi"],
+            ["Quillon.2028.Part.1.1080p-SYNTH.mkv", "Quillon.2028.Part.2.1080p-SYNTH.mkv"],
+        ] {
+            assert!(
+                distinct_episode_numbered_video_files(&files(&split))
+                    < MOVIE_IMPORT_EPISODE_FILE_LIMIT,
+                "{split:?}"
+            );
+        }
     }
 }
