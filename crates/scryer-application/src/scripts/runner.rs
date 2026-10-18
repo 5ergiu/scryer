@@ -973,7 +973,8 @@ mod tests {
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
             .expect("open readiness FIFO");
-        tokio::io::unix::AsyncFd::new(pipe).expect("register readiness FIFO")
+        // SAFETY: AsyncFd owns the File, keeping the same descriptor open until drop.
+        unsafe { tokio::io::unix::AsyncFd::register(pipe) }.expect("register readiness FIFO")
     }
 
     async fn wait_until_armed(pipe: &tokio::io::unix::AsyncFd<std::fs::File>) {

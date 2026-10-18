@@ -453,6 +453,18 @@ export const TITLE_MEDIA_FILE_FIELDS = `
         capturedAt
       }`;
 
+/**
+ * The saved score evaluation is a per-file resolver that re-reads the file,
+ * its title, episodes and quality profile to judge freshness. Request it only
+ * from the detail queries whose UI shows the score summary, never from the
+ * shared file fragment that bulk and maintenance queries reuse.
+ */
+export const TITLE_MEDIA_FILE_SCORE_FIELDS = `
+      currentScoreEvaluation {
+        score evaluatedAt needsRefresh timeSensitive rejectionCodes
+        entries { code delta kind source origin }
+      }`;
+
 const WANTED_ITEM_FIELDS = `
       id
       titleId
@@ -633,7 +645,7 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     }
     ratings {${TITLE_RATING_SUMMARY_FIELDS}
     }${TITLE_CAST_CREDIT_SELECTION}
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }`;
 
 const SERIES_SIDE_PANEL_TITLE_FIELDS = `
@@ -747,7 +759,14 @@ export const TITLE_MUTATION_RESULT_FIELDS = `
     recapPolicy
     createdAt`;
 
+const HISTORY_SCORING_FIELDS = `scoring {
+  candidateScore previousScore delta decisionCode
+  entries { code delta kind source origin }
+  comparisons { fileId episodeIds previousScore delta }
+}`;
+
 const TITLE_EVENT_FIELDS = `
+    ${HISTORY_SCORING_FIELDS}
     id
     titleId
     episodeId
@@ -1111,7 +1130,7 @@ export const titleDownloadQueueItemsQuery = `query TitleDownloadQueueItems($id: 
 export const currentReleaseFilesQuery = `query CurrentReleaseFiles($id: ID!) {
   title(id: $id) {
     id
-    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath }
+    mediaFiles { role grabbedReleaseTitle sceneName originalFilePath filePath episodeId seriesMovieLinkIds episode { collectionId } }
   }
 }`;
 
@@ -1126,7 +1145,7 @@ export const titleMediaFilesQuery = `query TitleMediaFiles($id: ID!) {
 export const movieEntityDetailQuery = `query MovieEntityDetail($titleId: ID!, $movieId: ID!) {
   title(id: $titleId) {
     id
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }
   }
   movieEntity(titleId: $titleId, id: $movieId) {
@@ -1151,7 +1170,7 @@ export const episodeSidePanelDetailQuery = `query EpisodeSidePanelDetail($titleI
       state
       primaryQualityLabel
     }
-    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}
+    mediaFiles {${TITLE_MEDIA_FILE_FIELDS}${TITLE_MEDIA_FILE_SCORE_FIELDS}
     }
   }
 }`;
@@ -1753,6 +1772,17 @@ ${pageMetadataFields}
   }
 }`;
 }
+
+/** Ids of every title matching the catalog filters, for select-all. */
+export const titleCatalogIdsQuery = `query TitleCatalogIds(
+  $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
+  $filter: TitleCatalogFilterInput, $sort: TitleCatalogSortInput, $limit: Int, $offset: Int
+) {
+  titles(facet: $facet, libraryIds: $libraryIds, query: $query, filter: $filter, sort: $sort, limit: $limit, offset: $offset) {
+    items { id }
+    hasMore
+  }
+}`;
 
 export const titleCatalogCountsQuery = `query TitleCatalogCounts(
   $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
@@ -3069,6 +3099,7 @@ export const delayProfilesQuery = `query DelayProfiles {
     bypassIfHighestQuality
     appliesToFacets
     tags
+    libraryIds
     priority
     enabled
   }
@@ -4671,6 +4702,7 @@ export const externalSubtitlesQuery = `query ExternalSubtitles($titleId: ID!) {
 export const titleHistoryQuery = `query TitleHistory($filter: TitleHistoryFilterInput!) {
   titleHistory(filter: $filter) {
     items {
+      ${HISTORY_SCORING_FIELDS}
       id
       titleId
       titleName

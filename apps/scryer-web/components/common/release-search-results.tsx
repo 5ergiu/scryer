@@ -1,5 +1,8 @@
 import * as React from "react";
 import { useQuery } from "urql";
+import { useActivityEventStream } from "@/lib/hooks/use-activity-event-stream";
+import { TITLE_OVERVIEW_IMPORT_REFRESH_KINDS } from "@/lib/utils/title-overview-refresh-policy";
+import type { CurrentReleaseScope } from "@/lib/utils/current-release";
 import { currentReleaseFilesQuery } from "@/lib/graphql/queries";
 import { currentReleaseNames, releaseIdentityName, type CurrentReleaseFile } from "@/lib/utils/current-release";
 import {
@@ -17,7 +20,8 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { useTranslate } from "@/lib/context/translate-context";
 import { cn } from "@/lib/utils";
-import { scoringEntryText } from "@/lib/utils/release-decision-explanation";
+import { ScoreLog, scoreToneClassName } from "@/components/common/score-log";
+import { formatScore, toScoreLogEntries } from "@/lib/utils/score-log";
 import { releaseCoversMultipleEpisodes } from "@/lib/utils/release-queue-scope";
 import {
   releaseSearchResultQueueAdditionalId,
@@ -49,13 +53,6 @@ function selectedTitleTagClassName(index: number) {
   );
 }
 
-function getScoreText(score: number | undefined) {
-  if (score == null) {
-    return "—";
-  }
-  return score > 0 ? `+${score}` : `${score}`;
-}
-
 function bytesToWholeReadable(raw: number | null | undefined) {
   if (!raw || raw <= 0) {
     return "—";
@@ -81,66 +78,11 @@ function ScoringLogPanel({
 }: {
   decision: NonNullable<Release["qualityProfileDecision"]>;
 }) {
-  const t = useTranslate();
-
   return (
-    <div className="bg-background/80 px-3 py-2">
-      <p className="mb-1 text-xs font-semibold text-muted-foreground">
-        {t("nzb.scoringLog")}
-      </p>
-      <div className="space-y-0.5">
-        {decision.scoringLog.map((entry) => {
-          const badge = entry.source?.startsWith("user:")
-            ? "Custom Rule"
-            : entry.source?.startsWith("system:")
-              ? "System Rule"
-              : null;
-          return (
-            <div
-              key={entry.code}
-              className="flex justify-between gap-4 font-[var(--font-code)] text-xs"
-            >
-              <span className="flex items-center gap-1.5 text-muted-foreground">
-                {entry.code}
-                {badge && (
-                  <>
-                    <span className="rounded bg-muted px-1 py-0.5 font-sans text-[10px] leading-none text-muted-foreground">
-                      {badge}
-                    </span>
-                    {entry.ruleSetName && (
-                      <span className="font-sans text-[10px] text-muted-foreground/60">
-                        {entry.ruleSetName}
-                      </span>
-                    )}
-                  </>
-                )}
-              </span>
-              <span
-                className={
-                  entry.delta < 0 || entry.kind === "mandatory_rejection" || entry.kind === "final_score_rejection"
-                    ? "text-[var(--scry-danger-text-soft)]"
-                    : "text-[var(--scry-success-text-soft)]"
-                }
-              >
-                {scoringEntryText(entry, t)}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      <div className="mt-1.5 flex justify-between border-t border-border pt-1.5 font-[var(--font-code)] text-xs font-semibold">
-        <span className="text-muted-foreground">{t("nzb.total")}</span>
-        <span
-          className={
-            decision.releaseScore < 0
-              ? "text-[var(--scry-danger-text-soft)]"
-              : "text-[var(--scry-success-text-soft)]"
-          }
-        >
-          {getScoreText(decision.releaseScore)}
-        </span>
-      </div>
-    </div>
+    <ScoreLog
+      entries={toScoreLogEntries(decision.scoringLog)}
+      total={decision.releaseScore}
+    />
   );
 }
 
@@ -380,11 +322,7 @@ function SearchResultRow({
   );
 
   if (presentation === "selected-title") {
-    const scoreToneClassName = decision
-      ? decision.releaseScore < 0
-        ? "text-[var(--scry-danger-text-soft)]"
-        : "text-[var(--scry-success-text-soft)]"
-      : "text-[var(--scry-faint)]";
+    const scoreClassName = scoreToneClassName(decision?.releaseScore);
     const selectedTitleTags = [
       ...parsedBits.map((metadataBit, index) => ({
         className: selectedTitleTagClassName(index),
@@ -472,19 +410,19 @@ function SearchResultRow({
               }
               className={cn(
                 "text-[14px] font-bold tabular-nums underline-offset-2 hover:underline",
-                scoreToneClassName,
+                scoreClassName,
               )}
             >
-              {getScoreText(decision?.releaseScore)}
+              {formatScore(decision?.releaseScore)}
             </button>
           ) : (
             <div
               className={cn(
                 "text-[14px] font-bold tabular-nums",
-                scoreToneClassName,
+                scoreClassName,
               )}
             >
-              {getScoreText(decision?.releaseScore)}
+              {formatScore(decision?.releaseScore)}
             </div>
           )}
           <div className="mt-0.5 text-[9.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-faint3)]">
@@ -568,9 +506,9 @@ function SearchResultRow({
         data-release-link={result.link ?? ""}
         data-release-download-url={result.downloadUrl ?? ""}
         data-release-candidate-token={result.candidateToken ?? ""}
-        className="rounded-lg border border-border bg-background/40 p-3"
+        className="rounded-lg border border-border bg-background/40 px-2.5 py-2"
       >
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <p className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug text-foreground">
             {result.title}
           </p>
@@ -586,6 +524,38 @@ function SearchResultRow({
             <span className="font-[var(--font-code)] font-medium text-foreground/80">
               {bytesToWholeReadable(result.sizeBytes)}
             </span>
+            {decision ? (
+              <>
+                <span aria-hidden="true">•</span>
+                {hasLog ? (
+                  <button
+                    type="button"
+                    onClick={() => setExpanded((prev) => !prev)}
+                    aria-expanded={expanded}
+                    aria-label={
+                      expanded ? t("nzb.hideScoringLog") : t("nzb.showScoringLog")
+                    }
+                    className="inline-flex items-center gap-1"
+                  >
+                    {t("nzb.score")}
+                    <span
+                      className={`font-[var(--font-code)] font-semibold underline decoration-dotted underline-offset-2 ${scoreToneClassName(decision.releaseScore)}`}
+                    >
+                      {formatScore(decision.releaseScore)}
+                    </span>
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1">
+                    {t("nzb.score")}
+                    <span
+                      className={`font-[var(--font-code)] font-semibold ${scoreToneClassName(decision.releaseScore)}`}
+                    >
+                      {formatScore(decision.releaseScore)}
+                    </span>
+                  </span>
+                )}
+              </>
+            ) : null}
             {currentFileBadge}{packBadge}
             {rejectionBadge}
           </div>
@@ -630,7 +600,12 @@ function SearchResultRow({
               {queueUnavailableReason}
             </p>
           ) : null}
-          <div className="mt-1 grid gap-2">
+          {expanded && hasLog ? (
+            <div className="overflow-x-auto rounded-md border border-border">
+              <ScoringLogPanel decision={decision} />
+            </div>
+          ) : null}
+          <div className="flex flex-row-reverse flex-wrap gap-2 pt-0.5">
             <Button
               id={queueButtonId}
               data-ui="release-search-result-queue"
@@ -639,10 +614,10 @@ function SearchResultRow({
               disabled={queueDisabled}
               className={
                 queueButtonMuted
-                  ? "w-full"
+                  ? "min-w-24 flex-1"
                   : queueRequested
-                    ? "w-full border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-bg-strong)] text-[var(--scry-success-text)]"
-                    : "w-full border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-solid)] text-[var(--scry-success-on-solid)] hover:bg-[var(--scry-success-solid-hover)] focus-visible:ring-[var(--scry-success-border-strong)]"
+                    ? "min-w-24 flex-1 border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-bg-strong)] text-[var(--scry-success-text)]"
+                    : "min-w-24 flex-1 border border-[var(--scry-success-border-strong)] bg-[var(--scry-success-solid)] text-[var(--scry-success-on-solid)] hover:bg-[var(--scry-success-solid-hover)] focus-visible:ring-[var(--scry-success-border-strong)]"
               }
               variant={queueButtonMuted ? "ghost" : "default"}
             >
@@ -665,7 +640,7 @@ function SearchResultRow({
                 onClick={handleQueueAdditionalClick}
                 disabled={additionalQueueDisabled}
                 className={cn(
-                  "w-full border-[rgba(var(--scry-accent-rgb),0.30)] bg-[rgba(var(--scry-accent-rgb),0.08)] text-[var(--scry-accent-text)] shadow-none hover:bg-[rgba(var(--scry-accent-rgb),0.13)] hover:text-[var(--scry-accent-text)] focus-visible:ring-[rgba(var(--scry-accent-rgb),0.25)]",
+                  "flex-1 border-[rgba(var(--scry-accent-rgb),0.30)] bg-[rgba(var(--scry-accent-rgb),0.08)] text-[var(--scry-accent-text)] shadow-none hover:bg-[rgba(var(--scry-accent-rgb),0.13)] hover:text-[var(--scry-accent-text)] focus-visible:ring-[rgba(var(--scry-accent-rgb),0.25)]",
                   additionalQueueRequested &&
                     "border-[var(--scry-success-border)] bg-[var(--scry-success-bg)] text-[var(--scry-success-text)] hover:border-[var(--scry-success-border-strong)] hover:bg-[var(--scry-success-bg-strong)] hover:text-[var(--scry-success-text)]",
                 )}
@@ -765,24 +740,24 @@ function SearchResultRow({
             hasLog ? (
               <button
                 type="button"
-                className={`text-sm font-[var(--font-code)] underline-offset-2 hover:underline ${decision.releaseScore < 0 ? "text-[var(--scry-danger-text-soft)]" : "text-[var(--scry-success-text)]"}`}
+                className={`text-sm font-[var(--font-code)] underline-offset-2 hover:underline ${scoreToneClassName(decision.releaseScore)}`}
                 onClick={() => setExpanded((prev) => !prev)}
                 aria-label={
                   expanded ? t("nzb.hideScoringLog") : t("nzb.showScoringLog")
                 }
               >
-                {getScoreText(decision.releaseScore)}
+                {formatScore(decision.releaseScore)}
               </button>
             ) : (
               <span
-                className={`text-sm font-[var(--font-code)] ${decision.releaseScore < 0 ? "text-[var(--scry-danger-text-soft)]" : "text-[var(--scry-success-text)]"}`}
+                className={`text-sm font-[var(--font-code)] ${scoreToneClassName(decision.releaseScore)}`}
               >
-                {getScoreText(decision.releaseScore)}
+                {formatScore(decision.releaseScore)}
               </span>
             )
           ) : (
             <span className="text-sm font-[var(--font-code)] text-muted-foreground">
-              {getScoreText(undefined)}
+              {formatScore(undefined)}
             </span>
           )}
         </td>
@@ -862,10 +837,11 @@ function SearchResultRow({
 }
 
 const EMPTY_CURRENT_RELEASES = new Set<string>();
+const OWNED_RELEASE_REFRESH_KINDS = new Set([...TITLE_OVERVIEW_IMPORT_REFRESH_KINDS, "system_notice", "file_analyzed"]);
 type SearchResultBucketsProps = Omit<
   React.ComponentProps<typeof SearchResultBucketsContent>,
   "currentNames"
->;
+> & { ownedScope?: CurrentReleaseScope };
 
 export function SearchResultBuckets({
   titleId,
@@ -880,16 +856,20 @@ export function SearchResultBuckets({
 
 function TitleSearchResultBuckets({
   titleId,
+  ownedScope,
   ...props
 }: SearchResultBucketsProps & { titleId: string }) {
-  const [{ data }] = useQuery<{ title: { id: string; mediaFiles: CurrentReleaseFile[] } | null }>({
+  const [{ data }, refresh] = useQuery<{ title: { id: string; mediaFiles: CurrentReleaseFile[] } | null }>({
     query: currentReleaseFilesQuery,
     variables: { id: titleId },
     requestPolicy: "cache-and-network",
   });
+  useActivityEventStream({ titleId, kinds: OWNED_RELEASE_REFRESH_KINDS,
+    onStart: () => refresh({ requestPolicy: "network-only" }),
+    onEvent: () => refresh({ requestPolicy: "network-only" }) });
   const currentNames = React.useMemo(
-    () => currentReleaseNames(data?.title?.id === titleId ? data.title.mediaFiles : []),
-    [data, titleId],
+    () => currentReleaseNames(data?.title?.id === titleId ? data.title.mediaFiles : [], ownedScope),
+    [data, titleId, ownedScope],
   );
   return <SearchResultBucketsContent {...props} currentNames={currentNames} />;
 }

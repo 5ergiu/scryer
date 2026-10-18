@@ -226,6 +226,7 @@ impl FileImporter for ProgressReportingFileImporter {
 
 #[derive(Default, Clone)]
 pub(crate) struct MockMediaFileRepo {
+    pub(super) score_evaluations: Arc<Mutex<HashMap<String, crate::FileScoreEvaluation>>>,
     pub(super) store: Arc<Mutex<Vec<TitleMediaFile>>>,
     pub(super) pending_analysis_ids: Arc<Mutex<Vec<String>>>,
     pub(super) analysis_attempts: Arc<Mutex<Vec<(String, MediaFileAnalysis)>>>,
@@ -392,6 +393,35 @@ fn mock_media_file(id: String, input: &InsertMediaFileInput) -> TitleMediaFile {
 
 #[async_trait]
 impl MediaFileRepository for MockMediaFileRepo {
+    async fn get_score_evaluation(
+        &self,
+        file_id: &str,
+    ) -> AppResult<Option<crate::FileScoreEvaluation>> {
+        Ok(self.score_evaluations.lock().await.get(file_id).cloned())
+    }
+
+    async fn save_score_evaluation(
+        &self,
+        file_id: &str,
+        title_id: &str,
+        evaluation: &crate::FileScoreEvaluation,
+    ) -> AppResult<()> {
+        if !self
+            .store
+            .lock()
+            .await
+            .iter()
+            .any(|file| file.id == file_id && file.title_id == title_id)
+        {
+            return Err(AppError::NotFound("media file".into()));
+        }
+        self.score_evaluations
+            .lock()
+            .await
+            .insert(file_id.into(), evaluation.clone());
+        Ok(())
+    }
+
     async fn insert_media_file(&self, input: &InsertMediaFileInput) -> AppResult<String> {
         let id = Id::new().0;
         self.store

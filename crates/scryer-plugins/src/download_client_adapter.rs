@@ -547,6 +547,7 @@ fn map_add_response_to_grab_result(
         client_type: client_type.to_string(),
         info_hash,
         seed_goals: None,
+        grabbed_file_names: Vec::new(),
     }
 }
 
@@ -669,6 +670,7 @@ fn map_completed_download(
         size_bytes: item.size_bytes,
         completed_at: parse_timestamp(item.completed_at),
         parameters: item.parameters,
+        posted_file_names: Vec::new(),
     }
 }
 

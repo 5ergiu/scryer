@@ -1,6 +1,6 @@
 [package]
 name = "scryer"
-version = "0.21.16"
+version = "0.21.17"
 edition.workspace = true
 
 [features]
@@ -109,6 +109,10 @@ scryer-runtime-info = { path = "../scryer-runtime-info" }
 [[bin]]
 name = "scryer-tray"
 path = "src/tray.rs"
+
+[[bin]]
+name = "scryer-setup"
+path = "src/setup.rs"
 
 [target.'cfg(unix)'.dependencies]
 # `SIGTERM` for the tray's graceful stop of its server child.

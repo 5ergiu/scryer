@@ -2,11 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   listMembershipMetadataLookup,
+  listTitleWithoutYear,
   listMembershipReasonKey,
   listPreviewMetadataLookup,
   listMembershipTitleHref,
   sortListSubscriptions,
 } from "./lists.ts";
+
+test("list titles remove only a matching year suffix before rendering the separate year", () => {
+  assert.equal(listTitleWithoutYear("The Grand Tour (2016)", 2016), "The Grand Tour");
+  assert.equal(listTitleWithoutYear("INVINCIBLE (2021) ", 2021), "INVINCIBLE");
+  assert.equal(listTitleWithoutYear("Example (2021)", 2022), "Example (2021)");
+  assert.equal(listTitleWithoutYear("Example (2021)", null), "Example (2021)");
+  assert.equal(listTitleWithoutYear("1917", 2019), "1917");
+  assert.equal(listTitleWithoutYear("Example (Part 2)", 2021), "Example (Part 2)");
+  assert.equal(listTitleWithoutYear("(2021)", 2021), "(2021)");
+});
 
 test("a list entry's reason code resolves to its sentence, and an unknown code to none", () => {
   assert.equal(listMembershipReasonKey("media_type_not_included"), "lists.reason.mediaTypeNotIncluded");
@@ -345,7 +356,7 @@ test("public modes exclude member requests and discover cannot be picked yet", (
   assert.equal(PUBLIC_LIST_MODES.includes("REQUEST"), false);
   assert.equal(isListModeSelectable("DISCOVER"), false);
   assert.equal(isListModeSelectable("HOLD"), true);
-  assert.equal(listModeLabelKey("SEARCH"), "lists.mode.search");
+  assert.equal(listModeLabelKey("ADD"), "lists.mode.add");
 });
 
 test("state labels and tones cover every sync and membership state", () => {
@@ -488,7 +499,7 @@ test("subscribe input is public, drops blank parameters and routes for unfollowe
     {
       name: "  Weekend picks ",
       kinds: ["MOVIE"],
-      mode: "SEARCH",
+      mode: "ADD",
       routes: [defaultListRoute("MOVIE", libraries, "MONITORED"), defaultListRoute("SERIES", libraries, "ALL_EPISODES")],
       filters: [],
       maxPerSync: 5,

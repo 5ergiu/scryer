@@ -5685,6 +5685,7 @@ mod tests {
             size_bytes: None,
             completed_at: None,
             parameters: vec![],
+            posted_file_names: Vec::new(),
         }
     }
 

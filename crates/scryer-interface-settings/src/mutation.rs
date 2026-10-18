@@ -383,6 +383,7 @@ fn from_delay_profile(profile: scryer_application::DelayProfile) -> DelayProfile
             .filter_map(|facet| MediaFacetValue::parse(&facet))
             .collect(),
         tags: profile.tags,
+        library_ids: profile.library_ids.into_iter().map(ID::from).collect(),
         priority: profile.priority,
         enabled: profile.enabled,
     }
@@ -679,7 +680,9 @@ fn quality_profile_from_input(
             prefer_remux: criteria.prefer_remux,
             allow_bd_disk: criteria.allow_bd_disk,
             allow_upgrades: criteria.allow_upgrades,
-            ignore_proper_repack: criteria.ignore_proper_repack,
+            ignore_proper_repack: criteria.ignore_proper_repack.unwrap_or_else(|| {
+                existing.is_some_and(|profile| profile.criteria.ignore_proper_repack)
+            }),
             prefer_dual_audio: false,
             required_audio_languages: Vec::new(),
             scoring_persona: scryer_application::ScoringPersona::Balanced,
@@ -1435,11 +1438,23 @@ impl SettingsMutations {
             require_config_app_permission(ctx, scryer_domain::AppPermission::ManageCatalogSettings)
                 .await?;
 
+        let profile_id = input.id.to_string();
+        let library_ids = match input.library_ids {
+            Some(library_ids) => library_ids.into_iter().map(|id| id.to_string()).collect(),
+            None => app
+                .get_delay_profiles(&actor)
+                .await
+                .map_err(to_gql_error)?
+                .into_iter()
+                .find(|profile| profile.id.trim() == profile_id.trim())
+                .map(|profile| profile.library_ids)
+                .unwrap_or_default(),
+        };
         let profile = app
             .upsert_delay_profile(
                 &actor,
                 scryer_application::DelayProfile {
-                    id: input.id.to_string(),
+                    id: profile_id,
                     name: input.name,
                     usenet_delay_minutes: input.usenet_delay_minutes as i64,
                     torrent_delay_minutes: input.torrent_delay_minutes as i64,
@@ -1455,6 +1470,7 @@ impl SettingsMutations {
                         .map(|facet| facet.into_domain().as_str().to_string())
                         .collect(),
                     tags: input.tags,
+                    library_ids,
                     priority: input.priority,
                     enabled: input.enabled,
                 },
@@ -2587,6 +2603,40 @@ impl SettingsMutations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_revision_policy_preserves_existing_profile() {
+        use async_graphql::InputType;
+
+        let mut input = serde_json::json!({
+            "id": "revision-policy", "name": "Revision policy",
+            "criteria": {
+                "qualityTiers": ["1080P"], "archivalQuality": "1080P",
+                "allowUnknownQuality": false,
+                "sourceAllowlist": [], "sourceBlocklist": [],
+                "videoCodecAllowlist": [], "videoCodecBlocklist": [],
+                "audioCodecAllowlist": [], "audioCodecBlocklist": [],
+                "dolbyVisionAllowed": true, "detectedHdrAllowed": true,
+                "preferRemux": false, "allowBdDisk": true,
+                "allowUpgrades": true, "scoringOverrides": {}
+            }
+        });
+        let parse = |value| {
+            QualityProfileInput::parse(Some(async_graphql::Value::from_json(value).unwrap()))
+                .unwrap_or_else(|_| panic!("invalid profile input"))
+        };
+        let mut existing = quality_profile_from_input(parse(input.clone()), None).unwrap();
+        assert!(!existing.criteria.ignore_proper_repack);
+        existing.criteria.ignore_proper_repack = true;
+        let preserved = quality_profile_from_input(parse(input.clone()), Some(&existing)).unwrap();
+        assert!(preserved.criteria.ignore_proper_repack);
+        for explicit in [false, true] {
+            input["criteria"]["ignoreProperRepack"] = explicit.into();
+            let updated =
+                quality_profile_from_input(parse(input.clone()), Some(&existing)).unwrap();
+            assert_eq!(updated.criteria.ignore_proper_repack, explicit);
+        }
+    }
 
     #[test]
     fn media_server_login_requires_effective_form_login() {

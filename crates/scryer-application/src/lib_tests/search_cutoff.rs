@@ -1,6 +1,161 @@
 use super::*;
 
 #[tokio::test]
+async fn related_revision_survives_the_search_result_cap() {
+    for (incumbent_group, ignore, quality, preferred) in [
+        (Some("GRP"), false, "1080p", true),
+        (Some("UNRELATED"), false, "1080p", false),
+        (None, false, "1080p", false),
+        (Some("GRP"), true, "1080p", false),
+        (Some("GRP"), false, "720p", false),
+    ] {
+        let settings = Arc::new(StoredSettingsRepo::default());
+        settings
+            .set_value(
+                SETTINGS_SCOPE_SYSTEM,
+                QUALITY_PROFILE_ID_KEY,
+                r#""revision-cap""#,
+            )
+            .await;
+        let profiles = Arc::new(StoredQualityProfileRepo::default());
+        let mut profile = cutoff_projection_test_profile("revision-cap", "1080P");
+        profile.criteria.ignore_proper_repack = ignore;
+        profiles.set_profiles(vec![profile.clone()]).await;
+        let files = Arc::new(MockMediaFileRepo::default());
+        let (app, user, _) =
+            bootstrap_with_cutoff_projection_state(settings, profiles, files.clone());
+        let policy = scryer_rules::UserPolicy {
+            id: "group_score".into(),
+            name: "Group score".into(),
+            applied_facets: vec![],
+            origin: scryer_rules::PolicyOrigin::User,
+            rego_source: scryer_rules::rewrite_package_declaration(
+                "score_entry[\"group\"] := 1000 if { startswith(lower(input.release.release_group), \"other\") }",
+                "group_score",
+            ),
+        };
+        *app.services.customization.user_rules.write().unwrap() =
+            scryer_rules::UserRulesEngine::build(&[policy]).unwrap();
+        let title = app
+            .add_title(
+                &user,
+                NewTitle {
+                    name: "Revision Movie".into(),
+                    facet: MediaFacet::Movie,
+                    monitored: true,
+                    year: Some(2024),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(group) = incumbent_group {
+            files
+                .insert_media_file(&InsertMediaFileInput {
+                    title_id: title.id.clone(),
+                    file_path: format!(
+                        "/fixture/Revision.Movie.2024.1080p.WEB-DL.H.264-{group}.mkv"
+                    ),
+                    quality_label: Some("1080P".into()),
+                    role: MediaFileRole::Primary,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        let candidates = (0..=200)
+            .map(|index| IndexerSearchResult {
+                title: if index == 200 {
+                    format!("Revision.Movie.2024.{quality}.PROPER.WEB-DL.H.264-GRP")
+                } else {
+                    format!("Revision.Movie.2024.1080p.WEB-DL.H.264-OTHER{index}")
+                },
+                source: "fixture".into(),
+                indexer_id: None,
+                link: None,
+                download_url: None,
+                source_kind: None,
+                size_bytes: None,
+                published_at: None,
+                thumbs_up: None,
+                thumbs_down: None,
+                indexer_languages: None,
+                indexer_subtitles: None,
+                indexer_grabs: None,
+                password_hint: None,
+                parsed_release_metadata: None,
+                quality_profile_decision: None,
+                extra: Default::default(),
+                response_attributes: Default::default(),
+                guid: None,
+                info_url: None,
+                provenance: None,
+                candidate_token: None,
+                queue_scope: None,
+                coverage_scope: None,
+                auto_eligible: None,
+                auto_decision_code: None,
+                auto_decision_summary: None,
+                release_listing_json: None,
+            })
+            .collect();
+        let parse_context = crate::release_parser::build_release_parse_context_for_title(
+            &title,
+            &[],
+            Some("movie"),
+        );
+        let scored = app
+            .score_release_results(
+                candidates,
+                &profile,
+                &title.id,
+                None,
+                None,
+                &parse_context,
+                None,
+                None,
+                None,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            scored.len(),
+            201,
+            "provisional scoring must retain every candidate"
+        );
+        assert!(
+            scored.last().unwrap().title.contains("PROPER"),
+            "the revision must lose provisional ranking before incumbent context"
+        );
+        let subject = app
+            .resolve_release_search_subject_for_title(&title)
+            .await
+            .unwrap();
+        let evaluated = app
+            .evaluate_search_results_for_subject(&title, &subject, scored, true)
+            .await
+            .unwrap();
+        assert_eq!(evaluated.len(), 200);
+        assert_eq!(
+            evaluated[0].title.contains("PROPER"),
+            preferred,
+            "incumbent={incumbent_group:?}, ignore={ignore}, quality={quality}: {:?}",
+            evaluated[0]
+        );
+        assert_eq!(
+            evaluated[0]
+                .quality_profile_decision
+                .as_ref()
+                .unwrap()
+                .revision_preference
+                > 0,
+            preferred
+        );
+    }
+}
+
+#[tokio::test]
 async fn automatic_search_includes_permitted_upgrades_for_an_unmonitored_complete_title() {
     for (upgrades_allowed, quality, score_cutoff, expected) in [
         (true, "720P", None, 1),

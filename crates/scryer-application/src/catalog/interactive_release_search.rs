@@ -1524,7 +1524,10 @@ impl AppUseCase {
             .record_submission_with_identity(submission.clone(), identity, grab.seed_goals.clone())
             .await
         {
-            Ok(disposition) => disposition,
+            Ok(disposition) => {
+                self.record_grabbed_file_names(&download_id, &grab).await;
+                disposition
+            }
             Err(error) => {
                 return Err(AppError::DownloadSubmitAmbiguous(format!(
                     "accepted unlinked download {download_id} could not be made durable: {error}"

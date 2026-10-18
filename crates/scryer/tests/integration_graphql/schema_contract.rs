@@ -817,7 +817,7 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Abandoning an account link the member walked away from adds
     // `cancelListAccountLink`: 272->273.
     assert_eq!(
-        mutation_field_count, 273,
+        mutation_field_count, 275,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1142,9 +1142,20 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Rename previews now expose the existing per-title naming context.
     assert!(public_type_names.contains(&"MediaRenameNamingContextPayload"));
     assert!(public_type_names.contains(&"MovieAvailabilityPayload"));
-    assert_eq!(public_types.len(), 966);
-    assert_eq!(kind_count("OBJECT"), 520);
-    assert_eq!(kind_count("INPUT_OBJECT"), 239);
+    for name in [
+        "FileScoreEvaluationPayload",
+        "FileScoreSelectionInput",
+        "HistoryScoreComparisonPayload",
+        "HistoryScoringPayload",
+        "ScoreEvaluationEntryPayload",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert!(mutation_field_names.contains(&"refreshFileScores"));
+    assert!(mutation_field_names.contains(&"cancelFileScoreRefresh"));
+    assert_eq!(public_types.len(), 971);
+    assert_eq!(kind_count("OBJECT"), 524);
+    assert_eq!(kind_count("INPUT_OBJECT"), 240);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
@@ -6470,6 +6481,14 @@ async fn graphql_introspection_exposes_typed_settings_fields() {
             &format!("DelayProfilePayload.{field_name}"),
         );
     }
+    assert_settings_non_null_id_list(
+        settings_output_field("delayProfile", "libraryIds"),
+        "DelayProfilePayload.libraryIds",
+    );
+    assert_settings_optional_id_list(
+        settings_input_field("delayProfileInput", "libraryIds"),
+        "DelayProfileInput.libraryIds",
+    );
     assert_settings_non_null_id(
         settings_output_field("qualityProfile", "id"),
         "QualityProfilePayload.id",

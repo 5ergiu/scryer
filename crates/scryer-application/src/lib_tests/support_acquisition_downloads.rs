@@ -20,6 +20,7 @@ pub(super) struct MockReleaseAttemptRepo {
 pub(super) struct MockBlocklistRepo {
     pub(super) entries: Arc<Mutex<Vec<BlocklistEntry>>>,
     pub(super) fail_writes: std::sync::atomic::AtomicBool,
+    pub(super) fail_reads: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -233,6 +234,11 @@ impl BlocklistRepository for MockBlocklistRepo {
         release_name: &str,
         info_hash: Option<&str>,
     ) -> AppResult<bool> {
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AppError::Repository(
+                "synthetic blocklist read failure".into(),
+            ));
+        }
         let entries = self.entries.lock().await;
         if let Some(info_hash) = info_hash
             && entries.iter().any(|entry| {
@@ -2356,6 +2362,7 @@ impl DownloadClient for StubDownloadClient {
             client_type: "nzbget".to_string(),
             info_hash: self.grab_info_hash.lock().await.clone(),
             seed_goals: None,
+            grabbed_file_names: Vec::new(),
         })
     }
 

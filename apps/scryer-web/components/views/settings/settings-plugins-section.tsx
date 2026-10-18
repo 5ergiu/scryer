@@ -720,12 +720,17 @@ export function SettingsPluginsSection({
 
   const upgradeCount = installed.filter((p) => p.updateAvailable).length;
   const toolbar = (
-    <div className="flex min-h-10 flex-wrap items-center justify-end gap-2 sm:min-w-[29rem]">
+    <div className="flex min-h-10 items-center justify-end sm:min-w-[29rem]">
+      {/* Equal columns: every action takes the width of the widest, so the
+          update count badge does not make Update All the odd one out. */}
+      <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:auto-cols-fr sm:grid-flow-col sm:grid-cols-none">
+      {upgradeCount > 0 || upgradingAll ? (
       <TextActionButton
         id="settings-plugins-upgrade-all"
         tone="upgrade"
         size="sm"
-        disabled={upgradingAll || remoteActionsBlocked.upgrade || upgradeCount === 0}
+        className="w-full"
+        disabled={upgradingAll || remoteActionsBlocked.upgrade}
         onClick={onUpgradeAllPlugins}
         leadingIcon={upgradingAll ? <LoadingMark className="h-4 w-4" /> : <ArrowUpCircle className="h-4 w-4" />}
       >
@@ -739,11 +744,12 @@ export function SettingsPluginsSection({
           </Badge>
         ) : null}
       </TextActionButton>
+      ) : null}
       <Button
         id="settings-plugins-manual-toggle"
         variant="outline"
         size="sm"
-        className="h-9"
+        className="h-9 w-full"
         onClick={onToggleManualInstall}
       >
         {t("settings.pluginInstallManually")}
@@ -752,13 +758,14 @@ export function SettingsPluginsSection({
         id="settings-plugins-refresh"
         variant="outline"
         size="sm"
-        className="h-9"
+        className="h-9 w-full"
         disabled={refreshing}
         onClick={onRefreshRegistry}
       >
         {refreshing ? <LoadingMark className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
         {refreshing ? t("label.refreshing") : t("settings.pluginsRefresh")}
       </Button>
+      </div>
     </div>
   );
 

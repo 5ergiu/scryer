@@ -40,7 +40,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
 dependencies = [
  "crypto-common 0.2.2",
- "inout 0.2.2",
+ "inout 0.2.4",
 ]
 
 [[package]]
@@ -1125,7 +1125,7 @@ checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
- "inout 0.2.2",
+ "inout 0.2.4",
  "zeroize",
 ]
 
@@ -1201,9 +1201,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.8"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
+checksum = "4356eba6976435498d05a311ee9fc486da3bc81c200d3f0d7dd9703b41913f92"
 dependencies = [
  "bytes",
  "memchr",
@@ -1219,8 +1219,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd 0.14.2",
- "zstd-safe 8.1.0",
+ "zstd 0.14.3",
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -1798,18 +1798,18 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "defmt"
-version = "0.3.100"
+version = "0.3.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad"
+checksum = "4deef977660e373c458df605a913d4ab121db0ccd18d1ad6976dff7d37cddb53"
 dependencies = [
- "defmt 1.1.1",
+ "defmt 1.2.0",
 ]
 
 [[package]]
 name = "defmt"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1"
+checksum = "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1"
 dependencies = [
  "bitflags 1.3.2",
  "defmt-macros",
@@ -1817,21 +1817,21 @@ dependencies = [
 
 [[package]]
 name = "defmt-macros"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bad9c72e7ca2137e0dc3813245a0d282fd6daad32fd800af018306a9169b5fe8"
+checksum = "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366"
 dependencies = [
  "defmt-parser",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "defmt-parser"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
+checksum = "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -2154,9 +2154,9 @@ dependencies = [
 
 [[package]]
 name = "equivalent"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "erased-serde"
@@ -2506,9 +2506,9 @@ dependencies = [
 
 [[package]]
 name = "generator"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ade96dc9003043bce7c035c85a9df5a858bfb2039c5a2e6fdf00f324f6c551"
+checksum = "1be81b31c9ce4caf7f3178eeb90662bb1864d3ad363ec6bdada3201adff19c37"
 dependencies = [
  "cc",
  "cfg-if",
@@ -3287,9 +3287,9 @@ dependencies = [
 
 [[package]]
 name = "inout"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
+checksum = "3ce983bb6fb399067d101fbfc9e74174e07e9f29a2bc679efefeb8c645819c3f"
 dependencies = [
  "block-padding",
  "hybrid-array",
@@ -4403,9 +4403,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
-version = "2.9.3"
+version = "2.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b568374ba38b33a6c627141f891faf16902b08d2db26b8ede1bcb0a15b1919fa"
+checksum = "fd47a460a9cbc3b3429c7e22bf0d76653e779319bae45a499ca010c9a990bb23"
 dependencies = [
  "memchr",
  "psm",
@@ -5241,7 +5241,7 @@ dependencies = [
  "ghash",
  "hex-literal",
  "hmac 0.13.0",
- "inout 0.2.2",
+ "inout 0.2.4",
  "log",
  "pageant",
  "pbkdf2",
@@ -5336,9 +5336,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -5449,9 +5449,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.29"
+version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
+checksum = "9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -5495,7 +5495,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scryer"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "application-updater",
  "async-graphql",
@@ -5571,7 +5571,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-application"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "application-updater",
  "argon2",
@@ -5631,12 +5631,12 @@ dependencies = [
  "whatlang",
  "windows-sys 0.61.2",
  "wiremock",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-domain"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "blake3",
  "chrono",
@@ -5654,7 +5654,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-acquisition"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -5690,12 +5690,12 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-infrastructure-configuration"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5713,7 +5713,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-crypto"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -5723,7 +5723,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-datastore"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5754,12 +5754,12 @@ dependencies = [
  "url",
  "uuid",
  "windows-native-keyring-store",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-infrastructure-identity"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5784,7 +5784,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-library"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "blake3",
@@ -5813,13 +5813,13 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
- "zstd 0.14.2",
+ "zstd 0.14.3",
  "zune-core",
 ]
 
 [[package]]
 name = "scryer-infrastructure-library-search"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "scryer-application",
@@ -5836,7 +5836,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-metadata"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -5863,7 +5863,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-notifications"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5880,7 +5880,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-infrastructure-runtime"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -5911,12 +5911,12 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-infrastructure-sql"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "blake3",
  "chrono",
@@ -5928,12 +5928,12 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-infrastructure-workflow"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5955,7 +5955,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -5982,7 +5982,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-acquisition"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -5994,7 +5994,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-core"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "scryer-application",
@@ -6005,7 +6005,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-import"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6023,7 +6023,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-media"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6039,7 +6039,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-media-types"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6051,7 +6051,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-metadata"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "scryer-application",
@@ -6062,7 +6062,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-query"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "base64 0.22.1",
@@ -6079,7 +6079,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-security"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6091,7 +6091,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-settings"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6104,7 +6104,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-subscription"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-interface-system"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -6131,14 +6131,14 @@ dependencies = [
 
 [[package]]
 name = "scryer-launcher"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "scryer-logging"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "chrono",
  "serde",
@@ -6149,14 +6149,14 @@ dependencies = [
 
 [[package]]
 name = "scryer-media-types"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "scryer-mediainfo"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "bytes",
  "isolang",
@@ -6174,7 +6174,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-mock-apis"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "axum",
  "serde",
@@ -6186,7 +6186,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-outbound-http"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "chrono",
  "governor",
@@ -6214,7 +6214,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-plugins"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -6250,12 +6250,12 @@ dependencies = [
  "wasmtime-wasi",
  "wat",
  "wiremock",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "scryer-release-parser"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -6269,7 +6269,7 @@ dependencies = [
 
 [[package]]
 name = "scryer-rules"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "blake3",
  "chrono",
@@ -6283,11 +6283,11 @@ dependencies = [
 
 [[package]]
 name = "scryer-runtime-info"
-version = "0.21.16"
+version = "0.21.17"
 
 [[package]]
 name = "scryer-webauthn"
-version = "0.21.16"
+version = "0.21.17"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6694,7 +6694,7 @@ dependencies = [
  "bitflags 1.3.2",
  "byteorder",
  "cfg-if",
- "defmt 0.3.100",
+ "defmt 0.3.101",
  "heapless",
  "managed",
 ]
@@ -7472,9 +7472,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -8220,12 +8220,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.261.0"
+version = "0.262.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2608e8bb6d67fd68f5a8d0eb1363d6e7bcbc1f8ded5a0bd3a1e382462b876b22"
+checksum = "4495a6f85dd94c411c749303efcbc5defade0b0cbdbc0541495241ab917a9b5a"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.261.0",
+ "wasmparser 0.262.0",
 ]
 
 [[package]]
@@ -8268,9 +8268,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.261.0"
+version = "0.262.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
+checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
 dependencies = [
  "bitflags 2.13.2",
  "indexmap",
@@ -8560,24 +8560,24 @@ dependencies = [
 
 [[package]]
 name = "wast"
-version = "261.0.0"
+version = "262.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "776443145731a4062e5b0d392892a2005909b6ab72d9fdc3cad53dd1a714e44a"
+checksum = "30612a0c29249b5f185888a107e8a519d920226b7d07f9d351fd094e9f75eb23"
 dependencies = [
  "bumpalo",
  "leb128fmt",
  "memchr",
  "unicode-width",
- "wasm-encoder 0.261.0",
+ "wasm-encoder 0.262.0",
 ]
 
 [[package]]
 name = "wat"
-version = "1.261.0"
+version = "1.262.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7b4d1a49ea73a8f3326e74e3a05db667001b16bd1035ed3356fc1a0ed05ca7f"
+checksum = "e228027f2b07bbaf946980ebbe2437fca73be6f54c40c2a8d4f42f277075f8d1"
 dependencies = [
- "wast 261.0.0",
+ "wast 262.0.0",
 ]
 
 [[package]]
@@ -9261,7 +9261,7 @@ dependencies = [
  "toml_edit",
  "x509-cert",
  "xtask-support",
- "zstd 0.14.2",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -9302,18 +9302,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.62"
+version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86502bf56ac7c77571a32e2647bb2a15894565e981fb2a48d7bde2d91c965a9d"
+checksum = "e5fe1f8f1b06191a00962174c61aa5005e0bb391a6d80d07e24d115c01a92ed8"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.62"
+version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5457206954b06561e2608c7e19cf58b1926586d999c246eebe4502f7e2039d1a"
+checksum = "863ad3ac83293fb4d740aedbfdc9240dd8d1a50c1099acd76ce80ce7c7230c7f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9419,11 +9419,11 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.14.2"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057cfd910cfac363a0ada849592624b4c9ff2e10bef504c3433810d78ed96f93"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.1.0",
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -9437,18 +9437,18 @@ dependencies = [
 
 [[package]]
 name = "zstd-safe"
-version = "8.1.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd44c6a7284e91f3717755b24315a302edd9153a01f753c3cba3d765e8eafac"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.1+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

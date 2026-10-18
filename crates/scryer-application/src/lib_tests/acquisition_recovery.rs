@@ -131,6 +131,30 @@ async fn notification_broadcast_wakes_once_for_notification_batches() {
 
 const STANDBY_LISTING_SNAPSHOT: &str = r#"{"v":1,"thumbs_up":4,"extra":{"synthetic_listing_attribute":"standby"},"captured_at":"2026-01-01T00:00:00Z"}"#;
 
+fn assert_scored_1080p_listing(actual: Option<&str>, expected: Option<String>, decision: &str) {
+    let mut actual: serde_json::Value =
+        serde_json::from_str(actual.expect("recorded listing")).unwrap();
+    let scoring = actual.as_object_mut().unwrap().remove("grab_scoring");
+    assert_eq!(
+        scoring,
+        Some(serde_json::json!({
+            "candidate_score": 100,
+            "previous_score": null,
+            "delta": null,
+            "decision_code": decision,
+            "comparisons": [],
+            "entries": [{"code": "quality_resolution_1080p", "delta": 100,
+                "kind": "score_contribution", "source": null}]
+        }))
+    );
+    let expected: serde_json::Value =
+        serde_json::from_str(&expected.expect("expected listing")).unwrap();
+    assert_eq!(
+        actual, expected,
+        "all original listing facts remain unchanged"
+    );
+}
+
 /// The standby row's frozen facts, stamped at the instant the row was grabbed.
 fn standby_listing_stamped_at(grabbed_at: &str) -> String {
     use crate::quality::release_listing::ReleaseListingSnapshot;
@@ -378,10 +402,10 @@ async fn failed_grab_retries_standby_candidate(
             submission.source_title.as_deref() == Some("Standby.Release.1080p.WEB-DL")
         })
         .expect("standby submission");
-    assert_eq!(
-        standby_submission.release_listing_json,
+    assert_scored_1080p_listing(
+        standby_submission.release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(standby_grabbed_at)),
-        "the standby grab carries the facts frozen when the row was saved, stamped at the grab"
+        "initial",
     );
     let identities = download_submissions.identities.lock().await;
     assert!(
@@ -573,24 +597,16 @@ async fn standby_delay_parks_the_best_row_stops_the_walk_and_promotion_grabs_whe
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Standby Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "standby-delay",
-                "name": "Standby delay",
-                "usenet_delay_minutes": 10,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "standby-delay",
+            "name": "Standby delay",
+            "usenet_delay_minutes": 10,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let now = Utc::now();
     let mut best = pending_movie_release(
         &wanted_id,
@@ -933,24 +949,16 @@ async fn waiting_promotion_reparks_when_the_delay_profile_grows() {
         .insert_pending_release(&waiting)
         .await
         .expect("seed waiting release");
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "grown-delay",
-                "name": "Grown delay",
-                "usenet_delay_minutes": 30,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("lengthen delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "grown-delay",
+            "name": "Grown delay",
+            "usenet_delay_minutes": 30,
+        }]),
+    )
+    .await
+    .expect("lengthen delay profile");
     let wanted = wanted_items
         .get_acquisition_scope_state_by_id(&wanted_id)
         .await
@@ -1004,24 +1012,16 @@ async fn operator_pending_grab_ignores_the_delay_profile() {
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Operator Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "operator-delay",
-                "name": "Operator delay",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "operator-delay",
+            "name": "Operator delay",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let pending = pending_movie_release(
         &wanted_id,
         &title,
@@ -1635,13 +1635,15 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
-    let (app, user) = bootstrap_with_acquisition_tracking(
+    let (mut app, user) = bootstrap_with_acquisition_tracking(
         download_client,
         download_submissions.clone(),
         pending_releases.clone(),
         wanted_items.clone(),
     );
 
+    let blocklist = Arc::new(MockBlocklistRepo::default());
+    app.services.workflow.blocklist_repo = blocklist.clone();
     let title = app
         .add_title(
             &user,
@@ -1729,21 +1731,74 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
         .await
         .expect("record failed submission");
 
-    let outcome = crate::acquisition_workflow::process_download_failure(
+    let failure = || crate::acquisition_workflow::DownloadFailureContext {
+        wanted_item: Some(wanted.clone()),
+        title_id: Some(title.id.clone()),
+        client_id: "primary".to_string(),
+        client_type: "nzbget".to_string(),
+        client_name: Some("Primary".to_string()),
+        client_item_id: "failed-job".to_string(),
+        release_title: "Failed.Release.1080p.WEB-DL".to_string(),
+        reason: "download failed".to_string(),
+        remove_from_client_if_configured: false,
+        blocklist_reason: None,
+        skip_reacquire: false,
+    };
+    blocklist
+        .fail_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
         &app,
-        crate::acquisition_workflow::DownloadFailureContext {
-            wanted_item: Some(wanted.clone()),
-            title_id: Some(title.id.clone()),
-            client_id: "primary".to_string(),
-            client_type: "nzbget".to_string(),
-            client_name: Some("Primary".to_string()),
-            client_item_id: "failed-job".to_string(),
-            release_title: "Failed.Release.1080p.WEB-DL".to_string(),
-            reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
-            blocklist_reason: None,
-            skip_reacquire: false,
-        },
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        failed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert!(blocklist.entries.lock().await.is_empty());
+    blocklist
+        .fail_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    blocklist
+        .fail_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unconfirmed = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
+    )
+    .await;
+    assert_eq!(
+        unconfirmed,
+        crate::acquisition_workflow::FailureHandlingOutcome::RecordingFailed
+    );
+    let unchanged = wanted_items
+        .get_acquisition_scope_state_by_id(&wanted.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, AcquisitionScopeStatus::Grabbed);
+    assert_eq!(unchanged.grabbed_release, wanted.grabbed_release);
+    assert_eq!(blocklist.entries.lock().await.len(), 1);
+    blocklist
+        .fail_reads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::acquisition_workflow::process_download_failure_with_cleanup_intent(
+        &app,
+        None,
+        failure(),
+        true,
     )
     .await;
 
@@ -6107,12 +6162,12 @@ async fn automatic_search_grab_persists_the_listing_it_was_offered() {
     .with_timezone(&chrono::Utc);
     // The lane scores and grabs at one instant, so the snapshot it persists is
     // the offered listing captured exactly when the grab was recorded.
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, grabbed_at,
         ),
-        "the grab persists the snapshot it scored, captured at the lane's grab time"
+        "initial",
     );
 }
 
@@ -6134,24 +6189,16 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Unknown Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age-search",
-                "name": "Unknown age search",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age-search",
+            "name": "Unknown age search",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -6175,12 +6222,12 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
     );
     let added_at =
         crate::quality_profile::parse_published_at(&row.added_at).expect("valid first-seen time");
-    assert_eq!(
-        row.release_listing_json,
+    assert_scored_1080p_listing(
+        row.release_listing_json.as_deref(),
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered, added_at,
         ),
-        "the hold freezes the listing it scored and parked, captured at park time"
+        "release_age_unknown",
     );
     let delay_until = crate::quality_profile::parse_published_at(&row.delay_until)
         .expect("valid escalation deadline");
@@ -6205,25 +6252,17 @@ async fn automatic_search_parks_hard_minimum_age_until_publication_deadline() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Minimum Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "minimum-age-search",
-                "name": "Minimum age search",
-                "usenet_delay_minutes": 0,
-                "min_age_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "minimum-age-search",
+            "name": "Minimum age search",
+            "usenet_delay_minutes": 0,
+            "min_age_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -8394,10 +8433,10 @@ async fn expired_pending_release_grabs_with_its_frozen_listing_snapshot() {
         .grabbed_at
         .as_deref()
         .expect("promotion records its grab instant");
-    assert_eq!(
-        submissions[0].release_listing_json,
+    assert_scored_1080p_listing(
+        submissions[0].release_listing_json.as_deref(),
         Some(standby_listing_stamped_at(promoted_at)),
-        "promotion keeps every fact frozen at park time and stamps it at the promotion instant"
+        "initial",
     );
 }
 
@@ -8428,15 +8467,16 @@ async fn automatic_promotion_grabs_a_pending_release_at_the_current_minimum_seed
     // capture from the row itself.
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         Some(
             crate::quality::release_listing::ReleaseListingSnapshot::capture_from_pending_release(
                 &row,
                 captured_at,
             )
-            .to_json_string()
-        )
+            .to_json_string(),
+        ),
+        "initial",
     );
 }
 
@@ -8740,24 +8780,16 @@ async fn the_rss_park_path_stores_the_reported_seeder_count_on_the_pending_row()
     // only client the acquisition harness enables; the capture under test reads
     // `extra["seeders"]` and is indifferent to the protocol, and the production
     // park site is the same single call either way.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delay-torrents",
-                "name": "Delay torrents",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delay-torrents",
+            "name": "Delay torrents",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -8794,24 +8826,16 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
             indexer_client,
         );
     let _title = add_rss_target_movie(&app, &user, &wanted_items, "Rss Unknown Age Movie").await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age",
-                "name": "Unknown age",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age",
+            "name": "Unknown age",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -10800,8 +10824,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
         Arc::new(MockIndexerClient),
     );
     let title = add_rss_target_movie(&app, &user, &wanted, "Convergent Skyline").await;
-    app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
-        serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
+    replace_delay_profiles(&app, serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}])).await.unwrap();
     let mut input = external_test_input();
     // With no incumbent, use a tier upgrade rather than a revision-only tie.
     input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
@@ -10847,17 +10870,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     assert_eq!(pending.store.lock().await.len(), 2);
     // A policy edit makes the ordinary delay admission check eligible;
     // no wall-clock sleep and no RSS/indexer request is needed.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            "[]".into(),
-            "test",
-            None,
-        )
+    replace_delay_profiles(&app, serde_json::json!([]))
         .await
         .unwrap();
     assert_eq!(app.process_external_pending_releases().await.unwrap(), 1);
@@ -11217,13 +11230,13 @@ async fn rss_grabs_missing_movie_with_no_wanted_row_and_creates_state_row() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the RSS grab persists the listing it was offered"
+        "initial",
     );
 }
 
@@ -11263,13 +11276,13 @@ async fn manual_best_release_grab_persists_the_listing_it_was_offered() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     let listing = submissions[0].release_listing_json.as_deref();
     let captured_at = crate::quality::release_listing::captured_at_of(listing);
-    assert_eq!(
-        listing.map(str::to_string),
+    assert_scored_1080p_listing(
+        listing,
         crate::quality::release_listing::ReleaseListingSnapshot::capture_json_from_search_result(
             &offered,
             captured_at,
         ),
-        "the manual grab persists the listing it was offered"
+        "initial",
     );
 }
 
@@ -13015,24 +13028,16 @@ async fn a_delayed_season_pack_no_longer_suppresses_its_episode_search() {
     );
     let (app, _title, indexer_client, download_client) =
         seed_recent_failed_season_pack_fixture_with_indexer(indexer_client).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delayed-pack",
-                "name": "Delayed pack",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delayed-pack",
+            "name": "Delayed pack",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -16898,4 +16903,19 @@ async fn a_covered_walk_prunes_the_coverage_of_a_source_gone_row() {
         vec!["kept-indexer".to_string()],
         "the gone source's coverage is pruned so the next cycle re-queries it"
     );
+}
+
+/// Replace every stored delay profile with `catalog`, written in the JSON shape
+/// the profiles used to be stored in.
+async fn replace_delay_profiles(app: &AppUseCase, catalog: serde_json::Value) -> AppResult<()> {
+    let repository = &app.services.config.delay_profiles;
+    for profile in repository.list().await? {
+        repository.delete(&profile.id).await?;
+    }
+    let profiles = crate::parse_delay_profile_catalog(&catalog.to_string())
+        .map_err(|error| AppError::Validation(error.to_string()))?
+        .into_iter()
+        .map(crate::normalize_delay_profile)
+        .collect();
+    repository.save_many(profiles).await
 }

@@ -145,12 +145,43 @@ test("validateFolderTemplateSyntax supports safe nested movie folder components"
     "G/Grey Harbor, The (2008)",
   );
 
-  for (const unsafeTemplate of ["/A/{title}", "A//{title}", "../{title}", "A/../{title}"]) {
+  for (const unsafeTemplate of [
+    "/A/{title}", "A//{title}", "../{title}", "A/../{title}", "{title}/ /{title}", "A/ .. /{title}", " . /{title}",
+  ]) {
     assert.deepEqual(
       validateFolderTemplateSyntax(unsafeTemplate, VALID_MOVIE_FOLDER_TOKENS, undefined, true),
       { kind: "illegalCharacter", character: "/" },
     );
   }
+});
+
+test("validateFolderTemplateSyntax requires a title token in the last title folder", () => {
+  const tokens = new Set([
+    "title", "title_with_year", "year", "title_first_character", "imdb_id", "tvdb_id",
+  ]);
+  for (const template of [
+    "{title_first_character}/{title_with_year}",
+    "{year}/{title}",
+    "{title_first_character}/[{tvdb_id}]",
+    "{title}{?year: ({year})}",
+  ]) {
+    assert.equal(validateFolderTemplateSyntax(template, tokens, undefined, true), null, template);
+  }
+  for (const template of [
+    "{title_first_character}",
+    "{year}",
+    "{title}/Movie",
+    "{imdb_id}/x",
+    "{title_first_character}/{?imdb_id:{title}}",
+  ]) {
+    assert.deepEqual(
+      validateFolderTemplateSyntax(template, tokens, undefined, true),
+      { kind: "missingLeafTitleToken" },
+      template,
+    );
+  }
+  // Season and specials folders are single components with no title requirement.
+  assert.equal(validateFolderTemplateSyntax("Specials", tokens), null);
 });
 
 test("validateRenameTemplateSyntax accepts literal brace escapes", () => {

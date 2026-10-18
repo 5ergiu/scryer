@@ -1169,6 +1169,7 @@ export const upsertDelayProfileMutation = `mutation UpsertDelayProfile($input: D
     bypassIfHighestQuality
     appliesToFacets
     tags
+    libraryIds
     priority
     enabled
   }

@@ -3103,6 +3103,20 @@ pub struct CompletedDownload {
     pub size_bytes: Option<i64>,
     pub completed_at: Option<DateTime<Utc>>,
     pub parameters: Vec<(String, String)>,
+    /// Files the client wrote under a different name than they were posted
+    /// with (shortened, cleaned of characters a filesystem refuses, or made
+    /// unique), each with its posted name. Empty when the client reports
+    /// none; only Weaver does.
+    #[serde(default)]
+    pub posted_file_names: Vec<PostedFileName>,
+}
+
+/// A downloaded file's name on disk and the name it was posted with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedFileName {
+    /// The file's name inside the download's `dest_dir`.
+    pub name: String,
+    pub posted_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4440,9 +4454,42 @@ pub struct ReleaseGrabbedEventData {
     pub release_facts: Option<GrabbedReleaseFacts>,
 }
 
+/// Immutable scoring evidence captured by the selection that led to a grab.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabScoringSnapshot {
+    pub candidate_score: i32,
+    pub previous_score: Option<i32>,
+    pub delta: Option<i64>,
+    pub decision_code: String,
+    pub comparisons: Vec<GrabScoreComparison>,
+    pub entries: Vec<ScoringSnapshotEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrabScoreComparison {
+    pub file_id: String,
+    pub episode_ids: Vec<String>,
+    pub previous_score: i32,
+    pub delta: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScoringSnapshotEntry {
+    pub code: String,
+    pub delta: i32,
+    pub kind: String,
+    pub source: Option<String>,
+    /// `"user"` or `"system"` for a rule contribution, `None` for a built-in
+    /// one. Absent on entries saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
 /// Release facts captured at grab time, for history and notifications.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrabbedReleaseFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<GrabScoringSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4460,6 +4507,13 @@ pub struct GrabbedReleaseFacts {
     pub indexer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_client_name: Option<String>,
+}
+
+impl GrabbedReleaseFacts {
+    pub fn with_scoring(mut self, scoring: Option<GrabScoringSnapshot>) -> Self {
+        self.scoring = scoring;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

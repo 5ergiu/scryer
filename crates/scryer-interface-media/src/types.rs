@@ -4,6 +4,58 @@ use chrono::{DateTime, Utc};
 pub use crate::conversions::{FromApplication, IntoApplication};
 pub use scryer_interface_media_types::*;
 
+/// Explicit scope for an on-demand score refresh. Exactly one selection kind is required.
+#[derive(async_graphql::OneofObject)]
+pub enum FileScoreSelectionInput {
+    /// Media file IDs to evaluate, limited to 1000 selections.
+    FileIds(Vec<ID>),
+    /// Season IDs whose live files should be evaluated, limited to 1000 selections.
+    SeasonIds(Vec<ID>),
+    /// Title IDs whose live files should be evaluated, limited to 1000 selections.
+    TitleIds(Vec<ID>),
+}
+
+/// Current-rule evaluation, separate from the score recorded on acquisition.
+#[derive(SimpleObject, Clone)]
+pub struct FileScoreEvaluationPayload {
+    /// Score under the rules used by this saved evaluation.
+    pub score: i32,
+    /// UTC evaluation time in RFC 3339 format.
+    pub evaluated_at: String,
+    /// Whether the scoring inputs have changed since this evaluation.
+    pub needs_refresh: bool,
+    /// Whether scoring rules read the clock, so the saved score can age.
+    pub time_sensitive: bool,
+    /// Recorded contributions and rejections from this evaluation.
+    pub entries: Vec<ScoreEvaluationEntryPayload>,
+    /// Reasons the file failed the evaluated quality policy.
+    pub rejection_codes: Vec<String>,
+}
+
+impl From<scryer_application::FileScoreEvaluationView> for FileScoreEvaluationPayload {
+    fn from(view: scryer_application::FileScoreEvaluationView) -> Self {
+        let evaluation = view.evaluation;
+        Self {
+            score: evaluation.score,
+            evaluated_at: evaluation.evaluated_at,
+            needs_refresh: view.stale,
+            time_sensitive: evaluation.time_sensitive,
+            entries: evaluation
+                .entries
+                .into_iter()
+                .map(|entry| ScoreEvaluationEntryPayload {
+                    code: entry.code,
+                    delta: entry.delta,
+                    kind: entry.kind,
+                    source: entry.source,
+                    origin: entry.origin,
+                })
+                .collect(),
+            rejection_codes: evaluation.rejection_codes,
+        }
+    }
+}
+
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]
 /// Catalog metadata, monitoring settings, and media identity for a title.

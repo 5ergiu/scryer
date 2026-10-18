@@ -151,8 +151,6 @@ type MediaLibrarySettingsPanelProps = {
   onUpdateLibrary: (libraryId: string, input: LibraryMutationInput) => Promise<LibraryRecord | null | void> | LibraryRecord | null | void;
   onDeleteLibrary: (libraryId: string) => Promise<boolean | void> | boolean | void;
   onScan: (libraryId: string) => Promise<void> | void;
-  /** Reports whether the content column should widen (dense routing table). */
-  onWideLayoutChange?: (wide: boolean) => void;
   /** Reports the active library name for the page breadcrumb (null when creating). */
   onActiveLibraryNameChange?: (name: string | null) => void;
 };
@@ -292,7 +290,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   onUpdateLibrary,
   onDeleteLibrary,
   onScan,
-  onWideLayoutChange,
   onActiveLibraryNameChange,
 }: MediaLibrarySettingsPanelProps) {
   const t = useTranslate();
@@ -361,9 +358,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     );
     setFooterTarget(document.getElementById(LIBRARY_FOOTER_SLOT_ID));
   }, []);
-  React.useEffect(() => {
-    onWideLayoutChange?.(draftDownloadClientRoutingMode === "custom");
-  }, [draftDownloadClientRoutingMode, onWideLayoutChange]);
 
   const activeLibrary = React.useMemo(
     () => libraries.find((library) => library.id === activeLibraryId) ?? null,
@@ -1295,76 +1289,82 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
                         id={selectorId("media-library-root-row", rf.path)}
                         className="space-y-1"
                       >
-                        <div className="flex items-center gap-2.5 rounded-[11px] border border-[var(--scry-border2)] bg-[var(--scry-bg)] py-1.5 pl-3.5 pr-2">
-                          <FolderOpen className="h-4 w-4 shrink-0 text-[var(--scry-faint)]" />
-                          <span
-                            className="flex-1 truncate font-[var(--font-code)] text-[13.5px] text-[var(--scry-text2)]"
-                            title={rf.path}
-                          >
-                            {rf.path}
-                          </span>
-                          {pathIsInvalid ? (
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 rounded-[11px] border border-[var(--scry-border2)] bg-[var(--scry-bg)] py-2 pl-3.5 pr-2 sm:flex-nowrap sm:py-1.5">
+                          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                            <FolderOpen className="h-4 w-4 shrink-0 text-[var(--scry-faint)]" />
                             <span
-                              className="shrink-0 rounded-[7px] border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-destructive"
-                              title={invalidRootTooltip}
+                              className="min-w-0 flex-1 break-all font-[var(--font-code)] text-[13.5px] text-[var(--scry-text2)] sm:truncate"
+                              title={rf.path}
                             >
-                              {t("settings.rootFolderInvalid")}
+                              {rf.path}
                             </span>
-                          ) : null}
-                          {rf.isDefault ? (
-                            <span className="shrink-0 rounded-[7px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.12)] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-accent-text)]">
-                              {t("label.default")}
-                            </span>
-                          ) : (
-                            <Button
-                              id={selectorId("media-library-root-set-default", rf.path)}
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
-                              onClick={() => handleSetDefault(index)}
+                          </div>
+                          <div className="order-last flex w-full flex-wrap items-center gap-2 sm:order-none sm:w-auto sm:shrink-0 sm:flex-nowrap">
+                            {pathIsInvalid ? (
+                              <span
+                                className="shrink-0 rounded-[7px] border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-destructive"
+                                title={invalidRootTooltip}
+                              >
+                                {t("settings.rootFolderInvalid")}
+                              </span>
+                            ) : null}
+                            {rf.isDefault ? (
+                              <span className="shrink-0 rounded-[7px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.12)] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-accent-text)]">
+                                {t("label.default")}
+                              </span>
+                            ) : (
+                              <Button
+                                id={selectorId("media-library-root-set-default", rf.path)}
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
+                                onClick={() => handleSetDefault(index)}
+                                disabled={actionBusy}
+                              >
+                                {t("settings.rootFolderSetDefault")}
+                              </Button>
+                            )}
+                            {rf.id && experimentalFeaturesEnabled ? (
+                              <Button
+                                id={selectorId("media-library-root-change", rf.path)}
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
+                                onClick={() => setChangeRootId(rf.id ?? null)}
+                                disabled={!canChangeRoot}
+                                title={
+                                  canChangeRoot
+                                    ? undefined
+                                    : t("rootChange.unavailableWhileUnsaved")
+                                }
+                              >
+                                <HardDrive className="mr-1 h-3.5 w-3.5" />
+                                {t("rootChange.rowAction")}
+                              </Button>
+                            ) : null}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <IconButton
+                              id={selectorId("media-library-root-edit", rf.path)}
+                              label={t("label.edit")}
+                              tone="edit"
+                              onClick={() => openEdit(index)}
                               disabled={actionBusy}
                             >
-                              {t("settings.rootFolderSetDefault")}
-                            </Button>
-                          )}
-                          {rf.id && experimentalFeaturesEnabled ? (
-                            <Button
-                              id={selectorId("media-library-root-change", rf.path)}
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
-                              onClick={() => setChangeRootId(rf.id ?? null)}
-                              disabled={!canChangeRoot}
-                              title={
-                                canChangeRoot
-                                  ? undefined
-                                  : t("rootChange.unavailableWhileUnsaved")
-                              }
+                              <Pencil className="h-4 w-4" />
+                            </IconButton>
+                            <IconButton
+                              id={selectorId("media-library-root-delete", rf.path)}
+                              label={t("label.delete")}
+                              tone="delete"
+                              onClick={() => handleRemovePath(index)}
+                              disabled={actionBusy}
                             >
-                              <HardDrive className="mr-1 h-3.5 w-3.5" />
-                              {t("rootChange.rowAction")}
-                            </Button>
-                          ) : null}
-                          <IconButton
-                            id={selectorId("media-library-root-edit", rf.path)}
-                            label={t("label.edit")}
-                            tone="edit"
-                            onClick={() => openEdit(index)}
-                            disabled={actionBusy}
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </IconButton>
-                          <IconButton
-                            id={selectorId("media-library-root-delete", rf.path)}
-                            label={t("label.delete")}
-                            tone="delete"
-                            onClick={() => handleRemovePath(index)}
-                            disabled={actionBusy}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </IconButton>
+                              <Trash2 className="h-4 w-4" />
+                            </IconButton>
+                          </div>
                         </div>
                         {conflictingLibraryNames ? (
                           <p className="text-xs text-destructive">
@@ -2082,12 +2082,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
             ? createPortal(
                 <div className="border-t border-[var(--scry-border2)] bg-[var(--scry-surf)]">
                   <div
-                    className={cn(
-                      "mx-auto flex w-full flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]",
-                      draftDownloadClientRoutingMode === "custom"
-                        ? "max-w-[1280px]"
-                        : "max-w-[920px]",
-                    )}
+                    className="mx-auto flex w-full max-w-[920px] flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]"
                   >
                     {mode !== "new" &&
                     activeLibrary &&

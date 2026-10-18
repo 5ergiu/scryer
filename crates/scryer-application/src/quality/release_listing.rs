@@ -44,6 +44,8 @@ const MAX_INDEXER_LANGUAGE_BYTES: usize = 64;
 /// submission, copied to the media row, never re-read from a live listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ReleaseListingSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grab_scoring: Option<scryer_domain::GrabScoringSnapshot>,
     /// Publish time as the indexer gave it (trimmed). Only kept when it parses.
     #[serde(default)]
     pub published_at: Option<String>,
@@ -95,6 +97,7 @@ impl ReleaseListingSnapshot {
             .or_else(|| password_protection_hint(result.password_hint.as_deref()));
         Self {
             published_at: parseable_published_at(result.published_at.as_deref()),
+            grab_scoring: None,
             thumbs_up: result.thumbs_up,
             thumbs_down: result.thumbs_down,
             is_password_protected,
@@ -179,6 +182,7 @@ impl ReleaseListingSnapshot {
     ) -> Self {
         Self {
             published_at: parseable_published_at(release.published_at.as_deref()),
+            grab_scoring: None,
             thumbs_up: None,
             thumbs_down: None,
             is_password_protected: password_protection_hint(release.source_password.as_deref()),
@@ -547,6 +551,7 @@ mod tests {
         extra.insert("list".to_string(), json!([1, "two", null, true]));
         ReleaseListingSnapshot {
             published_at: Some("2024-01-02T03:04:05Z".to_string()),
+            grab_scoring: None,
             thumbs_up: Some(7),
             thumbs_down: Some(-2),
             is_password_protected: Some(false),
@@ -917,6 +922,7 @@ mod tests {
             parsed,
             ReleaseListingSnapshot {
                 published_at: None,
+                grab_scoring: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: None,
@@ -1189,6 +1195,7 @@ mod tests {
             snapshot,
             ReleaseListingSnapshot {
                 published_at: Some("2023-12-22T12:00:00Z".to_string()),
+                grab_scoring: None,
                 thumbs_up: None,
                 thumbs_down: None,
                 is_password_protected: Some(true),
@@ -1279,6 +1286,7 @@ mod tests {
     fn release_listing_view_maps_every_field_and_ages_to_the_capture() {
         let snapshot = ReleaseListingSnapshot {
             published_at: Some("2024-03-01T12:00:00Z".to_string()),
+            grab_scoring: None,
             thumbs_up: Some(7),
             thumbs_down: Some(2),
             is_password_protected: Some(true),

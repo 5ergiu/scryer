@@ -2370,6 +2370,7 @@ async fn graphql_download_import_exposes_background_import_blocked_state_from_ca
         size_bytes: item.size_bytes,
         completed_at: Some(Utc::now()),
         parameters: Vec::new(),
+        posted_file_names: Vec::new(),
     };
 
     ingest
@@ -3546,6 +3547,7 @@ async fn drive_unlinked_completed_grab(with_identity: bool, staged: u8) -> Optio
         size_bytes: item.size_bytes,
         completed_at: Some(Utc::now()),
         parameters: Vec::new(),
+        posted_file_names: Vec::new(),
     };
 
     if staged > 0 {

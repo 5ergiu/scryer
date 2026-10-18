@@ -44,6 +44,8 @@ pub mod file_source_signature;
 mod folder_ownership;
 pub mod fs_integrity;
 pub mod fs_safety;
+pub mod grabbed_file_names;
+pub use grabbed_file_names::GrabbedFileName;
 mod health;
 mod helpers;
 mod image_proxy;
@@ -229,6 +231,9 @@ pub use plugins::plugins::RUNTIME_PLUGIN_LOAD_CONCURRENCY;
 pub use plugins::plugins::decode_persisted_plugin_wasm_payload;
 pub use plugins::plugins::load_runtime_plugin_from_persisted_installation_payload;
 pub use plugins::settings::PluginSettingsView;
+pub use quality::evaluations::{
+    FileScoreEvaluation, FileScoreEvaluationView, ScoreEvaluationEntry, ScoreRefreshSelection,
+};
 pub use quality::release_dedup;
 pub use quality::release_listing::{
     ReleaseListingView, release_listing_view, search_result_listing_json,
@@ -278,8 +283,8 @@ pub type AppResult<T> = Result<T, AppError>;
 use crate::quality_profile::resolve_profile_id_for_title;
 pub use acquisition::delay_profile::{
     DELAY_PROFILE_CATALOG_KEY, DelayDecision, DelayProfile, PreferredProtocol, is_usenet_source,
-    parse_delay_profile_catalog, resolve_delay_decision, resolve_delay_profile,
-    validate_delay_profile_catalog,
+    normalize_delay_profile, parse_delay_profile_catalog, resolve_delay_decision,
+    resolve_delay_profile, validate_delay_profile_catalog,
 };
 pub use acquisition::policy::AcquisitionThresholds;
 pub use acquisition::seed_goals::{
@@ -311,9 +316,9 @@ pub(crate) use audio_requirements::missing_required_audio_languages;
 #[cfg(feature = "runtime-media-analysis")]
 pub(crate) use audio_requirements::{RequiredAudioVerdict, classify_required_audio};
 pub(crate) use audio_requirements::{
-    normalize_required_audio_requirements, release_audio_language_hints_for_title,
-    required_audio_languages_match, resolve_required_audio_requirements,
-    title_audio_language_context,
+    normalize_required_audio_languages, normalize_required_audio_requirements,
+    release_audio_language_hints_for_title, required_audio_languages_match,
+    resolve_required_audio_requirements, title_audio_language_context,
 };
 pub use catalog::facets::handler::{
     FacetHandler, HydrationResult, movie_to_hydration_result, series_to_hydration_result,
@@ -586,8 +591,8 @@ pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, ArchiveExtractorSelection,
     BackgroundIndexerSearchStrategyState, BlocklistRepository,
-    BuiltinDownloadClientConnectionTester, DatastoreInfo, DiscoveryContextTitle,
-    DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
+    BuiltinDownloadClientConnectionTester, DatastoreInfo, DelayProfileRepository,
+    DiscoveryContextTitle, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
     DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
     DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
     DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,

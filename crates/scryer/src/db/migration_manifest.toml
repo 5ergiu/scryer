@@ -3131,18 +3131,92 @@ scope = "all"
 
 [[migration]]
 version = 290
-description = "movie release dates"
+description = "store on-demand file score evaluations"
 checksum_algo = "blake3"
 
 [[migration.steps]]
 kind = "sql"
-file = "migrations/0290_movie_release_dates.sql"
+file = "migrations/0290_media_file_score_evaluation.sql"
 engine = "sqlite"
 scope = "all"
 
 [[migration.steps]]
 kind = "sql"
-file = "postgres/migrations/0290_movie_release_dates.sql"
+file = "postgres/migrations/0290_media_file_score_evaluation.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 291
+description = "merge list search mode into add"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 292
+description = "grabbed file names on download submissions"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 293
+description = "delay profile tables"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0293_delay_profile_tables.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0293_delay_profile_tables.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration.steps]]
+kind = "rust"
+hook_id = "import_delay_profile_catalog"
+engine = "all"
+scope = "all"
+
+[[migration]]
+version = 294
+description = "movie release dates"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0294_movie_release_dates.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0294_movie_release_dates.sql"
 engine = "postgres"
 scope = "all"
 

@@ -1,7 +1,7 @@
 import type { InteractiveSearchIndexerProgress } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types";
 
-export type EpisodePanelTab = "details" | "search" | "blocklist";
+export type EpisodePanelTab = "details" | "blocklist";
 
 export interface EpisodePanelState {
   searchResultsByEpisode: Record<string, Release[]>;

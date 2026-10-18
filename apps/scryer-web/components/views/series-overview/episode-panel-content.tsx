@@ -31,23 +31,14 @@ export type EpisodePanelContentProps = {
   clearingReleaseBlocklistEntryId?: string | null;
   episode: CollectionEpisode;
   episodeFiles: EpisodeMediaFile[];
-  episodeIndexerProgress: InteractiveSearchIndexerProgress[];
-  episodeLoading: boolean;
-  episodeResults: Release[];
   facet: string;
-  hasSearchResults: boolean;
   onClearReleaseBlocklistEntry?: (entryId: string) => Promise<void> | void;
   onDeleteFile?: (fileId: string) => void;
   onMakePrimaryFile?: (fileId: string) => Promise<void> | void;
-  onQueueFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
-  onQueueAdditionalFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
   onRefreshSubtitles?: () => Promise<void> | void;
-  onRunEpisodeSearch?: (episode: CollectionEpisode) => void;
   onTabChange: (tab: EpisodePanelTab | "history") => void;
   showHistoryTab: boolean;
-  showSearchTab: boolean;
   releaseBlocklistEntries: TitleReleaseBlocklistEntry[];
-  searchBlocked: boolean;
   subtitleDownloads: ExternalSubtitleRecord[];
   /** Library the episode's media files belong to; gates subtitle controls. */
   libraryId: string | null;
@@ -61,27 +52,106 @@ export const EpisodePanelContent = React.memo(function EpisodePanelContent({
   clearingReleaseBlocklistEntryId,
   episode,
   episodeFiles,
+  facet,
+  onClearReleaseBlocklistEntry,
+  onDeleteFile,
+  onMakePrimaryFile,
+  onRefreshSubtitles,
+  onTabChange,
+  showHistoryTab,
+  releaseBlocklistEntries,
+  subtitleDownloads,
+  libraryId,
+  primaryMovieFileUpdatingId = null,
+}: EpisodePanelContentProps) {
+  const t = useTranslate();
+  const filteredBlocklistEntries = React.useMemo(() => {
+    if (activeTab !== "blocklist") {
+      return EMPTY_BLOCKLIST_ENTRIES;
+    }
+
+    return releaseBlocklistEntries.filter((entry) =>
+      blocklistEntryMatchesEpisode(entry, episode, collection),
+    );
+  }, [activeTab, collection, episode, releaseBlocklistEntries]);
+
+  return (
+    <Tabs
+      value={activeTab}
+      onValueChange={(value) => onTabChange(value as EpisodePanelTab | "history")}
+    >
+      <TabsList className="flex w-full flex-nowrap overflow-x-auto">
+        <TabsTrigger
+          id={selectorId("series-overview-episode-tab", episode.id, "details")}
+          value="details"
+          className="shrink-0"
+        >{t("episode.details")}</TabsTrigger>
+        {showHistoryTab ? (
+          <TabsTrigger
+            id={selectorId("series-overview-episode-tab", episode.id, "history")}
+            value="history"
+            className="shrink-0"
+          >{t("history.title")}</TabsTrigger>
+        ) : null}
+        <TabsTrigger
+          id={selectorId("series-overview-episode-tab", episode.id, "blocklist")}
+          value="blocklist"
+          className="shrink-0"
+        >{t("episode.blocklist")}</TabsTrigger>
+      </TabsList>
+      <TabsContent value="details">
+        <EpisodeDetailsPanel
+          episode={episode}
+          facet={facet}
+          mediaFiles={episodeFiles}
+          subtitleDownloads={subtitleDownloads}
+          libraryId={libraryId}
+          onRefreshSubtitles={onRefreshSubtitles}
+          onDeleteFile={onDeleteFile}
+          onMakePrimaryFile={onMakePrimaryFile}
+          primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
+        />
+      </TabsContent>
+      <TabsContent value="blocklist">
+        <EpisodeBlocklistPanel
+          entries={filteredBlocklistEntries}
+          canClear={canClearBlocklistEntries}
+          clearingEntryId={clearingReleaseBlocklistEntryId}
+          onClear={onClearReleaseBlocklistEntry}
+        />
+      </TabsContent>
+    </Tabs>
+  );
+});
+
+export type EpisodeSearchResultsProps = {
+  collection: TitleCollection;
+  episode: CollectionEpisode;
+  episodeIndexerProgress: InteractiveSearchIndexerProgress[];
+  episodeLoading: boolean;
+  episodeResults: Release[];
+  facet: string;
+  hasSearchResults: boolean;
+  onQueueFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
+  onQueueAdditionalFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
+  onRunEpisodeSearch?: (episode: CollectionEpisode) => void;
+  searchBlocked: boolean;
+};
+
+/** An episode's interactive search progress and results. */
+export function EpisodeSearchResults({
+  collection,
+  episode,
   episodeIndexerProgress,
   episodeLoading,
   episodeResults,
   facet,
   hasSearchResults,
-  onClearReleaseBlocklistEntry,
-  onDeleteFile,
-  onMakePrimaryFile,
   onQueueFromEpisodeSearch,
   onQueueAdditionalFromEpisodeSearch,
-  onRefreshSubtitles,
   onRunEpisodeSearch,
-  onTabChange,
-  showHistoryTab,
-  showSearchTab,
-  releaseBlocklistEntries,
   searchBlocked,
-  subtitleDownloads,
-  libraryId,
-  primaryMovieFileUpdatingId = null,
-}: EpisodePanelContentProps) {
+}: EpisodeSearchResultsProps) {
   const t = useTranslate();
   const searchPresentation = React.useMemo(
     () =>
@@ -122,153 +192,91 @@ export const EpisodePanelContent = React.memo(function EpisodePanelContent({
       indexerCount: sourceCount,
     });
   }, [episodeResults, searchPresentation, t]);
-  const filteredBlocklistEntries = React.useMemo(() => {
-    if (activeTab !== "blocklist") {
-      return EMPTY_BLOCKLIST_ENTRIES;
-    }
-
-    return releaseBlocklistEntries.filter((entry) =>
-      blocklistEntryMatchesEpisode(entry, episode, collection),
-    );
-  }, [activeTab, collection, episode, releaseBlocklistEntries]);
 
   return (
-    <Tabs
-      value={activeTab}
-      onValueChange={(value) => onTabChange(value as EpisodePanelTab | "history")}
-    >
-      <TabsList className="flex w-full flex-nowrap overflow-x-auto">
-        <TabsTrigger
-          id={selectorId("series-overview-episode-tab", episode.id, "details")}
-          value="details"
-          className="shrink-0"
-        >{t("episode.details")}</TabsTrigger>
-        {showSearchTab ? (
-          <TabsTrigger
-            id={selectorId("series-overview-episode-tab", episode.id, "search")}
-            value="search"
-            className="shrink-0"
-          >{t("episode.search")}</TabsTrigger>
-        ) : null}
-        {showHistoryTab ? (
-          <TabsTrigger
-            id={selectorId("series-overview-episode-tab", episode.id, "history")}
-            value="history"
-            className="shrink-0"
-          >{t("history.title")}</TabsTrigger>
-        ) : null}
-        <TabsTrigger
-          id={selectorId("series-overview-episode-tab", episode.id, "blocklist")}
-          value="blocklist"
-          className="shrink-0"
-        >{t("episode.blocklist")}</TabsTrigger>
-      </TabsList>
-      <TabsContent value="details">
-        <EpisodeDetailsPanel
-          episode={episode}
-          facet={facet}
-          mediaFiles={episodeFiles}
-          subtitleDownloads={subtitleDownloads}
-          libraryId={libraryId}
-          onRefreshSubtitles={onRefreshSubtitles}
-          onDeleteFile={onDeleteFile}
-          onMakePrimaryFile={onMakePrimaryFile}
-          primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
-        />
-      </TabsContent>
-      {showSearchTab ? (
-        <TabsContent value="search">
-          {searchBlocked ? (
-            <TitleSearchDownloadClientNotice />
-          ) : (
-            <div className="mb-2 flex items-start gap-4">
-              {searchPresentation.showProgress || searchPresentation.showFinalSummary ? (
-                <div className="min-w-0 flex-1">
-                  <p
-                    className="flex items-center gap-1.5 truncate text-[11.5px] text-[var(--scry-faint)]"
-                    data-ui="episode-release-search-summary"
-                    data-search-state={searchPresentation.showProgress ? "searching" : "done"}
-                  >
-                    {searchPresentation.showProgress ? (
-                      <LoadingMark className="h-3 w-3 shrink-0" label={t("label.searching")} />
-                    ) : null}
-                    <span className="truncate">{searchDescription}</span>
-                  </p>
-                  {searchPresentation.showFinalSummary &&
-                  searchPresentation.failedIndexerNames.length > 0 ? (
-                    <p className="mt-0.5 truncate text-[11.5px] text-[var(--scry-danger-text)]">
-                      {t("title.contextReleaseSearchIndexerFailures", {
-                        count: searchPresentation.failedIndexerNames.length,
-                        names: searchPresentation.failedIndexerNames.join(", "),
-                      })}
-                    </p>
-                  ) : null}
-                  {searchPresentation.showFinalSummary &&
-                  searchPresentation.skippedIndexers.length > 0 ? (
-                    <p
-                      className="mt-0.5 truncate text-[11.5px] text-[var(--scry-faint)]"
-                      title={searchPresentation.skippedIndexers
-                        .map((indexer) =>
-                          indexer.reason ? `${indexer.name}: ${indexer.reason}` : indexer.name,
-                        )
-                        .join("\n")}
-                    >
-                      {t("title.contextReleaseSearchIndexerSkipped", {
-                        count: searchPresentation.skippedIndexers.length,
-                        names: searchPresentation.skippedIndexers
-                          .map((indexer) => indexer.name)
-                          .join(", "),
-                      })}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-              <Button
-                id={selectorId("series-overview-episode-search-refresh", episode.id)}
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="ml-auto"
-                onClick={() => onRunEpisodeSearch?.(episode)}
-                disabled={episodeLoading}
-                aria-label={t("label.search")}
+    <>
+      {searchBlocked ? (
+        <TitleSearchDownloadClientNotice />
+      ) : (
+        <div className="mb-2 flex items-start gap-4">
+          {searchPresentation.showProgress || searchPresentation.showFinalSummary ? (
+            <div className="min-w-0 flex-1">
+              <p
+                className="flex items-center gap-1.5 truncate text-[11.5px] text-[var(--scry-faint)]"
+                data-ui="episode-release-search-summary"
+                data-search-state={searchPresentation.showProgress ? "searching" : "done"}
               >
-                <Search className="h-4 w-4" />
-                <span className="ml-1">
-                  {episodeLoading ? t("label.searching") : t("label.refresh")}
-                </span>
-              </Button>
+                {searchPresentation.showProgress ? (
+                  <LoadingMark className="h-3 w-3 shrink-0" label={t("label.searching")} />
+                ) : null}
+                <span className="truncate">{searchDescription}</span>
+              </p>
+              {searchPresentation.showFinalSummary &&
+              searchPresentation.failedIndexerNames.length > 0 ? (
+                <p className="mt-0.5 truncate text-[11.5px] text-[var(--scry-danger-text)]">
+                  {t("title.contextReleaseSearchIndexerFailures", {
+                    count: searchPresentation.failedIndexerNames.length,
+                    names: searchPresentation.failedIndexerNames.join(", "),
+                  })}
+                </p>
+              ) : null}
+              {searchPresentation.showFinalSummary &&
+              searchPresentation.skippedIndexers.length > 0 ? (
+                <p
+                  className="mt-0.5 truncate text-[11.5px] text-[var(--scry-faint)]"
+                  title={searchPresentation.skippedIndexers
+                    .map((indexer) =>
+                      indexer.reason ? `${indexer.name}: ${indexer.reason}` : indexer.name,
+                    )
+                    .join("\n")}
+                >
+                  {t("title.contextReleaseSearchIndexerSkipped", {
+                    count: searchPresentation.skippedIndexers.length,
+                    names: searchPresentation.skippedIndexers
+                      .map((indexer) => indexer.name)
+                      .join(", "),
+                  })}
+                </p>
+              ) : null}
             </div>
-          )}
-          {searchBlocked ? null : searchPresentation.showInitialLoader ? (
-            <div className="flex flex-col items-center justify-center gap-4 py-16">
-              <LoadingMark className="h-10 w-10 text-[var(--scry-accent-text)]" />
-              <p className="text-lg text-muted-foreground">{t("label.searching")}</p>
-            </div>
-          ) : !searchPresentation.showResults ? (
-            <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
-          ) : (
-            <SearchResultBuckets
-              titleId={collection.titleId}
-              results={episodeResults}
-              onQueue={(release) => onQueueFromEpisodeSearch?.(episode, release)}
-              onQueueAdditional={(release) => onQueueAdditionalFromEpisodeSearch?.(episode, release)}
-              canQueueAdditional={(release) =>
-                releaseSupportsAdditionalFileQueue(release, facet)
-              }
-              requireCandidateToken
-            />
-          )}
-        </TabsContent>
-      ) : null}
-      <TabsContent value="blocklist">
-        <EpisodeBlocklistPanel
-          entries={filteredBlocklistEntries}
-          canClear={canClearBlocklistEntries}
-          clearingEntryId={clearingReleaseBlocklistEntryId}
-          onClear={onClearReleaseBlocklistEntry}
+          ) : null}
+          <Button
+            id={selectorId("series-overview-episode-search-refresh", episode.id)}
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="ml-auto"
+            onClick={() => onRunEpisodeSearch?.(episode)}
+            disabled={episodeLoading}
+            aria-label={t("label.search")}
+          >
+            <Search className="h-4 w-4" />
+            <span className="ml-1">
+              {episodeLoading ? t("label.searching") : t("label.refresh")}
+            </span>
+          </Button>
+        </div>
+      )}
+      {searchBlocked ? null : searchPresentation.showInitialLoader ? (
+        <div className="flex flex-col items-center justify-center gap-4 py-16">
+          <LoadingMark className="h-10 w-10 text-[var(--scry-accent-text)]" />
+          <p className="text-lg text-muted-foreground">{t("label.searching")}</p>
+        </div>
+      ) : !searchPresentation.showResults ? (
+        <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
+      ) : (
+        <SearchResultBuckets
+          titleId={collection.titleId}
+          ownedScope={{ episodeId: episode.id }}
+          results={episodeResults}
+          onQueue={(release) => onQueueFromEpisodeSearch?.(episode, release)}
+          onQueueAdditional={(release) => onQueueAdditionalFromEpisodeSearch?.(episode, release)}
+          canQueueAdditional={(release) =>
+            releaseSupportsAdditionalFileQueue(release, facet)
+          }
+          requireCandidateToken
         />
-      </TabsContent>
-    </Tabs>
+      )}
+    </>
   );
-});
+}

@@ -101,10 +101,9 @@ pub(crate) struct TitleFolderBoundary {
 }
 
 pub(crate) struct TitleFolderBoundaryPolicy {
-    pub(crate) template_depth: usize,
+    pub(crate) facet: MediaFacet,
     pub(crate) stored_folders: Vec<PathBuf>,
     pub(crate) other_roots: Vec<PathBuf>,
-    pub(crate) episode_folders: Vec<regex::Regex>,
 }
 
 impl TitleFolderBoundaryPolicy {
@@ -123,17 +122,6 @@ impl TitleFolderBoundaryPolicy {
         library_id: &str,
         root: &Path,
     ) -> AppResult<Self> {
-        let default = match facet {
-            MediaFacet::Movie => DEFAULT_FOLDER_TEMPLATE_MOVIE,
-            MediaFacet::Series => DEFAULT_FOLDER_TEMPLATE_SERIES,
-            MediaFacet::Anime => DEFAULT_FOLDER_TEMPLATE_ANIME,
-        };
-        let template = crate::library::rename::normalize_title_folder_template_or_default(
-            app.read_setting_string_value(FOLDER_TEMPLATE_KEY, Some(facet.as_str()))
-                .await?,
-            default,
-            facet.as_str(),
-        );
         let titles = app
             .services
             .catalog
@@ -172,12 +160,10 @@ impl TitleFolderBoundaryPolicy {
                         )
                 }),
         );
-        let episode_folders = episode_folder_patterns(app, facet).await?;
         Ok(Self {
-            template_depth: template.split('/').count(),
+            facet: facet.clone(),
             stored_folders,
             other_roots,
-            episode_folders,
         })
     }
 }
@@ -211,8 +197,443 @@ pub(crate) async fn episode_folder_patterns(
     .collect()
 }
 
-/// Enumerate ownership boundaries before invoking the media walker. The
-/// traversal retains only a stack of open directories and one bounded batch.
+const MAX_UNOWNED_TITLE_DEPTH: usize = 8;
+
+#[derive(Default)]
+struct BoundaryEvidence {
+    has_media: bool,
+    title: Option<String>,
+    ids: [Option<String>; 3],
+    conflict: bool,
+    names_differ: bool,
+}
+
+impl BoundaryEvidence {
+    fn merge(&mut self, other: Self) {
+        self.has_media |= other.has_media;
+        self.conflict |= other.conflict;
+        self.names_differ |= other.names_differ;
+        Self::merge_value(&mut self.title, other.title, &mut self.names_differ);
+        for (current, incoming) in self.ids.iter_mut().zip(other.ids) {
+            Self::merge_value(current, incoming, &mut self.conflict);
+        }
+    }
+
+    fn merge_value(current: &mut Option<String>, incoming: Option<String>, conflict: &mut bool) {
+        if let Some(incoming) = incoming {
+            if current.as_ref().is_some_and(|current| current != &incoming) {
+                *conflict = true;
+                if current.as_ref().is_some_and(|value| incoming < *value) {
+                    *current = Some(incoming);
+                }
+            } else {
+                *current = Some(incoming);
+            }
+        }
+    }
+
+    fn from_name(name: &str) -> Self {
+        let (walk, conflict) =
+            crate::library_filename_parser::library_title_walk_with_id_conflicts(name);
+        let title = crate::helpers::parse_usable_release_title(name)
+            .map(|parsed| crate::title_matching::canonical_lookup_key(&parsed.normalized_title))
+            .filter(|title| !title.is_empty());
+        Self {
+            title,
+            conflict,
+            ids: walk
+                .map(|walk| [walk.imdb_id, walk.tmdb_id, walk.tvdb_id])
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    fn from_external_ids(external_ids: &[scryer_domain::ExternalId]) -> Self {
+        let mut identity = Self::default();
+        for external in external_ids {
+            match external.source.as_str() {
+                "imdb" => identity.ids[0] = crate::normalize::normalize_imdb_id(&external.value),
+                "tmdb" => identity.ids[1] = crate::normalize::normalize_numeric_id(&external.value),
+                "tvdb" => identity.ids[2] = crate::normalize::normalize_numeric_id(&external.value),
+                _ => {}
+            }
+        }
+        identity
+    }
+
+    fn conflicts_with(&self, other: &Self) -> bool {
+        self.conflict
+            || other.conflict
+            || self
+                .ids
+                .iter()
+                .zip(&other.ids)
+                .any(|(a, b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a != b))
+    }
+
+    #[cfg(test)]
+    async fn contradicts_folder(&self, path: &Path, episodic: bool) -> bool {
+        let folder = Self::from_name(&path.file_name().unwrap_or_default().to_string_lossy());
+        let Ok(local) = boundary_sidecar_evidence(path, episodic).await else {
+            return true;
+        };
+        self.conflicts_with(&folder)
+            || local
+                .as_ref()
+                .is_some_and(|local| self.conflicts_with(local) || folder.conflicts_with(local))
+    }
+}
+
+async fn boundary_sidecar_evidence(
+    path: &Path,
+    episodic: bool,
+) -> std::io::Result<Option<BoundaryEvidence>> {
+    // Keep the existing NFO-before-plexmatch precedence, but preserve I/O
+    // failures: an unreadable sidecar is not evidence that identity is absent.
+    let files: &[&str] = if episodic {
+        &["tvshow.nfo", ".plexmatch"]
+    } else {
+        &["movie.nfo"]
+    };
+    for name in files {
+        let content = match read_discovery_nfo(&path.join(name)).await {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let meta = if *name == ".plexmatch" {
+            crate::nfo::parse_plexmatch(&content)
+        } else {
+            crate::nfo::parse_nfo(&content)
+        };
+        if !meta.has_external_ids()
+            && meta
+                .title
+                .as_deref()
+                .is_none_or(|title| title.trim().is_empty())
+        {
+            continue;
+        }
+        return Ok(Some(BoundaryEvidence {
+            title: meta
+                .title
+                .as_deref()
+                .map(crate::title_matching::canonical_lookup_key),
+            ids: [
+                meta.imdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_imdb_id),
+                meta.tmdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_numeric_id),
+                meta.tvdb_id
+                    .as_deref()
+                    .and_then(crate::normalize::normalize_numeric_id),
+            ],
+            ..Default::default()
+        }));
+    }
+    Ok(None)
+}
+
+struct ScanBoundaryOwner<'a> {
+    name: &'a str,
+    aliases: &'a [String],
+    identity: BoundaryEvidence,
+}
+
+struct BoundaryFrame {
+    path: PathBuf,
+    entries: tokio::fs::ReadDir,
+    depth: usize,
+    season: bool,
+    part: bool,
+    evidence: BoundaryEvidence,
+    has_title_nfo: bool,
+    local_identity: Option<BoundaryEvidence>,
+    matches_folder: bool,
+    matches_parent: bool,
+    child_titles: bool,
+    blocked: bool,
+    inspection_error: Option<String>,
+    rejection_emitted: bool,
+    skip_extras: bool,
+    deferred_extras: bool,
+    extras_pass: bool,
+}
+
+fn conventional_season(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            crate::library::workflow::scan_title_files::recognize_season_folder_name(name).is_some()
+        })
+}
+
+/// Disc, disc-structure and anime bonus folders that hold part of their
+/// parent title's media rather than another title. Their files stay visible
+/// to the per-title walker; only boundary discovery folds them into the parent.
+fn is_title_part_folder_name(name: &str) -> bool {
+    const FIXED: &[&str] = &[
+        "bdmv",
+        "video_ts",
+        "stream",
+        "certificate",
+        "ncop",
+        "nced",
+        "ova",
+        "oad",
+        "ona",
+        "sp",
+        "sps",
+    ];
+    let name = name.trim().to_ascii_lowercase();
+    if FIXED.contains(&name.as_str()) {
+        return true;
+    }
+    ["disc", "disk", "cd", "dvd"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|rest| {
+            let digits = rest.strip_prefix([' ', '_', '-', '.']).unwrap_or(rest);
+            (1..=2).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn title_part_folder(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_title_part_folder_name)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static BOUNDARY_ENTRY_METADATA_FAILURE: PathBuf;
+}
+
+async fn boundary_entry_file_type(
+    entry: &tokio::fs::DirEntry,
+) -> std::io::Result<std::fs::FileType> {
+    #[cfg(test)]
+    if BOUNDARY_ENTRY_METADATA_FAILURE
+        .try_with(|path| path == &entry.path())
+        .unwrap_or(false)
+    {
+        return Err(std::io::Error::other("injected entry metadata failure"));
+    }
+    entry.file_type().await
+}
+
+pub(crate) async fn read_discovery_nfo(path: &Path) -> std::io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if !metadata.is_file() || metadata.len() > MAX_BYTES {
+        return Ok(None);
+    }
+    let file = tokio::fs::File::open(path).await?;
+    if file.metadata().await?.len() > MAX_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+impl BoundaryFrame {
+    fn identity_conflicts(&self) -> bool {
+        let folder = BoundaryEvidence::from_name(
+            &self.path.file_name().unwrap_or_default().to_string_lossy(),
+        );
+        self.evidence.conflicts_with(&folder)
+            || self.local_identity.as_ref().is_some_and(|identity| {
+                self.evidence.conflicts_with(identity) || folder.conflicts_with(identity)
+            })
+    }
+
+    fn is_episode_container_of(
+        &self,
+        parent: &Self,
+        owner: Option<&ScanBoundaryOwner<'_>>,
+    ) -> bool {
+        if !self.evidence.has_media
+            || self.blocked
+            || self.child_titles
+            || self.identity_conflicts()
+            || self.evidence.conflicts_with(&parent.evidence)
+        {
+            return false;
+        }
+        let parent_identity = owner
+            .map(|owner| &owner.identity)
+            .or(parent.local_identity.as_ref());
+        if let Some(child) = self.local_identity.as_ref() {
+            let Some(parent) = parent_identity else {
+                return false;
+            };
+            if child.conflicts_with(parent) {
+                return false;
+            }
+            // A sidecar declares a title boundary unless an explicit identity
+            // proves it is the same title. Similar names are insufficient.
+            return child
+                .ids
+                .iter()
+                .zip(&parent.ids)
+                .any(|(a, b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a == b));
+        }
+        if parent_identity
+            .as_ref()
+            .is_some_and(|identity| self.evidence.conflicts_with(identity))
+        {
+            return false;
+        }
+        let matches_owner = owner.is_some_and(|title| {
+            let folder = BoundaryEvidence::from_name(
+                &self.path.file_name().unwrap_or_default().to_string_lossy(),
+            );
+            folder
+                .title
+                .iter()
+                .chain(self.evidence.title.iter())
+                .any(|name| {
+                    std::iter::once(title.name)
+                        .chain(title.aliases.iter().map(String::as_str))
+                        .any(|alias| crate::title_matching::canonical_lookup_key(alias) == *name)
+                })
+        });
+        if self.matches_folder && !self.matches_parent && !self.season && !matches_owner {
+            return false;
+        }
+        self.season
+            || self.matches_parent
+            || matches_owner
+            || (parent.has_title_nfo && self.evidence.has_media)
+    }
+
+    async fn open(
+        path: PathBuf,
+        depth: usize,
+        season: bool,
+        part: bool,
+        episodic: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> AppResult<Self> {
+        let folded = season || part;
+        let mut entries = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|e| AppError::Repository(e.to_string()))?;
+        let mut evidence = BoundaryEvidence::default();
+
+        let folder_name =
+            BoundaryEvidence::from_name(&path.file_name().unwrap_or_default().to_string_lossy())
+                .title;
+        let parent_name = path
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| BoundaryEvidence::from_name(&name.to_string_lossy()))
+            .and_then(|e| e.title);
+        let mut matches_folder = false;
+        let mut matches_parent = false;
+        let mut inspection_error = None;
+        // Inspect immediate entries only. Reopen for child traversal so memory
+        // stays independent of directory width and extras do not depend on order.
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    inspection_error.get_or_insert_with(|| error.to_string());
+                    break;
+                }
+            };
+            let kind = match boundary_entry_file_type(&entry).await {
+                Ok(kind) => kind,
+                Err(error) => {
+                    inspection_error.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+            };
+            let child = entry.path();
+            if kind.is_file()
+                && is_allowed_video_path(&child)
+                && !should_skip_library_top_level_entry(&child, false)
+                && !child
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_ignored_media_extra_file_name)
+            {
+                let mut file = BoundaryEvidence::from_name(
+                    &child.file_stem().unwrap_or_default().to_string_lossy(),
+                );
+                file.has_media = true;
+                matches_folder |= file
+                    .title
+                    .as_ref()
+                    .zip(folder_name.as_ref())
+                    .is_some_and(|(a, b)| a == b);
+                matches_parent |= file
+                    .title
+                    .as_ref()
+                    .zip(parent_name.as_ref())
+                    .is_some_and(|(a, b)| a == b);
+                evidence.merge(file);
+            }
+        }
+        let entries = tokio::fs::read_dir(&path).await.map_err(|error| {
+            AppError::Repository(
+                inspection_error
+                    .clone()
+                    .unwrap_or_else(|| error.to_string()),
+            )
+        })?;
+        // Disc and bonus folders fold only media presence into their title,
+        // so their sidecars are not read as title identity.
+        let local_identity = if part {
+            None
+        } else {
+            match boundary_sidecar_evidence(&path, episodic).await {
+                Ok(identity) => identity,
+                Err(error) => {
+                    inspection_error.get_or_insert_with(|| error.to_string());
+                    None
+                }
+            }
+        };
+        let has_title_nfo = local_identity.is_some();
+        let skip_extras = depth > 0 && (evidence.has_media || has_title_nfo || folded);
+        Ok(Self {
+            path,
+            entries,
+            depth,
+            season,
+            part,
+            evidence,
+            has_title_nfo,
+            local_identity,
+            matches_folder,
+            matches_parent,
+            child_titles: false,
+            blocked: inspection_error.is_some(),
+            inspection_error,
+            rejection_emitted: false,
+            skip_extras,
+            deferred_extras: false,
+            extras_pass: false,
+        })
+    }
+}
+
+/// Discover existing title boundaries independently of future naming settings.
+/// Only immediate-directory summaries are retained along the active DFS path.
 pub(crate) fn stream_title_folder_boundaries(
     root: PathBuf,
     policy: TitleFolderBoundaryPolicy,
@@ -221,108 +642,298 @@ pub(crate) fn stream_title_folder_boundaries(
 ) -> tokio::sync::mpsc::Receiver<AppResult<Vec<TitleFolderBoundary>>> {
     let (sender, receiver) = tokio::sync::mpsc::channel(LIBRARY_SCAN_DISCOVERY_WORK_QUEUE_CAPACITY);
     tokio::spawn(async move {
-        let result = async {
-            if batch_size == 0 || policy.template_depth == 0 {
-                return Err(AppError::Validation("title boundary depth and batch size must be positive".into()));
-            }
-            let resolved_root = tokio::fs::canonicalize(&root).await.map_err(|error| AppError::Repository(error.to_string()))?;
-            let mut stack = vec![(tokio::fs::read_dir(&root).await.map_err(|error| AppError::Repository(error.to_string()))?, 0usize)];
-            let mut batch = Vec::with_capacity(batch_size);
-            while let Some((entries, parent_depth)) = stack.last_mut() {
-                if cancel.is_cancelled() || sender.is_closed() { return Ok(()); }
-                let depth = *parent_depth + 1;
-                let Some(entry) = entries.next_entry().await.map_err(|error| AppError::Repository(error.to_string()))? else {
-                    stack.pop();
-                    continue;
-                };
-                let path = entry.path();
-                let kind = entry.file_type().await.map_err(|error| AppError::Repository(error.to_string()))?;
-                if kind.is_symlink() {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return Ok(()),
-                        result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some("linked folder requires explicit ownership resolution before scanning".into()) }])) => if result.is_err() { return Ok(()); },
-                    }
-                    continue;
-                }
-                if !kind.is_dir() || should_skip_library_top_level_entry(&path, true) { continue; }
-                if policy.other_roots.iter().any(|other| crate::stored_paths::folder_paths_match(
-                    &path_to_stored_string(other), &path_to_stored_string(&path),
-                )) { continue; }
-                let resolved = tokio::fs::canonicalize(&path).await.map_err(|error| AppError::Repository(error.to_string()))?;
-                if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return Ok(()),
-                        result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some("folder resolves outside its library root; resolve the link explicitly before scanning".into()) }])) => if result.is_err() { return Ok(()); },
-                    }
-                    continue;
-                }
-                let owned = policy.stored_folders.iter().any(|stored| crate::stored_paths::folder_paths_match(
-                    &path_to_stored_string(stored), &path_to_stored_string(&path),
-                ));
-                let contains_owner = policy.stored_folders.iter().any(|stored| TitleFolderBoundaryPolicy::contains_stored_folder(&path, stored));
-                let content = if owned {
-                    TitleBoundaryContent { has_media: true, has_child_titles: false }
-                } else {
-                    // Above title depth these are organizing folders, even if
-                    // their children happen to resemble season/specials names.
-                    let episode_folders = if depth < policy.template_depth { &[][..] } else { &policy.episode_folders[..] };
-                    match inspect_title_boundary_content(&path, episode_folders).await {
-                        Ok(content) => content,
-                        Err(error) => {
-                            tokio::select! {
-                                _ = cancel.cancelled() => return Ok(()),
-                                result = sender.send(Ok(vec![TitleFolderBoundary { path, rejection: Some(format!("cannot inspect title boundary: {error}")) }])) => if result.is_err() { return Ok(()); },
-                            }
-                            continue;
-                        }
-                    }
-                };
-                let eligible = depth == policy.template_depth && content.has_media && !content.has_child_titles && !contains_owner;
-                if owned || content.has_media || depth == policy.template_depth {
-                    // A folder at template depth with no media and no child titles is
-                    // an empty or junk title folder; it stays a resolvable unmatched
-                    // item exactly as the flat scanner recorded it.
-                    let rejection = if contains_owner || content.has_child_titles {
-                        Some("folder contains another title boundary; resolve the mixed layout explicitly".into())
-                    } else if !owned && depth != policy.template_depth && !content.has_media {
-                        Some("organizing folder has no eligible title media".into())
-                    } else if !owned && depth != policy.template_depth {
-                        Some(format!("folder is not at template depth (expected {}, found {depth})", policy.template_depth))
-                    } else { None };
-                    batch.push(TitleFolderBoundary { path: path.clone(), rejection });
-                }
-                if !owned && !eligible && (depth <= policy.template_depth || contains_owner) {
-                    stack.push((tokio::fs::read_dir(&path).await.map_err(|error| AppError::Repository(error.to_string()))?, depth));
-                }
-                if batch.len() >= batch_size {
-                    let items = std::mem::take(&mut batch);
-                    tokio::select! {
-                        _ = cancel.cancelled() => return Ok(()),
-                        result = sender.send(Ok(items)) => if result.is_err() { return Ok(()); },
-                    }
-                }
-            }
-            if !batch.is_empty() {
-                tokio::select! {
-                    _ = cancel.cancelled() => {},
-                    _ = sender.send(Ok(batch)) => {},
-                }
-            }
-            Ok::<(), AppError>(())
-        }.await;
+        let result =
+            discover_title_folder_boundaries(root, policy, batch_size, &cancel, &sender).await;
         if let Err(error) = result {
-            tokio::select! {
-                _ = cancel.cancelled() => {},
-                _ = sender.send(Err(error)) => {},
-            }
+            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send(Err(error)) => {} }
         }
     });
     receiver
 }
 
+async fn discover_title_folder_boundaries(
+    root: PathBuf,
+    policy: TitleFolderBoundaryPolicy,
+    batch_size: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+    sender: &tokio::sync::mpsc::Sender<AppResult<Vec<TitleFolderBoundary>>>,
+) -> AppResult<()> {
+    if batch_size == 0 {
+        return Err(AppError::Validation("batch size must be positive".into()));
+    }
+    let resolved_root = tokio::fs::canonicalize(&root)
+        .await
+        .map_err(|e| AppError::Repository(e.to_string()))?;
+    let episodic = policy.facet != MediaFacet::Movie;
+    let mut stack = vec![BoundaryFrame::open(root, 0, false, false, episodic, cancel).await?];
+    let mut batch = Vec::with_capacity(batch_size.min(256));
+    let mut first_io_error = None;
+    while let Some(frame) = stack.last_mut() {
+        if cancel.is_cancelled() || sender.is_closed() {
+            return Ok(());
+        }
+        if let Some(error) = frame.inspection_error.take() {
+            first_io_error.get_or_insert_with(|| format!("{}: {error}", frame.path.display()));
+            frame.rejection_emitted = true;
+            batch.push(TitleFolderBoundary {
+                path: frame.path.clone(),
+                rejection: Some(format!("cannot inspect title boundary: {error}")),
+            });
+            if batch.len() >= batch_size {
+                tokio::select! { _ = cancel.cancelled() => return Ok(()), result = sender.send(Ok(std::mem::take(&mut batch))) => if result.is_err() { return Ok(()); } }
+            }
+        }
+        let entry = match frame.entries.next_entry().await {
+            Ok(entry) => entry,
+            Err(error) => {
+                frame.blocked = true;
+                first_io_error.get_or_insert_with(|| format!("{}: {error}", frame.path.display()));
+                if !frame.rejection_emitted {
+                    frame.rejection_emitted = true;
+                    batch.push(TitleFolderBoundary {
+                        path: frame.path.clone(),
+                        rejection: Some(format!("cannot inspect title boundary: {error}")),
+                    });
+                }
+                None
+            }
+        };
+        if let Some(entry) = entry {
+            let path = entry.path();
+            let depth = frame.depth + 1;
+            let kind = match entry.file_type().await {
+                Ok(kind) => kind,
+                Err(error) => {
+                    frame.blocked = true;
+                    first_io_error.get_or_insert_with(|| format!("{}: {error}", path.display()));
+                    batch.push(TitleFolderBoundary {
+                        path,
+                        rejection: Some(format!("cannot inspect title boundary: {error}")),
+                    });
+                    // Flush errors through the same bounded channel below.
+                    if !batch.is_empty() {
+                        tokio::select! { _ = cancel.cancelled() => return Ok(()), result = sender.send(Ok(std::mem::take(&mut batch))) => if result.is_err() { return Ok(()); } }
+                    }
+                    continue;
+                }
+            };
+            if !kind.is_dir() && !kind.is_symlink() {
+                continue;
+            }
+            if should_skip_library_top_level_entry(&path, true) {
+                continue;
+            }
+            if policy.other_roots.iter().any(|other| {
+                crate::stored_paths::folder_paths_match(
+                    &path_to_stored_string(other),
+                    &path_to_stored_string(&path),
+                )
+            }) {
+                frame.child_titles = true;
+                continue;
+            }
+            let owned = policy.stored_folders.iter().any(|stored| {
+                crate::stored_paths::folder_paths_match(
+                    &path_to_stored_string(stored),
+                    &path_to_stored_string(&path),
+                )
+            });
+            let contains_owner = policy
+                .stored_folders
+                .iter()
+                .any(|stored| TitleFolderBoundaryPolicy::contains_stored_folder(&path, stored));
+            let extra = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                LIBRARY_IGNORED_MEDIA_SUBDIR_NAMES.contains(&n.to_ascii_lowercase().as_str())
+            });
+            if frame.extras_pass && (!extra || owned || contains_owner) {
+                continue;
+            }
+            if frame.depth > 0 && extra && !owned && !contains_owner {
+                if frame.skip_extras {
+                    continue;
+                }
+                // Inspect ordinary children first: only actual season media,
+                // not a season-looking organizing name, establishes extras.
+                if !frame.extras_pass {
+                    frame.deferred_extras = true;
+                    continue;
+                }
+            }
+            // A conventional season is evidence inside its parent title, not
+            // another title level. Inspect it even at the discovery limit.
+            let season = episodic
+                && frame.depth > 0
+                && frame.depth <= MAX_UNOWNED_TITLE_DEPTH
+                && !frame.season
+                && !frame.part
+                && conventional_season(&path)
+                && !contains_owner;
+            // Disc and bonus folders hold part of the parent title's media.
+            // Root-level buckets with these names stay organizing folders.
+            let part = frame.depth > 0
+                && (frame.depth <= MAX_UNOWNED_TITLE_DEPTH || frame.season || frame.part)
+                && !season
+                && title_part_folder(&path)
+                && !contains_owner;
+            // A recorded title may own a linked folder. It is emitted, never
+            // walked, and must still resolve inside this library root.
+            let rejection = if kind.is_symlink() && !owned {
+                Some(
+                    "linked folder requires explicit ownership resolution before scanning"
+                        .to_owned(),
+                )
+            } else if depth > MAX_UNOWNED_TITLE_DEPTH
+                && !owned
+                && !contains_owner
+                && !season
+                && !part
+            {
+                Some("automatic title discovery depth limit reached".to_owned())
+            } else {
+                match tokio::fs::canonicalize(&path).await {
+                    Ok(resolved)
+                        if resolved != resolved_root && resolved.starts_with(&resolved_root) =>
+                    {
+                        None
+                    }
+                    Ok(_) => Some("folder resolves outside its library root".to_owned()),
+                    Err(error) => {
+                        first_io_error
+                            .get_or_insert_with(|| format!("{}: {error}", path.display()));
+                        Some(format!("cannot inspect title boundary: {error}"))
+                    }
+                }
+            };
+            if let Some(rejection) = rejection {
+                frame.blocked = true;
+                batch.push(TitleFolderBoundary {
+                    path,
+                    rejection: Some(rejection),
+                });
+            } else if owned {
+                frame.child_titles = true;
+                batch.push(TitleFolderBoundary {
+                    path,
+                    rejection: contains_owner
+                        .then(|| "folder contains another recorded title boundary".into()),
+                });
+            } else {
+                match BoundaryFrame::open(path.clone(), depth, season, part, episodic, cancel).await
+                {
+                    Ok(mut child) => {
+                        // A missing recorded descendant still owns its path;
+                        // do not let discovery claim the ancestor around it.
+                        child.child_titles |= contains_owner;
+                        stack.push(child);
+                    }
+                    Err(error) => {
+                        stack.last_mut().unwrap().blocked = true;
+                        first_io_error
+                            .get_or_insert_with(|| format!("{}: {error}", path.display()));
+                        batch.push(TitleFolderBoundary {
+                            path,
+                            rejection: Some(format!("cannot inspect title boundary: {error}")),
+                        });
+                    }
+                }
+            }
+        } else {
+            if frame.deferred_extras && !frame.extras_pass && !frame.skip_extras {
+                frame.extras_pass = true;
+                match tokio::fs::read_dir(&frame.path).await {
+                    Ok(entries) => {
+                        frame.entries = entries;
+                        continue;
+                    }
+                    Err(error) => {
+                        frame.blocked = true;
+                        first_io_error
+                            .get_or_insert_with(|| format!("{}: {error}", frame.path.display()));
+                        if !frame.rejection_emitted {
+                            frame.rejection_emitted = true;
+                            batch.push(TitleFolderBoundary {
+                                path: frame.path.clone(),
+                                rejection: Some(format!("cannot inspect title boundary: {error}")),
+                            });
+                        }
+                    }
+                }
+            }
+            let frame = stack.pop().unwrap();
+            let Some(parent) = stack.last_mut() else {
+                break;
+            };
+            if frame.part {
+                // Part file names such as `00001` or `NCOP1` are not title
+                // identities; fold presence of media only.
+                parent.skip_extras |= parent.depth > 0 && frame.evidence.has_media;
+                parent.evidence.has_media |= frame.evidence.has_media;
+                parent.child_titles |= frame.child_titles;
+                parent.blocked |= frame.blocked;
+            } else if episodic && parent.depth > 0 && frame.is_episode_container_of(parent, None) {
+                parent.skip_extras |= parent.depth > 0 && frame.evidence.has_media;
+                parent.evidence.merge(frame.evidence);
+                parent.child_titles |= frame.child_titles;
+                parent.blocked |= frame.blocked;
+            } else {
+                let is_candidate = frame.evidence.has_media || frame.has_title_nfo;
+                parent.child_titles |= is_candidate || frame.child_titles || frame.blocked;
+                if is_candidate && !frame.rejection_emitted {
+                    let rejection = if frame.blocked || frame.child_titles {
+                        Some("folder contains another title boundary or an unreadable branch; select individual title folders".into())
+                    } else if frame.identity_conflicts() {
+                        Some("media identity conflicts with the proposed title folder".into())
+                    } else {
+                        None
+                    };
+                    batch.push(TitleFolderBoundary {
+                        path: frame.path,
+                        rejection,
+                    });
+                }
+            }
+        }
+        if batch.len() >= batch_size {
+            tokio::select! { _ = cancel.cancelled() => return Ok(()), result = sender.send(Ok(std::mem::take(&mut batch))) => if result.is_err() { return Ok(()); } }
+        }
+    }
+    if !batch.is_empty() {
+        tokio::select! { _ = cancel.cancelled() => return Ok(()), result = sender.send(Ok(batch)) => if result.is_err() { return Ok(()); } }
+    }
+    match first_io_error {
+        Some(error) => Err(AppError::Repository(error)),
+        None => Ok(()),
+    }
+}
+
 struct TitleBoundaryContent {
     has_media: bool,
     has_child_titles: bool,
+}
+
+enum EpisodeFolderBoundaryPolicy<'a> {
+    Configured(&'a [regex::Regex]),
+}
+
+impl EpisodeFolderBoundaryPolicy<'_> {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Configured(patterns) if patterns.is_empty())
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        let conventional = || {
+            crate::library::workflow::scan_title_files::recognize_season_folder_name(name).is_some()
+        };
+        match self {
+            // Scan claims accept conventional season names, so every guard on
+            // an existing episodic title accepts them too. Movies carry no
+            // episode patterns and recognise no season folders.
+            Self::Configured(patterns) => {
+                !patterns.is_empty()
+                    && (patterns.iter().any(|pattern| pattern.is_match(name)) || conventional())
+            }
+        }
+    }
 }
 
 async fn directory_has_direct_media(path: &Path) -> AppResult<bool> {
@@ -331,7 +942,7 @@ async fn directory_has_direct_media(path: &Path) -> AppResult<bool> {
 
 async fn directory_has_episode_layout(
     path: &Path,
-    episode_folders: &[regex::Regex],
+    episode_folders: &EpisodeFolderBoundaryPolicy<'_>,
 ) -> AppResult<bool> {
     if episode_folders.is_empty() {
         return Ok(false);
@@ -349,9 +960,7 @@ async fn directory_has_episode_layout(
             .await
             .map_err(|error| AppError::Repository(error.to_string()))?
             .is_dir()
-            && episode_folders
-                .iter()
-                .any(|pattern| pattern.is_match(&entry.file_name().to_string_lossy()))
+            && episode_folders.matches(&entry.file_name().to_string_lossy())
             && directory_has_direct_media(&entry.path()).await?
         {
             return Ok(true);
@@ -360,9 +969,21 @@ async fn directory_has_episode_layout(
     Ok(false)
 }
 
+const MAX_TITLE_PART_NESTING: usize = 4;
+
 async fn inspect_title_boundary_content(
     path: &Path,
-    episode_folders: &[regex::Regex],
+    episode_folders: &EpisodeFolderBoundaryPolicy<'_>,
+) -> AppResult<TitleBoundaryContent> {
+    inspect_title_boundary_children(path, episode_folders, 0).await
+}
+
+/// `part_nesting` is zero for the title folder itself and counts recognised
+/// disc or bonus folders below it, which fold their media into the title.
+async fn inspect_title_boundary_children(
+    path: &Path,
+    episode_folders: &EpisodeFolderBoundaryPolicy<'_>,
+    part_nesting: usize,
 ) -> AppResult<TitleBoundaryContent> {
     let mut content = TitleBoundaryContent {
         has_media: directory_has_direct_media(path).await?,
@@ -392,11 +1013,23 @@ async fn inspect_title_boundary_content(
         {
             continue;
         }
+        if part_nesting < MAX_TITLE_PART_NESTING && title_part_folder(&child) {
+            let part = Box::pin(inspect_title_boundary_children(
+                &child,
+                episode_folders,
+                part_nesting + 1,
+            ))
+            .await?;
+            content.has_media |= part.has_media;
+            content.has_child_titles |= part.has_child_titles;
+            continue;
+        }
         if directory_has_direct_media(&child).await? {
-            let season = child
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| episode_folders.iter().any(|pattern| pattern.is_match(name)));
+            let season = part_nesting == 0
+                && child
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| episode_folders.matches(name));
             if season {
                 content.has_media = true;
             } else {
@@ -413,7 +1046,11 @@ pub(crate) async fn ensure_existing_title_boundary(
     path: &Path,
     episode_folders: &[regex::Regex],
 ) -> AppResult<()> {
-    let content = inspect_title_boundary_content(path, episode_folders).await?;
+    let content = inspect_title_boundary_content(
+        path,
+        &EpisodeFolderBoundaryPolicy::Configured(episode_folders),
+    )
+    .await?;
     if !content.has_media || content.has_child_titles {
         return Err(AppError::Validation("selected folder is an organizing folder or mixed title layout; select the title folder containing its media".into()));
     }
@@ -426,9 +1063,144 @@ pub(crate) async fn ensure_folder_holds_no_child_titles(
     path: &Path,
     episode_folders: &[regex::Regex],
 ) -> AppResult<()> {
-    let content = inspect_title_boundary_content(path, episode_folders).await?;
+    let content = inspect_title_boundary_content(
+        path,
+        &EpisodeFolderBoundaryPolicy::Configured(episode_folders),
+    )
+    .await?;
     if content.has_child_titles {
         return Err(AppError::Validation("destination folder already contains other title folders; it is an organizing folder, not a title folder".into()));
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_scanned_folder_holds_no_child_titles(
+    path: &Path,
+    title: &Title,
+) -> AppResult<()> {
+    verify_scan_boundary(
+        path,
+        &title.facet,
+        ScanBoundaryOwner {
+            name: &title.name,
+            aliases: &title.aliases,
+            identity: BoundaryEvidence::from_external_ids(&title.external_ids),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn verify_new_scan_title_boundary(
+    path: &Path,
+    title: &scryer_domain::NewTitle,
+) -> AppResult<()> {
+    verify_scan_boundary(
+        path,
+        &title.facet,
+        ScanBoundaryOwner {
+            name: &title.name,
+            aliases: &[],
+            identity: BoundaryEvidence::from_external_ids(&title.external_ids),
+        },
+    )
+    .await
+}
+
+async fn verify_scan_boundary(
+    path: &Path,
+    facet: &MediaFacet,
+    owner: ScanBoundaryOwner<'_>,
+) -> AppResult<()> {
+    let episodic = *facet != MediaFacet::Movie;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut stack =
+        vec![BoundaryFrame::open(path.to_path_buf(), 0, false, false, episodic, &cancel).await?];
+    while let Some(frame) = stack.last_mut() {
+        if let Some(error) = frame.inspection_error.take() {
+            return Err(AppError::Repository(error));
+        }
+        if frame.evidence.conflicts_with(&owner.identity)
+            || frame.identity_conflicts()
+            || BoundaryEvidence::from_name(
+                &frame.path.file_name().unwrap_or_default().to_string_lossy(),
+            )
+            .conflicts_with(&owner.identity)
+            || frame
+                .local_identity
+                .as_ref()
+                .is_some_and(|identity| identity.conflicts_with(&owner.identity))
+        {
+            return Err(AppError::Validation(
+                "media identity conflicts with the proposed title folder".into(),
+            ));
+        }
+        let entry = frame
+            .entries
+            .next_entry()
+            .await
+            .map_err(|error| AppError::Repository(error.to_string()))?;
+        if let Some(entry) = entry {
+            let child = entry.path();
+            let kind = entry
+                .file_type()
+                .await
+                .map_err(|error| AppError::Repository(error.to_string()))?;
+            if should_skip_library_top_level_entry(&child, true)
+                || child
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        LIBRARY_IGNORED_MEDIA_SUBDIR_NAMES
+                            .contains(&name.to_ascii_lowercase().as_str())
+                    })
+            {
+                continue;
+            }
+            if kind.is_symlink() {
+                return Err(AppError::Validation(
+                    "linked folder requires explicit ownership resolution before scanning".into(),
+                ));
+            }
+            if !kind.is_dir() {
+                continue;
+            }
+            let depth = frame.depth + 1;
+            if depth > MAX_UNOWNED_TITLE_DEPTH {
+                return Err(AppError::Validation(
+                    "automatic title discovery depth limit reached".into(),
+                ));
+            }
+            let season = episodic && !frame.part && conventional_season(&child);
+            let part = !season && title_part_folder(&child);
+            stack.push(BoundaryFrame::open(child, depth, season, part, episodic, &cancel).await?);
+        } else {
+            let child = stack.pop().unwrap();
+            let Some(parent) = stack.last_mut() else {
+                break;
+            };
+            if !(child.evidence.has_media || child.has_title_nfo) {
+                continue;
+            }
+            // Disc and bonus folders hold part of the title's own media;
+            // anything else with media below one is another title.
+            if child.part {
+                parent.evidence.has_media |= child.evidence.has_media;
+                continue;
+            }
+            if parent.part {
+                return Err(AppError::Validation(
+                    "destination folder contains an independent or unresolved title boundary"
+                        .into(),
+                ));
+            }
+            if !episodic || !child.is_episode_container_of(parent, Some(&owner)) {
+                return Err(AppError::Validation(
+                    "destination folder contains an independent or unresolved title boundary"
+                        .into(),
+                ));
+            }
+            parent.evidence.merge(child.evidence);
+        }
     }
     Ok(())
 }
@@ -515,10 +1287,9 @@ pub(crate) async fn stream_movie_top_level_entries_batched(
     batch_size: usize,
 ) -> AppResult<MovieTopLevelEntryBatchReceiver> {
     let policy = TitleFolderBoundaryPolicy {
-        template_depth: 1,
+        facet: MediaFacet::Movie,
         stored_folders: vec![],
         other_roots: vec![],
-        episode_folders: vec![],
     };
     let mut boundaries =
         stream_title_folder_boundaries(root.to_path_buf(), policy, batch_size, Default::default());
@@ -1041,88 +1812,844 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn nested_title_organizing_folders_never_become_episode_folders() {
-        use crate::library::rename::episode_folder_discovery_pattern as pattern;
-        let root = tempfile::tempdir().unwrap();
-        let titles = [
-            "A/Alpha",
-            "Example Network/Show Alpha",
-            "Example Network/Show Beta",
-            "GroupA/Release Show",
-            "Other Network/Extras",
-        ];
-        for title in titles {
-            let path = root.path().join(title).join("episode.mkv");
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"synthetic media").unwrap();
-        }
-        for specials in ["{title}", "{tvdb_id}", "Extras"] {
-            let entries = collect_nested_boundaries(
-                root.path(),
-                TitleFolderBoundaryPolicy {
-                    template_depth: 2,
-                    stored_folders: vec![],
-                    other_roots: vec![],
-                    episode_folders: vec![
-                        pattern(specials).unwrap(),
-                        pattern("Season {season}").unwrap(),
-                    ],
-                },
-            )
-            .await;
-            let mut accepted = entries
-                .iter()
-                .filter(|entry| entry.rejection.is_none())
-                .map(|entry| entry.path.clone())
-                .collect::<Vec<_>>();
-            accepted.sort();
-            let mut expected = titles.map(|title| root.path().join(title)).to_vec();
-            expected.sort();
-            assert_eq!(accepted, expected, "specials template: {specials}");
+    fn discovery_policy(facet: MediaFacet) -> TitleFolderBoundaryPolicy {
+        TitleFolderBoundaryPolicy {
+            facet,
+            stored_folders: vec![],
+            other_roots: vec![],
         }
     }
 
     #[tokio::test]
-    async fn nested_title_ambiguous_specials_require_ownership() {
-        use crate::library::rename::episode_folder_discovery_pattern as pattern;
+    async fn nested_title_nfo_only_discovery_ignores_empty_organizers() {
         let root = tempfile::tempdir().unwrap();
-        for relative in [
-            "Network/Ambiguous/Ambiguous/special.mkv",
-            "Network/Conventional/Season 1/episode.mkv",
-            "Network/Custom/Specials 12345/special.mkv",
-        ] {
-            let path = root.path().join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"synthetic media").unwrap();
+        assert!(read_discovery_nfo(root.path()).await.unwrap().is_none());
+        #[cfg(unix)]
+        {
+            let link = root.path().join("sidecar-link");
+            std::os::unix::fs::symlink(root.path(), &link).unwrap();
+            assert!(read_discovery_nfo(&link).await.unwrap().is_none());
+            std::fs::remove_file(link).unwrap();
         }
-        for owned in [false, true] {
-            let entries = collect_nested_boundaries(
-                root.path(),
-                TitleFolderBoundaryPolicy {
-                    template_depth: 2,
-                    stored_folders: if owned {
-                        vec![root.path().join("Network/Ambiguous")]
-                    } else {
-                        vec![]
-                    },
-                    other_roots: vec![],
-                    episode_folders: vec![
-                        pattern("{title}").unwrap(),
-                        pattern("Season {season}").unwrap(),
-                        pattern("Specials {tvdb_id}").unwrap(),
-                    ],
-                },
+        for relative in ["Flat", "Network/A/Nested", "Mixed", "Mixed/Child"] {
+            let folder = root.path().join(relative);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("tvshow.nfo"),
+                "<tvshow><title>Example Show</title><tvdbid>123</tvdbid></tvshow>",
             )
-            .await;
-            for title in ["Conventional", "Custom", "Ambiguous"] {
-                let entry = entries
-                    .iter()
-                    .find(|entry| entry.path == root.path().join("Network").join(title))
+            .unwrap();
+        }
+        for relative in [
+            "Empty",
+            "Invalid",
+            "Oversized",
+            "Oversized [Group]",
+            "Season 1",
+        ] {
+            let folder = root.path().join(relative);
+            std::fs::create_dir_all(&folder).unwrap();
+            if relative == "Invalid" {
+                std::fs::write(folder.join("tvshow.nfo"), "<tvshow></tvshow>").unwrap();
+            }
+            if relative.starts_with("Oversized") {
+                let path = folder.join("tvshow.nfo");
+                std::fs::write(&path, "<tvshow><title>Oversized</title></tvshow>").unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_len(10 * 1024 * 1024 + 1)
                     .unwrap();
-                assert_eq!(entry.rejection.is_none(), title != "Ambiguous" || owned);
+            }
+            if relative == "Oversized [Group]" {
+                std::fs::write(folder.join("Oversized.S01E01.mkv"), b"media").unwrap();
+                assert!(
+                    boundary_sidecar_evidence(&folder, true)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
             }
         }
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            let entries = collect_nested_boundaries(root.path(), discovery_policy(facet)).await;
+            assert_eq!(entries.len(), 5);
+            for relative in ["Flat", "Network/A/Nested", "Mixed/Child"] {
+                assert!(
+                    entries
+                        .iter()
+                        .any(|entry| entry.path == root.path().join(relative)
+                            && entry.rejection.is_none()),
+                    "{relative}"
+                );
+            }
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.path == root.path().join("Mixed")
+                        && entry.rejection.is_some())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_conflicts_and_mixed_parent_preserve_safe_children() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "Mixed/Mixed.S01E01.mkv",
+            "Mixed/Child/Child.S01E01.mkv",
+            "Wrong/Actual.S01E01.mkv",
+            "Conflict/Conflict.S01E01.mkv",
+            "Conflict/Other.S01E02.mkv",
+            "Ids/Ids.S01E01.{tvdb-123}.mkv",
+            "Ids/Ids.S01E02.{tvdb-456}.mkv",
+            "Bare/Season 1/S01E01.mkv",
+            "Bare/Specials/S00E01.mkv",
+            "Empty/Extras/trailer.mkv",
+        ] {
+            write_discovery_fixture(root.path(), relative);
+        }
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Series)).await;
+        for relative in ["Mixed", "Ids"] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == root.path().join(relative) && e.rejection.is_some()),
+                "missing rejection: {relative}"
+            );
+        }
+        // Name disagreement is deferred to title/episode matching; it is not an ID conflict.
+        for relative in ["Mixed/Child", "Bare", "Wrong", "Conflict"] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == root.path().join(relative) && e.rejection.is_none()),
+                "missing accepted boundary: {relative}"
+            );
+        }
+        assert!(!entries.iter().any(|e| e.path == root.path().join("Empty")));
+    }
+
+    #[tokio::test]
+    async fn nested_title_decorated_folders_preserve_local_identity_precedence() {
+        for (folder, file) in [
+            ("Anime Scan [SubsPlease]", "Anime.Scan.S01E01.1080p.WEB-DL"),
+            ("Existing Anime [BD]", "Existing.Anime.S01E01.1080p.WEB-DL"),
+            (
+                "Iron Vale!! [BD]",
+                "Iron.Vale!!.S01E01.1080p.BluRay.x264-GRP",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(folder);
+            std::fs::create_dir(&path).unwrap();
+            let evidence = BoundaryEvidence::from_name(file);
+            let title = evidence.title.as_ref().expect("usable filename identity");
+            std::fs::write(
+                path.join("tvshow.nfo"),
+                format!("<tvshow><title>{title}</title><tvdbid>123</tvdbid></tvshow>"),
+            )
+            .unwrap();
+            assert!(!evidence.contradicts_folder(&path, true).await, "{folder}");
+            let conflicting = BoundaryEvidence::from_name("Other.Show.S01E01.{tvdb-456}");
+            assert!(conflicting.contradicts_folder(&path, true).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_sidecar_corroboration_cannot_override_identity_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        for (folder, file, nfo, plexmatch) in [
+            (
+                "Show [Group]",
+                "Show.S01E01.{tvdb-456}",
+                "<tvshow><title>Show</title><tvdbid>123</tvdbid></tvshow>",
+                "",
+            ),
+            (
+                "Show [Group] {tvdb-456}",
+                "Show.S01E01",
+                "<tvshow><title>Show</title><tvdbid>123</tvdbid></tvshow>",
+                "",
+            ),
+            (
+                "Show [Other Group]",
+                "Show.S01E01.{tvdb-456}",
+                "<tvshow><tvdbid>123</tvdbid></tvshow>",
+                "title: Show\ntvdbid: 456\n",
+            ),
+        ] {
+            let path = root.path().join(folder);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("tvshow.nfo"), nfo).unwrap();
+            std::fs::write(path.join(".plexmatch"), plexmatch).unwrap();
+            let evidence = BoundaryEvidence::from_name(file);
+            assert_eq!(evidence.title.as_deref(), Some("show"));
+            assert!(evidence.contradicts_folder(&path, true).await, "{folder}");
+        }
+        let path = root.path().join("Show [Plex Group]");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join(".plexmatch"), "title: Show\ntvdbid: 123\n").unwrap();
+        let mut evidence = BoundaryEvidence::from_name("Show.S01E01.{tvdb-123}");
+        assert!(!evidence.contradicts_folder(&path, true).await);
+        evidence.merge(BoundaryEvidence::from_name("Other.Show.S01E02.{tvdb-123}"));
+        assert!(evidence.names_differ);
+        assert!(!evidence.contradicts_folder(&path, true).await);
+    }
+
+    #[tokio::test]
+    async fn nested_title_movie_sidecar_allows_generic_media_and_preserves_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let relative = "Spirited Away (2001) Vault";
+        write_discovery_fixture(root.path(), &format!("{relative}/vault-movie.mkv"));
+        let folder = root.path().join(relative);
+        std::fs::write(
+            folder.join("movie.nfo"),
+            "<movie><title>Spirited Away</title><imdbid>tt0245429</imdbid></movie>",
+        )
+        .unwrap();
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Movie)).await;
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].rejection.is_none());
+        assert_eq!(
+            std::fs::read(folder.join("vault-movie.mkv")).unwrap(),
+            b"synthetic media"
+        );
+        let conflict = BoundaryEvidence::from_name("Other.{imdb-tt1234567}");
+        assert!(conflict.contradicts_folder(&folder, false).await);
+    }
+
+    #[tokio::test]
+    async fn nested_title_folder_name_differences_are_not_identity_conflicts() {
+        // A decorated movie folder and a series folder whose files use another
+        // spelling or a romanised name disagree on names only, never on ids.
+        let movies = tempfile::tempdir().unwrap();
+        write_discovery_fixture(
+            movies.path(),
+            "Archive/Lantern Vale (2001) Vault/Lantern Vale (2001).mkv",
+        );
+        let entries =
+            collect_nested_boundaries(movies.path(), discovery_policy(MediaFacet::Movie)).await;
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            entries[0].path,
+            movies.path().join("Archive/Lantern Vale (2001) Vault")
+        );
+        assert!(entries[0].rejection.is_none(), "{entries:?}");
+        verify_scan_boundary(
+            &movies.path().join("Archive/Lantern Vale (2001) Vault"),
+            &MediaFacet::Movie,
+            ScanBoundaryOwner {
+                name: "Lantern Vale",
+                aliases: &[],
+                identity: BoundaryEvidence::from_external_ids(&[scryer_domain::ExternalId::new(
+                    "imdb",
+                    "tt7654321",
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+
+        let shows = tempfile::tempdir().unwrap();
+        for relative in [
+            "Copper Tide - Reprise/Copper Tide Reprise.S01E11.mkv",
+            "Copper Tide - Reprise/Akagane no Shio - 05.mkv",
+            "Copper Tide - Reprise/Copper Tide Reprise Shared Cour - 06.mkv",
+            "Copper Tide - Reprise/Glass Meridian S03 Complete/Copper Tide Reprise.S03E01.mkv",
+        ] {
+            write_discovery_fixture(shows.path(), relative);
+        }
+        assert_eq!(
+            accepted_boundaries(shows.path(), MediaFacet::Anime).await,
+            [PathBuf::from("Copper Tide - Reprise")]
+        );
+        let aliases = ["Akagane no Shio".to_owned()];
+        verify_scan_boundary(
+            &shows.path().join("Copper Tide - Reprise"),
+            &MediaFacet::Anime,
+            ScanBoundaryOwner {
+                name: "Copper Tide - Reprise",
+                aliases: &aliases,
+                identity: BoundaryEvidence::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(
+                shows
+                    .path()
+                    .join("Copper Tide - Reprise/Akagane no Shio - 05.mkv")
+            )
+            .unwrap(),
+            b"synthetic media"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_title_cour_containers_do_not_become_titles_or_swallow_siblings() {
+        for reverse in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut paths = vec![
+                "Studio/Show/Glass Meridian S03 Complete/Show.S03E01.mkv",
+                "Studio/Show/Glass Meridian S03 Complete/Show.S03E02.mkv",
+                "Studio/Other/Other.S01E01.mkv",
+                "Flat/Flat.S01E01.mkv",
+            ];
+            if reverse {
+                paths.reverse();
+            }
+            for path in paths {
+                write_discovery_fixture(root.path(), path);
+            }
+            let entries =
+                collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Anime)).await;
+            let mut accepted: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry.rejection.is_none())
+                .map(|entry| entry.path.strip_prefix(root.path()).unwrap().to_path_buf())
+                .collect();
+            accepted.sort();
+            assert_eq!(
+                accepted,
+                ["Flat", "Studio/Other", "Studio/Show"].map(PathBuf::from)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_sidecar_conflict_in_season_is_not_absorbed() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Show/Season 1/Show.S01E01.mkv");
+        std::fs::write(
+            root.path().join("Show/tvshow.nfo"),
+            "<tvshow><title>Show</title><tvdbid>123</tvdbid></tvshow>",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("Show/Season 1/tvshow.nfo"),
+            "<tvshow><title>Other</title><tvdbid>456</tvdbid></tvshow>",
+        )
+        .unwrap();
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Anime)).await;
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == root.path().join("Show") && entry.rejection.is_some())
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_title_repeated_ids_reject_conflicts_in_files_and_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let folders = [
+            "File Conflict",
+            "Folder Conflict {tvdb-123} {tvdb-456}",
+            "Safe {tvdb-123} {tvdb-123}",
+        ];
+        for (folder, file) in folders.iter().zip([
+            "File.Conflict.S01E01.{tvdb-123}.{tvdb-456}.mkv",
+            "Folder.Conflict.S01E01.{tvdb-123}.mkv",
+            "Safe.S01E01.{tvdb-123}.{tvdb-123}.mkv",
+        ]) {
+            write_discovery_fixture(root.path(), &format!("{folder}/{file}"));
+        }
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Series)).await;
+        assert_eq!(entries.len(), folders.len());
+        for folder in &folders[..2] {
+            let boundary = entries
+                .iter()
+                .find(|entry| entry.path == root.path().join(folder))
+                .unwrap();
+            assert!(
+                boundary
+                    .rejection
+                    .as_deref()
+                    .is_some_and(|reason| { reason.contains("media identity conflicts") })
+            );
+        }
+        assert!(entries.iter().any(|entry| {
+            entry.path == root.path().join(folders[2]) && entry.rejection.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn nested_title_depth_limit_preserves_deeper_owned_titles() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = "A/B/C/D/E/F/G";
+        write_discovery_fixture(root.path(), &format!("{prefix}/Allowed/Allowed.2024.mkv"));
+        write_discovery_fixture(
+            root.path(),
+            &format!("{prefix}/H/Too Deep/Too.Deep.2024.mkv"),
+        );
+        let owned = format!("{prefix}/H/I/J/Owned");
+        write_discovery_fixture(root.path(), &format!("{owned}/Arc One/file.mkv"));
+        let mut policy = discovery_policy(MediaFacet::Movie);
+        policy.stored_folders.push(root.path().join(&owned));
+        let entries = collect_nested_boundaries(root.path(), policy).await;
+        for path in [format!("{prefix}/Allowed"), owned] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == root.path().join(path.as_str()) && e.rejection.is_none()),
+                "{path}"
+            );
+        }
+        assert!(entries.iter().any(|e| {
+            e.path == root.path().join(format!("{prefix}/H/Too Deep"))
+                && e.rejection
+                    .as_deref()
+                    .is_some_and(|r| r.contains("depth limit"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn nested_title_cancelled_discovery_closes_without_results() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Show/Show.S01E01.mkv");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let mut receiver = stream_title_folder_boundaries(
+            root.path().into(),
+            discovery_policy(MediaFacet::Series),
+            1,
+            cancel,
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_title_at_depth_limit_includes_conventional_season() {
+        let root = tempfile::tempdir().unwrap();
+        let title = "A/B/C/D/E/F/G/Last Show";
+        write_discovery_fixture(
+            root.path(),
+            &format!("{title}/Season 1/Last.Show.S01E01.mkv"),
+        );
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Series)).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, root.path().join(title));
+        assert!(entries[0].rejection.is_none());
+    }
+
+    #[tokio::test]
+    async fn nested_title_overlapping_ownership_is_not_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Parent/Child/Child.S01E01.mkv");
+        let mut policy = discovery_policy(MediaFacet::Series);
+        policy.stored_folders = vec![root.path().join("Parent"), root.path().join("Parent/Child")];
+        let entries = collect_nested_boundaries(root.path(), policy).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, root.path().join("Parent"));
+        assert!(
+            entries[0]
+                .rejection
+                .as_deref()
+                .unwrap()
+                .contains("recorded title")
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_title_missing_owned_descendant_does_not_allow_ancestor_claim() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Parent/Parent.S01E01.mkv");
+        let mut policy = discovery_policy(MediaFacet::Series);
+        policy
+            .stored_folders
+            .push(root.path().join("Parent/Missing"));
+        let entries = collect_nested_boundaries(root.path(), policy).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, root.path().join("Parent"));
+        assert!(entries[0].rejection.is_some());
+    }
+
+    #[tokio::test]
+    async fn nested_title_entry_metadata_error_preserves_healthy_children() {
+        let root = tempfile::tempdir().unwrap();
+        let media = [
+            "Parent/Parent.S01E01.mkv",
+            "Parent/Child/Child.S01E01.mkv",
+            "Sibling/Sibling.S01E01.mkv",
+        ];
+        for relative in media {
+            write_discovery_fixture(root.path(), relative);
+        }
+        for relative in ["Parent", "Parent/Child"] {
+            let fault = root.path().join(relative);
+            let affected = fault.parent().unwrap().to_path_buf();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let discovery = async {
+                let result = BOUNDARY_ENTRY_METADATA_FAILURE
+                    .scope(
+                        fault,
+                        discover_title_folder_boundaries(
+                            root.path().into(),
+                            discovery_policy(MediaFacet::Series),
+                            1,
+                            &cancel,
+                            &sender,
+                        ),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    sender.send(Err(error)).await.unwrap();
+                }
+                drop(sender);
+            };
+            let collect = async {
+                let mut entries = Vec::new();
+                let mut terminal_error = None;
+                while let Some(batch) = receiver.recv().await {
+                    match batch {
+                        Ok(batch) => {
+                            assert!(terminal_error.is_none());
+                            entries.extend(batch);
+                        }
+                        Err(error) => {
+                            assert!(terminal_error.replace(error).is_none());
+                        }
+                    }
+                }
+                (entries, terminal_error)
+            };
+            let (_, (entries, terminal_error)) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::join!(discovery, collect)
+                })
+                .await
+                .unwrap();
+            assert!(
+                terminal_error
+                    .expect("discovery must retain its first I/O error")
+                    .to_string()
+                    .contains("injected entry metadata failure")
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.path == affected)
+                    .count(),
+                1,
+                "{relative}"
+            );
+            assert!(!entries.iter().any(|entry| {
+                entry.path == root.path().join("Parent") && entry.rejection.is_none()
+            }));
+            for healthy in ["Parent/Child", "Sibling"] {
+                assert!(entries.iter().any(|entry| {
+                    entry.path == root.path().join(healthy) && entry.rejection.is_none()
+                }));
+            }
+        }
+        for relative in media {
+            assert_eq!(
+                std::fs::read(root.path().join(relative)).unwrap(),
+                b"synthetic media"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_title_unreadable_branch_does_not_hide_healthy_sibling() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Blocked/Blocked.S01E01.mkv");
+        write_discovery_fixture(root.path(), "Healthy/Healthy.S01E01.mkv");
+        let blocked = root.path().join("Blocked");
+        let original = std::fs::metadata(&blocked).unwrap().permissions();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let unreadable = std::fs::read_dir(&blocked).is_err();
+        let mut receiver = stream_title_folder_boundaries(
+            root.path().into(),
+            discovery_policy(MediaFacet::Series),
+            1,
+            Default::default(),
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut entries = Vec::new();
+            let mut terminal_error = None;
+            while let Some(batch) = receiver.recv().await {
+                match batch {
+                    Ok(batch) => entries.extend(batch),
+                    Err(error) => terminal_error = Some(error),
+                }
+            }
+            (entries, terminal_error)
+        })
+        .await;
+        std::fs::set_permissions(&blocked, original).unwrap();
+        let (entries, terminal_error) = result.unwrap();
+        // Privileged runners can bypass filesystem permissions.
+        if unreadable {
+            assert!(terminal_error.is_some());
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == blocked && e.rejection.is_some())
+            );
+        }
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == root.path().join("Healthy") && e.rejection.is_none())
+        );
+    }
+
+    fn write_discovery_fixture(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"synthetic media").unwrap();
+    }
+
+    #[tokio::test]
+    async fn nested_title_organizing_folders_never_become_episode_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let titles = [
+            "Alpha",
+            "A/Alpha Two",
+            "Example Network/Show Alpha",
+            "Example Network/Show Beta",
+            "GroupA/Release Show",
+            "Other Network/Extras",
+            "Season 1/Another Network/Deep Show",
+            "Season Organizer/Season 1/Deep Series",
+            "Season Organizer/Extras",
+        ];
+        for title in titles {
+            let leaf = Path::new(title).file_name().unwrap().to_str().unwrap();
+            write_discovery_fixture(root.path(), &format!("{title}/{leaf}.S01E01.mkv"));
+        }
+        let entries =
+            collect_nested_boundaries(root.path(), discovery_policy(MediaFacet::Series)).await;
+        assert!(entries.iter().all(|entry| entry.rejection.is_none()));
+        let mut accepted: Vec<_> = entries.iter().map(|entry| entry.path.clone()).collect();
+        accepted.sort();
+        let mut expected = titles.map(|title| root.path().join(title)).to_vec();
+        expected.sort();
+        assert_eq!(accepted, expected);
+    }
+
+    #[tokio::test]
+    async fn nested_title_custom_seasons_use_corroborating_identity() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "Network/Custom/Arc One/Custom.S01E01.mkv",
+            "Network/Conventional/Season 1/Conventional.S01E01.mkv",
+        ] {
+            write_discovery_fixture(root.path(), relative);
+        }
+        for owned in [false, true] {
+            let mut policy = discovery_policy(MediaFacet::Series);
+            if owned {
+                policy
+                    .stored_folders
+                    .push(root.path().join("Network/Custom"));
+            }
+            let entries = collect_nested_boundaries(root.path(), policy).await;
+            assert!(entries.iter().any(|entry| entry.path
+                == root.path().join("Network/Conventional")
+                && entry.rejection.is_none()));
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.path == root.path().join("Network/Custom")
+                        && entry.rejection.is_none())
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| entry.path == root.path().join("Network/Custom/Arc One"))
+            );
+        }
+    }
+
+    async fn accepted_boundaries(root: &Path, facet: MediaFacet) -> Vec<PathBuf> {
+        let entries = collect_nested_boundaries(root, discovery_policy(facet)).await;
+        assert!(
+            entries.iter().all(|entry| entry.rejection.is_none()),
+            "{entries:?}"
+        );
+        let mut accepted: Vec<_> = entries
+            .into_iter()
+            .map(|entry| entry.path.strip_prefix(root).unwrap().to_path_buf())
+            .collect();
+        accepted.sort();
+        accepted
+    }
+
+    #[test]
+    fn title_part_folder_names_are_recognised() {
+        for name in [
+            "Disc 1",
+            "disc2",
+            "DISK 3",
+            "Disk_4",
+            "CD1",
+            "cd 2",
+            "DVD1",
+            "dvd-2",
+            "BDMV",
+            "VIDEO_TS",
+            "STREAM",
+            "CERTIFICATE",
+            "NCOP",
+            "nced",
+            "OVA",
+            "OAD",
+            "ONA",
+            "ona",
+            "SP",
+            "SPs",
+        ] {
+            assert!(is_title_part_folder_name(name), "{name}");
+        }
+        for name in [
+            "Disc",
+            "Discovery",
+            "CD",
+            "cd123",
+            "Disc One",
+            "Season 1",
+            "Extras",
+            "OVA Show",
+            "Spectrum",
+        ] {
+            assert!(!is_title_part_folder_name(name), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_title_disc_and_bonus_folders_fold_into_parent_title() {
+        let movies = tempfile::tempdir().unwrap();
+        for relative in [
+            "Movie Alpha (2020)/Disc 1/00001.mkv",
+            "Movie Alpha (2020)/Disc 2/00002.mkv",
+            "Movie Beta (2021)/CD1/part.avi",
+            "Movie Gamma (2022)/BDMV/STREAM/00001.m2ts",
+            "Collection/Movie Delta (2023)/Disc 1/NCOP1.mkv",
+        ] {
+            write_discovery_fixture(movies.path(), relative);
+        }
+        assert_eq!(
+            accepted_boundaries(movies.path(), MediaFacet::Movie).await,
+            [
+                "Collection/Movie Delta (2023)",
+                "Movie Alpha (2020)",
+                "Movie Beta (2021)",
+                "Movie Gamma (2022)",
+            ]
+            .map(PathBuf::from)
+        );
+
+        let shows = tempfile::tempdir().unwrap();
+        for relative in [
+            "Show Alpha/NCOP/NCOP1.mkv",
+            "Show Alpha/NCED/NCED1.mkv",
+            "Show Alpha/Season 1/Show.Alpha.S01E01.mkv",
+            "Show Beta/OVA/OVA1.mkv",
+            "Show Beta/SPs/SP1.mkv",
+            "Show Gamma/ONA/ONA1.mkv",
+            "Show Gamma/Show.Gamma.S01E01.mkv",
+            "OVA/Real Title/Real.Title.S01E01.mkv",
+        ] {
+            write_discovery_fixture(shows.path(), relative);
+        }
+        assert_eq!(
+            accepted_boundaries(shows.path(), MediaFacet::Anime).await,
+            ["OVA/Real Title", "Show Alpha", "Show Beta", "Show Gamma"].map(PathBuf::from)
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_title_boundary_accepts_disc_and_bonus_folders() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            "Movie Alpha/Disc 1/a.mkv",
+            "Movie Alpha/Disc 2/b.mkv",
+            "Movie Beta/BDMV/STREAM/00001.m2ts",
+            "Show Alpha/NCOP/NCOP1.mkv",
+            "Show Alpha/Season 1/Show.Alpha.S01E01.mkv",
+            "Mixed/Disc 1/Other Title/other.mkv",
+        ] {
+            write_discovery_fixture(root.path(), relative);
+        }
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Season {season}")
+                    .unwrap(),
+            ];
+        for (relative, episode_folders) in [
+            ("Movie Alpha", &[][..]),
+            ("Movie Beta", &[][..]),
+            ("Show Alpha", &patterns[..]),
+        ] {
+            ensure_existing_title_boundary(&root.path().join(relative), episode_folders)
+                .await
+                .unwrap_or_else(|error| panic!("{relative}: {error}"));
+            verify_scan_boundary(
+                &root.path().join(relative),
+                &MediaFacet::Anime,
+                ScanBoundaryOwner {
+                    name: relative,
+                    aliases: &[],
+                    identity: BoundaryEvidence::default(),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{relative}: {error}"));
+        }
+        assert!(
+            ensure_existing_title_boundary(&root.path().join("Mixed"), &[])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_title_boundary_accepts_conventional_season_with_other_template() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), "Show/Series 1/Show.S01E01.mkv");
+        write_discovery_fixture(
+            root.path(),
+            "Organizer/Show Two/Series 1/Show.Two.S01E01.mkv",
+        );
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        ensure_existing_title_boundary(&root.path().join("Show"), &patterns)
+            .await
+            .unwrap();
+        ensure_folder_holds_no_child_titles(&root.path().join("Show"), &patterns)
+            .await
+            .unwrap();
+        assert!(
+            ensure_existing_title_boundary(&root.path().join("Organizer"), &patterns)
+                .await
+                .is_err()
+        );
+        // Movies recognise no season folders.
+        assert!(
+            ensure_existing_title_boundary(&root.path().join("Show"), &[])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1134,13 +2661,9 @@ mod tests {
             std::fs::write(path, b"owned media").unwrap();
         }
         let policy = TitleFolderBoundaryPolicy {
-            template_depth: 3,
+            facet: MediaFacet::Series,
             stored_folders: vec![root.path().join("Series"), root.path().join("Movie")],
             other_roots: vec![],
-            episode_folders: vec![
-                crate::library::rename::episode_folder_discovery_pattern("Cycle {season:02}")
-                    .unwrap(),
-            ],
         };
         let mut receiver =
             stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
@@ -1167,10 +2690,9 @@ mod tests {
         std::fs::write(outside.path().join("movie.mkv"), b"outside").unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("Linked")).unwrap();
         let policy = TitleFolderBoundaryPolicy {
-            template_depth: 1,
+            facet: MediaFacet::Movie,
             stored_folders: vec![],
             other_roots: vec![],
-            episode_folders: vec![],
         };
         let mut receiver =
             stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
@@ -1193,14 +2715,47 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_title_owned_linked_folder_is_emitted_without_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        write_discovery_fixture(root.path(), ".store/Linked Target/Linked.S01E01.mkv");
+        let link = root.path().join("Network/Linked Show");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.path().join(".store/Linked Target"), &link).unwrap();
+        for owned in [true, false] {
+            let mut policy = discovery_policy(MediaFacet::Series);
+            if owned {
+                policy.stored_folders.push(link.clone());
+            }
+            let entries = collect_nested_boundaries(root.path(), policy).await;
+            assert_eq!(entries.len(), 1, "{entries:?}");
+            assert_eq!(entries[0].path, link);
+            if owned {
+                assert!(entries[0].rejection.is_none(), "{entries:?}");
+            } else {
+                assert!(
+                    entries[0]
+                        .rejection
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("linked folder"))
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read(root.path().join(".store/Linked Target/Linked.S01E01.mkv")).unwrap(),
+            b"synthetic media"
+        );
+    }
+
     #[tokio::test]
     async fn nested_title_boundaries_keep_siblings_separate_and_stored_depth_authoritative() {
         let root = tempfile::tempdir().unwrap();
         let paths = [
-            "E/Emberfall/movie.mkv",
-            "E/Echo/movie.mkv",
+            "E/Emberfall/Emberfall.2024.mkv",
+            "E/Echo/Echo.2023.mkv",
             "Legacy/movie.mkv",
-            "Flat/movie.mkv",
+            "Flat/Flat.2022.mkv",
         ];
         let mut before = Vec::new();
         for path in paths {
@@ -1210,10 +2765,9 @@ mod tests {
             before.push((path.clone(), blake3::hash(&std::fs::read(path).unwrap())));
         }
         let policy = TitleFolderBoundaryPolicy {
-            template_depth: 2,
+            facet: MediaFacet::Movie,
             stored_folders: vec![root.path().join("Legacy")],
             other_roots: vec![],
-            episode_folders: vec![],
         };
         let mut receiver =
             stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
@@ -1237,28 +2791,22 @@ mod tests {
             vec![
                 PathBuf::from("E/Echo"),
                 PathBuf::from("E/Emberfall"),
+                PathBuf::from("Flat"),
                 PathBuf::from("Legacy")
             ]
         );
-        assert!(results.iter().any(|entry| {
-            entry.path == root.path().join("Flat")
-                && entry
-                    .rejection
-                    .as_deref()
-                    .unwrap()
-                    .contains("not at template depth")
-        }));
+        assert!(results.iter().all(|entry| entry.rejection.is_none()));
         for (path, hash) in before {
             assert_eq!(blake3::hash(&std::fs::read(path).unwrap()), hash);
         }
     }
 
     #[tokio::test]
-    async fn nested_title_boundaries_use_configured_season_layout_and_skip_other_roots() {
+    async fn nested_title_boundaries_use_conventional_seasons_and_skip_other_roots() {
         let root = tempfile::tempdir().unwrap();
         for path in [
-            "E/Emberfall/Cycle 01/episode.mkv",
-            "E/Echo/Specials/episode.mkv",
+            "E/Emberfall/Series 01/Emberfall.S01E01.mkv",
+            "E/Echo/Special Episodes/Echo.S00E01.mkv",
             "Other/Hidden/movie.mkv",
         ] {
             let path = root.path().join(path);
@@ -1266,14 +2814,9 @@ mod tests {
             std::fs::write(path, b"media").unwrap();
         }
         let policy = TitleFolderBoundaryPolicy {
-            template_depth: 2,
+            facet: MediaFacet::Series,
             stored_folders: vec![],
             other_roots: vec![root.path().join("Other")],
-            episode_folders: vec![
-                crate::library::rename::episode_folder_discovery_pattern("Cycle {season:02}")
-                    .unwrap(),
-                crate::library::rename::episode_folder_discovery_pattern("Specials").unwrap(),
-            ],
         };
         let mut receiver =
             stream_title_folder_boundaries(root.path().into(), policy, 1, Default::default());
@@ -1391,6 +2934,10 @@ mod tests {
     #[tokio::test]
     async fn list_movie_top_level_entries_skips_junk_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_discovery_fixture(dir.path(), "Movie A/Movie.A.2024.mkv");
+        write_discovery_fixture(dir.path(), "Extras/Extras.2024.mkv");
+        write_discovery_fixture(dir.path(), "Only Extras/Only.Extras.2024-trailer.mkv");
+        std::fs::create_dir_all(dir.path().join("Empty")).unwrap();
         tokio::fs::create_dir_all(dir.path().join("Movie A"))
             .await
             .expect("movie dir");
@@ -1431,6 +2978,8 @@ mod tests {
     #[tokio::test]
     async fn stream_movie_top_level_entries_batched_skips_extra_suffix_files() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_discovery_fixture(dir.path(), "Movie A/Movie.A.2024.mkv");
+        write_discovery_fixture(dir.path(), "Only Extras/Only.Extras.2024-trailer.mkv");
         tokio::fs::create_dir_all(dir.path().join("Movie A"))
             .await
             .expect("movie dir");

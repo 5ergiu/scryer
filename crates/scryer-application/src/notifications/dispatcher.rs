@@ -2793,7 +2793,6 @@ mod tests {
                     list: list_sample_subject(),
                     title: title_context("Listed Movie", MediaFacet::Movie),
                     library_id: "library-movies".to_string(),
-                    searched: true,
                 }),
             ),
             list_sample_event(19, list_sample_request(false)),
@@ -3637,6 +3636,7 @@ mod tests {
                 .to_string(),
         );
         data.release_facts = Some(scryer_domain::GrabbedReleaseFacts {
+            scoring: None,
             quality: Some("1080p".to_string()),
             release_group: Some("NOGRP".to_string()),
             audio_languages: vec!["eng".to_string(), "jpn".to_string()],

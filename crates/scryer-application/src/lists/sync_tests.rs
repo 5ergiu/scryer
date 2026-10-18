@@ -153,7 +153,6 @@ async fn a_first_sync_adds_candidates_and_records_counts() {
         harness.actions.calls()[0],
         RecordedAction::Add {
             item_key: "alpha".to_string(),
-            search: false
         }
     );
 }
@@ -884,7 +883,7 @@ async fn capped_items_are_pending_and_acted_on_in_a_later_sync() {
 async fn a_personal_add_list_submits_requests_instead() {
     let list = ListSubscription {
         scope: ListScope::Personal,
-        mode: ListMode::Search,
+        mode: ListMode::Add,
         credential_id: None,
         ..subscription("list-a")
     };
@@ -909,35 +908,32 @@ async fn a_personal_add_list_submits_requests_instead() {
 }
 
 #[tokio::test]
-async fn personal_manager_add_preserves_search_intent_and_revoked_grants_request() {
-    for (mode, search) in [(ListMode::Add, false), (ListMode::Search, true)] {
-        let list = ListSubscription {
-            scope: ListScope::Personal,
-            mode,
-            ..subscription("manager-list")
-        };
-        let item = crate::lists::test_support::resolved_item("alpha");
-        let mut actions = RecordingActions {
-            owner_manages_titles: true,
-            ..Default::default()
-        };
-        let outcome = crate::lists::act::act_on_candidate(&actions, &list, &item, false).await;
-        assert_eq!(outcome.state, ListMembershipState::Added);
-        assert_eq!(
-            actions.calls(),
-            vec![RecordedAction::Add {
-                item_key: "alpha".into(),
-                search
-            }]
-        );
-        actions.owner_manages_titles = false;
-        let outcome = crate::lists::act::act_on_candidate(&actions, &list, &item, false).await;
-        assert_eq!(outcome.state, ListMembershipState::Requested);
-        assert!(matches!(
-            actions.calls().last(),
-            Some(RecordedAction::Request { hold: false, .. })
-        ));
-    }
+async fn personal_manager_add_adds_and_revoked_grants_request() {
+    let list = ListSubscription {
+        scope: ListScope::Personal,
+        mode: ListMode::Add,
+        ..subscription("manager-list")
+    };
+    let item = crate::lists::test_support::resolved_item("alpha");
+    let mut actions = RecordingActions {
+        owner_manages_titles: true,
+        ..Default::default()
+    };
+    let outcome = crate::lists::act::act_on_candidate(&actions, &list, &item, false).await;
+    assert_eq!(outcome.state, ListMembershipState::Added);
+    assert_eq!(
+        actions.calls(),
+        vec![RecordedAction::Add {
+            item_key: "alpha".into(),
+        }]
+    );
+    actions.owner_manages_titles = false;
+    let outcome = crate::lists::act::act_on_candidate(&actions, &list, &item, false).await;
+    assert_eq!(outcome.state, ListMembershipState::Requested);
+    assert!(matches!(
+        actions.calls().last(),
+        Some(RecordedAction::Request { hold: false, .. })
+    ));
 }
 
 #[tokio::test]

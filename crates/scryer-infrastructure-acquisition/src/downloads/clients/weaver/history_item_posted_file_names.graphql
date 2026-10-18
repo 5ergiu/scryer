@@ -1,0 +1,8 @@
+query HistoryItemPostedFileNames($id: Int!) {
+  historyItem(id: $id) {
+    postedFileNames {
+      name
+      postedName
+    }
+  }
+}

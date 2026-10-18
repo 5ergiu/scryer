@@ -311,6 +311,7 @@ async fn host_payload_fixture(
             size_bytes: None,
             completed_at: None,
             parameters: vec![],
+            posted_file_names: Vec::new(),
         });
     (root, payload)
 }
@@ -1932,6 +1933,7 @@ async fn verified_manual_import_without_a_binding_still_removes_the_client_job()
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     };
 
     crate::import::import::maybe_remove_completed_manual_import_download(
@@ -2722,6 +2724,7 @@ fn completed_for(client_id: &str, client_type: &str, item_id: &str) -> Completed
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     }
 }
 
@@ -3736,6 +3739,7 @@ async fn rtorrent_cleanup_retries_entry_removal_after_deleting_the_mapped_payloa
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         });
     observed(
         DownloadSeedingSnapshot {
@@ -3838,6 +3842,7 @@ async fn rtorrent_cleanup_refuses_to_delete_an_output_root() {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         });
     observed(
         DownloadSeedingSnapshot {
@@ -3903,6 +3908,7 @@ async fn rtorrent_cleanup_refuses_a_symlinked_payload_ancestor() {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         });
     observed(
         DownloadSeedingSnapshot {
@@ -3969,6 +3975,7 @@ async fn rtorrent_cleanup_allows_an_output_root_below_a_symlinked_ancestor() {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         });
     observed(
         DownloadSeedingSnapshot {
@@ -4039,6 +4046,7 @@ async fn rtorrent_cleanup_deletes_a_direct_completed_file() {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         });
     observed(
         DownloadSeedingSnapshot {

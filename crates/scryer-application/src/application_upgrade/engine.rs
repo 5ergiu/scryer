@@ -389,6 +389,20 @@ impl AppUseCase {
         .await?;
         verify_artifact_hash(&download_path, &artifact)?;
         validate_archive_members(&download_path, &artifact)?;
+        // Windows Installer may need its original source during a later repair
+        // or major upgrade. Never register disposable staging as that source.
+        let download_path = if artifact.archive
+            == application_updater::manifest::UpgradeArchive::Msi
+        {
+            let cache = self.application_upgrade_root_dir().join("installer-cache");
+            std::fs::create_dir_all(&cache).map_err(|e| {
+                AppError::Repository(format!("failed to create installer cache: {e}"))
+            })?;
+            (dependencies.ensure_available_space)(&cache, staging_space_requirement(&artifact))?;
+            super::msi_source::retain_installer(&download_path, &cache, &artifact)?
+        } else {
+            download_path
+        };
 
         self.update_application_upgrade_progress(
             run,

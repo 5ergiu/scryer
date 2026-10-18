@@ -56,7 +56,7 @@ mod scan_pipeline;
 #[path = "scan/refresh.rs"]
 mod scan_refresh;
 #[path = "scan/title_files.rs"]
-mod scan_title_files;
+pub(crate) mod scan_title_files;
 #[path = "scan/title_finalize.rs"]
 mod scan_title_finalize;
 #[path = "scan/title_scan.rs"]
@@ -860,6 +860,11 @@ impl AppUseCase {
         if deleted {
             self.refresh_download_client_category_admission_best_effort()
                 .await;
+            // The delete drops this library from every delay profile scope and
+            // disables a profile left with none, so the settings page reloads.
+            let _ = self.runtime.events.settings_changed_broadcast.send(vec![
+                crate::delay_profile::DELAY_PROFILE_CATALOG_KEY.to_string(),
+            ]);
         }
         Ok(deleted)
     }
@@ -1404,8 +1409,15 @@ impl AppUseCase {
                     .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Movie) => {
-                    background_refresh_movies(self, actor, library_id, library_path, session_id)
-                        .await?
+                    background_refresh_movies(
+                        self,
+                        actor,
+                        library_id,
+                        library_path,
+                        session_id,
+                        cancel_token.clone(),
+                    )
+                    .await?
                 }
                 (LibraryScanMode::Additive, MediaFacet::Series | MediaFacet::Anime) => {
                     background_refresh_series(
@@ -1415,6 +1427,7 @@ impl AppUseCase {
                         library_id,
                         library_path,
                         session_id,
+                        cancel_token.clone(),
                     )
                     .await?
                 }

@@ -638,6 +638,11 @@ impl AppServicesBuilder {
         Arc<dyn DownloadClientPluginProvider>
     );
     app_services_builder_setter!(
+        with_delay_profiles,
+        config.delay_profiles,
+        Arc<dyn crate::ports::DelayProfileRepository>
+    );
+    app_services_builder_setter!(
         with_seeding_profiles,
         integrations.seeding_profiles,
         Arc<dyn SeedingProfileRepository>

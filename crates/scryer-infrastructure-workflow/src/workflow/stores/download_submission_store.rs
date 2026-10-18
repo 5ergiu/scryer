@@ -6,7 +6,7 @@ use scryer_application::{
     AppError, AppResult, CanonicalDownloadIdentityDisposition, ClientJobLocator, DownloadOrigin,
     DownloadSubmission, DownloadSubmissionActorSnapshot, DownloadSubmissionIdentity,
     DownloadSubmissionRepository, DownloadTitleReassignment, DownloadTitleReferences,
-    IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
+    GrabbedFileName, IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
     TerminalDownloadHistoryRow,
 };
 use scryer_domain::{Id, TrackedDownloadState, download_identity::DownloadId};
@@ -2352,6 +2352,70 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
             .map(Option::flatten)
     }
 
+    async fn record_grabbed_file_names(
+        &self,
+        canonical_download_id: &DownloadId,
+        names: &[GrabbedFileName],
+    ) -> AppResult<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(names).map_err(|error| {
+            AppError::Repository(format!("failed to encode grabbed file names: {error}"))
+        })?;
+        SqlRuntime::execute_write(
+            &self.datastore,
+            "record_grabbed_file_names",
+            "UPDATE download_submissions SET grabbed_file_names_json = {} WHERE id = {}",
+            vec![
+                SqlArg::Text(json),
+                SqlArg::Text(canonical_download_id.to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn grabbed_file_names(
+        &self,
+        identity: &ClientJobLocator,
+    ) -> AppResult<Vec<GrabbedFileName>> {
+        let row = match self.active_binding_download_id(identity).await? {
+            Some(canonical_download_id) => SqlRuntime::fetch_optional(
+                self.datastore.read_exec(),
+                "SELECT grabbed_file_names_json FROM download_submissions WHERE id = {} LIMIT 1",
+                &[SqlArg::Text(canonical_download_id.to_string())],
+            )
+            .await?,
+            None => {
+                SqlRuntime::fetch_optional(
+                    self.datastore.read_exec(),
+                    "SELECT grabbed_file_names_json
+                     FROM download_submissions
+                     WHERE download_client_type = {}
+                       AND download_client_item_id = {}
+                       AND download_client_id = {}
+                     LIMIT 1",
+                    &[
+                        SqlArg::Text(identity.client_type.clone()),
+                        SqlArg::Text(identity.item_id.clone()),
+                        SqlArg::Text(normalize_download_client_id(identity.client_id.as_deref())),
+                    ],
+                )
+                .await?
+            }
+        };
+        let Some(json) = row
+            .map(|row| row.opt_text("grabbed_file_names_json"))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Vec::new());
+        };
+        // A record that does not decode is a lost hint, not a failed import.
+        Ok(serde_json::from_str(&json).unwrap_or_default())
+    }
+
     async fn get_seed_goals(
         &self,
         identity: &ClientJobLocator,
@@ -2705,6 +2769,12 @@ mod seed_goal_tests {
                 .await
                 .expect("cleanup seed migration should apply");
         }
+        sqlx::raw_sql(include_str!(
+            "../../../../scryer/src/db/migrations/0292_download_submission_grabbed_file_names.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("grabbed file names migration should apply");
         DownloadSubmissionStore::new(StoreDatastore::Sqlite {
             pool,
             writer_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -3818,6 +3888,90 @@ mod seed_goal_tests {
             .expect("canonical read should succeed");
 
         assert_eq!(loaded, Some(expected));
+    }
+
+    fn grabbed(name: &str) -> GrabbedFileName {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "posted_size_bytes": 4096,
+        }))
+        .expect("grabbed name fixture should decode")
+    }
+
+    #[tokio::test]
+    async fn grabbed_file_names_read_back_by_the_client_job() {
+        let store = store().await;
+        let canonical_download_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(canonical_download_id, "job-1", "title-1"),
+                submission_identity(canonical_download_id),
+                None,
+            )
+            .await
+            .expect("submission should persist");
+        let names = vec![grabbed(&format!("{}.mkv", "a".repeat(250)))];
+
+        store
+            .record_grabbed_file_names(&canonical_download_id, &[])
+            .await
+            .expect("recording no names should succeed");
+        assert!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed")
+                .is_empty(),
+            "a grab with no long names keeps nothing"
+        );
+
+        store
+            .record_grabbed_file_names(&canonical_download_id, &names)
+            .await
+            .expect("names should persist");
+
+        assert_eq!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed"),
+            names
+        );
+        assert!(
+            store
+                .grabbed_file_names(&ClientJobLocator::new(
+                    Some("primary"),
+                    "qbittorrent",
+                    "job-2"
+                ))
+                .await
+                .expect("read should succeed")
+                .is_empty(),
+            "another job never sees this grab's names"
+        );
+    }
+
+    #[tokio::test]
+    async fn grabbed_file_names_read_back_without_a_client_binding() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_submission(submission(download_id, "job-1", "title-1"))
+            .await
+            .expect("submission should persist");
+        let names = vec![grabbed(&format!("{}.mkv", "b".repeat(250)))];
+        store
+            .record_grabbed_file_names(&download_id, &names)
+            .await
+            .expect("names should persist");
+
+        assert_eq!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed"),
+            names
+        );
     }
 
     fn ambiguous_submission(

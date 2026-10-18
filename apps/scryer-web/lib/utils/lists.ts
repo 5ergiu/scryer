@@ -35,6 +35,15 @@ import { ratingSourceInfo } from "./title-ratings.ts";
 
 export type ListTone = "neutral" | "positive" | "warning" | "negative" | "info" | "accent" | "outline";
 
+export function listTitleWithoutYear(title: string, year: number | null | undefined): string {
+  if (!year) return title;
+  const suffix = ` (${year})`;
+  const trimmed = title.trimEnd();
+  if (!trimmed.endsWith(suffix)) return title;
+  const name = trimmed.slice(0, -suffix.length).trimEnd();
+  return name || title;
+}
+
 export function listMembershipTitleHref(kind: Facet, titleId: string | null, seriesMovieLinkId?: string | null): string | null {
   const facet = facetById(kind);
   const id = titleId?.trim();
@@ -89,11 +98,11 @@ export function listPreviewMetadataLookup(
 }
 
 /** Modes offered for public lists. `REQUEST` belongs to personal lists only. */
-export const PUBLIC_LIST_MODES: readonly ListMode[] = ["SEARCH", "ADD", "HOLD", "DISCOVER"];
+export const PUBLIC_LIST_MODES: readonly ListMode[] = ["ADD", "HOLD", "DISCOVER"];
 
 /** Discover-only membership has no destination yet, so it cannot be chosen. */
 export function isListModeSelectable(mode: ListMode): boolean {
-  return mode === "SEARCH" || mode === "ADD" || mode === "HOLD" || mode === "REQUEST";
+  return mode === "ADD" || mode === "HOLD" || mode === "REQUEST";
 }
 
 export const LIST_ON_LEAVE_OPTIONS: readonly ListOnLeave[] = ["KEEP", "LOG", "UNMONITOR", "TAG"];

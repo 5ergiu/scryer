@@ -20,7 +20,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
@@ -566,8 +565,9 @@ const SUB_NAV_BUTTON_CLASS =
 const SUB_NAV_MENU_CLASS =
   "mx-0 mb-0.5 ml-[17px] mt-0.5 gap-0.5 border-[var(--scry-border2)] px-0 py-0 pl-[11px]";
 
+// Badges sit at the end of the row's flex layout, so they centre with it.
 const TOP_NAV_BADGE_GROUP_CLASS =
-  "pointer-events-none absolute right-1 flex items-center gap-1 select-none peer-data-[size=sm]/menu-button:top-1 peer-data-[size=default]/menu-button:top-1.5 peer-data-[size=lg]/menu-button:top-2.5 group-data-[collapsible=icon]:hidden";
+  "ml-auto flex shrink-0 items-center gap-1 select-none group-data-[collapsible=icon]:hidden";
 
 const TOP_NAV_BADGE_BASE_CLASS =
   "inline-flex h-5 min-w-5 items-center justify-center rounded-md px-1 text-xs font-medium tabular-nums";
@@ -588,17 +588,35 @@ function navBadgeToneClass(tone: NavBadgeTone) {
   }
 }
 
+function TopNavBadge({
+  tone = "cta",
+  label,
+  children,
+}: {
+  tone?: NavBadgeTone;
+  label?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span className={TOP_NAV_BADGE_GROUP_CLASS}>
+      <span
+        className={cn(TOP_NAV_BADGE_BASE_CLASS, navBadgeToneClass(tone))}
+        title={label}
+        aria-label={label}
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
+
 function FacetNavBadges({ importCount }: { importCount: number }) {
   if (importCount <= 0) {
     return null;
   }
 
   return (
-    <div className={TOP_NAV_BADGE_GROUP_CLASS}>
-      <span className={cn(TOP_NAV_BADGE_BASE_CLASS, navBadgeToneClass("cta"))}>
-        {importCount}
-      </span>
-    </div>
+    <TopNavBadge>{importCount}</TopNavBadge>
   );
 }
 
@@ -1230,15 +1248,15 @@ function RootSidebarContent({
                             }}
                           >
                             <Icon className="h-4 w-4" />
-                            {item.label}
+                            <span className="min-w-0 flex-1 truncate">
+                              {item.label}
+                            </span>
+                            {pendingMediaRequestCount > 0 ? (
+                              <TopNavBadge tone="request">
+                                {pendingMediaRequestCount}
+                              </TopNavBadge>
+                            ) : null}
                           </SidebarMenuButton>
-                          {pendingMediaRequestCount > 0 ? (
-                            <SidebarMenuBadge
-                              className={navBadgeToneClass("request")}
-                            >
-                              {pendingMediaRequestCount}
-                            </SidebarMenuBadge>
-                          ) : null}
                         </SidebarMenuItem>
                       </React.Fragment>
                     );
@@ -1378,13 +1396,15 @@ function RootSidebarContent({
                             }}
                           >
                             <Icon className="h-4 w-4" />
-                            {item.label}
+                            <span className="min-w-0 flex-1 truncate">
+                              {item.label}
+                            </span>
+                            {item.id === "activity" && hasActivityImportBadge ? (
+                              <TopNavBadge label={activityImportBadgeLabel}>
+                                {activityImportBadgeText}
+                              </TopNavBadge>
+                            ) : null}
                           </SidebarMenuButton>
-                          {item.id === "activity" && hasActivityImportBadge ? (
-                            <SidebarMenuBadge className="bg-primary text-primary-foreground" title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
-                              {activityImportBadgeText}
-                            </SidebarMenuBadge>
-                          ) : null}
                         </SidebarMenuItem>
                       </React.Fragment>
                     );
@@ -1457,38 +1477,28 @@ function RootSidebarContent({
                           <span className="min-w-0 flex-1 truncate">
                             {item.label}
                           </span>
+                          {item.id === "activity" && hasActivityImportBadge ? (
+                            <TopNavBadge label={activityImportBadgeLabel}>
+                              {activityImportBadgeText}
+                            </TopNavBadge>
+                          ) : null}
+                          {isSettingsTop && pluginBlockedCount > 0 ? (
+                            // Only one badge fits the collapsed row; a plugin
+                            // that is not running outranks one with an update.
+                            <TopNavBadge tone="danger">
+                              {pluginBlockedCount}
+                            </TopNavBadge>
+                          ) : isSettingsTop && pluginUpdateCount > 0 ? (
+                            <TopNavBadge tone="warning">
+                              {pluginUpdateCount}
+                            </TopNavBadge>
+                          ) : null}
+                          {isMediaSection ? (
+                            <FacetNavBadges
+                              importCount={mediaFacetImportBadgeCount}
+                            />
+                          ) : null}
                         </SidebarMenuButton>
-                        {item.id === "activity" && hasActivityImportBadge ? (
-                          <SidebarMenuBadge className="bg-primary text-primary-foreground" title={activityImportBadgeLabel} aria-label={activityImportBadgeLabel}>
-                            {activityImportBadgeText}
-                          </SidebarMenuBadge>
-                        ) : null}
-                        {isSettingsTop && pluginBlockedCount > 0 ? (
-                          // Only one badge fits the collapsed row; a plugin
-                          // that is not running outranks one with an update.
-                          <SidebarMenuBadge
-                            className={cn(
-                              "!top-1/2 -translate-y-1/2",
-                              navBadgeToneClass("danger"),
-                            )}
-                          >
-                            {pluginBlockedCount}
-                          </SidebarMenuBadge>
-                        ) : isSettingsTop && pluginUpdateCount > 0 ? (
-                          <SidebarMenuBadge
-                            className={cn(
-                              "!top-1/2 -translate-y-1/2",
-                              navBadgeToneClass("warning"),
-                            )}
-                          >
-                            {pluginUpdateCount}
-                          </SidebarMenuBadge>
-                        ) : null}
-                        {isMediaSection ? (
-                          <FacetNavBadges
-                            importCount={mediaFacetImportBadgeCount}
-                          />
-                        ) : null}
                       </SidebarMenuItem>
 
                       {shouldShowChildren ? (

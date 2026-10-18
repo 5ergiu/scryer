@@ -483,7 +483,11 @@ pub(crate) fn parse_library_filename_with_index(
 }
 
 pub(crate) fn library_title_walk(raw: &str) -> Option<LibraryTitleWalk> {
-    let (without_ids, mut walk) = extract_library_title_ids(raw);
+    library_title_walk_with_id_conflicts(raw).0
+}
+
+pub(crate) fn library_title_walk_with_id_conflicts(raw: &str) -> (Option<LibraryTitleWalk>, bool) {
+    let (without_ids, mut walk, conflicting_ids) = extract_library_title_ids(raw);
     let normalized = normalize_library_title_text(&without_ids);
 
     if let Some((title, year)) = parse_simple_library_title_year(normalized.as_str()) {
@@ -493,7 +497,7 @@ pub(crate) fn library_title_walk(raw: &str) -> Option<LibraryTitleWalk> {
         walk.title = fallback_title_from_id_text(normalized.as_str());
     }
 
-    (!walk.is_empty()).then_some(walk)
+    ((!walk.is_empty()).then_some(walk), conflicting_ids)
 }
 
 pub(crate) fn normalize_folder_name(name: &str) -> String {
@@ -1413,29 +1417,44 @@ fn parsed_episode_metadata_from_episode(episode: &Episode) -> crate::ParsedEpiso
     }
 }
 
-fn extract_library_title_ids(raw: &str) -> (String, LibraryTitleWalk) {
-    let mut walk = LibraryTitleWalk::default();
-
-    for captures in library_id_token_regex().captures_iter(raw) {
-        if walk.imdb_id.is_none()
-            && let Some(value) = captures.name("imdb")
-        {
-            walk.imdb_id = crate::normalize::normalize_imdb_id(value.as_str());
-        }
-        if walk.tmdb_id.is_none()
-            && let Some(value) = captures.name("tmdb")
-        {
-            walk.tmdb_id = crate::normalize::normalize_numeric_id(value.as_str());
-        }
-        if walk.tvdb_id.is_none()
-            && let Some(value) = captures.name("tvdb")
-        {
-            walk.tvdb_id = crate::normalize::normalize_numeric_id(value.as_str());
+fn extract_library_title_ids(raw: &str) -> (String, LibraryTitleWalk, bool) {
+    fn retain_first_id(current: &mut Option<String>, incoming: Option<String>) -> bool {
+        match (current.as_ref(), incoming) {
+            (Some(current), Some(incoming)) => current != &incoming,
+            (None, Some(incoming)) => {
+                *current = Some(incoming);
+                false
+            }
+            _ => false,
         }
     }
 
+    let mut walk = LibraryTitleWalk::default();
+    let mut conflicting_ids = false;
+
+    for captures in library_id_token_regex().captures_iter(raw) {
+        conflicting_ids |= retain_first_id(
+            &mut walk.imdb_id,
+            captures
+                .name("imdb")
+                .and_then(|value| crate::normalize::normalize_imdb_id(value.as_str())),
+        );
+        conflicting_ids |= retain_first_id(
+            &mut walk.tmdb_id,
+            captures
+                .name("tmdb")
+                .and_then(|value| crate::normalize::normalize_numeric_id(value.as_str())),
+        );
+        conflicting_ids |= retain_first_id(
+            &mut walk.tvdb_id,
+            captures
+                .name("tvdb")
+                .and_then(|value| crate::normalize::normalize_numeric_id(value.as_str())),
+        );
+    }
+
     let without_ids = library_id_token_regex().replace_all(raw, " ").to_string();
-    (without_ids, walk)
+    (without_ids, walk, conflicting_ids)
 }
 
 fn library_id_token_regex() -> &'static Regex {
@@ -1728,6 +1747,42 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn title_walk_reports_conflicting_ids_within_one_name() {
+        for (tokens, expected_first) in [
+            ("{imdb-tt12345}.{imdb-tt67890}", "tt12345"),
+            ("{tmdb-123}.{tmdb-456}", "123"),
+            ("{tvdb-123}.{tvdb-456}", "123"),
+        ] {
+            for prefix in ["Some.Show.S01E01", "Some Show (2024)"] {
+                let name = format!("{prefix} {tokens}");
+                let (walk, conflicting_ids) = library_title_walk_with_id_conflicts(&name);
+                assert!(conflicting_ids, "{name}");
+                assert_eq!(library_title_walk(&name), walk);
+                let walk = walk.expect("title walk");
+                let first_id = walk
+                    .imdb_id
+                    .as_deref()
+                    .or(walk.tmdb_id.as_deref())
+                    .or(walk.tvdb_id.as_deref());
+                assert_eq!(first_id, Some(expected_first), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn title_walk_allows_matching_repeated_ids_and_distinct_providers() {
+        let name = "Some Show (2024) {imdb-tt12345} [IMDBID=TT12345] \
+                    {tmdb-123} [TMDBID=123] {tvdb-456} [TVDBID=456]";
+        let (walk, conflicting_ids) = library_title_walk_with_id_conflicts(name);
+        assert!(!conflicting_ids);
+        assert_eq!(library_title_walk(name), walk);
+        let walk = walk.expect("title walk");
+        assert_eq!(walk.imdb_id.as_deref(), Some("tt12345"));
+        assert_eq!(walk.tmdb_id.as_deref(), Some("123"));
+        assert_eq!(walk.tvdb_id.as_deref(), Some("456"));
     }
 
     #[test]

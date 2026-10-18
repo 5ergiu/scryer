@@ -45,6 +45,7 @@ import {
   titleReleaseBlocklistQuery,
   titleCatalogFilterOptionsQuery,
   titleCatalogCountsQuery,
+  titleCatalogIdsQuery,
   titleCatalogManagedBytesQuery,
   buildTitlesQuery,
 } from "@/lib/graphql/queries";
@@ -199,6 +200,8 @@ const TITLE_DELETION_JOB_FALLBACK_DELAYS_MS = [
   10_000, 60_000, 180_000,
 ] as const;
 const TITLE_CATALOG_PAGE_SIZE = 72;
+// The titles query clamps a page to 300 items.
+const TITLE_CATALOG_SELECT_ALL_PAGE_SIZE = 300;
 const LIBRARY_SCAN_TITLE_REFRESH_THROTTLE_MS = 5_000;
 // The title panel shows a recent-blocks window, not the whole blocklist.
 const SELECTED_OVERVIEW_BLOCKLIST_LIMIT = 6;
@@ -1321,6 +1324,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     preview: titleDeletePreview,
     loading: titleDeletePreviewLoading,
     error: titleDeletePreviewError,
+    errorReason: titleDeletePreviewErrorReason,
   } = useDeletePreview(
     deleteTitlePreviewQuery,
     "deleteTitlePreview",
@@ -3724,16 +3728,83 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     [],
   );
 
+  const selectAllRequestSeqRef = React.useRef(0);
   const toggleAllVisibleTitles = React.useCallback(
     (checked: boolean) => {
+      const requestSeq = ++selectAllRequestSeqRef.current;
       setSelectedTitleIds(
         checked ? new Set(visibleTitles.map((title) => title.id)) : new Set(),
       );
+      if (!checked || !catalogPaginationState.hasMore) {
+        return;
+      }
+
+      // Only the loaded pages are in visibleTitles; page through the ids of
+      // every title matching the current catalog query so select-all covers
+      // the whole list.
+      const variables = buildTitleCatalogQueryVariables({
+        facet: activeFacet,
+        libraryIds: selectedLibraryIds,
+        query: activeCatalogQueryRef.current.trim(),
+        filters: effectiveTitleQuickFilters,
+        advancedFilters: effectiveAdvancedTitleFilters,
+        sort: effectiveTitleCatalogSort,
+        limit: TITLE_CATALOG_SELECT_ALL_PAGE_SIZE,
+        offset: 0,
+      });
+      void (async () => {
+        const ids: string[] = [];
+        try {
+          for (let offset = 0; ; offset += TITLE_CATALOG_SELECT_ALL_PAGE_SIZE) {
+            const { data, error } = await client
+              .query(
+                titleCatalogIdsQuery,
+                { ...variables, offset },
+                { requestPolicy: "network-only" },
+              )
+              .toPromise();
+            if (error) {
+              throw error;
+            }
+            if (requestSeq !== selectAllRequestSeqRef.current) {
+              return;
+            }
+            const page = data?.titles;
+            const items = (page?.items ?? []) as { id: string }[];
+            ids.push(...items.map((item) => item.id));
+            if (!page?.hasMore || items.length === 0) {
+              break;
+            }
+          }
+        } catch (error) {
+          setGlobalStatus(
+            userFacingGraphQlErrorMessage(error, t("status.failedToLoad")),
+            { level: "ERROR" },
+          );
+          return;
+        }
+        if (requestSeq !== selectAllRequestSeqRef.current) {
+          return;
+        }
+        setSelectedTitleIds((current) => new Set([...current, ...ids]));
+      })();
     },
-    [visibleTitles],
+    [
+      activeFacet,
+      catalogPaginationState.hasMore,
+      client,
+      effectiveAdvancedTitleFilters,
+      effectiveTitleCatalogSort,
+      effectiveTitleQuickFilters,
+      selectedLibraryIds,
+      setGlobalStatus,
+      t,
+      visibleTitles,
+    ],
   );
 
   const clearSelectedTitles = React.useCallback(() => {
+    selectAllRequestSeqRef.current += 1;
     setSelectedTitleIds((current) =>
       current.size === 0 ? current : new Set(),
     );
@@ -5461,6 +5532,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               preview={titleDeletePreview}
               loading={titleDeletePreviewLoading}
               error={titleDeletePreviewError}
+              errorReason={titleDeletePreviewErrorReason}
+              onRemoveFromCatalogOnly={() => setDeleteFilesOnDisk(false)}
               typedConfirmation={titleDeleteTypedConfirmation}
               onTypedConfirmationChange={setTitleDeleteTypedConfirmation}
             />

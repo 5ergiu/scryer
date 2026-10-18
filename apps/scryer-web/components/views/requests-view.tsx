@@ -1410,11 +1410,62 @@ export function RequestsView({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-[var(--scry-border3)]">
+        <div className="flex flex-wrap items-center gap-2">
+          <LibraryMultiSelect
+            libraries={libraries}
+            selectedLibraryIds={selectedLibraryIds}
+            onSelectedLibraryIdsChange={onSelectedLibraryIdsChange}
+            triggerClassName="h-10 w-full rounded-[11px] sm:w-64"
+          />
+          {mode === "admin" &&
+          (requesterOptions.length > 0 || selectedRequesterId !== null) ? (
+            <Select
+              value={selectedRequesterId ?? ALL_REQUESTERS_VALUE}
+              onValueChange={(value) =>
+                onSelectedRequesterIdChange(
+                  value === ALL_REQUESTERS_VALUE ? null : value,
+                )
+              }
+            >
+              <SelectTrigger
+                id="requests-requester-filter"
+                aria-label={t("requests.requesterFilter.label")}
+                className="h-10 min-w-44 rounded-[11px]"
+              >
+                <User className="h-4 w-4 shrink-0 text-[var(--scry-muted3)]" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_REQUESTERS_VALUE}>
+                  {t("requests.requesterFilter.all")}
+                </SelectItem>
+                {requesterOptions.map((option) => (
+                  <SelectItem key={option.userId} value={option.userId}>
+                    {option.username}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          {mode === "mine" ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 w-10 rounded-[11px] p-0"
+              onClick={onRefresh}
+              disabled={loading}
+              aria-label="Refresh requests"
+            >
+              {loading ? <LoadingMark className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
+            </Button>
+          ) : null}
+        </div>
+
+        <div className="border-b border-[var(--scry-border3)]">
           <div
             role="group"
             aria-label="Request filters"
-            className="relative top-px flex min-h-10 min-w-0 max-w-full flex-1 flex-wrap items-center justify-start gap-x-5 gap-y-1 border-0 bg-transparent p-0 shadow-none"
+            className="relative top-px flex min-h-10 min-w-0 max-w-full flex-wrap items-center justify-start gap-x-5 gap-y-1 border-0 bg-transparent p-0 shadow-none"
           >
             {showModeSwitch ? (
               <>
@@ -1462,56 +1513,6 @@ export function RequestsView({
                 onClick={() => onStatusFilterChange(filter.value)}
               />
             ))}
-          </div>
-          <div className="mb-3 flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
-            <LibraryMultiSelect
-              libraries={libraries}
-              selectedLibraryIds={selectedLibraryIds}
-              onSelectedLibraryIdsChange={onSelectedLibraryIdsChange}
-              triggerClassName="h-10 min-w-56 rounded-[11px]"
-            />
-            {mode === "admin" &&
-            (requesterOptions.length > 0 || selectedRequesterId !== null) ? (
-              <Select
-                value={selectedRequesterId ?? ALL_REQUESTERS_VALUE}
-                onValueChange={(value) =>
-                  onSelectedRequesterIdChange(
-                    value === ALL_REQUESTERS_VALUE ? null : value,
-                  )
-                }
-              >
-                <SelectTrigger
-                  id="requests-requester-filter"
-                  aria-label={t("requests.requesterFilter.label")}
-                  className="h-10 min-w-44 rounded-[11px]"
-                >
-                  <User className="h-4 w-4 shrink-0 text-[var(--scry-muted3)]" />
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL_REQUESTERS_VALUE}>
-                    {t("requests.requesterFilter.all")}
-                  </SelectItem>
-                  {requesterOptions.map((option) => (
-                    <SelectItem key={option.userId} value={option.userId}>
-                      {option.username}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-            {mode === "mine" ? (
-              <Button
-                type="button"
-                variant="outline"
-                className="h-10 w-10 rounded-[11px] p-0"
-                onClick={onRefresh}
-                disabled={loading}
-                aria-label="Refresh requests"
-              >
-                {loading ? <LoadingMark className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
-              </Button>
-            ) : null}
           </div>
         </div>
 

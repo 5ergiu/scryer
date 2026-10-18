@@ -4786,6 +4786,18 @@ pub trait SeedingProfileRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait DelayProfileRepository: Send + Sync {
+    /// Every profile with its facet, tag and library sets, ordered by priority
+    /// and then id.
+    async fn list(&self) -> AppResult<Vec<crate::DelayProfile>>;
+    /// Insert each profile, or replace the stored profile with the same id,
+    /// in one transaction.
+    async fn save_many(&self, profiles: Vec<crate::DelayProfile>) -> AppResult<()>;
+    /// Returns false when no profile has the id.
+    async fn delete(&self, id: &str) -> AppResult<bool>;
+}
+
+#[async_trait]
 pub trait SubtitleProviderConfigRepository: Send + Sync {
     async fn list(&self, provider_type: Option<String>) -> AppResult<Vec<SubtitleProviderConfig>>;
     async fn get_by_id(&self, id: &str) -> AppResult<Option<SubtitleProviderConfig>>;
@@ -5706,6 +5718,25 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         _actor: DownloadSubmissionActorSnapshot,
     ) -> AppResult<()> {
         Ok(())
+    }
+
+    /// Keep the long file names a grab's NZB or torrent carried with its
+    /// submission row.
+    async fn record_grabbed_file_names(
+        &self,
+        _canonical_download_id: &DownloadId,
+        _names: &[crate::GrabbedFileName],
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// The long file names kept for the grab behind this client job: its
+    /// active binding's submission, else the submission recorded for the job.
+    async fn grabbed_file_names(
+        &self,
+        _identity: &ClientJobLocator,
+    ) -> AppResult<Vec<crate::GrabbedFileName>> {
+        Ok(Vec::new())
     }
 
     /// Read the goals a torrent was grabbed under, by download-client identity.
@@ -7426,7 +7457,51 @@ pub struct MediaFileHashCandidate {
 
 #[async_trait]
 pub trait MediaFileRepository: Send + Sync {
+    /// Stable, bounded pages of files in an explicit score-refresh selection.
+    async fn score_refresh_page(
+        &self,
+        _selection: &crate::ScoreRefreshSelection,
+        _after: &str,
+    ) -> AppResult<Vec<String>> {
+        Err(AppError::Repository(
+            "score refresh selection is unavailable".into(),
+        ))
+    }
+
+    /// Last explicitly requested evaluation; reading it never runs scoring.
+    async fn get_score_evaluation(
+        &self,
+        _file_id: &str,
+    ) -> AppResult<Option<crate::quality::evaluations::FileScoreEvaluation>> {
+        Ok(None)
+    }
+
+    /// Persist a display evaluation without changing acquisition evidence.
+    async fn save_score_evaluation(
+        &self,
+        _file_id: &str,
+        _title_id: &str,
+        _evaluation: &crate::quality::evaluations::FileScoreEvaluation,
+    ) -> AppResult<()> {
+        Err(AppError::Repository(
+            "score evaluation persistence is unavailable".into(),
+        ))
+    }
+
     async fn insert_media_file(&self, input: &InsertMediaFileInput) -> AppResult<String>;
+
+    async fn score_evaluation_episode_ids(&self, file: &TitleMediaFile) -> AppResult<Vec<String>> {
+        let mut ids: Vec<_> = self
+            .list_media_files_for_title(&file.title_id)
+            .await?
+            .into_iter()
+            .filter(|row| row.id == file.id)
+            .filter_map(|row| row.episode_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
 
     async fn claim_import_destination(
         &self,
@@ -11112,6 +11187,17 @@ pub trait DownloadClient: Send + Sync {
                 download,
                 native_delete_paths: Vec::new(),
             }))
+    }
+
+    /// The names a completed download's renamed files were posted with, for a
+    /// client that records them. Empty for every other client.
+    async fn posted_file_names_for_source(
+        &self,
+        _client_id: &str,
+        _client_type: &str,
+        _download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        Ok(Vec::new())
     }
 
     /// Fetch a single completed download by its client-scoped source

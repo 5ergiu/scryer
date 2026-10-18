@@ -58,6 +58,8 @@ pub enum JobKeyValue {
     TitleRename,
     /// Media-file deletion.
     MediaFileDeletion,
+    /// On-demand file score refresh.
+    MediaFileRescore,
     /// Recycle-bin restore.
     RecycleBinRestore,
     /// Recycle-bin purge.

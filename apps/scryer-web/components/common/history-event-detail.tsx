@@ -1,4 +1,7 @@
 import type { TitleHistoryEvent } from "@/lib/types";
+import { ScoreStat, ScoreValue } from "@/components/common/score-log";
+import { toScoreLogEntries } from "@/lib/utils/score-log";
+import { useTranslate } from "@/lib/context/translate-context";
 import { LazyCodeEditor } from "@/components/common/lazy-code-editor";
 import { formatSanitizedHistoryValue } from "@/lib/utils/history-redaction";
 import { cn } from "@/lib/utils";
@@ -131,7 +134,7 @@ export function buildHistoryEventDetail(event: TitleHistoryEvent): {
   const rawDetails = Object.entries(data ?? {}).filter(
     ([key]) => !structuredDataKeys.has(key),
   );
-  const hasDetail = structuredDetails.length > 0 || rawDetails.length > 0;
+  const hasDetail = Boolean(event.scoring) || structuredDetails.length > 0 || rawDetails.length > 0;
 
   return {
     structuredDetails,
@@ -141,6 +144,8 @@ export function buildHistoryEventDetail(event: TitleHistoryEvent): {
 }
 
 export function HistoryEventDetailContent({ event }: { event: TitleHistoryEvent }) {
+  const t = useTranslate();
+  const scoring = event.scoring;
   const { structuredDetails, rawDetails, hasDetail } = buildHistoryEventDetail(event);
 
   if (!hasDetail) {
@@ -149,6 +154,24 @@ export function HistoryEventDetailContent({ event }: { event: TitleHistoryEvent 
 
   return (
     <div className="space-y-1.5">
+      {scoring ? <div className="space-y-1 text-xs">
+        <ScoreStat
+          id={`history-event-score-${event.id}`}
+          label={t("scoring.score")}
+          score={scoring.candidateScore}
+          entries={toScoreLogEntries(scoring.entries)}
+          meta={scoring.previousScore != null ? <>
+            {t("scoring.previous")} <ScoreValue score={scoring.previousScore} />
+            {scoring.delta != null ? <> · {t("scoring.change")} <ScoreValue score={scoring.delta} /></> : null}
+          </> : scoring.delta != null ? <>{t("scoring.change")} <ScoreValue score={scoring.delta} /></> : null}
+        />
+        <div><span className="text-muted-foreground">{t("scoring.decision")}</span> {scoring.decisionCode === "initial" ? t("history.initial") : scoring.decisionCode === "upgrade" ? t("history.upgrade") : scoring.decisionCode === "manual_override" ? t("scoring.manualOverride") : scoring.decisionCode}</div>
+        {scoring.comparisons.length > 1 ? <ul className="space-y-0.5">{scoring.comparisons.map((comparison) => <li key={comparison.fileId} className="flex flex-wrap items-baseline gap-x-1.5">
+          <span className="text-muted-foreground">{comparison.episodeIds.join(", ") || comparison.fileId}</span>
+          <ScoreValue score={comparison.previousScore} /> → <ScoreValue score={scoring.candidateScore} />
+          (<ScoreValue score={comparison.delta} />)
+        </li>)}</ul> : null}
+      </div> : null}
       {structuredDetails.map(({ key, value }) => (
         <div key={key} className="grid grid-cols-[auto_1fr] gap-x-3 text-xs">
           <span className="whitespace-nowrap text-muted-foreground">{formatKey(key)}</span>

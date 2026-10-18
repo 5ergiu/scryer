@@ -415,6 +415,136 @@ pub(crate) async fn find_other_folder_owner(
         }))
 }
 
+/// Lowercased containment keys a folder is compared under before any
+/// filesystem resolution. Lowercasing only widens the set of owners that go
+/// on to the exact, resolving comparison.
+fn overlap_prefilter_key(folder: &str) -> Option<String> {
+    crate::title_folder_rules::folder_containment_key(folder).map(|key| key.to_lowercase())
+}
+
+fn overlap_keys_related(left: &str, right: &str) -> bool {
+    fn within(path: &str, folder: &str) -> bool {
+        path.strip_prefix(folder)
+            .is_some_and(|rest| rest.is_empty() || folder.ends_with('/') || rest.starts_with('/'))
+    }
+    within(left, right) || within(right, left)
+}
+
+/// Keys for comparing one move candidate against every recorded owner while
+/// resolving the candidate and each library root only once.
+struct FolderMoveOverlapKeys {
+    candidate: Vec<String>,
+    /// Library root keys with their resolved spelling, or `None` when the
+    /// root could not be resolved.
+    roots: Vec<(String, Option<String>)>,
+    /// Whether a folder below a library root is a link, shared by owners
+    /// under the same organizing folders.
+    links: std::collections::HashMap<std::path::PathBuf, bool>,
+}
+
+impl FolderMoveOverlapKeys {
+    async fn load(app: &AppUseCase, folder_path: &str) -> AppResult<Self> {
+        let resolved = resolved_folder_identity(&stored_path_to_path_buf(folder_path))?;
+        let mut candidate: Vec<String> = [
+            overlap_prefilter_key(folder_path),
+            overlap_prefilter_key(&path_to_stored_string(&resolved)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        candidate.dedup();
+        let root_paths = match SCAN_FOLDER_ROOTS.try_with(|snapshot| snapshot.all.clone()) {
+            Ok(roots) => roots,
+            Err(_) => app
+                .all_library_root_folders()
+                .await?
+                .into_iter()
+                .map(|root| root.path)
+                .collect(),
+        };
+        let roots = root_paths
+            .iter()
+            .filter_map(|root| {
+                let key = overlap_prefilter_key(root)?;
+                let resolved = resolved_folder_identity(&stored_path_to_path_buf(root))
+                    .ok()
+                    .and_then(|resolved| overlap_prefilter_key(&path_to_stored_string(&resolved)));
+                Some((key, resolved))
+            })
+            .collect();
+        Ok(Self {
+            candidate,
+            roots,
+            links: Default::default(),
+        })
+    }
+
+    /// Whether `owned_path` needs the exact, resolving overlap comparison.
+    /// An owner unrelated by key, also after substituting its resolved library
+    /// root, with no link between that root and its folder, cannot overlap.
+    fn needs_exact_comparison(&mut self, owned_path: &str) -> AppResult<bool> {
+        let Some(owner) = overlap_prefilter_key(owned_path) else {
+            return Ok(true);
+        };
+        let mut owner_keys = vec![owner.clone()];
+        for (root, resolved) in &self.roots {
+            if overlap_keys_related(&owner, root) && owner.len() >= root.len() {
+                let Some(resolved) = resolved else {
+                    return Ok(true);
+                };
+                let rest = owner[root.len()..].trim_start_matches('/');
+                owner_keys.push(if rest.is_empty() {
+                    resolved.clone()
+                } else {
+                    format!("{}/{rest}", resolved.trim_end_matches('/'))
+                });
+            }
+        }
+        if owner_keys.iter().any(|owner| {
+            self.candidate
+                .iter()
+                .any(|candidate| overlap_keys_related(owner, candidate))
+        }) {
+            return Ok(true);
+        }
+        let path = stored_path_to_path_buf(owned_path);
+        if !path.is_absolute() {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors() {
+            let is_resolved_root = overlap_prefilter_key(&path_to_stored_string(ancestor))
+                .is_some_and(|key| {
+                    self.roots
+                        .iter()
+                        .any(|(root, resolved)| resolved.is_some() && *root == key)
+                });
+            if is_resolved_root {
+                break;
+            }
+            let is_link = match self.links.get(ancestor) {
+                Some(is_link) => *is_link,
+                None => {
+                    let is_link = match std::fs::symlink_metadata(ancestor) {
+                        Ok(metadata) => metadata.file_type().is_symlink(),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                        Err(error) => {
+                            return Err(AppError::Validation(format!(
+                                "cannot inspect folder {owned_path} owned by another title: {error}"
+                            )));
+                        }
+                    };
+                    self.links.insert(ancestor.to_path_buf(), is_link);
+                    is_link
+                }
+            };
+            if is_link {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 pub(crate) async fn ensure_folder_move_available_to_title(
     app: &AppUseCase,
     title: &Title,
@@ -424,6 +554,7 @@ pub(crate) async fn ensure_folder_move_available_to_title(
         return Err(AppError::Validation("title folder path is required".into()));
     }
     let folder_path = path_to_stored_string(folder_path);
+    let mut keys = None;
     for owner in app
         .services
         .catalog
@@ -431,12 +562,29 @@ pub(crate) async fn ensure_folder_move_available_to_title(
         .list_delete_preview_info()
         .await?
     {
-        if owner.title_id != title.id
-            && let Some(owned_path) = owner.folder_path.as_deref()
-            && !owned_path.is_empty()
-            && title_folders_overlap(&folder_path, owned_path)?
-            && !folder_spans_a_library_root(app, owned_path).await?
+        let Some(owned_path) = owner.folder_path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        if owner.title_id == title.id {
+            continue;
+        }
+        if keys.is_none() {
+            keys = Some(FolderMoveOverlapKeys::load(app, &folder_path).await?);
+        }
+        if !keys
+            .as_mut()
+            .expect("overlap keys loaded")
+            .needs_exact_comparison(owned_path)?
         {
+            continue;
+        }
+        let overlaps = title_folders_overlap(&folder_path, owned_path).map_err(|error| {
+            AppError::Validation(format!(
+                "cannot compare folder {folder_path} with folder {owned_path} owned by title {}: {error}",
+                owner.title_id
+            ))
+        })?;
+        if overlaps && !folder_spans_a_library_root(app, owned_path).await? {
             return Err(AppError::Validation(format!(
                 "folder {folder_path} overlaps the folder owned by title {}",
                 owner.title_id
@@ -531,11 +679,69 @@ pub(crate) async fn claim_title_folder_if_missing(
     title: &mut Title,
     folder_path: &Path,
 ) -> AppResult<()> {
+    claim_title_folder_with_layout(app, title, folder_path, TitleFolderClaimLayout::Configured)
+        .await
+}
+
+pub(crate) async fn claim_title_folder_for_scan_if_missing(
+    app: &AppUseCase,
+    title: &mut Title,
+    folder_path: &Path,
+) -> AppResult<()> {
+    claim_title_folder_with_layout(
+        app,
+        title,
+        folder_path,
+        TitleFolderClaimLayout::Conventional,
+    )
+    .await
+}
+
+enum TitleFolderClaimLayout {
+    Configured,
+    Conventional,
+}
+
+/// Every check [`claim_title_folder_if_missing`] makes before recording
+/// `folder_path` for a title that has no folder, without recording it.
+pub(crate) async fn ensure_title_folder_claimable(
+    app: &AppUseCase,
+    title: &Title,
+    folder_path: &Path,
+) -> AppResult<()> {
+    ensure_folder_available_to_title(app, title, folder_path).await?;
+    ensure_unowned_folder_claimable(app, title, folder_path, TitleFolderClaimLayout::Configured)
+        .await
+}
+
+async fn claim_title_folder_with_layout(
+    app: &AppUseCase,
+    title: &mut Title,
+    folder_path: &Path,
+    layout: TitleFolderClaimLayout,
+) -> AppResult<()> {
     ensure_folder_available_to_title(app, title, folder_path).await?;
     if non_empty_folder_path(title.folder_path.as_deref()).is_some() {
         return Ok(());
     }
 
+    ensure_unowned_folder_claimable(app, title, folder_path, layout).await?;
+    let folder_path = path_to_stored_string(folder_path);
+    app.services
+        .catalog
+        .titles
+        .set_folder_path(&title.id, &folder_path)
+        .await?;
+    title.folder_path = Some(folder_path);
+    Ok(())
+}
+
+async fn ensure_unowned_folder_claimable(
+    app: &AppUseCase,
+    title: &Title,
+    folder_path: &Path,
+    layout: TitleFolderClaimLayout,
+) -> AppResult<()> {
     ensure_folder_move_available_to_title(app, title, folder_path).await?;
     // Imports reserve missing or empty destinations before writing media. A
     // destination with contents must not hold other titles' folders; stray
@@ -552,9 +758,24 @@ pub(crate) async fn claim_title_folder_if_missing(
         Err(error) => return Err(AppError::Repository(error.to_string())),
     };
     if has_contents {
-        let patterns = crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
-        crate::library_discovery::ensure_folder_holds_no_child_titles(folder_path, &patterns)
-            .await?;
+        match layout {
+            TitleFolderClaimLayout::Configured => {
+                let patterns =
+                    crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
+                crate::library_discovery::ensure_folder_holds_no_child_titles(
+                    folder_path,
+                    &patterns,
+                )
+                .await?;
+            }
+            TitleFolderClaimLayout::Conventional => {
+                crate::library_discovery::ensure_scanned_folder_holds_no_child_titles(
+                    folder_path,
+                    title,
+                )
+                .await?;
+            }
+        }
     }
 
     let folder_path = path_to_stored_string(folder_path);
@@ -579,12 +800,6 @@ pub(crate) async fn claim_title_folder_if_missing(
             "cannot claim a title folder outside its library roots".into(),
         ));
     }
-    app.services
-        .catalog
-        .titles
-        .set_folder_path(&title.id, &folder_path)
-        .await?;
-    title.folder_path = Some(folder_path);
     Ok(())
 }
 
@@ -769,6 +984,195 @@ mod tests {
             digital_release_date: None,
             movie_release_dates: None,
             folder_path: folder_path.map(str::to_string),
+        }
+    }
+
+    async fn unowned_scan_title(facet: MediaFacet, root: &Path) -> (AppUseCase, Title) {
+        let (app, user) = crate::lib_tests::bootstrap();
+        let library_id = scryer_domain::default_library_id_for_facet(&facet);
+        let library = app
+            .services
+            .catalog
+            .libraries
+            .get_by_id(&library_id)
+            .await
+            .unwrap()
+            .unwrap();
+        app.services
+            .catalog
+            .libraries
+            .update(
+                &library_id,
+                library.name,
+                library.slug,
+                vec![crate::LibraryRootDraft {
+                    path: path_to_stored_string(root),
+                    is_default: true,
+                }],
+            )
+            .await
+            .unwrap();
+        let created = app
+            .create_title_without_hydration_in_library(
+                &user,
+                crate::NewTitle {
+                    name: "Scan Fixture".into(),
+                    facet,
+                    ..Default::default()
+                },
+                library_id,
+            )
+            .await
+            .unwrap();
+        assert!(created.title.folder_path.is_none());
+        (app, created.title)
+    }
+
+    #[tokio::test]
+    async fn scan_and_import_claims_accept_conventional_season_layouts() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime] {
+            for (season, scan) in [
+                "Series 1",
+                "Special Episodes",
+                "Season_1",
+                "Season-1",
+                "Season1",
+            ]
+            .into_iter()
+            .flat_map(|season| [(season, true), (season, false)])
+            {
+                let root = tempfile::tempdir().unwrap();
+                let folder = root.path().join("Scan Fixture");
+                let file = folder.join(season).join("Scan.Fixture.S01E01.mkv");
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"synthetic media").unwrap();
+                let (app, mut title) = unowned_scan_title(facet.clone(), root.path()).await;
+
+                if scan {
+                    claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                        .await
+                        .unwrap();
+                } else {
+                    claim_title_folder_if_missing(&app, &mut title, &folder)
+                        .await
+                        .unwrap_or_else(|error| panic!("{season}: {error}"));
+                }
+                assert!(title_owns_folder(&title, &folder));
+                let stored = app
+                    .services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(title_owns_folder(&stored, &folder));
+                assert_eq!(std::fs::read(&file).unwrap(), b"synthetic media");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_preserves_mixed_title_and_movie_boundaries() {
+        for facet in [MediaFacet::Series, MediaFacet::Anime, MediaFacet::Movie] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let child = folder
+                .join("Other Title")
+                .join("Series 1")
+                .join("S01E01.mkv");
+            std::fs::create_dir_all(child.parent().unwrap()).unwrap();
+            std::fs::write(&child, b"preserved child media").unwrap();
+            let loose = folder.join("Scan.Fixture.2024.mkv");
+            std::fs::write(&loose, b"preserved direct media").unwrap();
+            // Movies do not recognize episode layouts, so use a direct child
+            // file to prove their existing boundary remains guarded.
+            let direct_child = (facet == MediaFacet::Movie)
+                .then(|| folder.join("Other Title").join("Other.Title.2024.mkv"));
+            if let Some(path) = &direct_child {
+                std::fs::write(path, b"preserved child movie").unwrap();
+            }
+            let (app, mut title) = unowned_scan_title(facet, root.path()).await;
+            assert!(
+                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                    .await
+                    .is_err()
+            );
+            assert!(title.folder_path.is_none());
+            assert!(
+                app.services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .folder_path
+                    .is_none()
+            );
+            assert_eq!(std::fs::read(&child).unwrap(), b"preserved child media");
+            assert_eq!(std::fs::read(&loose).unwrap(), b"preserved direct media");
+            if let Some(path) = direct_child {
+                assert_eq!(std::fs::read(path).unwrap(), b"preserved child movie");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_cour_aliases_preserve_files_and_settings() {
+        for relative in [
+            "Glass Meridian S03 Complete/Scan.Fixture.S03E01.mkv",
+            "Arc One/Verified.Alias.S02E01.mkv",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let file = folder.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"preserved episode").unwrap();
+            let (app, mut title) = unowned_scan_title(MediaFacet::Anime, root.path()).await;
+            title.aliases.push("Verified Alias".into());
+            let tags = title.tags.clone();
+            claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                .await
+                .unwrap();
+            assert!(title_owns_folder(&title, &folder));
+            assert_eq!(title.tags, tags);
+            assert_eq!(std::fs::read(&file).unwrap(), b"preserved episode");
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_scan_claim_rejects_unproven_cour_and_foreign_identity() {
+        for (relative, nfo) in [
+            ("Arc One/01.mkv", None),
+            (
+                "Scan.Fixture.S03E01.mkv",
+                Some("<tvshow><title>Other</title><tvdbid>456</tvdbid></tvshow>"),
+            ),
+            (
+                "Arc One/Scan.Fixture.S03E01.mkv",
+                Some("<tvshow><title>Other</title><tvdbid>456</tvdbid></tvshow>"),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("Scan Fixture");
+            let file = folder.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"preserved episode").unwrap();
+            if let Some(nfo) = nfo {
+                std::fs::write(file.parent().unwrap().join("tvshow.nfo"), nfo).unwrap();
+            }
+            let (app, mut title) = unowned_scan_title(MediaFacet::Anime, root.path()).await;
+            title
+                .external_ids
+                .push(scryer_domain::ExternalId::new("tvdb", "123"));
+            assert!(
+                claim_title_folder_for_scan_if_missing(&app, &mut title, &folder)
+                    .await
+                    .is_err()
+            );
+            assert!(title.folder_path.is_none());
+            assert_eq!(std::fs::read(&file).unwrap(), b"preserved episode");
         }
     }
 

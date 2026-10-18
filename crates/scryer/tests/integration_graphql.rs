@@ -1400,15 +1400,6 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 validation_json: None,
             },
             SettingDefinitionSeed {
-                category: "acquisition".into(),
-                scope: "system".into(),
-                key_name: "acquisition.delay_profiles".into(),
-                data_type: "json".into(),
-                default_value_json: "[]".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
                 category: "general".into(),
                 scope: "system".into(),
                 key_name: "ui.experimental_features_enabled".into(),

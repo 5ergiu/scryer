@@ -713,6 +713,7 @@ fn from_delay_profile(profile: scryer_application::DelayProfile) -> DelayProfile
             .filter_map(|facet| MediaFacetValue::parse(&facet))
             .collect(),
         tags: profile.tags,
+        library_ids: profile.library_ids.into_iter().map(ID::from).collect(),
         priority: profile.priority,
         enabled: profile.enabled,
     }

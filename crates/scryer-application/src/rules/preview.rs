@@ -84,6 +84,7 @@ impl RuleSetTestListingInput {
             })
             .unwrap_or_default();
         ReleaseListingSnapshot {
+            grab_scoring: None,
             published_at: self
                 .published_at
                 .as_deref()
@@ -135,7 +136,7 @@ enum PreviewSubject {
     Release {
         name: String,
         size_bytes: Option<i64>,
-        listing: ListingFacts,
+        listing: Box<ListingFacts>,
     },
     StoredFile {
         file: Box<crate::TitleMediaFile>,
@@ -532,7 +533,7 @@ impl AppUseCase {
                 size_bytes: request.size_bytes,
                 // A tester candidate has never been grabbed: its age is
                 // measured now, like any live search result.
-                listing: ListingFacts::candidate(request.listing.snapshot(now), now),
+                listing: Box::new(ListingFacts::candidate(request.listing.snapshot(now), now)),
             },
             (None, None) => unreachable!("validated preview subject"),
         };
@@ -599,12 +600,6 @@ impl AppUseCase {
                             Some(compute_title.facet.as_str()),
                         ),
                     );
-                    let parsed = crate::quality::canonical_context::announced_metadata_for_title(
-                        &compute_title,
-                        &raw_parsed,
-                        context.required_audio_languages(),
-                        None,
-                    );
                     let coverage = crate::acquisition_coverage::resolve_release_coverage(
                         &raw_parsed,
                         &episodes,
@@ -613,7 +608,7 @@ impl AppUseCase {
                     );
                     let size_basis = crate::acquisition_coverage::coverage_size_basis(
                         &coverage,
-                        &parsed,
+                        &raw_parsed,
                         &episodes,
                         context.default_runtime_minutes(),
                     );
@@ -623,9 +618,15 @@ impl AppUseCase {
                         ..context.view(size_basis, is_filler)
                     };
                     let facts = RuleSetTestListingFacts::from_facts(&listing);
+                    let listing = *listing;
+                    let parsed = crate::canonical_scoring::canonical_parse(
+                        &raw_parsed,
+                        Some(&listing),
+                        &preview_context,
+                    );
                     let preview = crate::canonical_scoring::score_release_preview(
                         &crate::canonical_scoring::ReleaseEvidence::announced(
-                            parsed.clone(),
+                            raw_parsed,
                             size_bytes,
                         )
                         .with_listing(Some(listing)),
@@ -677,7 +678,11 @@ impl AppUseCase {
                     Ok(ScoredSubject {
                         release_name: stored_file_release_name(&file),
                         media_file_id: Some(file.id.clone()),
-                        parsed: crate::canonical_scoring::announced_parse_from_media_file(&file),
+                        parsed: crate::canonical_scoring::canonical_parse(
+                            &crate::canonical_scoring::announced_parse_from_media_file(&file),
+                            listing.as_ref(),
+                            &preview_context,
+                        ),
                         size_bytes: Some(crate::canonical_scoring::size_basis_bytes(
                             file.size_bytes,
                             file.announced_size_bytes,

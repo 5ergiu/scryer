@@ -12,7 +12,7 @@ fn public_lists_cannot_request_or_discover() {
     for mode in [ListMode::Request, ListMode::Discover] {
         assert!(validate_public_settings(&[MediaFacet::Movie], None, mode, &routes, None).is_err());
     }
-    for mode in [ListMode::Search, ListMode::Add, ListMode::Hold] {
+    for mode in [ListMode::Add, ListMode::Hold] {
         assert_eq!(
             validate_public_settings(&[MediaFacet::Movie], None, mode, &routes, None).unwrap(),
             vec![MediaFacet::Movie]

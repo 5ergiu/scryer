@@ -1983,6 +1983,9 @@ pub struct DownloadGrabResult {
     /// Torrent seed goals resolved by the selected client route. The canonical
     /// submission coordinator freezes them with the accepted identity.
     pub seed_goals: Option<crate::PersistedSeedGoals>,
+    /// The file names in the grabbed NZB or torrent long enough that a client
+    /// may cut them, read by the router before the artifact is handed off.
+    pub grabbed_file_names: Vec<crate::GrabbedFileName>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

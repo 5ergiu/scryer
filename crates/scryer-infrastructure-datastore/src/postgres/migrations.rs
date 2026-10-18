@@ -560,6 +560,10 @@ async fn run_postgres_rust_hook(
             crate::migrations::release_url_scrub::scrub_stored_release_url_credentials_postgres(tx)
                 .await
         }
+        "import_delay_profile_catalog" => {
+            crate::migrations::delay_profile_tables::import_delay_profile_catalog_postgres(tx)
+                .await
+        }
         #[cfg(test)]
         "test_insert_hook_marker" => {
             let marker = match install_kind {

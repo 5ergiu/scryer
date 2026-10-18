@@ -476,9 +476,8 @@ impl ListActions for FailingDepartureRecord {
         subscription: &ListSubscription,
         route: &scryer_domain::ListRoute,
         item: &crate::lists::resolve::ResolvedItem,
-        search: bool,
     ) -> crate::AppResult<crate::lists::act::AddedTitle> {
-        self.0.add_title(subscription, route, item, search).await
+        self.0.add_title(subscription, route, item).await
     }
 
     async fn owner_manages_titles(

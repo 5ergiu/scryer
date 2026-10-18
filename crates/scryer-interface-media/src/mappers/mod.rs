@@ -354,6 +354,7 @@ mod tests {
             size_bytes: None,
             completed_at: None,
             parameters: vec![("*scryer_facet".to_string(), "anime".to_string())],
+            posted_file_names: Vec::new(),
         };
         let record = ImportRecord {
             id: "import-1".to_string(),

@@ -602,6 +602,7 @@ impl AppUseCase {
         };
 
         scryer_domain::GrabbedReleaseFacts {
+            scoring: None,
             quality: parsed.quality.clone(),
             release_group: parsed.release_group.clone(),
             audio_languages: parsed.languages_audio.clone(),

@@ -1404,6 +1404,10 @@ impl DatastoreAssembly {
         }
     }
 
+    pub fn delay_profiles(&self) -> Arc<dyn scryer_application::DelayProfileRepository> {
+        Arc::new(crate::DelayProfileStore::new(self.datastore()))
+    }
+
     pub fn seeding_profiles(&self) -> Arc<dyn scryer_application::SeedingProfileRepository> {
         match &self.stores {
             DatastoreStores::Sqlite {
@@ -1679,6 +1683,7 @@ impl DatastoreAssembly {
                 .with_oauth_store(oauth)
                 .with_proxy_config_store(self.proxy_configs())
                 .with_seeding_profiles(self.seeding_profiles())
+                .with_delay_profiles(self.delay_profiles())
                 .with_external_identity_verifier(Arc::new(HttpExternalIdentityVerifier::new()))
                 .with_media_server_connection_store(media_server_connection_store.clone())
                 // Maintenance safety: live playback observation (RFC 137 §9.10, WP-G).
@@ -1812,6 +1817,7 @@ impl DatastoreAssembly {
                 .with_oauth_store(oauth)
                 .with_proxy_config_store(self.proxy_configs())
                 .with_seeding_profiles(self.seeding_profiles())
+                .with_delay_profiles(self.delay_profiles())
                 .with_external_identity_verifier(Arc::new(HttpExternalIdentityVerifier::new()))
                 .with_media_server_connection_store(media_server_connection_store.clone())
                 // Maintenance safety: live playback observation (RFC 137 §9.10, WP-G).

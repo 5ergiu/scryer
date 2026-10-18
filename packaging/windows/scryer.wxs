@@ -104,8 +104,15 @@
          never depends on code it is replacing. The stop is scoped to executables inside the
          installed folder, so a portable or development copy running elsewhere survives; a
          process whose path cannot be read (another user's) is skipped and left to Restart
-         Manager. The folder is read into a variable outside the script block because MSI
-         formatting strips braces around a resolved property. Failures are ignored. There is
+         Manager. The installed folder is never pasted into the script: an install path can
+         hold an apostrophe, which would end a PowerShell literal early and fail the whole
+         command. Instead the script asks Windows Installer for the key path of the installed
+         product's application files component (the same component INSTALLEDAPPLICATIONFOLDER
+         is searched from), using the product codes FindRelatedProducts recorded in
+         WIX_UPGRADE_DETECTED; GUIDs carry no quoting hazard. The command is MSI formatted
+         text, so it must not contain a .NET type literal such as [System.IO.Path] (it reads
+         as a property reference and is blanked) and no script block may contain a resolved
+         property (formatting strips the braces around one). Failures are ignored. There is
          no tree kill and the upgrade helper runs as scryer-upgrade-helper.exe, which is not
          in the name list, so an in-app upgrade keeps its helper. This must run immediately
          before InstallValidate, which precedes InstallInitialize, so it cannot be deferred;
@@ -118,7 +125,7 @@
     <CustomAction
         Id="ForceStopScryerProcessesBeforeValidate"
         Property="FORCESTOPPOWERSHELLEXE"
-        ExeCommand="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;$folder = '[INSTALLEDAPPLICATIONFOLDER]'; Get-Process scryer,scryer-tray -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($folder, 'OrdinalIgnoreCase') } | Stop-Process -Force&quot;"
+        ExeCommand="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;$msi = New-Object -ComObject WindowsInstaller.Installer; $folders = @(); foreach ($product in '[WIX_UPGRADE_DETECTED]'.Split(';')) { if (-not $product) { continue }; try { $keyPath = $msi.GetType().InvokeMember('ComponentPath', 'GetProperty', $null, $msi, @($product, '$(var.ApplicationFilesComponentGuid)')); if ($keyPath) { $folders += ((Split-Path -Parent $keyPath).TrimEnd('\') + '\') } } catch { } }; if ($folders.Count -gt 0) { Get-Process scryer,scryer-tray -ErrorAction SilentlyContinue | Where-Object { $path = $_.Path; $path -and @($folders | Where-Object { $path.StartsWith($_, 'OrdinalIgnoreCase') }).Count -gt 0 } | Stop-Process -Force }&quot;"
         Execute="immediate"
         Return="ignore"
         Impersonate="yes" />

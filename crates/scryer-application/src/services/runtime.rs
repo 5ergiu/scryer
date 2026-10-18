@@ -2257,6 +2257,7 @@ pub struct AppRuntimeLibraryState {
 
 #[derive(Clone)]
 pub struct AppRuntimeJobState {
+    pub(crate) score_refresh: Arc<crate::quality::evaluations::ScoreRefreshRuntime>,
     pub job_run_tracker: JobRunTracker,
     pub(crate) full_hash_start_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) full_hash_execution_lock: Arc<tokio::sync::Mutex<()>>,
@@ -2637,6 +2638,7 @@ impl AppRuntimeState {
                 #[cfg(not(windows))]
                 application_upgrade_bundle_signature_check: Arc::new(std::sync::RwLock::new(None)),
                 acquisition_search_lock: Arc::new(tokio::sync::Mutex::new(())),
+                score_refresh: Arc::new(crate::quality::evaluations::ScoreRefreshRuntime::default()),
                 custom_job_scheduler: crate::scripts::scheduler::CustomJobScheduler::default(),
                 custom_job_start_lock: Arc::new(tokio::sync::Mutex::new(())),
                 script_shutdown: tokio_util::sync::CancellationToken::new(),

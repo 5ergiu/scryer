@@ -27,6 +27,63 @@ impl LibraryStore {
     }
 }
 
+/// Drop a library from every delay profile scope. A profile that was limited
+/// to libraries and has none left is disabled rather than left to apply to
+/// every library, and the disable is logged so the operator can find it.
+async fn release_delay_profile_library_tx(tx: &mut SqlTx<'_>, library_id: &str) -> AppResult<()> {
+    let scoped = SqlRuntime::fetch_all(
+        SqlExec::Tx(tx),
+        "SELECT delay_profiles.id, delay_profiles.name, delay_profiles.enabled
+           FROM delay_profiles
+           JOIN delay_profile_libraries
+             ON delay_profile_libraries.profile_id = delay_profiles.id
+          WHERE delay_profile_libraries.library_id = {}
+          ORDER BY delay_profiles.id",
+        &[SqlArg::Text(library_id.to_string())],
+    )
+    .await?;
+    if scoped.is_empty() {
+        return Ok(());
+    }
+    tx.execute(
+        "DELETE FROM delay_profile_libraries WHERE library_id = {}",
+        &[SqlArg::Text(library_id.to_string())],
+    )
+    .await?;
+    for row in &scoped {
+        let profile_id = row.text("id")?;
+        let remaining = SqlRuntime::fetch_optional(
+            SqlExec::Tx(tx),
+            "SELECT 1 AS remaining FROM delay_profile_libraries WHERE profile_id = {} LIMIT 1",
+            &[SqlArg::Text(profile_id.clone())],
+        )
+        .await?;
+        if remaining.is_some() {
+            continue;
+        }
+        let was_enabled = row.bool("enabled")?;
+        if was_enabled {
+            tx.execute(
+                "UPDATE delay_profiles SET enabled = {}, updated_at = {} WHERE id = {}",
+                &[
+                    SqlArg::Bool(false),
+                    SqlArg::Timestamp(Utc::now()),
+                    SqlArg::Text(profile_id.clone()),
+                ],
+            )
+            .await?;
+        }
+        tracing::warn!(
+            delay_profile_id = %profile_id,
+            delay_profile_name = %row.text("name")?,
+            library_id = %library_id,
+            was_enabled,
+            "delay profile lost its last library and is now disabled"
+        );
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl LibraryRepository for LibraryStore {
     async fn list(&self, facet: Option<MediaFacet>) -> AppResult<Vec<Library>> {
@@ -108,6 +165,7 @@ impl LibraryRepository for LibraryStore {
             let library_id = library_id.clone();
             Box::pin(async move {
                 delete_monitor_selections_for_library_tx(tx, &library_id).await?;
+                release_delay_profile_library_tx(tx, &library_id).await?;
                 tx.execute(
                     "DELETE FROM libraries WHERE id = {}",
                     &[SqlArg::Text(library_id)],
@@ -583,6 +641,119 @@ mod tests {
             pool,
             writer_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    fn store_pool(store: &LibraryStore) -> sqlx::SqlitePool {
+        match &store.datastore {
+            StoreDatastore::Sqlite { pool, .. } => pool.clone(),
+            _ => unreachable!("library store tests run on SQLite"),
+        }
+    }
+
+    async fn create_movie_library(store: &LibraryStore, id: &str) {
+        let now = Utc::now();
+        store
+            .create(
+                Library {
+                    id: id.to_string(),
+                    facet: MediaFacet::Movie,
+                    name: id.to_string(),
+                    slug: id.to_string(),
+                    is_default: false,
+                    roots: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                },
+                vec![draft(&format!("/mnt/{id}"), true)],
+            )
+            .await
+            .expect("library should create");
+    }
+
+    async fn insert_delay_profile(pool: &sqlx::SqlitePool, id: &str, library_ids: &[&str]) {
+        sqlx::query(
+            "INSERT INTO delay_profiles (
+                 id, name, usenet_delay_minutes, torrent_delay_minutes, preferred_protocol,
+                 min_age_minutes, bypass_score_threshold, enable_usenet, enable_torrent,
+                 bypass_if_highest_quality, priority, enabled, created_at, updated_at
+             ) VALUES (?1, ?1, 30, 30, 'usenet', 0, NULL, 1, 1, 0, 1, 1, ?2, ?2)",
+        )
+        .bind(id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .expect("delay profile should insert");
+        for (position, library_id) in library_ids.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO delay_profile_libraries (profile_id, library_id, position)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(id)
+            .bind(library_id)
+            .bind(position as i64)
+            .execute(pool)
+            .await
+            .expect("delay profile library should insert");
+        }
+    }
+
+    async fn delay_profile_state(pool: &sqlx::SqlitePool, id: &str) -> (bool, Vec<String>) {
+        let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM delay_profiles WHERE id = ?1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("delay profile should exist");
+        let library_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT library_id FROM delay_profile_libraries
+              WHERE profile_id = ?1 ORDER BY position",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .expect("delay profile libraries should load");
+        (enabled != 0, library_ids)
+    }
+
+    #[tokio::test]
+    async fn deleting_a_profiles_last_library_disables_the_profile_and_spares_the_rest() {
+        let store = test_store().await;
+        let pool = store_pool(&store);
+        create_movie_library(&store, "removed-library").await;
+        create_movie_library(&store, "kept-library").await;
+        insert_delay_profile(&pool, "only-removed", &["removed-library"]).await;
+        insert_delay_profile(
+            &pool,
+            "removed-and-kept",
+            &["removed-library", "kept-library"],
+        )
+        .await;
+        insert_delay_profile(&pool, "only-kept", &["kept-library"]).await;
+        insert_delay_profile(&pool, "every-library", &[]).await;
+
+        assert!(
+            store
+                .delete_library("removed-library")
+                .await
+                .expect("library should delete")
+        );
+
+        assert_eq!(
+            delay_profile_state(&pool, "only-removed").await,
+            (false, Vec::new()),
+            "a profile left with no library is disabled rather than widened to every library"
+        );
+        assert_eq!(
+            delay_profile_state(&pool, "removed-and-kept").await,
+            (true, vec!["kept-library".to_string()])
+        );
+        assert_eq!(
+            delay_profile_state(&pool, "only-kept").await,
+            (true, vec!["kept-library".to_string()])
+        );
+        assert_eq!(
+            delay_profile_state(&pool, "every-library").await,
+            (true, Vec::new())
+        );
     }
 
     fn draft(path: &str, is_default: bool) -> LibraryRootDraft {

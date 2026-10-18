@@ -1514,9 +1514,12 @@ impl AppUseCase {
             else {
                 continue;
             };
-            let Some(profile) =
-                crate::delay_profile::resolve_delay_profile(&profiles, &title.tags, &title.facet)
-            else {
+            let Some(profile) = crate::delay_profile::resolve_delay_profile(
+                &profiles,
+                &title.tags,
+                &title.facet,
+                &title.library_id,
+            ) else {
                 continue;
             };
             if *now
@@ -2568,7 +2571,7 @@ impl AppUseCase {
                 )
             })
             .collect::<Vec<_>>();
-        let mut selected: Option<usize> = None;
+        let mut selected = None;
         let mut next_pending_role = PendingReleaseRole::Primary;
 
         let mut ranked = Vec::with_capacity(scored.len());
@@ -2823,6 +2826,7 @@ impl AppUseCase {
                             delay_profiles,
                             &title.tags,
                             &title.facet,
+                            &title.library_id,
                         )
                         .map(|profile| {
                             profile.release_age_unknown_escalation_deadline(
@@ -2922,12 +2926,21 @@ impl AppUseCase {
             }
 
             if decision_code.is_eligible() {
-                selected = Some(candidate_index);
+                selected = Some((
+                    candidate_index,
+                    candidate.quality_profile_decision.as_ref().map(|decision| {
+                        crate::quality::grab_scoring::capture(
+                            decision,
+                            &admission,
+                            decision_code.as_str(),
+                        )
+                    }),
+                ));
                 break;
             }
         }
 
-        let Some(best_index) = selected else {
+        let Some((best_index, scoring_snapshot)) = selected else {
             return;
         };
         let best = &scored[best_index];
@@ -2954,6 +2967,8 @@ impl AppUseCase {
             *now,
         );
 
+        let release_listing_json =
+            crate::quality::grab_scoring::with_snapshot(release_listing_json, scoring_snapshot);
         let candidate_score = best
             .quality_profile_decision
             .as_ref()
@@ -3192,7 +3207,10 @@ impl AppUseCase {
                         grab_indexer.clone(),
                         canonical_submission.grab.client_id.as_deref(),
                     )
-                    .await;
+                    .await
+                    .with_scoring(crate::quality::grab_scoring::from_listing(
+                        release_listing_json.as_deref(),
+                    ));
                 let _ = self
                     .append_domain_event(new_title_domain_event(
                         report.external_actor.as_ref().map_or_else(

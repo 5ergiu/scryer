@@ -728,3 +728,37 @@ fn season_only_folder_with_technical_suffix_needs_no_title_context() {
         assert!(episode.episode_numbers.is_empty(), "{folder}");
     }
 }
+
+#[test]
+fn an_essay_length_title_keeps_the_facts_that_follow_it() {
+    let words = ["Quiet", "Harbor", "Keeper", "Lantern", "Tide"];
+    let title = (0..300)
+        .map(|index| words[index % words.len()])
+        .collect::<Vec<_>>()
+        .join(" ");
+    let raw = format!("[Fixture] {title} - 07 (1080p) [ABCD1234]");
+    assert!(raw.len() < 4096);
+
+    let analysis = analyze_release_for_target(
+        &raw,
+        &context(ContextFacetHint::Anime, "Quiet Harbor Keeper"),
+    );
+    let projected = &analysis.best_candidate().expect("candidate").projected;
+
+    assert!(analysis.tokens.len() <= 256);
+    assert!(
+        analysis
+            .parse_hints
+            .iter()
+            .any(|hint| hint == "token_limit_reached")
+    );
+    let episode = projected.episode.as_ref().expect("episode");
+    assert_eq!(
+        episode
+            .absolute_episode
+            .or_else(|| episode.absolute_episode_numbers.first().copied())
+            .or_else(|| episode.episode_numbers.first().copied()),
+        Some(7)
+    );
+    assert_eq!(projected.quality.as_deref(), Some("1080p"));
+}

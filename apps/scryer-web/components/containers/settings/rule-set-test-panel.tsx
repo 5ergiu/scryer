@@ -1,13 +1,11 @@
 import * as React from "react";
 import { useClient } from "urql";
 import { Button } from "@/components/ui/button";
+import { ScoreLogRows, ScoreValue } from "@/components/common/score-log";
 import { TitleAutocompletePicker } from "@/components/common/title-autocomplete-picker";
 import { FilterableSelect } from "@/components/ui/filterable-select";
 import { useTranslate } from "@/lib/context/translate-context";
-import {
-  scoringEntryText,
-  type ScoringEntryKind,
-} from "@/lib/utils/release-decision-explanation";
+import type { ScoringEntryKind } from "@/lib/utils/release-decision-explanation";
 import {
   Collapsible,
   CollapsibleContent,
@@ -761,7 +759,7 @@ export function RuleSetTestPanel({
                       <p className="text-xs font-medium uppercase tracking-wide">
                         {label}
                       </p>
-                      <p className="text-3xl font-semibold tabular-nums">
+                      <p className="font-[var(--font-code)] text-3xl font-semibold tabular-nums">
                         {formatSignedScore(score)}
                       </p>
                     </div>
@@ -832,28 +830,22 @@ export function RuleSetTestPanel({
                                 ? ` — ${entry.messages.join("; ")}`
                                 : ""}
                             </span>
-                            <span className="shrink-0 tabular-nums">
-                              {entry.matched
-                                ? formatSignedScore(entry.score ?? 0)
-                                : "No match"}
-                            </span>
+                            {entry.matched ? (
+                              <ScoreValue className="shrink-0" score={entry.score ?? 0} />
+                            ) : (
+                              <span className="shrink-0 text-muted-foreground">No match</span>
+                            )}
                           </div>
                           {entry.entries?.length ? (
-                            <ul className="mt-1 space-y-1 border-l border-border pl-2 text-muted-foreground">
-                              {entry.entries.map((scoreEntry, entryIndex) => (
-                                <li
-                                  key={`${scoreEntry.code}-${entryIndex}`}
-                                  className="flex justify-between gap-3"
-                                >
-                                  <span className="min-w-0 break-words">
-                                    {previewEntryLabel(scoreEntry, result.parsed)}
-                                  </span>
-                                  <span className="shrink-0 tabular-nums">
-                                    {scoringEntryText(scoreEntry, t)}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
+                            <ScoreLogRows
+                              className="mt-1 border-l border-border pl-2"
+                              entries={entry.entries.map((scoreEntry) => ({
+                                code: scoreEntry.code,
+                                delta: scoreEntry.delta,
+                                ...(scoreEntry.kind ? { kind: scoreEntry.kind } : {}),
+                                label: previewEntryLabel(scoreEntry, result.parsed),
+                              }))}
+                            />
                           ) : null}
                         </li>
                       ))}

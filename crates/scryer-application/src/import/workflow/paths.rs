@@ -827,10 +827,11 @@ pub(crate) fn import_video_destination_extension(
 ///
 /// `physical` is the only path that ever reaches the filesystem: every fs,
 /// artifact, move and cleanup call takes [`ImportVideoFile::path`]. A
-/// `logical_name` is set only when srrdb recovered the original scene filename
-/// for an obfuscated member, and it exists purely so title matching, episode
-/// identity, pack planning and the movie fallback have something to parse. The
-/// file on disk is never renamed.
+/// `logical_name` is set only when the download client reported the name the
+/// file was posted with, or srrdb recovered the original scene filename for an
+/// obfuscated member. It exists purely so title matching, episode identity,
+/// pack planning and the movie fallback have something to parse. The file on
+/// disk is never renamed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportVideoFile {
     pub(crate) physical: PathBuf,
@@ -906,6 +907,83 @@ impl ImportVideoFile {
     }
 }
 
+/// Give each file the client wrote under a different name than it was posted
+/// with (Weaver shortens a name past 240 bytes, for one) its posted name to
+/// parse. Only a file directly named by the report and inside the download's
+/// folder takes one; a path separator in the posted name is never followed.
+fn apply_posted_file_names(
+    completed: &CompletedDownload,
+    posted_file_names: &[PostedFileName],
+    files: &mut [ImportVideoFile],
+) {
+    if posted_file_names.is_empty() {
+        return;
+    }
+    let dest_dir = Path::new(&completed.dest_dir);
+    for file in files.iter_mut() {
+        if !file.physical.starts_with(dest_dir) {
+            continue;
+        }
+        let Some(name) = file.physical.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(posted) = posted_file_names.iter().find(|posted| posted.name == name) else {
+            continue;
+        };
+        let posted_name = posted.posted_name.trim().replace(['/', '\\'], "_");
+        if posted_name.is_empty() || posted_name == name {
+            continue;
+        }
+        tracing::debug!(
+            physical_name = %file.physical.display(),
+            logical_name = %posted_name,
+            "parsing the name the download client reported this file was posted with"
+        );
+        file.logical_name = Some(posted_name);
+    }
+}
+
+use crate::grabbed_file_names::{file_name_looks_cut, match_cut_file_names};
+
+/// The grab's own long file names, matched back to the files whose names
+/// look cut. Only a name the file's own name is the start of is taken, so a
+/// file the client renamed keeps the name it was given.
+async fn posted_names_from_grab(
+    app: &AppUseCase,
+    completed: &CompletedDownload,
+    cut_files: &[(&Path, String)],
+) -> Vec<PostedFileName> {
+    let locator = crate::ClientJobLocator::new(
+        Some(&completed.client_id),
+        &completed.client_type,
+        &completed.download_client_item_id,
+    );
+    let grabbed = app
+        .services
+        .workflow
+        .download_submissions
+        .grabbed_file_names(&locator)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(
+                error = %error,
+                download_client_item_id = %completed.download_client_item_id,
+                "could not read the grab's file names; parsing the names on disk"
+            );
+            Vec::new()
+        });
+    if grabbed.is_empty() {
+        return Vec::new();
+    }
+    let mut on_disk = Vec::with_capacity(cut_files.len());
+    for (path, name) in cut_files {
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            on_disk.push((name.clone(), metadata.len()));
+        }
+    }
+    match_cut_file_names(&grabbed, &on_disk)
+}
+
 /// srrdb filename recovery for one `run_import` call.
 ///
 /// Everything about it is per-import and in memory: the admin setting is read
@@ -922,6 +1000,8 @@ struct SrrdbFilenameRecovery {
     resolved: HashMap<PathBuf, Option<String>>,
     /// Set by the first timeout, transport failure, 429 or 5xx.
     tripped: bool,
+    /// The client's posted names for this download, once asked for.
+    posted_file_names: Option<Vec<PostedFileName>>,
 }
 
 impl SrrdbFilenameRecovery {
@@ -949,6 +1029,62 @@ impl SrrdbFilenameRecovery {
         parsed_usable_release_from_file_stem(path).is_none()
     }
 
+    /// The names this download's files were posted with: the ones the
+    /// completed download already carries, else, when a file name looks cut,
+    /// the client's answer, else the grab's own long names matched back to the
+    /// cut files. Asked for at most once per import. A failure reads as no
+    /// names, which is what the import did before either source existed.
+    ///
+    /// TODO(2026-11-17): once Weaver's history reads carry `postedFileNames`,
+    /// read Weaver's names from `completed` alone and drop its second request.
+    async fn posted_file_names<'a>(
+        &'a mut self,
+        app: &AppUseCase,
+        completed: &'a CompletedDownload,
+        files: &[ImportVideoFile],
+    ) -> &'a [PostedFileName] {
+        if !completed.posted_file_names.is_empty() {
+            return &completed.posted_file_names;
+        }
+        if self.posted_file_names.is_none() {
+            let dest_dir = Path::new(&completed.dest_dir);
+            let cut_files: Vec<(&Path, String)> = files
+                .iter()
+                .filter(|file| file.physical.starts_with(dest_dir))
+                .filter_map(|file| {
+                    let name = file.physical.file_name()?.to_str()?;
+                    file_name_looks_cut(name).then(|| (file.physical.as_path(), name.to_string()))
+                })
+                .collect();
+            if cut_files.is_empty() {
+                return &[];
+            }
+            let mut names = app
+                .services
+                .integrations
+                .download_client
+                .posted_file_names_for_source(
+                    &completed.client_id,
+                    &completed.client_type,
+                    &completed.download_client_item_id,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::debug!(
+                        error = %error,
+                        download_client_item_id = %completed.download_client_item_id,
+                        "could not read the posted file names; parsing the names on disk"
+                    );
+                    Vec::new()
+                });
+            if names.is_empty() {
+                names = posted_names_from_grab(app, completed, &cut_files).await;
+            }
+            self.posted_file_names = Some(names);
+        }
+        self.posted_file_names.as_deref().unwrap_or_default()
+    }
+
     /// Pair each physical video file with the name parsing should read.
     ///
     /// `needs_own_name` is the caller's judgement that these files have to
@@ -969,6 +1105,8 @@ impl SrrdbFilenameRecovery {
             .into_iter()
             .map(ImportVideoFile::physical)
             .collect();
+        let posted_file_names = self.posted_file_names(app, completed, &files).await;
+        apply_posted_file_names(completed, posted_file_names, &mut files);
 
         // The port is absent in every assembly that does not wire the
         // production adapter, which is indistinguishable from the switch being
@@ -996,6 +1134,9 @@ impl SrrdbFilenameRecovery {
         }
 
         for file in &mut files {
+            if file.logical_name.is_some() {
+                continue;
+            }
             if let Some(cached) = self.resolved.get(&file.physical) {
                 file.logical_name = cached.clone();
                 continue;

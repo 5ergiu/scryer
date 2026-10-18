@@ -656,6 +656,8 @@ const ru: LocaleDictionary = {
     "jobs.triggerSource.systemInternal": "Внутренний системный процесс",
     "deletePreview.counting": "Подсчёт файлов для удаления...",
     "deletePreview.error": "Не удалось подготовить предварительный просмотр удаления.",
+    "deletePreview.folderUnknown": "Scryer не может определить, в какой папке лежат файлы этого тайтла, поэтому ничего не удалит с диска.",
+    "deletePreview.removeFromCatalogOnly": "Убрать только из каталога",
     "deletePreview.files": "Файлы",
     "deletePreview.media": "Медиафайлы",
     "deletePreview.subtitles": "Субтитры",
@@ -768,6 +770,9 @@ const ru: LocaleDictionary = {
     "settings.delayProfileFacetsLabel": "Применяется к",
     "settings.delayProfileFacetsHelp":
         "Типы контента, к которым применяется этот профиль. Оставьте все флажки снятыми, чтобы применять ко всем типам.",
+    "settings.delayProfileLibrariesLabel": "Библиотеки",
+    "settings.delayProfileLibrariesHelp": "Библиотеки, к которым применяется этот профиль. Оставьте выбранными все, чтобы применять его ко всем библиотекам. При удалении последней библиотеки профиля профиль отключается.",
+    "settings.delayProfileUnknownLibrary": "Неизвестная библиотека",
     "settings.delayProfileAllFacets": "Все",
     "settings.delayProfileTagsLabel": "Теги",
     "settings.delayProfileTagsPlaceholder":
@@ -957,6 +962,8 @@ const ru: LocaleDictionary = {
     "settings.folderValidationUnknownToken":
         "Шаблоны папок поддерживают токены {title}, {year} и идентификаторы внешних сервисов. Недопустимый токен: {{token}}",
     "settings.folderValidationEmpty": "Шаблон папки не может быть пустым.",
+    "settings.folderValidationLeafTitleToken":
+        "Последняя папка в шаблоне должна содержать токен названия или внешнего идентификатора",
     "settings.folderValidationIllegalCharacter":
         "Шаблон папки содержит недопустимый символ файловой системы: {{character}}",
     "settings.renameTemplateLabel": "Шаблон переименования",
@@ -2123,6 +2130,8 @@ const ru: LocaleDictionary = {
     "settings.refReleaseLangsAudio":
         "Коды языков аудио ISO 639-3 (например, eng, jpn). Включают языки из листинга индексатора, зафиксированные при захвате релиза; файлы, найденные сканированием, принятые или импортированные до того, как начали сохраняться снимки листинга, дают только то, что видно по имени и самому файлу",
 
+    "settings.refReleaseIndexerLanguages":
+        "Коды языков аудио ISO 639-3, которые сообщил сам листинг индексатора, зафиксированные при захвате релиза. Никогда не выводятся из имени или тайтла; пусто, если индексатор ничего не сообщил",
     "settings.refReleaseLangsSub":
         "Коды языков субтитров ISO 639-3",
 
@@ -6313,13 +6322,11 @@ const ru: LocaleDictionary = {
   "lists.kind.movie": "Фильмы",
   "lists.kind.series": "Сериалы",
   "lists.kind.anime": "Аниме",
-  "lists.mode.search": "Добавить и искать",
-  "lists.mode.add": "Только добавить",
+  "lists.mode.add": "Добавить",
   "lists.mode.hold": "Отложить до одобрения",
   "lists.mode.request": "Запросить",
   "lists.mode.discover": "Показывать только в «Обзоре»",
-  "lists.modeHelp.search": "Добавляет новые тайтлы с отслеживанием и сразу ищет их.",
-  "lists.modeHelp.add": "Добавляет новые тайтлы с отслеживанием без поиска.",
+  "lists.modeHelp.add": "Добавляет новые тайтлы с отслеживанием, выбранным для каждого типа. Отслеживаемые тайтлы ищутся, неотслеживаемые — нет.",
   "lists.modeHelp.hold": "Создаёт ожидающий запрос для каждого нового тайтла, чтобы его кто-то одобрил.",
   "lists.modeHelp.request": "Запрашивает новые тайтлы от имени участника.",
   "lists.modeHelp.discover": "Записывает тайтлы списка, ничего не добавляя.",
@@ -6424,7 +6431,8 @@ const ru: LocaleDictionary = {
   "lists.detail.title": "Тайтл",
   "lists.detail.state": "Состояние",
   "lists.detail.noTitles": "Тайтлы ещё не записаны.",
-  "lists.detail.pageRange": "{{from}}–{{to}} из {{total}}",
+  "lists.detail.sourceRank": "Место в источнике",
+  "lists.detail.pageRange": "Записи {{from}}–{{to}} из {{total}}",
   "lists.detail.previousPage": "Назад",
   "lists.detail.nextPage": "Далее",
   "lists.detail.history": "История синхронизаций",

@@ -1153,6 +1153,116 @@ async fn graphql_delay_profiles_round_trip() {
     assert_eq!(delete["data"]["deleteDelayProfile"]["id"], "balanced-delay");
 }
 
+const UPSERT_SCOPED_DELAY_PROFILE: &str = r#"
+    mutation UpsertDelayProfile($input: DelayProfileInput!) {
+      upsertDelayProfile(input: $input) { id libraryIds enabled }
+    }
+"#;
+
+const READ_SCOPED_DELAY_PROFILES: &str = r#"
+    query DelayProfiles { delayProfiles { id libraryIds enabled } }
+"#;
+
+fn scoped_delay_profile_input(library_ids: Option<Vec<&str>>) -> Value {
+    let mut input = json!({
+        "id": "scoped-delay",
+        "name": "Scoped Delay",
+        "usenetDelayMinutes": 45,
+        "torrentDelayMinutes": 45,
+        "preferredProtocol": "USENET",
+        "minAgeMinutes": 0,
+        "appliesToFacets": ["MOVIE"],
+        "tags": [],
+        "priority": 1,
+        "enabled": true
+    });
+    if let Some(library_ids) = library_ids {
+        input["libraryIds"] = json!(library_ids);
+    }
+    json!({ "input": input })
+}
+
+#[tokio::test]
+async fn graphql_delay_profile_library_scope_round_trips_and_follows_library_delete() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let library = gql(
+        &ctx,
+        r#"mutation($input: CreateLibraryInput!) {
+            createLibrary(input: $input) { id }
+        }"#,
+        json!({
+            "input": {
+                "facet": "MOVIE",
+                "name": "Delay Scope Movies",
+                "roots": [{ "path": "/delay-scope/movies", "isDefault": true }]
+            }
+        }),
+    )
+    .await;
+    assert_no_errors(&library);
+    let library_id = library["data"]["createLibrary"]["id"]
+        .as_str()
+        .expect("library id")
+        .to_string();
+
+    let unknown = gql(
+        &ctx,
+        UPSERT_SCOPED_DELAY_PROFILE,
+        scoped_delay_profile_input(Some(vec!["missing-library"])),
+    )
+    .await;
+    assert!(
+        unknown["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "an unknown library id should be refused: {unknown}"
+    );
+
+    let scoped = gql(
+        &ctx,
+        UPSERT_SCOPED_DELAY_PROFILE,
+        scoped_delay_profile_input(Some(vec![library_id.as_str()])),
+    )
+    .await;
+    assert_no_errors(&scoped);
+    assert_eq!(
+        scoped["data"]["upsertDelayProfile"]["libraryIds"],
+        json!([library_id])
+    );
+
+    // Leaving libraryIds out keeps the libraries the profile already has.
+    let kept = gql(
+        &ctx,
+        UPSERT_SCOPED_DELAY_PROFILE,
+        scoped_delay_profile_input(None),
+    )
+    .await;
+    assert_no_errors(&kept);
+    assert_eq!(
+        kept["data"]["upsertDelayProfile"]["libraryIds"],
+        json!([library_id])
+    );
+
+    let deleted = gql(
+        &ctx,
+        r#"mutation($id: ID!) { deleteLibrary(id: $id) { id } }"#,
+        json!({ "id": library_id }),
+    )
+    .await;
+    assert_no_errors(&deleted);
+
+    let read = gql(&ctx, READ_SCOPED_DELAY_PROFILES, json!({})).await;
+    assert_no_errors(&read);
+    let profile = &read["data"]["delayProfiles"][0];
+    assert_eq!(profile["id"], "scoped-delay");
+    assert_eq!(profile["libraryIds"], json!([]));
+    assert_eq!(
+        profile["enabled"], false,
+        "a profile that loses its last library is disabled, not widened to every library"
+    );
+}
+
 async fn create_oauth_refresh_grant_for_security_test(
     ctx: &TestContext,
     user: &User,

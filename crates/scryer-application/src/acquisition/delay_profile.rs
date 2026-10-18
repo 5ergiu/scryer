@@ -4,6 +4,9 @@ use scryer_domain::MediaFacet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// The settings key delay profiles were stored under before they moved to
+/// their own tables. It is still the key `settings_changed` events carry when
+/// the profiles change, which is what the web settings page listens for.
 pub const DELAY_PROFILE_CATALOG_KEY: &str = "acquisition.delay_profiles";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -12,6 +15,23 @@ pub enum PreferredProtocol {
     #[default]
     Usenet,
     Torrent,
+}
+
+impl PreferredProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Usenet => "usenet",
+            Self::Torrent => "torrent",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "usenet" => Some(Self::Usenet),
+            "torrent" => Some(Self::Torrent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,10 +114,36 @@ pub struct DelayProfile {
     pub applies_to_facets: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Libraries this profile is limited to. Empty applies to every library.
+    #[serde(default)]
+    pub library_ids: Vec<String>,
     #[serde(default)]
     pub priority: i32,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// The same defaults a stored profile gets for a field it leaves out.
+impl Default for DelayProfile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            usenet_delay_minutes: 0,
+            torrent_delay_minutes: 0,
+            preferred_protocol: default_preferred_protocol(),
+            min_age_minutes: 0,
+            bypass_score_threshold: None,
+            enable_usenet: true,
+            enable_torrent: true,
+            bypass_if_highest_quality: false,
+            applies_to_facets: Vec::new(),
+            tags: Vec::new(),
+            library_ids: Vec::new(),
+            priority: 0,
+            enabled: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -110,6 +156,41 @@ fn default_preferred_protocol() -> PreferredProtocol {
 
 pub fn parse_delay_profile_catalog(raw_json: &str) -> Result<Vec<DelayProfile>, serde_json::Error> {
     serde_json::from_str::<Vec<DelayProfile>>(raw_json)
+}
+
+/// Trim the id and name, keep only valid facets in their canonical spelling,
+/// and drop blank or repeated tags and library ids.
+pub fn normalize_delay_profile(mut profile: DelayProfile) -> DelayProfile {
+    profile.id = profile.id.trim().to_string();
+    profile.name = profile.name.trim().to_string();
+
+    let mut seen_facets = HashSet::new();
+    profile.applies_to_facets = profile
+        .applies_to_facets
+        .into_iter()
+        .filter_map(|facet| MediaFacet::parse(&facet).map(|parsed| parsed.as_str().to_string()))
+        .filter(|facet| seen_facets.insert(facet.clone()))
+        .collect();
+
+    let mut seen_tags = HashSet::new();
+    profile.tags = profile
+        .tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .filter(|tag| seen_tags.insert(tag.to_ascii_lowercase()))
+        .collect();
+
+    let mut seen_libraries = HashSet::new();
+    profile.library_ids = profile
+        .library_ids
+        .into_iter()
+        .map(|library_id| library_id.trim().to_string())
+        .filter(|library_id| !library_id.is_empty())
+        .filter(|library_id| seen_libraries.insert(library_id.clone()))
+        .collect();
+
+    profile
 }
 
 pub fn validate_delay_profile_catalog(profiles: &[DelayProfile]) -> Result<(), String> {
@@ -172,23 +253,31 @@ pub fn validate_delay_profile_catalog(profiles: &[DelayProfile]) -> Result<(), S
     Ok(())
 }
 
-/// Resolve the delay profile that applies to a title, based on tags and facet.
+/// Resolve the delay profile that applies to a title, based on tags, facet and
+/// library.
 ///
 /// Profiles are evaluated in `priority ASC` order. A profile matches if:
 /// 1. It is enabled.
 /// 2. Its `tags` overlap with the title's tags, OR it has no tags (catch-all).
 /// 3. Its `applies_to_facets` contains the title's facet, OR it has no facet filter.
+/// 4. Its `library_ids` contains the title's library, OR it has no library filter.
 ///
 /// Returns `None` if no profile matches — caller should grab immediately.
 pub fn resolve_delay_profile<'a>(
     profiles: &'a [DelayProfile],
     title_tags: &[String],
     facet: &MediaFacet,
+    library_id: &str,
 ) -> Option<&'a DelayProfile> {
     let mut sorted: Vec<&DelayProfile> = profiles.iter().filter(|p| p.enabled).collect();
     sorted.sort_by_key(|p| p.priority);
 
     for profile in sorted {
+        if !profile.library_ids.is_empty() && !profile.library_ids.iter().any(|id| id == library_id)
+        {
+            continue;
+        }
+
         // Check facet filter
         if !profile.applies_to_facets.is_empty()
             && !profile
@@ -216,10 +305,15 @@ pub fn resolve_delay_profile<'a>(
     None
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the delay decision takes the title's matching keys and the release facts explicitly"
+)]
 pub fn resolve_delay_decision(
     profiles: &[DelayProfile],
     title_tags: &[String],
     facet: &MediaFacet,
+    library_id: &str,
     source_kind: Option<DownloadSourceKind>,
     published_at: Option<DateTime<Utc>>,
     candidate_score: i32,
@@ -229,7 +323,7 @@ pub fn resolve_delay_decision(
         candidate_score,
         ..DelayPolicyContext::default()
     };
-    resolve_delay_profile(profiles, title_tags, facet).map(|profile| {
+    resolve_delay_profile(profiles, title_tags, facet, library_id).map(|profile| {
         profile.evaluate_delay_decision_with_context(source_kind, published_at, &context, now)
     })
 }
@@ -248,6 +342,7 @@ pub(crate) fn grab_time_delay_decision(
     profiles: &[DelayProfile],
     title_tags: &[String],
     facet: &MediaFacet,
+    library_id: &str,
     source_kind: Option<DownloadSourceKind>,
     published_at: Option<DateTime<Utc>>,
     candidate_score: i32,
@@ -258,6 +353,7 @@ pub(crate) fn grab_time_delay_decision(
         profiles,
         title_tags,
         facet,
+        library_id,
         source_kind,
         published_at,
         &DelayPolicyContext {
@@ -268,16 +364,21 @@ pub(crate) fn grab_time_delay_decision(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the canonical grab-time check deliberately mirrors the shared delay decision inputs"
+)]
 pub(crate) fn grab_time_delay_decision_with_context(
     profiles: &[DelayProfile],
     title_tags: &[String],
     facet: &MediaFacet,
+    library_id: &str,
     source_kind: Option<DownloadSourceKind>,
     published_at: Option<DateTime<Utc>>,
     context: &DelayPolicyContext,
     now: &DateTime<Utc>,
 ) -> Option<DelayDecision> {
-    resolve_delay_profile(profiles, title_tags, facet).map(|profile| {
+    resolve_delay_profile(profiles, title_tags, facet, library_id).map(|profile| {
         profile.evaluate_delay_decision_with_context(source_kind, published_at, context, now)
     })
 }
@@ -482,6 +583,8 @@ pub fn is_usenet_source(source_kind: Option<DownloadSourceKind>) -> bool {
 mod tests {
     use super::*;
 
+    const LIBRARY: &str = "library-movies";
+
     fn make_profile(
         id: &str,
         priority: i32,
@@ -501,6 +604,7 @@ mod tests {
             bypass_if_highest_quality: false,
             applies_to_facets: vec![],
             tags: vec![],
+            library_ids: vec![],
             priority,
             enabled: true,
         }
@@ -508,14 +612,14 @@ mod tests {
 
     #[test]
     fn no_profiles_returns_none() {
-        let result = resolve_delay_profile(&[], &[], &MediaFacet::Movie);
+        let result = resolve_delay_profile(&[], &[], &MediaFacet::Movie, LIBRARY);
         assert!(result.is_none());
     }
 
     #[test]
     fn catch_all_profile_matches() {
         let profiles = vec![make_profile("default", 100, 360, 360)];
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY);
         assert_eq!(result.unwrap().id, "default");
     }
 
@@ -525,7 +629,7 @@ mod tests {
             make_profile("low", 100, 720, 720),
             make_profile("high", 10, 360, 360),
         ];
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series, LIBRARY);
         assert_eq!(result.unwrap().id, "high");
     }
 
@@ -534,7 +638,7 @@ mod tests {
         let mut profile = make_profile("movies-only", 10, 360, 360);
         profile.applies_to_facets = vec!["movie".to_string()];
         let profiles = vec![profile];
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series, LIBRARY);
         assert!(result.is_none());
     }
 
@@ -543,7 +647,7 @@ mod tests {
         let mut profile = make_profile("movies-only", 10, 360, 360);
         profile.applies_to_facets = vec!["movie".to_string()];
         let profiles = vec![profile];
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY);
         assert_eq!(result.unwrap().id, "movies-only");
     }
 
@@ -558,6 +662,7 @@ mod tests {
             &profiles,
             &["4k".to_string(), "anime".to_string()],
             &MediaFacet::Movie,
+            LIBRARY,
         );
         assert_eq!(result.unwrap().id, "tagged");
     }
@@ -569,7 +674,8 @@ mod tests {
         let catch_all = make_profile("default", 100, 720, 720);
         let profiles = vec![profile, catch_all];
 
-        let result = resolve_delay_profile(&profiles, &["hdr".to_string()], &MediaFacet::Movie);
+        let result =
+            resolve_delay_profile(&profiles, &["hdr".to_string()], &MediaFacet::Movie, LIBRARY);
         assert_eq!(result.unwrap().id, "default");
     }
 
@@ -578,8 +684,63 @@ mod tests {
         let mut profile = make_profile("disabled", 10, 360, 360);
         profile.enabled = false;
         let profiles = vec![profile];
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn library_filter_excludes_other_libraries() {
+        let mut profile = make_profile("scoped", 10, 360, 360);
+        profile.library_ids = vec!["library-other".to_string()];
+        let profiles = vec![profile];
+        assert!(resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY).is_none());
+    }
+
+    #[test]
+    fn library_filter_includes_listed_library() {
+        let mut profile = make_profile("scoped", 10, 360, 360);
+        profile.library_ids = vec!["library-other".to_string(), LIBRARY.to_string()];
+        let profiles = vec![profile];
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY);
+        assert_eq!(result.unwrap().id, "scoped");
+    }
+
+    #[test]
+    fn library_scoped_profile_falls_through_to_catch_all() {
+        let mut scoped = make_profile("scoped", 10, 360, 360);
+        scoped.library_ids = vec!["library-other".to_string()];
+        let profiles = vec![scoped, make_profile("default", 100, 720, 720)];
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY);
+        assert_eq!(result.unwrap().id, "default");
+    }
+
+    #[test]
+    fn library_filter_combines_with_facet_and_tags() {
+        let mut profile = make_profile("scoped", 10, 360, 360);
+        profile.library_ids = vec![LIBRARY.to_string()];
+        profile.applies_to_facets = vec!["movie".to_string()];
+        profile.tags = vec!["4k".to_string()];
+        let profiles = vec![profile];
+        let tags = ["4k".to_string()];
+        assert!(resolve_delay_profile(&profiles, &tags, &MediaFacet::Movie, LIBRARY).is_some());
+        assert!(resolve_delay_profile(&profiles, &[], &MediaFacet::Movie, LIBRARY).is_none());
+        assert!(resolve_delay_profile(&profiles, &tags, &MediaFacet::Series, LIBRARY).is_none());
+        assert!(
+            resolve_delay_profile(&profiles, &tags, &MediaFacet::Movie, "library-other").is_none()
+        );
+    }
+
+    #[test]
+    fn normalize_drops_blank_and_repeated_library_ids() {
+        let mut profile = make_profile("scoped", 10, 360, 360);
+        profile.library_ids = vec![
+            " library-a ".to_string(),
+            String::new(),
+            "library-a".to_string(),
+            "library-b".to_string(),
+        ];
+        let normalized = normalize_delay_profile(profile);
+        assert_eq!(normalized.library_ids, vec!["library-a", "library-b"]);
     }
 
     #[test]
@@ -653,7 +814,7 @@ mod tests {
         profile.applies_to_facets = vec!["series".to_string()];
         let profiles = vec![profile];
 
-        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series);
+        let result = resolve_delay_profile(&profiles, &[], &MediaFacet::Series, LIBRARY);
         assert!(result.is_some());
     }
 
@@ -710,6 +871,7 @@ mod tests {
             &profiles,
             &[],
             &MediaFacet::Movie,
+            LIBRARY,
             Some(DownloadSourceKind::NzbFile),
             Some(published_at),
             0,
@@ -721,6 +883,7 @@ mod tests {
             &profiles,
             &[],
             &MediaFacet::Movie,
+            LIBRARY,
             Some(DownloadSourceKind::NzbFile),
             Some(published_at),
             0,

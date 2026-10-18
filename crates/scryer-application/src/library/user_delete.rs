@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(test)]
 use crate::stored_paths::path_to_stored_string;
 use crate::stored_paths::stored_path_to_path_buf;
 use scryer_domain::{
@@ -297,7 +296,9 @@ impl AppUseCase {
         actor: &User,
         title_id: &str,
     ) -> AppResult<DeletePreview> {
-        let context = self.resolve_title_delete_context(title_id).await?;
+        let context = self
+            .resolve_title_delete_context(title_id, MissingTitleFolder::Derive)
+            .await?;
         self.require_delete_context_permission(actor, &context)
             .await?;
         let manifest = self.build_delete_manifest(context.clone()).await?;
@@ -426,9 +427,7 @@ impl AppUseCase {
             .filter(|candidate| candidate.title_id.as_str() != title.title_id.as_str())
             .cloned()
             .collect();
-        let folder_path = Some(required_title_delete_folder(title.folder_path)?);
-
-        let recorded_paths = self
+        let recorded_paths: Vec<String> = self
             .services
             .library
             .media_files
@@ -437,6 +436,24 @@ impl AppUseCase {
             .into_iter()
             .map(|file| file.file_path)
             .collect();
+        let folder_path = match normalize_optional_path_string(title.folder_path) {
+            Some(folder) => Some(folder),
+            None => {
+                let mut catalog_title = self
+                    .services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.title_id)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("title {}", title.title_id)))?;
+                self.title_delete_folder(
+                    &mut catalog_title,
+                    &recorded_paths,
+                    MissingTitleFolder::Derive,
+                )
+                .await?
+            }
+        };
 
         let manifest = self
             .build_delete_manifest(UserDeleteContext::Title(TitleDeleteContext {
@@ -605,7 +622,9 @@ impl AppUseCase {
         preview_fingerprint: &str,
         typed_confirmation: Option<&str>,
     ) -> AppResult<()> {
-        let context = self.resolve_title_delete_context(title_id).await?;
+        let context = self
+            .resolve_title_delete_context(title_id, MissingTitleFolder::DeriveAndRecord)
+            .await?;
         self.execute_delete_context(
             context,
             preview_fingerprint,
@@ -625,7 +644,9 @@ impl AppUseCase {
         preview_fingerprint: &str,
         authorization: &PolicyDeleteAuthorization,
     ) -> AppResult<()> {
-        let context = self.resolve_title_delete_context(title_id).await?;
+        let context = self
+            .resolve_title_delete_context(title_id, MissingTitleFolder::Refuse)
+            .await?;
         // The owned multi-disc exception is for explicit user deletion only.
         // Preserve the existing maintenance-policy boundary.
         if let UserDeleteContext::Title(title) = &context
@@ -635,7 +656,9 @@ impl AppUseCase {
             if path.is_dir() {
                 let patterns =
                     crate::library_discovery::episode_folder_patterns(self, &title.facet).await?;
-                crate::library_discovery::ensure_existing_title_boundary(&path, &patterns).await?;
+                crate::library_discovery::ensure_existing_title_boundary(&path, &patterns)
+                    .await
+                    .map_err(title_delete_boundary_error)?;
             }
         }
         self.execute_delete_context(
@@ -1028,8 +1051,12 @@ impl AppUseCase {
             .await
     }
 
-    async fn resolve_title_delete_context(&self, title_id: &str) -> AppResult<UserDeleteContext> {
-        let title = self
+    async fn resolve_title_delete_context(
+        &self,
+        title_id: &str,
+        missing_folder: MissingTitleFolder,
+    ) -> AppResult<UserDeleteContext> {
+        let mut title = self
             .services
             .catalog
             .titles
@@ -1056,9 +1083,7 @@ impl AppUseCase {
             .filter(|candidate| candidate.id != title.id)
             .filter_map(tracked_title_folder_from_title)
             .collect();
-        let folder_path = Some(required_title_delete_folder(title.folder_path)?);
-
-        let recorded_paths = self
+        let recorded_paths: Vec<String> = self
             .services
             .library
             .media_files
@@ -1067,6 +1092,9 @@ impl AppUseCase {
             .into_iter()
             .map(|file| file.file_path)
             .collect();
+        let folder_path = self
+            .title_delete_folder(&mut title, &recorded_paths, missing_folder)
+            .await?;
 
         Ok(UserDeleteContext::Title(TitleDeleteContext {
             title_id: title.id,
@@ -1077,6 +1105,48 @@ impl AppUseCase {
             other_titles,
             recorded_paths,
         }))
+    }
+
+    /// The folder a title delete works in.
+    ///
+    /// A title with no recorded folder and no recorded files has nothing on
+    /// disk to delete. One with files gets the single folder they all imply,
+    /// held to the checks a folder claim makes; recording it is left to the
+    /// delete itself, so a preview changes nothing.
+    async fn title_delete_folder(
+        &self,
+        title: &mut Title,
+        recorded_paths: &[String],
+        missing_folder: MissingTitleFolder,
+    ) -> AppResult<Option<String>> {
+        if let Some(folder) = normalize_optional_path_string(title.folder_path.clone()) {
+            return Ok(Some(folder));
+        }
+        if matches!(missing_folder, MissingTitleFolder::Refuse) {
+            return required_title_delete_folder(None).map(Some);
+        }
+        if recorded_paths.is_empty() {
+            return Ok(None);
+        }
+        let folder = implied_title_folder_for(self, title, recorded_paths).await?;
+        let claim = match missing_folder {
+            MissingTitleFolder::DeriveAndRecord => {
+                crate::folder_ownership::claim_title_folder_if_missing(self, title, &folder).await
+            }
+            _ => crate::folder_ownership::ensure_title_folder_claimable(self, title, &folder).await,
+        };
+        // A refused claim leaves the folder unknown. Anything else (storage or
+        // filesystem trouble) may pass, and is reported as it is.
+        claim.map_err(|error| match error {
+            AppError::Validation(_) | AppError::ValidationRefused { .. } => {
+                AppError::validation_refused(TITLE_FOLDER_UNKNOWN, format!(
+                    "title folder ownership is missing and the folder its files are in ({}) cannot be recorded for it: {error}; correct the title's folder before deleting files",
+                    folder.display()
+                ))
+            }
+            error => error,
+        })?;
+        Ok(Some(path_to_stored_string(&folder)))
     }
 
     async fn resolve_media_file_delete_context(
@@ -1219,11 +1289,106 @@ fn normalize_optional_path_string(path: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Delete refuses a recorded folder that holds other titles or a mixed
+/// layout; the message says how to resolve it instead of naming a selection.
+fn title_delete_boundary_error(error: AppError) -> AppError {
+    match error {
+        AppError::Validation(_) => AppError::Validation(
+            "title folder also holds other titles or a mixed layout; change this title's folder to the one that directly holds its media, then delete again".into(),
+        ),
+        error => error,
+    }
+}
+
+/// The reason a title delete gives when it cannot tell which folder is the
+/// title's. Removing the title from the catalog without its files still works.
+pub(crate) const TITLE_FOLDER_UNKNOWN: &str = "title_folder_unknown";
+
+/// What a title delete does when the title has no recorded folder.
+#[derive(Clone, Copy)]
+enum MissingTitleFolder {
+    /// Refuse, as a maintenance-policy delete always does.
+    Refuse,
+    /// Use the folder the title's recorded files imply, without recording it.
+    Derive,
+    /// Record the folder the title's recorded files imply, then use it.
+    DeriveAndRecord,
+}
+
+/// The one title folder every recorded file of `title` sits in. Nothing here
+/// checks the folder may be claimed; recording it goes through the claim.
+pub(super) async fn implied_title_folder_for(
+    app: &AppUseCase,
+    title: &Title,
+    recorded_paths: &[String],
+) -> AppResult<PathBuf> {
+    let patterns = crate::library_discovery::episode_folder_patterns(app, &title.facet).await?;
+    implied_title_folder(&title.facet, recorded_paths, &patterns)
+}
+
+/// The one title folder every recorded file sits in: the file's own folder,
+/// above a season folder of an episodic title or a disc structure folder of a
+/// movie. Files that imply different folders leave the title's folder unknown.
+fn implied_title_folder(
+    facet: &MediaFacet,
+    recorded_paths: &[String],
+    episode_folders: &[regex::Regex],
+) -> AppResult<PathBuf> {
+    let mut implied: Option<PathBuf> = None;
+    for raw_path in recorded_paths {
+        let path = normalize_absolute_path(&stored_path_to_path_buf(raw_path))?;
+        let mut folder = path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::Validation("recorded media path has no folder".into()))?;
+        if *facet == MediaFacet::Movie {
+            if let Some(disc_root) = folder.ancestors().find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.eq_ignore_ascii_case("BDMV") || name.eq_ignore_ascii_case("VIDEO_TS")
+                    })
+            }) {
+                folder = disc_root.parent().map(Path::to_path_buf).unwrap_or(folder);
+            }
+        } else if folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                episode_folders.iter().any(|pattern| pattern.is_match(name))
+                    || crate::library::workflow::scan_title_files::recognize_season_folder_name(
+                        name,
+                    )
+                    .is_some()
+            })
+            && let Some(parent) = folder.parent()
+        {
+            folder = parent.to_path_buf();
+        }
+        match &implied {
+            None => implied = Some(folder),
+            Some(existing) if *existing == folder => {}
+            Some(existing) => {
+                return Err(AppError::validation_refused(
+                    TITLE_FOLDER_UNKNOWN,
+                    format!(
+                        "title folder ownership is missing and its recorded files are in more than one folder ({} and {}); correct the title's folder before deleting files",
+                        existing.display(),
+                        folder.display()
+                    ),
+                ));
+            }
+        }
+    }
+    implied.ok_or_else(|| AppError::Validation("title has no recorded media".into()))
+}
+
 fn required_title_delete_folder(folder_path: Option<String>) -> AppResult<String> {
     normalize_optional_path_string(folder_path).ok_or_else(|| {
-        AppError::Validation(
-            "title folder ownership is missing; resolve the title folder before deleting files"
-                .into(),
+        AppError::validation_refused(
+            TITLE_FOLDER_UNKNOWN,
+            "title folder ownership is missing; rescan the title to record its folder before deleting files",
         )
     })
 }
@@ -1237,8 +1402,10 @@ async fn ensure_owned_title_delete_boundary(
     let boundary_error =
         match crate::library_discovery::ensure_existing_title_boundary(path, patterns).await {
             Ok(()) => return Ok(()),
-            Err(error @ AppError::Validation(_)) if title.facet == MediaFacet::Movie => error,
-            Err(error) => return Err(error),
+            Err(error @ AppError::Validation(_)) if title.facet == MediaFacet::Movie => {
+                title_delete_boundary_error(error)
+            }
+            Err(error) => return Err(title_delete_boundary_error(error)),
         };
     // Discovery cannot distinguish a movie's disc folders from nested titles.
     // Only catalog ownership of every media file can establish this exception.
@@ -1364,8 +1531,7 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
     });
     if !has_recorded_media {
         return Err(AppError::Validation(
-            "title folder has no verified recorded media; refusing to delete unowned contents"
-                .into(),
+            "title folder has no verified recorded media, so nothing was deleted; rescan the title folder to record its files, then delete again".into(),
         ));
     }
 
@@ -1981,18 +2147,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_series_delete_accepts_conventional_season_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Show");
+        let media = folder.join("Series 1/Show.S01E01.mkv");
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"owned media").unwrap();
+        let context = TitleDeleteContext {
+            title_id: "show".into(),
+            title_name: "Show".into(),
+            facet: MediaFacet::Series,
+            folder_path: Some(path_to_stored_string(&folder)),
+            root_folders: vec![test_root_entry(root.path())],
+            other_titles: vec![],
+            recorded_paths: vec![path_to_stored_string(&media)],
+        };
+        let patterns =
+            [
+                crate::library::rename::episode_folder_discovery_pattern("Arc {season:00}")
+                    .unwrap(),
+            ];
+        let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        ensure_owned_title_delete_boundary(&context, &folder, &patterns, &manifest)
+            .await
+            .unwrap();
+        assert_eq!(manifest.to_preview().media_count, 1);
+        assert_eq!(std::fs::read(media).unwrap(), b"owned media");
+    }
+
+    #[tokio::test]
     async fn owned_multi_disc_delete_rejects_unrecorded_nested_media() {
         let root = tempfile::tempdir().unwrap();
         let context = multi_disc_context(root.path());
         let folder = root.path().join("Movie");
-        let unowned = folder.join("Other/movie.mkv");
+        // `Other` is an extras folder; use a folder that reads as another title.
+        let unowned = folder.join("Other Title/movie.mkv");
         std::fs::create_dir_all(unowned.parent().unwrap()).unwrap();
         std::fs::write(&unowned, b"unowned").unwrap();
         let manifest = build_title_delete_manifest(context.clone()).unwrap();
+        let error = ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
+            .await
+            .expect_err("nested title must be refused");
         assert!(
-            ensure_owned_title_delete_boundary(&context, &folder, &[], &manifest)
-                .await
-                .is_err()
+            error.to_string().contains("directly holds its media"),
+            "{error}"
         );
         assert_eq!(std::fs::read(unowned).unwrap(), b"unowned");
         for path in context.recorded_paths {

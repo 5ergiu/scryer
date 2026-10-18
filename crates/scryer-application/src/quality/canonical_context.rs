@@ -31,6 +31,28 @@ pub(crate) struct ResolvedScoringContext {
 }
 
 impl ResolvedScoringContext {
+    pub(crate) fn evaluation_reads_clock(&self) -> bool {
+        self.rules.reads_clock()
+    }
+
+    pub(crate) fn evaluation_fingerprint(
+        &self,
+        file: &crate::TitleMediaFile,
+        basis: CoverageSizeBasis,
+        episode_ids: &[String],
+    ) -> String {
+        use crate::quality::landed_bar_memo::hash_debug;
+        let mut hasher = blake3::Hasher::new();
+        self.hash_memo_inputs(&mut hasher);
+        // RuleHandle includes the compiled source digest and execution metadata.
+        hash_debug(&mut hasher, &self.rules.rules());
+        hash_debug(&mut hasher, &self.rules.limits());
+        hash_debug(&mut hasher, file);
+        hash_debug(&mut hasher, &basis);
+        hash_debug(&mut hasher, &episode_ids);
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// Borrow scoring inputs.
     ///
     /// `size_basis` overrides the title's own runtime for scopes that know
@@ -61,10 +83,6 @@ impl ResolvedScoringContext {
 
     pub(crate) fn profile(&self) -> &QualityProfile {
         &self.profile
-    }
-
-    pub(crate) fn required_audio_languages(&self) -> &[String] {
-        &self.required_audio_languages
     }
 
     /// The title's own runtime, used as the per-episode fallback when the
@@ -114,42 +132,6 @@ impl ResolvedScoringContext {
     }
 }
 
-/// The announced-evidence parse for a release against one title.
-///
-/// The one place `languages_audio` is enriched, so grab, pending and import
-/// cannot disagree about what a release claims to carry. Most release names say
-/// nothing about audio; `release_audio_language_hints_for_title` infers the
-/// title's original language when a profile requires one, and a lane that skips
-/// the enrichment sees an empty language list and raises
-/// `required_audio_language_missing` against a release that is perfectly fine.
-/// That was the asymmetry between the grab side (enriched at
-/// `catalog/release_search.rs`) and the import side (not enriched at all).
-///
-/// The audio context is keyed on the **title's** facet, not the search category:
-/// a search collapses anime movies and series-movie links to `"movie"`, which
-/// hides their anime origin and breaks dual-audio inference (eng+jpn).
-pub(crate) fn announced_metadata_for_title(
-    title: &Title,
-    parsed: &crate::ParsedReleaseMetadata,
-    required_audio_languages: &[String],
-    indexer_languages: Option<&[String]>,
-) -> crate::ParsedReleaseMetadata {
-    let language_context = crate::title_audio_language_context(
-        title.language.as_deref(),
-        title.country.as_deref(),
-        Some(title.facet.as_str()),
-        &title.tags,
-    );
-    let mut enriched = parsed.clone();
-    enriched.languages_audio = crate::release_audio_language_hints_for_title(
-        parsed,
-        indexer_languages,
-        Some(&language_context),
-        !required_audio_languages.is_empty(),
-    );
-    enriched
-}
-
 /// Everything a lane needs about a release it only knows by name.
 ///
 /// The three lanes that judge a release from a stored title rather than from a
@@ -158,6 +140,7 @@ pub(crate) fn announced_metadata_for_title(
 /// (D18) — all need the same derivation, and it is the derivation that has to
 /// agree with the search lane or the whole design is undone.
 pub(crate) struct ParkedReleaseFacts {
+    pub scoring_log: Vec<crate::quality_profile::ScoringEntry>,
     pub coverage: crate::acquisition_coverage::ReleaseCoverage,
     pub release_group: Option<String>,
     /// The D4 runtime basis for what the release covers: total runtime, one
@@ -212,8 +195,7 @@ pub(crate) fn score_parked_release_title(
         catalog_collections,
         None,
     );
-    let parsed =
-        announced_metadata_for_title(title, &raw_parsed, context.required_audio_languages(), None);
+    let parsed = raw_parsed.clone();
     let size_basis = crate::acquisition_coverage::coverage_size_basis(
         &coverage,
         &parsed,
@@ -232,6 +214,7 @@ pub(crate) fn score_parked_release_title(
     );
 
     ParkedReleaseFacts {
+        scoring_log: scored.announced_decision.scoring_log.clone(),
         coverage,
         release_group,
         size_basis,

@@ -18,6 +18,7 @@ async fn check_emits_manual_interaction_notification_once() {
         completed_download_calls: Arc::new(AtomicUsize::new(0)),
         recent_completed_download_calls: Arc::new(AtomicUsize::new(0)),
         scoped_recent_completed_calls: Arc::new(Mutex::new(Vec::new())),
+        ..TestDownloadClient::default()
     });
     let app = build_app_with_download_client(vec![], vec![], vec![], vec![], download_client);
     let mut actor = User::new_admin("admin");

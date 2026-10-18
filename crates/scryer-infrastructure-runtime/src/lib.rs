@@ -82,6 +82,7 @@ pub(crate) mod types {
 }
 
 pub(crate) use crate::sqlite_backup::SqliteLogicalBackupExporter;
+pub(crate) use scryer_infrastructure_acquisition::delay_profile_store::DelayProfileStore;
 #[cfg(test)]
 pub(crate) use scryer_infrastructure_acquisition::downloads::clients::NzbgetDownloadClient;
 pub(crate) use scryer_infrastructure_acquisition::downloads::{

@@ -1,5 +1,6 @@
 
 import * as React from "react";
+import { useScoreRefreshUpdates } from "@/components/common/refresh-scores-button";
 import { useSearchParams } from "react-router";
 import { useJobRunToasts } from "@/components/root/job-run-provider";
 import { useAutomaticSearch } from "@/lib/hooks/use-automatic-search";
@@ -521,6 +522,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     preview: titleDeletePreview,
     loading: titleDeletePreviewLoading,
     error: titleDeletePreviewError,
+    errorReason: titleDeletePreviewErrorReason,
   } = useDeletePreview(
     deleteTitlePreviewQuery,
     "deleteTitlePreview",
@@ -1192,6 +1194,11 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     canManageTitle,
     onApplied: reloadRenamedTitle,
   });
+  const reloadScores = React.useCallback(
+    () => titleId ? reloadRenamedTitle({ id: titleId }) : undefined,
+    [reloadRenamedTitle, titleId],
+  );
+  useScoreRefreshUpdates(reloadScores);
 
   // A deep-linked episode may live in a season whose episodes are not loaded
   // yet; resolve its collection and hydrate that season so the view can expand
@@ -2122,6 +2129,8 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
               preview={titleDeletePreview}
               loading={titleDeletePreviewLoading}
               error={titleDeletePreviewError}
+              errorReason={titleDeletePreviewErrorReason}
+              onRemoveFromCatalogOnly={() => setDeleteFilesOnDisk(false)}
               typedConfirmation={titleDeleteTypedConfirmation}
               onTypedConfirmationChange={setTitleDeleteTypedConfirmation}
               typedConfirmationPromptId="title-delete-typed-confirmation-prompt"

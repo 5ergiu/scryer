@@ -403,8 +403,25 @@ pub(crate) async fn reconcile_library_scan_unmatched_items(
         .list_library_scan_unmatched_items(Some(facet.clone()), Some(&scan_root), None, count, 0)
         .await?;
 
-    for item in existing {
-        if !seen_paths.contains(&item.item_path) {
+    // A rejected or unreadable boundary hides its descendants from discovery.
+    // Their absence is not evidence that previously recorded items disappeared.
+    let unresolved_boundaries: Vec<_> = existing
+        .iter()
+        .filter(|item| {
+            item.status == PendingImportStatus::Ignored && seen_paths.contains(&item.item_path)
+        })
+        .collect();
+
+    for item in &existing {
+        if !seen_paths.contains(&item.item_path)
+            && !unresolved_boundaries.iter().any(|boundary| {
+                boundary.library_id == item.library_id
+                    && crate::stored_paths::stored_path_is_within_folder(
+                        &boundary.item_path,
+                        &item.item_path,
+                    )
+            })
+        {
             app.services
                 .library
                 .library_scan_unmatched_items
