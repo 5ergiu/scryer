@@ -6408,6 +6408,10 @@ async fn catalog_scan_and_final_import_join_the_same_native_probe() {
 }
 
 #[cfg(feature = "runtime-media-analysis")]
+#[path = "import_probe_stability.rs"]
+mod import_probe_stability;
+
+#[cfg(feature = "runtime-media-analysis")]
 #[tokio::test]
 async fn shared_native_probe_rejects_source_changes_in_both_production_paths() {
     let fixture = fail_closed_pack_fixture().await;
