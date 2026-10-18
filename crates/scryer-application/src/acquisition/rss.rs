@@ -484,6 +484,8 @@ fn rss_is_permanent_rejection(code: ReleaseAutoDecisionCode) -> bool {
             | ReleaseAutoDecisionCode::EpisodeMismatch
             | ReleaseAutoDecisionCode::EpisodeNotMonitored
             | ReleaseAutoDecisionCode::SubtitlesOnly
+            | ReleaseAutoDecisionCode::EpisodicReleaseForMovie
+            | ReleaseAutoDecisionCode::TitleYearMismatch
     )
 }
 
@@ -1114,6 +1116,8 @@ impl AppUseCase {
 
         debug!("starting RSS sync cycle");
 
+        let availability_settings = self.acquisition_settings().await?;
+
         // The scopes that hold monitored titles, as one grouped read. This
         // used to be every title row in the catalog, kept for the whole cycle
         // so a bank could be indexed over it.
@@ -1420,12 +1424,14 @@ impl AppUseCase {
                 // For movies: the monitored title is a target while it has no
                 // primary file or sits below cutoff. Availability gates active
                 // grabs the same way the derived movie target set does (§D1).
-                if !super::targets::movie_is_available_for_acquisition(
-                    title.first_aired.as_deref(),
-                    title.digital_release_date.as_deref(),
-                    title.min_availability.as_deref().unwrap_or("announced"),
+                if super::targets::movie_availability_decision_for_title(
+                    &title,
+                    &availability_settings,
                     &now,
-                ) {
+                )
+                .status
+                    != crate::types::MovieAvailabilityStatus::Available
+                {
                     continue;
                 }
                 self.process_rss_title_releases(
@@ -2706,7 +2712,12 @@ impl AppUseCase {
                 )
                 .unwrap_or(ReleaseAutoDecisionCode::AnimeNumberingAmbiguous)
             } else if !is_allowed {
-                ReleaseAutoDecisionCode::QualityBlocked
+                // Identity first: a pack or another year's film is refused as
+                // what it is, not as a quality the profile happens to dislike.
+                crate::acquisition_release_search::movie_subject_refusal_unmatched(
+                    candidate, &subject,
+                )
+                .unwrap_or(ReleaseAutoDecisionCode::QualityBlocked)
             } else if route_key
                 .as_ref()
                 .is_some_and(|route| grabbed_urls.contains(route))
@@ -3934,6 +3945,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }

@@ -2384,6 +2384,7 @@ async fn delete_media_file_honors_custom_library_permissions_after_library_refac
         metadata_fetched_at: Some(now),
         min_availability: None,
         digital_release_date: Some("2024-01-01".to_string()),
+        movie_release_dates: None,
         folder_path: None,
     };
     let title = ctx.titles.create(title).await.expect("create scoped title");
@@ -2756,6 +2757,7 @@ async fn subtitle_search_and_download_require_manage_subtitles() {
         metadata_fetched_at: Some(now),
         min_availability: None,
         digital_release_date: Some("2024-01-01".to_string()),
+        movie_release_dates: None,
         folder_path: None,
     };
     let title = ctx

@@ -1586,7 +1586,11 @@ mod tests {
         assert!(!movie_is_pre_release(None, None, &now));
         assert!(!movie_is_pre_release(Some("tba"), None, &now));
         assert!(movie_is_pre_release(None, Some("2026-03-10"), &now));
-        assert!(!movie_is_pre_release(None, Some("2026-03-08"), &now));
+        // The legacy TMDB date is theatrical: the home release is estimated
+        // 90 days later, so a movie two days into its cinema run is still
+        // pre-release and one 129 days past it is not.
+        assert!(movie_is_pre_release(None, Some("2026-03-08"), &now));
+        assert!(!movie_is_pre_release(None, Some("2025-11-01"), &now));
     }
 
     fn test_criteria() -> QualityProfileCriteria {

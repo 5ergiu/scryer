@@ -1,4 +1,5 @@
 export type TitleOptionUpdates = {
+  minAvailability?: string | null;
   searchLanguages?: string[] | null;
   searchAliases?: string[] | null;
   metadataLanguage?: string | null;

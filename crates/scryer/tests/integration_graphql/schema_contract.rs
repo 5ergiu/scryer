@@ -1141,6 +1141,7 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     }
     // Rename previews now expose the existing per-title naming context.
     assert!(public_type_names.contains(&"MediaRenameNamingContextPayload"));
+    assert!(public_type_names.contains(&"MovieAvailabilityPayload"));
     for name in [
         "FileScoreEvaluationPayload",
         "FileScoreSelectionInput",
@@ -1152,8 +1153,8 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     }
     assert!(mutation_field_names.contains(&"refreshFileScores"));
     assert!(mutation_field_names.contains(&"cancelFileScoreRefresh"));
-    assert_eq!(public_types.len(), 970);
-    assert_eq!(kind_count("OBJECT"), 523);
+    assert_eq!(public_types.len(), 971);
+    assert_eq!(kind_count("OBJECT"), 524);
     assert_eq!(kind_count("INPUT_OBJECT"), 240);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);

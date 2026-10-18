@@ -3203,6 +3203,40 @@ hook_id = "import_delay_profile_catalog"
 engine = "all"
 scope = "all"
 
+[[migration]]
+version = 294
+description = "movie release dates"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0294_movie_release_dates.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0294_movie_release_dates.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 295
+description = "movie default availability"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0295_movie_default_availability.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0295_movie_default_availability.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

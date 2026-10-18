@@ -5860,3 +5860,82 @@ async fn graphql_title_search_language_override_accepts_picker_languages_only() 
     assert_no_errors(&inherited);
     assert!(language_tags(&inherited["data"]["updateTitle"]).is_empty());
 }
+
+/// A movie added without an explicit minimum availability takes the instance
+/// default (`released`), an explicit choice is stored as given, and both read
+/// back through `TitlePayload.minAvailability` and stay editable through
+/// `TitleOptionsInput.minAvailability`.
+#[tokio::test]
+async fn graphql_added_movie_takes_default_availability_and_reads_it_back() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let library = create_title_catalog_library(
+        &ctx,
+        "MOVIE",
+        "Availability Add Library",
+        &[("/availability-add/default", true)],
+    )
+    .await;
+    let library_id = library_id(&library);
+    let root_id = library_root_id(&library, "/availability-add/default");
+    let add = r#"mutation($input: AddTitleInput!) {
+        addTitle(input: $input) { title { id minAvailability } }
+    }"#;
+    let add_movie = |name: &'static str, tvdb_id: &'static str, availability: Option<&str>| {
+        let mut input = json!({
+            "name": name,
+            "facet": "MOVIE",
+            "libraryId": library_id,
+            "monitored": true,
+            "tags": [],
+            "externalIds": [{ "source": "tvdb", "value": tvdb_id }],
+            "options": { "rootFolderId": root_id }
+        });
+        if let Some(availability) = availability {
+            input["minAvailability"] = json!(availability);
+        }
+        json!({ "input": input })
+    };
+
+    let defaulted = gql(
+        &ctx,
+        add,
+        add_movie("Availability Record A", "991001", None),
+    )
+    .await;
+    assert_no_errors(&defaulted);
+    assert_eq!(
+        defaulted["data"]["addTitle"]["title"]["minAvailability"],
+        "released"
+    );
+
+    let explicit = gql(
+        &ctx,
+        add,
+        add_movie("Availability Record B", "991002", Some("in_cinemas")),
+    )
+    .await;
+    assert_no_errors(&explicit);
+    let explicit_id = explicit["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("added title id")
+        .to_string();
+    let read = r#"query($id: ID!) { title(id: $id) { minAvailability } }"#;
+    let read_back = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&read_back);
+    assert_eq!(read_back["data"]["title"]["minAvailability"], "in_cinemas");
+
+    let edit = r#"mutation($input: UpdateTitleInput!) {
+        updateTitle(input: $input) { id minAvailability }
+    }"#;
+    let edited = gql(
+        &ctx,
+        edit,
+        json!({ "input": { "titleId": explicit_id, "options": { "minAvailability": "announced" } } }),
+    )
+    .await;
+    assert_no_errors(&edited);
+    let read_back = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&read_back);
+    assert_eq!(read_back["data"]["title"]["minAvailability"], "announced");
+}

@@ -61,4 +61,5 @@ export type Release = {
   autoEligible?: boolean | null;
   autoDecisionCode?: string | null;
   autoDecisionSummary?: string | null;
+  manualAvailabilityOverrideConfirmed?: boolean;
 };

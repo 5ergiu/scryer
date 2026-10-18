@@ -953,6 +953,8 @@ impl ExternalIdInput {
 #[derive(InputObject, Clone)]
 /// Optional title settings used when creating or updating a title.
 pub struct TitleOptionsInput {
+    /// Movie minimum availability override; omission preserves it, null clears it to legacy Announced behavior, and a value replaces it. Other facets reject this field.
+    pub min_availability: MaybeUndefined<String>,
     /// Search-language override: omitted preserves, null inherits the library, empty searches only the primary name and custom aliases.
     pub search_languages: MaybeUndefined<Vec<String>>,
     /// User-owned search aliases: omitted preserves, null or empty clears. Metadata refresh preserves these aliases.

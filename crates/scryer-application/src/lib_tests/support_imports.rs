@@ -677,9 +677,13 @@ impl MediaFileRepository for MockMediaFileRepo {
                     title_id: item.title_id.clone(),
                     library_id,
                     title_facet: facet,
-                    min_availability: None,
+                    // The double carries no title dates, so it holds the
+                    // threshold at announced rather than the instance default.
+                    min_availability: Some("announced".to_string()),
                     first_aired: None,
                     digital_release_date: None,
+                    metadata_fetched: false,
+                    movie_release_dates: None,
                     created_at: created.clone(),
                 });
             }

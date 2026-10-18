@@ -600,7 +600,8 @@ export function defaultListRoute(
     qualityProfileId: null,
     rootFolderId: root?.id ?? null,
     monitorType,
-    minAvailability: kind === "MOVIE" ? "announced" : null,
+    // Null follows the instance default when the title is added.
+    minAvailability: null,
     useSeasonFolders: kind === "MOVIE" ? null : true,
     releaseNumbering: kind === "MOVIE" ? null : "AUTO",
     tags: [],

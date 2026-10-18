@@ -1497,6 +1497,16 @@ fn source_season_type(source: NumberingBridgeSource) -> &'static str {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MovieReleaseDates {
+    pub market: String,
+    pub fetched: bool,
+    pub theatrical_dates: Vec<String>,
+    pub digital_dates: Vec<String>,
+    pub physical_dates: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Title {
     pub id: String,
@@ -1535,6 +1545,8 @@ pub struct Title {
     pub metadata_fetched_at: Option<DateTime<Utc>>,
     pub min_availability: Option<String>,
     pub digital_release_date: Option<String>,
+    #[serde(default)]
+    pub movie_release_dates: Option<MovieReleaseDates>,
     pub folder_path: Option<String>,
 }
 
