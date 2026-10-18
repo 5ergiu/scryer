@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use super::native_download_client_http_client;
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use scryer_application::grabbed_file_names::{
+    GrabbedFileName, long_file_names_from_nzb, long_file_names_from_torrent,
+};
 use scryer_application::{
     AppError, AppResult, DownloadClient, DownloadClientAddRequest,
     DownloadClientCategorySnapshotStore, DownloadClientConfigRepository,
@@ -69,6 +72,40 @@ async fn read_staged_nzb_bytes(staged_nzb: &StagedNzbRef) -> AppResult<Vec<u8>> 
             AppError::Repository(format!("staged nzb decompression failed: {error}"))
         })?;
     Ok(bytes)
+}
+
+/// The long file names the NZB or torrent this request hands off carries.
+///
+/// Never fatal: a staged NZB that cannot be read back, or an artifact that does
+/// not parse, leaves the grab with no names, which only means a cut name later
+/// stays as the client wrote it.
+async fn grabbed_long_file_names(request: &DownloadClientAddRequest) -> Vec<GrabbedFileName> {
+    enum Artifact {
+        Nzb(Vec<u8>),
+        Torrent(Vec<u8>),
+    }
+    let artifact = match request.resolved_download_artifact.as_ref() {
+        Some(ResolvedDownloadArtifact::Nzb { bytes, .. }) => Artifact::Nzb(bytes.clone()),
+        Some(ResolvedDownloadArtifact::TorrentFile { bytes, .. }) => {
+            Artifact::Torrent(bytes.clone())
+        }
+        _ => match request.staged_nzb.as_ref() {
+            Some(staged_nzb) => match read_staged_nzb_bytes(staged_nzb).await {
+                Ok(bytes) => Artifact::Nzb(bytes),
+                Err(error) => {
+                    debug!(error = %error, "could not read the staged nzb for its file names");
+                    return Vec::new();
+                }
+            },
+            None => return Vec::new(),
+        },
+    };
+    tokio::task::spawn_blocking(move || match artifact {
+        Artifact::Nzb(bytes) => long_file_names_from_nzb(&bytes),
+        Artifact::Torrent(bytes) => long_file_names_from_torrent(&bytes),
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn parse_download_client_feedback_timeout(raw: Option<&str>, default: Duration) -> Duration {
@@ -2869,6 +2906,8 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             );
             match submit_result {
                 Ok(result) => {
+                    // Read before the staged copy goes; the client has its own.
+                    let grabbed_file_names = grabbed_long_file_names(&effective_request).await;
                     self.delete_staged_nzb(
                         staged_nzb.as_ref().map(|lease| &lease.staged_nzb),
                         "submit_success",
@@ -2883,6 +2922,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                             .info_hash
                             .or_else(|| resolved_v1_info_hash(&effective_request)),
                         seed_goals: None,
+                        grabbed_file_names,
                     };
                     grab.seed_goals =
                         Self::persisted_seed_goals(&effective_request, &grab, &resolved_seed_goals);
@@ -4423,6 +4463,7 @@ mod tests {
                 client_type: "mock".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             })
         }
 
@@ -4659,6 +4700,7 @@ mod tests {
                 client_type: "delayed".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             })
         }
 
@@ -4809,6 +4851,7 @@ mod tests {
                 client_type: "failing".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             })
         }
 
@@ -4841,6 +4884,7 @@ mod tests {
                 client_type: "failing-activity".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             })
         }
 

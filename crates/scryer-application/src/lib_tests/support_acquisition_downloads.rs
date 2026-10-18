@@ -2362,6 +2362,7 @@ impl DownloadClient for StubDownloadClient {
             client_type: "nzbget".to_string(),
             info_hash: self.grab_info_hash.lock().await.clone(),
             seed_goals: None,
+            grabbed_file_names: Vec::new(),
         })
     }
 

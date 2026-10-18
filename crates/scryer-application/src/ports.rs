@@ -5707,6 +5707,25 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         Ok(())
     }
 
+    /// Keep the long file names a grab's NZB or torrent carried with its
+    /// submission row.
+    async fn record_grabbed_file_names(
+        &self,
+        _canonical_download_id: &DownloadId,
+        _names: &[crate::GrabbedFileName],
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// The long file names kept for the grab behind this client job: its
+    /// active binding's submission, else the submission recorded for the job.
+    async fn grabbed_file_names(
+        &self,
+        _identity: &ClientJobLocator,
+    ) -> AppResult<Vec<crate::GrabbedFileName>> {
+        Ok(Vec::new())
+    }
+
     /// Read the goals a torrent was grabbed under, by download-client identity.
     async fn get_seed_goals(
         &self,

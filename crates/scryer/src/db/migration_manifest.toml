@@ -3163,6 +3163,23 @@ file = "postgres/migrations/0291_merge_list_search_mode_into_add.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 292
+description = "grabbed file names on download submissions"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

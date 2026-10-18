@@ -234,6 +234,34 @@ async fn run_recovery_import_with_client(
     manual_title_id: Option<&str>,
     download_client: Arc<TestDownloadClient>,
 ) -> ImportResult {
+    run_recovery_import_with_submissions(
+        dir,
+        release_name,
+        client_type,
+        enabled,
+        lookup,
+        manual_title_id,
+        download_client,
+        Arc::new(crate::null_repositories::NullDownloadSubmissionRepository),
+        recovery_titles(),
+    )
+    .await
+}
+
+/// `run_recovery_import_with_client` over `titles`, with `download_submissions`
+/// holding what Scryer kept from its own grabs.
+#[allow(clippy::too_many_arguments)]
+async fn run_recovery_import_with_submissions(
+    dir: &Path,
+    release_name: Option<&str>,
+    client_type: &str,
+    enabled: bool,
+    lookup: Arc<FakeSrrdbLookup>,
+    manual_title_id: Option<&str>,
+    download_client: Arc<TestDownloadClient>,
+    download_submissions: Arc<dyn DownloadSubmissionRepository>,
+    mut titles: Vec<Title>,
+) -> ImportResult {
     let import_repo = Arc::new(TestImportRepo::default());
     let mut completed = build_completed_download(
         release_name.unwrap_or("obfuscated download"),
@@ -253,7 +281,6 @@ async fn run_recovery_import_with_client(
         .catalog
         .libraries
         .clone();
-    let mut titles = recovery_titles();
     for title in &mut titles {
         let library = libraries
             .get_by_id(&title.library_id)
@@ -287,9 +314,7 @@ async fn run_recovery_import_with_client(
         TestAppRepositories {
             download_client,
             download_client_configs: Arc::new(NullDownloadClientConfigRepository),
-            download_submissions: Arc::new(
-                crate::null_repositories::NullDownloadSubmissionRepository,
-            ),
+            download_submissions,
             settings: Arc::new(SrrdbSettingsRepo { enabled }),
         },
     )
@@ -725,5 +750,201 @@ async fn posted_names_are_not_asked_for_when_no_name_looks_cut() {
             .load(Ordering::SeqCst),
         0
     );
+    assert_eq!(result.decision, ImportDecision::Unmatched, "{result:?}");
+}
+
+// ── long names Scryer kept from its own grab ───────────────────────────────
+
+/// A submissions repository that holds the long names of one grab and counts
+/// how often import asks for them.
+struct GrabbedNamesRepo {
+    names: Vec<crate::GrabbedFileName>,
+    calls: AtomicUsize,
+}
+
+impl GrabbedNamesRepo {
+    /// The long names of an NZB whose only file was posted as `posted_name`.
+    fn posted(posted_name: &str) -> Self {
+        let nzb = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster@example.invalid" date="1" subject="[1/1] - &quot;{posted_name}&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes="4096" number="1">part1@example.invalid</segment></segments>
+  </file>
+</nzb>"#
+        );
+        let names = crate::grabbed_file_names::long_file_names_from_nzb(nzb.as_bytes());
+        assert_eq!(names.len(), 1, "the fixture NZB keeps its one long name");
+        Self {
+            names,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GrabbedNamesRepo {
+    /// A grab that kept no long names.
+    fn none() -> Self {
+        Self {
+            names: Vec::new(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl DownloadSubmissionRepository for GrabbedNamesRepo {
+    async fn record_submission(&self, _: DownloadSubmission) -> AppResult<()> {
+        Ok(())
+    }
+    async fn record_ambiguous_submission(&self, _: DownloadSubmission) -> AppResult<()> {
+        Ok(())
+    }
+    async fn record_submission_with_identity(
+        &self,
+        _: DownloadSubmission,
+        _: crate::DownloadSubmissionIdentity,
+        _: Option<crate::PersistedSeedGoals>,
+    ) -> AppResult<crate::CanonicalDownloadIdentityDisposition> {
+        Ok(crate::CanonicalDownloadIdentityDisposition::Requested)
+    }
+    async fn find_by_client_item_id(
+        &self,
+        _: &ClientJobLocator,
+    ) -> AppResult<Option<DownloadSubmission>> {
+        Ok(None)
+    }
+    async fn list_for_client_items(
+        &self,
+        _: &[ClientJobLocator],
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        Ok(vec![])
+    }
+    async fn list_for_title(&self, _: &str) -> AppResult<Vec<DownloadSubmission>> {
+        Ok(vec![])
+    }
+    async fn find_by_title_and_request_signature(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::DownloadSubmissionPurpose,
+        _: &crate::SubmissionScope,
+    ) -> AppResult<Option<DownloadSubmission>> {
+        Ok(None)
+    }
+    async fn delete_for_title(&self, _: &str) -> AppResult<()> {
+        Ok(())
+    }
+    async fn delete_by_client_item_id(&self, _: &ClientJobLocator) -> AppResult<()> {
+        Ok(())
+    }
+    async fn update_tracked_state(&self, _: &ClientJobLocator, _: &str) -> AppResult<()> {
+        Ok(())
+    }
+    async fn get_tracked_state(&self, _: &ClientJobLocator) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+    async fn grabbed_file_names(
+        &self,
+        _: &ClientJobLocator,
+    ) -> AppResult<Vec<crate::GrabbedFileName>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.names.clone())
+    }
+}
+
+/// A series whose title alone runs past where a client cuts a file name.
+fn long_titled_series() -> Title {
+    build_title(
+        "title-long-series",
+        &format!(
+            "Harbor Pals {}",
+            "A Very Long Subtitle That Keeps Going "
+                .repeat(6)
+                .trim_end()
+        ),
+        MediaFacet::Series,
+    )
+}
+
+/// An episode of the long-titled series, posted with its episode number after
+/// the title, past where a client cuts.
+fn long_posted_name() -> String {
+    format!("{} - S01E02 - 1080p WEB.mkv", long_titled_series().name)
+}
+
+/// `name` cut the way Weaver cuts it: at 240 bytes, keeping the extension.
+fn weaver_cut(name: &str) -> String {
+    let (stem, ext) = name.rsplit_once('.').expect("extension");
+    format!("{}.{ext}", &stem[..240 - ext.len() - 1])
+}
+
+async fn import_with_grabbed_names(
+    on_disk: &str,
+    submissions: GrabbedNamesRepo,
+) -> (ImportResult, Arc<GrabbedNamesRepo>) {
+    let (_root, dir) = completed_dir();
+    let dir = dir.as_path();
+    let member = write_member(dir, on_disk, false);
+    let submissions = Arc::new(submissions);
+
+    let result = run_recovery_import_with_submissions(
+        dir,
+        None,
+        "weaver",
+        false,
+        Arc::new(FakeSrrdbLookup::default()),
+        None,
+        Arc::new(TestDownloadClient::default()),
+        submissions.clone(),
+        recovery_titles()
+            .into_iter()
+            .chain([long_titled_series()])
+            .collect(),
+    )
+    .await;
+
+    assert!(member.exists(), "the file on disk keeps its name");
+    (result, submissions)
+}
+
+#[tokio::test]
+async fn a_cut_name_takes_the_long_name_kept_from_the_grab() {
+    let on_disk = weaver_cut(&long_posted_name());
+    assert!(!on_disk.contains("S01E02"), "the cut drops the episode");
+
+    let (result, submissions) =
+        import_with_grabbed_names(&on_disk, GrabbedNamesRepo::posted(&long_posted_name())).await;
+
+    assert_eq!(submissions.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        result.title_id.as_deref(),
+        Some("title-long-series"),
+        "the grabbed name is what identifies the episode: {result:?}"
+    );
+    assert_ne!(result.decision, ImportDecision::Unmatched, "{result:?}");
+}
+
+#[tokio::test]
+async fn a_name_the_client_renamed_never_takes_a_grabbed_name() {
+    // par2 repair or the client renamed the file: its name is no cut of
+    // anything the NZB posted, so the grabbed name must not replace it.
+    let (result, submissions) = import_with_grabbed_names(
+        &cut_member_name(),
+        GrabbedNamesRepo::posted(&long_posted_name()),
+    )
+    .await;
+
+    assert_eq!(submissions.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(result.decision, ImportDecision::Unmatched, "{result:?}");
+}
+
+#[tokio::test]
+async fn a_cut_name_with_nothing_kept_from_the_grab_stays_unmatched() {
+    let (result, submissions) =
+        import_with_grabbed_names(&weaver_cut(&long_posted_name()), GrabbedNamesRepo::none()).await;
+
+    assert_eq!(submissions.calls.load(Ordering::SeqCst), 1);
     assert_eq!(result.decision, ImportDecision::Unmatched, "{result:?}");
 }
