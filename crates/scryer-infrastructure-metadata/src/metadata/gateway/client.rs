@@ -4954,6 +4954,114 @@ mod tests {
         assert_eq!(result.missing_ref_indexes, vec![1]);
     }
 
+    #[test]
+    fn the_titles_query_asks_for_release_dates_in_the_requested_region() {
+        let query = super::graphql_docs::TITLES_QUERY;
+        assert!(query.contains("$releaseDateRegion: String!"), "{query}");
+        assert!(
+            query.contains("releaseDateRegion: $releaseDateRegion"),
+            "{query}"
+        );
+        let release_dates = query
+            .split_once("release_dates {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(fields, _)| fields.split_whitespace().collect::<Vec<_>>())
+            .expect("release_dates selection");
+        assert_eq!(
+            release_dates,
+            vec![
+                "fetched",
+                "theatrical_dates",
+                "digital_dates",
+                "physical_dates"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn movie_titles_carry_the_regional_release_dates_the_gateway_returns() {
+        let server = MockServer::start().await;
+        let dated = merge_json(
+            minimal_movie_item_fields(),
+            json!({
+                "id": 610,
+                "kind": "movie",
+                "primary_source": "tmdb",
+                "release_dates": {
+                    "fetched": true,
+                    "theatrical_dates": ["2028-03-10"],
+                    "digital_dates": ["2028-05-02"],
+                    "physical_dates": []
+                }
+            }),
+        );
+        let undated = merge_json(
+            minimal_movie_item_fields(),
+            json!({ "id": 611, "kind": "movie", "primary_source": "tmdb" }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "titles": {
+                        "movies": [dated, undated],
+                        "missing_ids": [],
+                        "redirects": []
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+        let refs = [610, 611].map(|smg_id| MovieTitleRef {
+            smg_id: Some(smg_id),
+            tvdb_id: None,
+            tmdb_id: None,
+            imdb_id: None,
+        });
+
+        let result = client
+            .get_movie_titles_for_release_market(&refs, "eng", "gb")
+            .await
+            .expect("title-id request should succeed");
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let variables = requests
+            .iter()
+            .find_map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find_map(|(name, value)| (name == "variables").then(|| value.into_owned()))
+            })
+            .map(|value| serde_json::from_str::<serde_json::Value>(&value).expect("variables"))
+            .expect("titles variables");
+        assert_eq!(variables["releaseDateRegion"], json!("gb"));
+
+        let dated = result
+            .by_ref_index
+            .get(&0)
+            .and_then(|movie| movie.movie_release_dates.clone())
+            .expect("dated movie carries its release dates");
+        assert_eq!(dated.market, "GB");
+        assert!(dated.fetched);
+        assert_eq!(dated.theatrical_dates, vec!["2028-03-10".to_string()]);
+        assert_eq!(dated.digital_dates, vec!["2028-05-02".to_string()]);
+        assert!(dated.physical_dates.is_empty());
+
+        // A movie the gateway has not fetched dates for reads as unfetched,
+        // never as "no release anywhere".
+        let undated = result
+            .by_ref_index
+            .get(&1)
+            .and_then(|movie| movie.movie_release_dates.clone())
+            .expect("undated movie still records the market it was asked in");
+        assert!(!undated.fetched);
+        assert!(undated.theatrical_dates.is_empty());
+    }
+
     fn tmdb_primary_series_titles_payload() -> serde_json::Value {
         let series = merge_json(
             minimal_series_item_fields(),
