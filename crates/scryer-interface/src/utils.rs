@@ -8,6 +8,7 @@ pub(crate) struct ResolvedTitleOptionsInput {
     pub search_languages: Option<Option<Vec<String>>>,
     pub search_aliases: Option<Option<Vec<String>>>,
     /// `None` preserves the stored value; `Some(None)` clears it; `Some(Some(_))` sets it.
+    pub min_availability: Option<Option<String>>,
     pub quality_profile_id: Option<Option<String>>,
     pub root_folder_id: Option<Option<String>>,
     pub monitor_type: Option<Option<String>>,
@@ -24,6 +25,7 @@ pub(crate) struct ResolvedTitleOptionsInput {
 impl ResolvedTitleOptionsInput {
     pub(crate) fn to_application_patch(&self) -> scryer_application::TitleOptionsPatch {
         scryer_application::TitleOptionsPatch {
+            min_availability: self.min_availability.clone(),
             search_languages: self.search_languages.clone(),
             search_aliases: self.search_aliases.clone(),
             quality_profile_id: self.quality_profile_id.clone(),
@@ -198,6 +200,10 @@ pub(crate) fn map_add_input(
     let root_folder_id = resolved_options
         .as_ref()
         .and_then(|options| options.root_folder_id.clone().flatten());
+    let min_availability = resolved_options
+        .as_ref()
+        .and_then(|options| options.min_availability.clone())
+        .unwrap_or(min_availability);
     if let Some(options) = resolved_options {
         apply_title_options(&mut tags, options);
     }

@@ -3421,7 +3421,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               tmdbId: candidate.tmdbId ?? undefined,
               imdbId: imdbId || undefined,
               ...(queueFacet === "MOVIE"
-                ? { minAvailability: minAvailabilityForQueue }
+                ? minAvailabilityForQueue === "default"
+                  ? {}
+                  : { minAvailability: minAvailabilityForQueue }
                 : {}),
             },
           })
@@ -3537,6 +3539,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           scope: releaseQueueScopeInput(release, { title: true }),
           candidateToken: release.candidateToken,
           sizeBytes: release.sizeBytes ?? null,
+          overrideMovieAvailability:
+            release.manualAvailabilityOverrideConfirmed ?? false,
         };
         const replacesPrimary = hasPrimaryMediaFile(title.mediaFiles);
         const mutation = replacesPrimary
@@ -3589,6 +3593,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               scope: releaseQueueScopeInput(release, { title: true }),
               candidateToken: release.candidateToken,
               sizeBytes: release.sizeBytes ?? null,
+              overrideMovieAvailability:
+                release.manualAvailabilityOverrideConfirmed ?? false,
               purpose: "ADDITIONAL_FILE",
             },
           })

@@ -154,11 +154,46 @@ async fn execute_resolved_episode_import(
             .or_else(|| parsed.quality.clone());
         let effective_parsed =
             parsed_with_quality_override(parsed, effective_quality_label.as_deref());
+        let prepared =
+            match crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+                app,
+                title,
+                &effective_parsed,
+                quality_profile,
+                source_video,
+                source_size,
+                !existing_files.is_empty(),
+                None,
+                is_filler,
+                crate::post_download_gate::RuntimeSampleValidation::manual_override(
+                    expected_runtime_seconds_for_episode_import(title, target_episodes),
+                ),
+                disc_selection,
+                release_listing_json,
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(rejection) => {
+                    return Ok(EpisodeImportOutcome::Rejected {
+                        reason_code: Some(rejection.recycle_reason.to_string()),
+                        rejection,
+                        disposition: crate::import_decide::RejectionDisposition::Hold,
+                        episode_ids: target_episode_ids.clone(),
+                    });
+                }
+            };
+        let effective_quality_label = quality_override
+            .as_deref()
+            .and_then(|value| non_empty_string(Some(value.to_string())))
+            .or_else(|| prepared.parsed.quality.clone());
+        let effective_parsed =
+            parsed_with_quality_override(&prepared.parsed, effective_quality_label.as_deref());
         let canonical_dest_path = episode_import_dest_path(
             title,
             use_season_folders,
             &effective_parsed,
-            None,
+            prepared.accepted.analysis.as_ref(),
             &ext,
             source_video,
             title_folder_path,
@@ -235,7 +270,7 @@ async fn execute_resolved_episode_import(
             source_video,
             &dest_path,
             import_mode,
-            None,
+            Some(&prepared.source_snapshot),
             completed,
         )
         .await?;
@@ -266,7 +301,12 @@ async fn execute_resolved_episode_import(
             .insert_or_reuse_media_file(app, &media_file_input)
             .await?
             .media_file_id;
-        analyze_and_persist_imported_media_file(app, &title.id, &media_file_id, &dest_path).await;
+        crate::post_download_gate::persist_media_analysis_result(
+            &app.services.library.media_files,
+            &media_file_id,
+            &prepared.accepted,
+        )
+        .await?;
         if let Err(error) = crate::subtitles::reconcile_external_subtitles_for_media_file(
             app,
             &title.id,

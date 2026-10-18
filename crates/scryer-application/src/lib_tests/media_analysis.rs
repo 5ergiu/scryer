@@ -103,7 +103,7 @@ async fn deferred_analysis_failures_preserve_successful_metadata_and_reject_stal
     impl MediaAnalyzer for FailedAnalyzer {
         async fn analyze_file(&self, _path: PathBuf) -> AppResult<MediaAnalysisOutcome> {
             self.started.notify_one();
-            self.resume.notified().await;
+            within_deadline("resume failed analysis", self.resume.notified()).await;
             if self.invalid {
                 Ok(MediaAnalysisOutcome::Invalid("malformed media".into()))
             } else {
@@ -115,7 +115,7 @@ async fn deferred_analysis_failures_preserve_successful_metadata_and_reject_stal
         for changed in [false, true] {
             let started = Arc::new(tokio::sync::Notify::new());
             let resume = Arc::new(tokio::sync::Notify::new());
-            let (app, _admin, files, id, dir) = selection_fixture(Arc::new(FailedAnalyzer {
+            let (app, _admin, files, id, _dir) = selection_fixture(Arc::new(FailedAnalyzer {
                 invalid,
                 started: started.clone(),
                 resume: resume.clone(),
@@ -125,24 +125,20 @@ async fn deferred_analysis_failures_preserve_successful_metadata_and_reject_stal
                 let mut rows = files.store.lock().await;
                 let file = rows.iter_mut().find(|row| row.id == id).unwrap();
                 file.scan_status = "scanned".into();
-                file.analysis_details.revision = scryer_media_types::ANALYSIS_REVISION;
+                file.analysis_details.revision = scryer_media_types::ANALYSIS_REVISION - 1;
                 file.duration_seconds = Some(7200);
                 file.video_width = Some(1920);
             }
-            let initial = files.get_media_file_by_id(&id).await.unwrap().unwrap();
+            *files.pending_analysis_ids.lock().await = vec![id.clone()];
             let task = tokio::spawn({
                 let app = app.clone();
-                let title_id = initial.title_id.clone();
-                let id = id.clone();
-                let path = dir.path().join("Movie.iso");
                 async move {
-                    crate::import::workflow::analyze_and_persist_imported_media_file(
-                        &app, &title_id, &id, &path,
-                    )
-                    .await;
+                    app.refresh_stale_media_analysis("fixture-library")
+                        .await
+                        .unwrap();
                 }
             });
-            started.notified().await;
+            within_deadline("failed analysis started", started.notified()).await;
             if changed {
                 let mut rows = files.store.lock().await;
                 let file = rows.iter_mut().find(|row| row.id == id).unwrap();
@@ -151,7 +147,9 @@ async fn deferred_analysis_failures_preserve_successful_metadata_and_reject_stal
             }
             let expected = files.get_media_file_by_id(&id).await.unwrap().unwrap();
             resume.notify_one();
-            task.await.unwrap();
+            within_deadline("failed analysis completed", task)
+                .await
+                .unwrap();
             let saved = files.get_media_file_by_id(&id).await.unwrap().unwrap();
             assert_eq!(saved.analysis_details, expected.analysis_details);
             assert_eq!(saved.video_width, expected.video_width);
@@ -483,18 +481,25 @@ async fn disc_episode_mapping_validates_each_authored_runtime_and_episode_owner(
             .episode_mappings
     );
     drop(attempts);
+    files
+        .store
+        .lock()
+        .await
+        .iter_mut()
+        .find(|row| row.id == id)
+        .unwrap()
+        .analysis_details
+        .revision = scryer_media_types::ANALYSIS_REVISION - 1;
+    *files.pending_analysis_ids.lock().await = vec![id.clone()];
+    let before = files.get_media_file_by_id(&id).await.unwrap().unwrap();
     let prior_attempts = files.analysis_attempts.lock().await.len();
-    crate::import::workflow::analyze_and_persist_imported_media_file(
-        &app,
-        &before.title_id,
-        &id,
-        std::path::Path::new(&before.file_path),
-    )
-    .await;
+    app.refresh_stale_media_analysis("fixture-library")
+        .await
+        .unwrap();
     assert_eq!(
         files.analysis_attempts.lock().await.len(),
         prior_attempts + 1,
-        "deferred import inspection must also validate saved episode runtimes"
+        "catalog refresh must also validate saved episode runtimes"
     );
     let after = files.get_media_file_by_id(&id).await.unwrap().unwrap();
     assert_eq!(
@@ -745,20 +750,19 @@ async fn disc_title_override_survives_catalogued_reprobe() {
     app.analyze_catalogued_media_file(Some(&id), PathBuf::from(&row.file_path))
         .await
         .unwrap();
-    crate::import::workflow::analyze_and_persist_imported_media_file(
-        &app,
-        "a-different-title",
-        &id,
-        std::path::Path::new(&row.file_path),
-    )
-    .await;
-    crate::import::workflow::analyze_and_persist_imported_media_file(
-        &app,
-        &row.title_id,
-        &id,
-        std::path::Path::new(&row.file_path),
-    )
-    .await;
+    files
+        .store
+        .lock()
+        .await
+        .iter_mut()
+        .find(|row| row.id == id)
+        .unwrap()
+        .analysis_details
+        .revision = scryer_media_types::ANALYSIS_REVISION - 1;
+    *files.pending_analysis_ids.lock().await = vec![id.clone()];
+    app.refresh_stale_media_analysis("fixture-library")
+        .await
+        .unwrap();
     let persisted = files.get_media_file_by_id(&id).await.unwrap().unwrap();
     assert_eq!(
         persisted

@@ -9258,7 +9258,7 @@ async fn acquisition_cycle_submits_paperman_media_request_candidate() {
                     ExternalId::new("imdb".to_string(), "tt2388725".to_string()),
                 ],
                 content_status: Some("Released".to_string()),
-                min_availability: Some("released".to_string()),
+                min_availability: Some("announced".to_string()),
                 ..Default::default()
             },
         )
@@ -11352,6 +11352,92 @@ async fn rss_library_quality_profile_overrides_global_profile() {
     let submissions = download_submissions.store.lock().await.clone();
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].source_title.as_deref(), Some(release_1080p));
+}
+
+#[tokio::test]
+async fn rss_refuses_a_pack_on_identity_before_quality_and_never_takes_another_years_film() {
+    // 2160p, so the 1080p profile would refuse every one of them on quality;
+    // the recorded reason must be what they are, not what they look like.
+    let releases = [
+        "Quillon 2000 2160p BluRay x265-SYNTH",
+        "Quillon.2000.2160p.WEB-DL.DDP5.1.H.265-SYNTH",
+        "Quillon (2000) [2160p] [BluRay]",
+        "[SynthSubs] Quillon (01-12) [2160p]",
+    ];
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let quality_profiles = Arc::new(StoredQualityProfileRepo::default());
+    quality_profiles
+        .set_profiles(vec![
+            crate::builtin_4k_profile(),
+            crate::builtin_1080p_profile(),
+        ])
+        .await;
+    let (app, user, settings) = bootstrap_rss_with_media_files_and_profiles(
+        Arc::new(StubDownloadClient::default()),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        Arc::new(MockMediaFileRepo::default()),
+        quality_profiles,
+        Arc::new(MultiReleaseIndexerClient::new(releases.to_vec())),
+    )
+    .await;
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Quillon".into(),
+                sort_title: Some("Quillon".into()),
+                slug: Some("quillon".into()),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                year: Some(2028),
+                min_availability: Some("announced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create monitored movie");
+    wanted_items
+        .remember_title_facet(&title.id, MediaFacet::Movie)
+        .await;
+    settings
+        .set_scoped_value(
+            SETTINGS_SCOPE_SYSTEM,
+            QUALITY_PROFILE_ID_KEY,
+            &title.library_id,
+            "\"1080p\"",
+        )
+        .await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(download_submissions.store.lock().await.is_empty());
+    let decisions = wanted_items.release_decisions.lock().await.clone();
+    let code_for = |release: &str| {
+        decisions
+            .iter()
+            .find(|decision| decision.release_title == release)
+            .map(|decision| decision.decision_code.clone())
+    };
+    // The feed never pairs another year's film with this title at all; if a
+    // lane ever does, it must say why.
+    for release in &releases[..3] {
+        assert!(
+            matches!(
+                code_for(release).as_deref(),
+                None | Some("title_year_mismatch")
+            ),
+            "{release}: {:?}",
+            code_for(release)
+        );
+    }
+    assert_eq!(
+        code_for(releases[3]).as_deref(),
+        Some("episodic_release_for_movie")
+    );
 }
 
 #[tokio::test]
@@ -15907,7 +15993,7 @@ async fn seed_monitored_movie_for_cycle(
                 monitored: true,
                 year: Some(year),
                 content_status: Some("Released".to_string()),
-                min_availability: Some("released".to_string()),
+                min_availability: Some("announced".to_string()),
                 ..Default::default()
             },
         )

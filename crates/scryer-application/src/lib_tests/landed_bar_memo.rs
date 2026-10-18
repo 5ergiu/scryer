@@ -71,6 +71,8 @@ impl Fixture {
                     facet: MediaFacet::Movie,
                     monitored: true,
                     year: Some(2024),
+                    // An unhydrated fixture has no release dates to wait on.
+                    min_availability: Some("announced".into()),
                     ..Default::default()
                 },
             )

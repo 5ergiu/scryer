@@ -13,6 +13,8 @@ import { facetById } from "@/lib/facets/registry";
 import { facetStyle } from "@/lib/facets/style";
 
 const INHERIT_QUALITY_PROFILE = "__inherit__";
+/** Select value standing for "follow the instance default" (a null route value). */
+const INSTANCE_DEFAULT_AVAILABILITY_VALUE = "default";
 
 function RouteFieldLabel({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
   return (
@@ -140,12 +142,19 @@ export function ListRouteCard({
               <SingleSelectField
                 id={`${idPrefix}-route-${kind.toLowerCase()}-availability`}
                 label={<RouteFieldLabel icon={Calendar} label={t("settings.minAvailabilityLabel")} />}
-                value={route.minAvailability ?? "announced"}
-                options={["announced", "in_cinemas", "released"].map((value) => ({
-                  value,
-                  label: t(`settings.minAvailability.${value}`),
-                }))}
-                onValueChange={(minAvailability) => update({ minAvailability })}
+                value={route.minAvailability ?? INSTANCE_DEFAULT_AVAILABILITY_VALUE}
+                options={[INSTANCE_DEFAULT_AVAILABILITY_VALUE, "announced", "in_cinemas", "released"].map(
+                  (value) => ({
+                    value,
+                    label: t(`settings.minAvailability.${value}`),
+                  }),
+                )}
+                onValueChange={(minAvailability) =>
+                  update({
+                    minAvailability:
+                      minAvailability === INSTANCE_DEFAULT_AVAILABILITY_VALUE ? null : minAvailability,
+                  })
+                }
                 disabled={disabled}
               />
             ) : (

@@ -1161,7 +1161,9 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         .read()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| scryer_rules::UserRulesEngine::empty());
-    if !user_rules_engine.is_empty() {
+    if runtime_sample_validation.mode == RuntimeSampleValidationMode::EnforceAutomatic
+        && !user_rules_engine.is_empty()
+    {
         let library_name = match app
             .services
             .catalog

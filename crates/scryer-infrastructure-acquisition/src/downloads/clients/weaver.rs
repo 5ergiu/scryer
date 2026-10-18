@@ -2287,6 +2287,7 @@ mod tests {
                 metadata_fetched_at: None,
                 min_availability: None,
                 digital_release_date: None,
+                movie_release_dates: None,
                 folder_path: None,
             },
             search_facet: None,
