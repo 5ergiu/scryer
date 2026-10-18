@@ -1881,7 +1881,18 @@ async fn import_single_episode_file(
             already_present_destination,
             ..
         } => {
-            let artifact_result = if episode_skip_is_already_present(skip_reason.as_ref()) {
+            let already_present = episode_skip_is_already_present(skip_reason.as_ref());
+            if already_present {
+                let release_title = release_evidence.release_title(Some(parse_video));
+                complete_already_present_episode_scopes(
+                    app,
+                    &title.id,
+                    &target_episode_ids,
+                    release_title.as_deref(),
+                )
+                .await;
+            }
+            let artifact_result = if already_present {
                 "already_present"
             } else {
                 "rejected"
