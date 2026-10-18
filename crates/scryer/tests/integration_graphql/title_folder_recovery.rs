@@ -4,6 +4,32 @@ use scryer_application::location::model::LocationOperationState;
 use scryer_application::location::title_folder_recovery::RECOVERY_VERSION;
 use scryer_infrastructure_library::media::libraries::location_operation_store::LocationOperationStore;
 
+async fn configure_recovery_recycle_path(ctx: &TestContext, path: &std::path::Path) {
+    ctx.settings_store
+        .batch_ensure_setting_definitions(vec![SettingDefinitionSeed {
+            category: "media".into(),
+            scope: "media".into(),
+            key_name: "recycle_bin.path".into(),
+            data_type: "string".into(),
+            default_value_json: "null".into(),
+            is_sensitive: false,
+            validation_json: None,
+        }])
+        .await
+        .unwrap();
+    ctx.settings_store
+        .upsert_setting_value(
+            "media",
+            "recycle_bin.path",
+            None,
+            serde_json::to_string(&path.to_string_lossy()).unwrap(),
+            "test",
+            None,
+        )
+        .await
+        .unwrap();
+}
+
 async fn await_recovery(
     ctx: &TestContext,
     title_id: &str,
@@ -344,6 +370,15 @@ async fn title_folder_recovery_rolls_back_all_paths_and_resumes_verified_copies(
     let destination = receipts[0].destination_path.clone();
     assert_eq!(std::fs::read(&destination).unwrap(), b"synthetic movie");
     assert_eq!(std::fs::read(&source).unwrap(), b"synthetic movie");
+    // A re-created catalog row must replace the old receipt even though its
+    // source and destination filenames have not changed.
+    let replacement_id = Id::new().0;
+    sqlx::query("UPDATE media_files SET id = ? WHERE title_id = ?")
+        .bind(&replacement_id)
+        .bind(&title.id)
+        .execute(ctx.db.pool())
+        .await
+        .unwrap();
     sqlx::raw_sql("DROP TRIGGER reject_recovery_title_write")
         .execute(ctx.db.pool())
         .await
@@ -373,6 +408,14 @@ async fn title_folder_recovery_rolls_back_all_paths_and_resumes_verified_copies(
         "{resumed:?}"
     );
     assert!(store.recovery_committed(&operation.id).await.unwrap());
+    let refreshed = store
+        .list_location_file_verifications(&operation.id, Some(&title.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed[0].media_file_id.as_deref(),
+        Some(replacement_id.as_str())
+    );
     assert_eq!(
         ctx.media_files
             .list_media_files_for_title(&title.id)
@@ -551,6 +594,13 @@ async fn title_folder_recovery_uses_tracked_folder_in_another_root_of_the_same_l
     std::fs::create_dir_all(&first).unwrap();
     std::fs::create_dir_all(&folder).unwrap();
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+    let unrelated = second.join("Unrelated (2014) - [tvdbid-999999]");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(
+        unrelated.join("tvshow.nfo"),
+        "<tvshow><uniqueid type=\"tvdb\">888888</uniqueid></tvshow>",
+    )
+    .unwrap();
     let library = ctx.libraries.get_by_id(&library_id).await.unwrap().unwrap();
     let library = ctx
         .libraries
@@ -627,4 +677,117 @@ async fn title_folder_recovery_uses_tracked_folder_in_another_root_of_the_same_l
     assert_eq!(before[0].file_path, after[0].file_path);
     assert_eq!(std::fs::read(&path).unwrap(), b"media");
     assert_eq!(std::fs::read_dir(&first).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn title_folder_recovery_refuses_foreign_generated_destination() {
+    for reserve_recycle in [false, true] {
+        let ctx = TestContext::new().await;
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path().canonicalize().unwrap();
+        let root = ancestor.join("Library");
+        std::fs::create_dir(&root).unwrap();
+        configure_default_library_root(&ctx, MediaFacet::Movie, &root).await;
+        let title = create_catalog_title(
+            &ctx,
+            "Generated Film",
+            MediaFacet::Movie,
+            vec![],
+            vec![],
+            true,
+        )
+        .await;
+        set_title_folder_path(&ctx, &title.id, &ancestor).await;
+        let source = ancestor.join("film.mkv");
+        std::fs::write(&source, b"media").unwrap();
+        ctx.media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: title.id.clone(),
+                file_path: source.to_string_lossy().into_owned(),
+                size_bytes: 5,
+                role: MediaFileRole::Primary,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let current = ctx.titles.get_by_id(&title.id).await.unwrap().unwrap();
+        let destination = root.join(format!("{} ({})", current.name, current.year.unwrap()));
+        let foreign = destination.join("foreign.mkv");
+        if reserve_recycle {
+            configure_recovery_recycle_path(&ctx, &destination).await;
+        } else {
+            std::fs::create_dir_all(&destination).unwrap();
+            std::fs::write(&foreign, b"unrelated content").unwrap();
+        }
+        ctx.app.enroll_title_folder_recovery().await.unwrap();
+        let operation = await_recovery(&ctx, &title.id).await;
+        assert_eq!(operation.state, LocationOperationState::Failed);
+        assert!(operation.detail.unwrap().contains(if reserve_recycle {
+            "configured recycle storage"
+        } else {
+            "without ownership evidence"
+        }));
+        assert_eq!(
+            ctx.titles
+                .get_by_id(&title.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .folder_path,
+            current.folder_path
+        );
+        assert_eq!(std::fs::read(source).unwrap(), b"media");
+        if reserve_recycle {
+            assert!(!destination.exists());
+        } else {
+            assert_eq!(std::fs::read(foreign).unwrap(), b"unrelated content");
+            assert_eq!(std::fs::read_dir(destination).unwrap().count(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn title_folder_recovery_never_adopts_exact_id_recycle_storage() {
+    let ctx = TestContext::new().await;
+    let temp = tempfile::tempdir().unwrap();
+    let ancestor = temp.path().canonicalize().unwrap();
+    let root = ancestor.join("Anime");
+    let recycle = root.join("Example (2014) - [tvdbid-456789]");
+    std::fs::create_dir_all(&recycle).unwrap();
+    std::fs::write(recycle.join("retained.mkv"), b"retained original").unwrap();
+    configure_default_library_root(&ctx, MediaFacet::Anime, &root).await;
+    configure_recovery_recycle_path(&ctx, &recycle).await;
+    let title = create_catalog_title(
+        &ctx,
+        "Example",
+        MediaFacet::Anime,
+        vec![ExternalId::new("tvdb", "456789")],
+        vec![],
+        true,
+    )
+    .await;
+    set_title_folder_path(&ctx, &title.id, &ancestor).await;
+    ctx.app.enroll_title_folder_recovery().await.unwrap();
+    let operation = await_recovery(&ctx, &title.id).await;
+    assert_eq!(operation.state, LocationOperationState::Failed);
+    assert_eq!(
+        ctx.titles
+            .get_by_id(&title.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .folder_path,
+        Some(ancestor.to_string_lossy().into_owned())
+    );
+    assert_eq!(
+        std::fs::read(recycle.join("retained.mkv")).unwrap(),
+        b"retained original"
+    );
+    assert!(
+        ctx.media_files
+            .list_media_files_for_title(&title.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -104,6 +104,19 @@ impl LocationOperationRepository for LocationOperationStore {
                  SqlArg::Text(file.media.file_path.clone()), SqlArg::Text(file.destination.clone()), SqlArg::Text(staging_path.into())]).await?;
         Ok(())
     }
+    async fn recovery_staging_paths(&self, operation_id: &str) -> AppResult<Vec<String>> {
+        let rows = SqlRuntime::fetch_all(self.datastore.read_exec(),
+            "SELECT staging_path FROM location_recovery_staging WHERE operation_id = {} LIMIT 100001",
+            &[SqlArg::Text(operation_id.into())]).await?;
+        if rows.len() > 100000 {
+            return Err(AppError::Validation(
+                "Recovery staging evidence limit exceeded".into(),
+            ));
+        }
+        rows.into_iter()
+            .map(|row| row.text("staging_path"))
+            .collect()
+    }
     async fn replace_recovery_plan(&self, operation_id: &str, plan_json: &str) -> AppResult<()> {
         use scryer_application::location::title_folder_recovery::RecoveryPlan;
         let plan: RecoveryPlan =
@@ -112,17 +125,28 @@ impl LocationOperationRepository for LocationOperationStore {
             return Err(AppError::Validation("Recovery identity changed".into()));
         }
         let work = plan.work();
-        let changed = SqlRuntime::execute_write(&self.datastore, "replace_recovery_plan",
+        let operation_id = operation_id.to_owned();
+        let plan_json = plan_json.to_owned();
+        SqlRuntime::run_in_transaction(&self.datastore, "replace_recovery_plan", move |tx| {
+            let plan = plan.clone(); let work = work.clone(); let operation_id = operation_id.clone(); let plan_json = plan_json.clone();
+            Box::pin(async move {
+        let changed = SqlRuntime::execute(SqlExec::Tx(tx),
             "UPDATE location_operations SET plan_json = {}, plan_fingerprint = {}, source_root_id = {}, destination_root_id = {}, file_total = {}, bytes_total = {}, updated_at = {} WHERE id = {} AND operation_type = 'title_folder_recovery' AND recovery_committed_at IS NULL AND state IN ('failed', 'canceled')",
-            vec![SqlArg::Text(plan_json.into()), SqlArg::Text(blake3::hash(plan_json.as_bytes()).to_hex().to_string()),
+            &[SqlArg::Text(plan_json.clone()), SqlArg::Text(blake3::hash(plan_json.as_bytes()).to_hex().to_string()),
                 SqlArg::Text(plan.title.root_folder_id), SqlArg::OptText(plan.destination_root.map(|root| root.id)),
-                SqlArg::I64(work.files_total()), SqlArg::I64(work.bytes_total()), SqlArg::Timestamp(Utc::now()), SqlArg::Text(operation_id.into())]).await?;
+                SqlArg::I64(work.files_total()), SqlArg::I64(work.bytes_total()), SqlArg::Timestamp(Utc::now()), SqlArg::Text(operation_id.clone())]).await?;
         if changed != 1 {
             return Err(AppError::Validation(
                 "Recovery cannot be replanned in its current state".into(),
             ));
         }
+        // Retain destination bytes and staging evidence, but never let an old
+        // receipt skip verification under a newly accepted plan.
+        SqlRuntime::execute(SqlExec::Tx(tx), "DELETE FROM location_operation_verifications WHERE operation_id = {}",
+            &[SqlArg::Text(operation_id)]).await?;
         Ok(())
+            })
+        }).await
     }
 
     async fn recovery_committed(&self, operation_id: &str) -> AppResult<bool> {

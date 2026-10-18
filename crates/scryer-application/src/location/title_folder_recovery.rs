@@ -59,6 +59,8 @@ pub struct RecoveryPlan {
     pub expected_media: Vec<RecoveryMedia>,
     pub destination_root: Option<LibraryRoot>,
     pub destination: Option<String>,
+    #[serde(default)]
+    pub generated_destination: bool,
     pub files: Vec<RecoveryFile>,
     pub unresolved: Option<String>,
 }
@@ -306,18 +308,30 @@ async fn folder_identity_matches(
         ("tmdb", parsed.tmdb_id),
         ("imdb", parsed.imdb_id),
     ];
+    let mut identity_errors = Vec::new();
     for name in ["tvshow.nfo", "movie.nfo"] {
         let file = path.join(name);
-        match tokio::fs::symlink_metadata(&file).await {
-            Ok(meta)
-                if meta.is_file()
-                    && !meta.file_type().is_symlink()
-                    && meta.len() <= 1024 * 1024 =>
-            {
-                inspect_path(&file, false).await?;
-                let content = tokio::fs::read_to_string(&file)
-                    .await
-                    .map_err(|e| fail(e.to_string()))?;
+        let content: AppResult<Option<String>> = async {
+            match tokio::fs::symlink_metadata(&file).await {
+                Ok(meta)
+                    if meta.is_file()
+                        && !meta.file_type().is_symlink()
+                        && meta.len() <= 1024 * 1024 =>
+                {
+                    inspect_path(&file, false).await?;
+                    tokio::fs::read_to_string(&file)
+                        .await
+                        .map(Some)
+                        .map_err(|e| fail(e.to_string()))
+                }
+                Ok(_) => Err(fail("Identity sidecar is unsupported or too large")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(fail(e.to_string())),
+            }
+        }
+        .await;
+        match content {
+            Ok(Some(content)) => {
                 let meta = crate::nfo::parse_nfo(&content);
                 ids.extend([
                     ("tvdb", meta.tvdb_id),
@@ -325,10 +339,16 @@ async fn folder_identity_matches(
                     ("imdb", meta.imdb_id),
                 ]);
             }
-            Ok(_) => return Err(fail("Identity sidecar is unsupported or too large")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(fail(e.to_string())),
+            Ok(None) => {}
+            Err(error) => identity_errors.push(error),
         }
+    }
+    let relevant = require_consistency
+        || ids
+            .iter()
+            .any(|id| external_ids_match(title, std::slice::from_ref(id)));
+    if let Some(error) = identity_errors.into_iter().next() {
+        return if relevant { Err(error) } else { Ok(false) };
     }
     // Two sources naming different IDs are ambiguous even when one matches.
     for source in ["tvdb", "tmdb", "imdb"] {
@@ -338,7 +358,11 @@ async fn folder_identity_matches(
             .filter_map(|(_, v)| v.as_deref())
             .collect();
         if values.len() > 1 {
-            return Err(fail("Folder identity evidence conflicts"));
+            return if relevant {
+                Err(fail("Folder identity evidence conflicts"))
+            } else {
+                Ok(false)
+            };
         }
     }
     if require_consistency
@@ -461,6 +485,7 @@ impl AppUseCase {
             expected_media,
             destination_root: None,
             destination: None,
+            generated_destination: false,
             files: Vec::new(),
             unresolved: None,
         };
@@ -551,6 +576,16 @@ impl AppUseCase {
                     continue;
                 }
                 let folder = entry.path();
+                let stored = path_to_stored_string(&folder);
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with(".scryer-")
+                    || custom_recycle.as_ref().is_some_and(|recycle| {
+                        folder_paths_match(recycle, &stored)
+                            || stored_path_is_inside_folder(recycle, &stored)
+                    })
+                {
+                    continue;
+                }
                 inspect_path(&folder, false).await?;
                 if folder_matches(&plan.title, &folder).await? {
                     let folder = path_to_stored_string(&folder);
@@ -564,6 +599,7 @@ impl AppUseCase {
         let destination = if let Some(folder) = candidates.into_values().next() {
             folder
         } else {
+            plan.generated_destination = true;
             if live.is_empty() {
                 return Err(fail("No media or exact-ID folder establishes ownership"));
             }
@@ -594,6 +630,14 @@ impl AppUseCase {
                 plan.title.year,
             ))
         };
+        if custom_recycle
+            .as_ref()
+            .is_some_and(|recycle| overlaps(&destination, recycle))
+        {
+            return Err(fail(
+                "Recovery destination overlaps configured recycle storage",
+            ));
+        }
         let root = roots
             .iter()
             .filter(|r| path_is_strictly_within(&destination, &r.path))
@@ -601,6 +645,19 @@ impl AppUseCase {
             .ok_or_else(|| fail("Destination is outside the title library"))?;
         plan.destination = Some(destination.clone());
         plan.destination_root = Some(root.clone());
+        if let Some(previous) = self
+            .services
+            .library
+            .location_operations
+            .get_location_operation_plan_json(&plan.operation_id())
+            .await?
+        {
+            let previous: RecoveryPlan =
+                serde_json::from_str(&previous).map_err(|error| fail(error.to_string()))?;
+            if previous.generated_destination && previous.destination == plan.destination {
+                plan.generated_destination = true;
+            }
+        }
         let destination_path = stored_path_to_path_buf(&destination);
         inspect_path(&destination_path, true).await?;
         for media in live {
@@ -667,6 +724,101 @@ impl AppUseCase {
                 expected_hash,
             });
         }
-        validate_catalog(plan, catalog)
+        validate_catalog(plan, catalog)?;
+        self.validate_generated_recovery_destination(plan).await
+    }
+
+    pub(super) async fn validate_generated_recovery_destination(
+        &self,
+        plan: &RecoveryPlan,
+    ) -> AppResult<()> {
+        let destination = plan
+            .destination
+            .as_deref()
+            .ok_or_else(|| fail("Recovery destination missing"))?;
+        if self
+            .read_setting_string_value_for_scope(
+                crate::SETTINGS_SCOPE_MEDIA,
+                "recycle_bin.path",
+                None,
+            )
+            .await?
+            .as_ref()
+            .is_some_and(|recycle| overlaps(destination, recycle))
+        {
+            return Err(fail(
+                "Recovery destination overlaps configured recycle storage",
+            ));
+        }
+        if !plan.generated_destination {
+            return Ok(());
+        }
+        let path = stored_path_to_path_buf(destination);
+        match tokio::fs::symlink_metadata(&path).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(fail(error.to_string())),
+            Ok(meta) if !meta.is_dir() => {
+                return Err(fail("Generated destination is not a directory"));
+            }
+            Ok(_) => {}
+        }
+        inspect_path(&path, false).await?;
+        let store = &self.services.library.location_operations;
+        let previous = store
+            .get_location_operation_plan_json(&plan.operation_id())
+            .await?
+            .ok_or_else(|| {
+                fail("Generated destination already exists without ownership evidence")
+            })?;
+        let previous: RecoveryPlan =
+            serde_json::from_str(&previous).map_err(|error| fail(error.to_string()))?;
+        if !previous.generated_destination
+            || previous.operation_id() != plan.operation_id()
+            || previous.destination.as_deref() != Some(destination)
+        {
+            return Err(fail(
+                "Generated destination is not this recovery's recorded folder",
+            ));
+        }
+        let mut allowed: BTreeSet<_> = plan
+            .files
+            .iter()
+            .map(|file| path_key(&file.destination))
+            .collect();
+        allowed.extend(
+            store
+                .recovery_staging_paths(&plan.operation_id())
+                .await?
+                .into_iter()
+                .map(|path| path_key(&path)),
+        );
+        let mut entries = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|error| fail(error.to_string()))?;
+        let mut seen = 0usize;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| fail(error.to_string()))?
+        {
+            seen += 1;
+            if seen > MAX_DISCOVERY_ENTRIES {
+                return Err(fail("Generated destination inventory limit exceeded"));
+            }
+            let entry_path = entry.path();
+            inspect_path(&entry_path, false).await?;
+            if !entry
+                .file_type()
+                .await
+                .map_err(|error| fail(error.to_string()))?
+                .is_file()
+                || !allowed.contains(&path_key(&path_to_stored_string(&entry_path)))
+            {
+                return Err(fail(
+                    "Generated destination contains unrelated content; ownership remains unresolved",
+                ));
+            }
+        }
+        Ok(())
     }
 }

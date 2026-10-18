@@ -1,12 +1,18 @@
 use super::*;
 use crate::domain_events::{DomainEventActor, new_title_domain_event, title_context_snapshot};
+use crate::location::execution::{ImportFilePermissionsApplier, PlacedContentPermissions};
 use crate::location::executor::*;
+use crate::location::ownership_guard::LiveRunnerGuard;
 use crate::location::verify::{
     CopyProgress, VerifiedCopier, VerifiedFile, hash_existing_file_with_progress,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use scryer_domain::{DomainEventPayload, TitleUpdatedEventData};
+
+#[cfg(all(test, unix))]
+#[path = "execute_tests.rs"]
+mod tests;
 
 impl RecoveryPlan {
     pub fn operation_id(&self) -> String {
@@ -117,13 +123,25 @@ impl AppUseCase {
                 updated_at: now,
                 completed_at: None,
             };
+            // Reserve liveness before the queued row becomes visible to the
+            // FIFO. Slow enrollment must never look like a lost runner.
+            let Some(guard) = self.runtime.library.location_runners.begin(&operation.id) else {
+                continue;
+            };
             if let Err(error) = store
                 .create_location_operation(&operation, Some(&json))
                 .await
             {
-                if store.get_location_operation(&operation.id).await?.is_none() {
+                let Some(existing) = store.get_location_operation(&operation.id).await? else {
                     return Err(error);
+                };
+                if existing.state.is_terminal() {
+                    continue;
                 }
+                let existing_plan = self.read_title_folder_recovery_plan(&existing).await?;
+                self.spawn_registered_title_folder_recovery(existing.id, existing_plan, guard);
+            } else {
+                self.spawn_registered_title_folder_recovery(operation.id, plan, guard);
             }
         }
         for operation in store.list_active_location_operations().await? {
@@ -144,21 +162,7 @@ impl AppUseCase {
         if self.runtime.library.location_runners.is_live(&operation.id) {
             return Err(fail("Recovery is already running"));
         }
-        let json = self
-            .services
-            .library
-            .location_operations
-            .get_location_operation_plan_json(&operation.id)
-            .await?
-            .ok_or_else(|| fail("Recovery plan is missing"))?;
-        let mut plan: RecoveryPlan =
-            serde_json::from_str(&json).map_err(|e| fail(e.to_string()))?;
-        if plan.version != RECOVERY_VERSION
-            || plan.operation_id() != operation.id
-            || operation.mode != LocationExecutionMode::CopyPreserveSources
-        {
-            return Err(fail("Unsupported recovery plan"));
-        }
+        let mut plan = self.read_title_folder_recovery_plan(operation).await?;
         if matches!(
             operation.state,
             LocationOperationState::Failed | LocationOperationState::Canceled
@@ -194,10 +198,40 @@ impl AppUseCase {
         Ok(plan)
     }
 
+    async fn read_title_folder_recovery_plan(
+        &self,
+        operation: &LocationOperation,
+    ) -> AppResult<RecoveryPlan> {
+        let json = self
+            .services
+            .library
+            .location_operations
+            .get_location_operation_plan_json(&operation.id)
+            .await?
+            .ok_or_else(|| fail("Recovery plan is missing"))?;
+        let plan: RecoveryPlan = serde_json::from_str(&json).map_err(|e| fail(e.to_string()))?;
+        if plan.version != RECOVERY_VERSION
+            || plan.operation_id() != operation.id
+            || operation.mode != LocationExecutionMode::CopyPreserveSources
+        {
+            return Err(fail("Unsupported recovery plan"));
+        }
+        Ok(plan)
+    }
+
     pub fn spawn_title_folder_recovery(&self, operation_id: String, plan: RecoveryPlan) {
         let Some(guard) = self.runtime.library.location_runners.begin(&operation_id) else {
             return;
         };
+        self.spawn_registered_title_folder_recovery(operation_id, plan, guard);
+    }
+
+    fn spawn_registered_title_folder_recovery(
+        &self,
+        operation_id: String,
+        plan: RecoveryPlan,
+        guard: LiveRunnerGuard,
+    ) {
         let app = self.clone();
         tokio::spawn(async move {
             let _guard = guard;
@@ -237,7 +271,17 @@ impl AppUseCase {
             app: self.clone(),
             job_run_id: job.id.clone(),
         };
-        let seams = RecoveryExecution { app: self, plan };
+        let permissions = self
+            .resolve_import_file_permissions(Some(&plan.title.library_id), &plan.title.facet)
+            .await?;
+        let seams = RecoveryExecution {
+            app: self,
+            plan,
+            permissions: ImportFilePermissionsApplier::new(
+                self.services.workflow.file_importer.clone(),
+                permissions,
+            ),
+        };
         let work = plan.work();
         self.services
             .library
@@ -287,6 +331,7 @@ impl AppUseCase {
 struct RecoveryExecution<'a> {
     app: &'a AppUseCase,
     plan: &'a RecoveryPlan,
+    permissions: ImportFilePermissionsApplier,
 }
 
 impl RecoveryExecution<'_> {
@@ -304,6 +349,9 @@ impl RecoveryExecution<'_> {
                 .ok_or_else(|| fail("Recovery destination missing"))?,
         );
         inspect_path(&destination, !self.plan.files.is_empty()).await?;
+        self.app
+            .validate_generated_recovery_destination(self.plan)
+            .await?;
         let matched = folder_identity_matches(&self.plan.title, &destination, true).await?;
         if self.plan.files.is_empty() && !matched {
             return Err(fail(
@@ -403,10 +451,7 @@ impl TitleFileMover for RecoveryExecution<'_> {
             let parent = destination
                 .parent()
                 .ok_or_else(|| fail("Destination has no parent"))?;
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| fail(e.to_string()))?;
-            inspect_path(parent, false).await?;
+            create_recovery_destination_directories(parent, &self.permissions).await?;
             // Each attempt gets its own durably recorded staging name. An
             // interrupted attempt is never mistaken for permission to delete it.
             let staging = parent.join(format!(".scryer-recovery-{}", scryer_domain::Id::new().0));
@@ -438,7 +483,9 @@ impl TitleFileMover for RecoveryExecution<'_> {
                 })?;
             crate::location::verify::sync_parent_directory_after_promotion(destination).await;
         }
-        let hashes = prove_file(file, request.progress.clone()).await?;
+        let hashes =
+            prove_and_apply_recovery_permissions(file, request.progress.clone(), &self.permissions)
+                .await?;
         Ok(VerifiedFile {
             source_path: source.clone(),
             destination_path: destination.clone(),
@@ -448,6 +495,64 @@ impl TitleFileMover for RecoveryExecution<'_> {
             detail: Some("Full content verified; original source preserved".into()),
         })
     }
+}
+
+async fn create_recovery_destination_directories(
+    parent: &Path,
+    permissions: &dyn PlacedContentPermissions,
+) -> AppResult<()> {
+    inspect_path(parent, true).await?;
+    let mut missing = Vec::new();
+    let mut current = parent;
+    loop {
+        match tokio::fs::symlink_metadata(current).await {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => return Err(fail("Recovery destination parent is not a directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(current.to_path_buf());
+                current = current
+                    .parent()
+                    .ok_or_else(|| fail("Recovery destination has no existing ancestor"))?;
+            }
+            Err(error) => return Err(fail(error.to_string())),
+        }
+    }
+    for directory in missing.into_iter().rev() {
+        match tokio::fs::create_dir(&directory).await {
+            Ok(()) => {
+                inspect_path(&directory, false).await?;
+                permissions.apply_to_directory(&directory).await?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                inspect_path(&directory, false).await?;
+                if !tokio::fs::symlink_metadata(&directory)
+                    .await
+                    .map_err(|e| fail(e.to_string()))?
+                    .is_dir()
+                {
+                    return Err(fail("Recovery destination parent is not a directory"));
+                }
+            }
+            Err(error) => return Err(fail(error.to_string())),
+        }
+    }
+    inspect_path(parent, false).await
+}
+
+async fn prove_and_apply_recovery_permissions(
+    file: &RecoveryFile,
+    progress: CopyProgress,
+    permissions: &dyn PlacedContentPermissions,
+) -> AppResult<StreamedContentHashes> {
+    let hashes = prove_file(file, progress).await?;
+    // In-place files are originals. Only a verified independent copy may have
+    // destination permissions applied; source modes remain untouched.
+    if !folder_paths_match(&file.media.file_path, &file.destination) {
+        permissions
+            .apply_to_file(&stored_path_to_path_buf(&file.destination))
+            .await?;
+    }
+    Ok(hashes)
 }
 
 pub(super) async fn prove_file(

@@ -226,6 +226,7 @@ fn catalog_fixture() -> (RecoveryPlan, RecoveryCatalog) {
         expected_media: catalog.media.clone(),
         destination_root: Some(root),
         destination: Some("/drive/library/Example".into()),
+        generated_destination: false,
         files: vec![RecoveryFile {
             media,
             destination: "/drive/library/Example/E01.mkv".into(),

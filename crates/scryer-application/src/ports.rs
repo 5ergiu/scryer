@@ -6391,6 +6391,11 @@ pub trait LocationOperationRepository: Send + Sync {
             "recovery staging storage is not configured".into(),
         ))
     }
+    async fn recovery_staging_paths(&self, _operation_id: &str) -> AppResult<Vec<String>> {
+        Err(AppError::Repository(
+            "recovery staging storage is not configured".into(),
+        ))
+    }
     async fn replace_recovery_plan(&self, _operation_id: &str, _plan_json: &str) -> AppResult<()> {
         Err(AppError::Repository(
             "recovery replanning is not configured".into(),
