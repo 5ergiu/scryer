@@ -260,6 +260,10 @@ pub(crate) enum ReleaseAutoDecisionCode {
     /// A movie subject was offered a release whose year is more than a year
     /// away from the movie's own: a different film that shares the name.
     TitleYearMismatch,
+    /// An automatic single-episode search was offered a season or a pack of
+    /// three or more episodes. Packs belong to season searches, where the
+    /// missing-episode threshold decides whether one is worth taking.
+    PackForSingleEpisode,
 }
 
 impl ReleaseAutoDecisionCode {
@@ -298,6 +302,7 @@ impl ReleaseAutoDecisionCode {
             "anime_numbering_ambiguous" => Some(Self::AnimeNumberingAmbiguous),
             "episodic_release_for_movie" => Some(Self::EpisodicReleaseForMovie),
             "title_year_mismatch" => Some(Self::TitleYearMismatch),
+            "pack_for_single_episode" => Some(Self::PackForSingleEpisode),
             _ => None,
         }
     }
@@ -335,6 +340,7 @@ impl ReleaseAutoDecisionCode {
             Self::AnimeNumberingAmbiguous => "anime_numbering_ambiguous",
             Self::EpisodicReleaseForMovie => "episodic_release_for_movie",
             Self::TitleYearMismatch => "title_year_mismatch",
+            Self::PackForSingleEpisode => "pack_for_single_episode",
         }
     }
 
@@ -393,6 +399,9 @@ impl ReleaseAutoDecisionCode {
                 "release is a season, pack or multi-episode release, not a movie"
             }
             Self::TitleYearMismatch => "release year is more than a year away from the movie's",
+            Self::PackForSingleEpisode => {
+                "an automatic single-episode search does not take a season or multi-episode pack"
+            }
         }
     }
 
@@ -1925,6 +1934,40 @@ pub(crate) fn release_title_is_episodic(release_title: &str) -> bool {
         || episode.absolute_episode_numbers.len() > 1
 }
 
+/// Episode count at which a multi-episode release stops being a double
+/// episode and becomes a pack.
+const SINGLE_EPISODE_PACK_MIN_EPISODES: usize = 3;
+
+/// A season, a multi-season or series pack, or a run of three or more
+/// episodes. Resolved coverage is read first; a release the catalog could not
+/// place falls back to its own parse, so a run longer than the catalog knows
+/// is still a pack.
+fn candidate_is_pack_for_single_episode(candidate: &IndexerSearchResult) -> bool {
+    match &candidate.coverage_scope {
+        Some(SubmissionScope::Collection { .. }) => return true,
+        Some(SubmissionScope::EpisodeSet { episode_ids })
+            if episode_ids.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let Some(episode) = candidate
+        .parsed_release_metadata
+        .as_ref()
+        .and_then(|parsed| parsed.episode.as_ref())
+    else {
+        return false;
+    };
+    episode.full_season
+        || episode.is_partial_season
+        || episode.is_multi_season
+        || episode.is_series_pack
+        || episode.season_numbers.len() > 1
+        || episode.episode_numbers.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES
+        || episode.absolute_episode_numbers.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES
+}
+
 pub(crate) fn evaluate_auto_candidate(
     candidate: &IndexerSearchResult,
     context: &AutoCandidateEvaluationContext<'_>,
@@ -1975,6 +2018,22 @@ pub(crate) fn evaluate_auto_candidate(
 
     if candidate_numbering_contradicts_subject(candidate, context.subject) {
         return ReleaseAutoDecisionCode::EpisodeMismatch;
+    }
+
+    // Sonarr's `SingleEpisodeSearchMatchSpecification`: an automatic search
+    // for one episode takes that episode, or a double episode that holds it,
+    // never a season. The season and collection searches own packs and their
+    // missing-episode threshold. An operator-started search and the feed are
+    // not single-episode searches and are left alone.
+    if !context.user_invoked
+        && !context.is_rss_lane
+        && matches!(
+            context.subject.submission_scope,
+            SubmissionScope::Episode { .. }
+        )
+        && candidate_is_pack_for_single_episode(candidate)
+    {
+        return ReleaseAutoDecisionCode::PackForSingleEpisode;
     }
 
     // Sonarr's `MonitoredEpisodeSpecification`. A multi-episode release that
@@ -4967,6 +5026,136 @@ mod tests {
         }
         assert!(!ReleaseAutoDecisionCode::QualityBlocked.is_identity_refusal());
         assert!(!ReleaseAutoDecisionCode::Eligible.is_identity_refusal());
+    }
+
+    fn single_episode_decision(
+        release: &str,
+        wanted_episode: u32,
+        coverage_scope: Option<SubmissionScope>,
+        user_invoked: bool,
+    ) -> ReleaseAutoDecisionCode {
+        let mut title = make_title();
+        title.name = "Synthetic Show".to_string();
+        title.facet = MediaFacet::Series;
+        title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+        title.tagged_aliases = Vec::new();
+        title.year = None;
+        let mut subject = numbering_scoped_subject(&title, Some(1), Some(wanted_episode));
+        subject.submission_scope = SubmissionScope::Episode {
+            episode_id: format!("ep-{wanted_episode}"),
+        };
+        let mut candidate = make_candidate(release, None);
+        candidate.parsed_release_metadata = Some(crate::parse_release_metadata_for_target(
+            release,
+            &subject.title_evidence.parse_context,
+        ));
+        candidate.quality_profile_decision = Some(allowed_quality_decision(2400));
+        candidate.coverage_scope = coverage_scope;
+        let profile = QualityProfile::default();
+        let thresholds = AcquisitionThresholds::default();
+        let now = Utc::now();
+        let db_blocklist = crate::app_usecase_discovery::TitleReleaseBlocklistSignatures::default();
+        let no_minimum_seeders = HashMap::new();
+        let context = AutoCandidateEvaluationContext {
+            title: &title,
+            subject: &subject,
+            admission: &empty_admission(),
+            profile: &profile,
+            thresholds: &thresholds,
+            incumbent_at_cutoff: false,
+            is_rss_lane: false,
+            user_invoked,
+            oldest_overlapping_pending_published_at: None,
+            now: &now,
+            dl_snapshot: None,
+            db_blocklist: &db_blocklist,
+            existing_files: &[],
+            delay_profiles: &[],
+            failed_routes: None,
+            minimum_seeders: &no_minimum_seeders,
+            unmonitored_episode_ids: &HashSet::new(),
+        };
+        evaluate_auto_candidate(&candidate, &context)
+    }
+
+    #[test]
+    fn an_automatic_single_episode_search_does_not_take_packs() {
+        let long_run = "Synthetic.Show.S01E01-240.1080p.WEB-DL-SYNTH";
+        assert_eq!(
+            single_episode_decision(long_run, 1, None, false),
+            ReleaseAutoDecisionCode::PackForSingleEpisode,
+            "{long_run}"
+        );
+        let season_range = "Synthetic Show S01 [25-48] [1080p]";
+        assert_eq!(
+            single_episode_decision(season_range, 30, None, false),
+            ReleaseAutoDecisionCode::PackForSingleEpisode,
+            "{season_range}"
+        );
+        let resolved_season = SubmissionScope::Collection {
+            collection_id: "season-1".to_string(),
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01.1080p.WEB-DL-SYNTH",
+                1,
+                Some(resolved_season.clone()),
+                false
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+        let triple = SubmissionScope::EpisodeSet {
+            episode_ids: vec!["ep-1".into(), "ep-2".into(), "ep-3".into()],
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01E01-E03.1080p.WEB-DL-SYNTH",
+                1,
+                Some(triple),
+                false
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+    }
+
+    #[test]
+    fn a_single_episode_search_still_takes_its_episode_or_a_double_holding_it() {
+        assert_eq!(
+            single_episode_decision("Synthetic.Show.S01E01.1080p.WEB-DL-SYNTH", 1, None, false),
+            ReleaseAutoDecisionCode::Eligible
+        );
+        let double = SubmissionScope::EpisodeSet {
+            episode_ids: vec!["ep-1".into(), "ep-2".into()],
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01E01E02.1080p.WEB-DL-SYNTH",
+                1,
+                Some(double),
+                false
+            ),
+            ReleaseAutoDecisionCode::Eligible
+        );
+    }
+
+    #[test]
+    fn an_operator_started_episode_search_may_take_a_pack() {
+        let resolved_season = SubmissionScope::Collection {
+            collection_id: "season-1".to_string(),
+        };
+        assert_ne!(
+            single_episode_decision(
+                "Synthetic.Show.S01.1080p.WEB-DL-SYNTH",
+                1,
+                Some(resolved_season),
+                true
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+        assert_eq!(
+            ReleaseAutoDecisionCode::parse(ReleaseAutoDecisionCode::PackForSingleEpisode.as_str()),
+            Some(ReleaseAutoDecisionCode::PackForSingleEpisode)
+        );
     }
 
     #[test]

@@ -141,6 +141,7 @@ function formatWantedDecisionCode(code: string, t: Translate) {
     quality_blocked: "wanted.decision.qualityBlocked",
     minimum_seeders: "wanted.decision.minimumSeeders",
     pack_below_missing_threshold: "wanted.decision.packBelowMissingThreshold",
+    pack_for_single_episode: "wanted.decision.packForSingleEpisode",
     upgrade_rejected: "wanted.decision.upgradeRejected",
     pending_delay: "wanted.decision.pendingDelay",
     already_active: "wanted.decision.alreadyActive",
