@@ -598,6 +598,11 @@ pub(crate) fn series_movie_search_title(
     search_title.name = movie.title.clone();
     search_title.facet = MediaFacet::Movie;
     search_title.year = movie.year;
+    // A linked movie has no availability threshold of its own; the series'
+    // NULL must not pick up the movie instance default.
+    search_title
+        .min_availability
+        .get_or_insert_with(|| "announced".to_string());
     search_title.imdb_id = movie.imdb_id.clone();
     search_title.runtime_minutes = movie.runtime_minutes;
     search_title.external_ids.retain(|external_id| {
@@ -1828,15 +1833,28 @@ fn release_title_is_subtitles_only(release_title: &str) -> bool {
         })
 }
 
-/// The two refusals only a movie subject can earn: an episodic release and a
-/// release from another year. Both are identity, not taste, so they run ahead
-/// of every quality and availability gate in every lane.
+/// A movie title of its own, not a movie linked to a series. A linked movie
+/// is legitimately released in episodic shapes (an `S00E01` special, a
+/// "Show - Movie" name) under the series' own years, so neither movie refusal
+/// applies to it.
+fn subject_is_standalone_movie(subject: &ResolvedReleaseSearchSubject) -> bool {
+    subject.search_facet == MediaFacet::Movie
+        && subject.owner_facet == MediaFacet::Movie
+        && !matches!(
+            subject.submission_scope,
+            SubmissionScope::SeriesMovie { .. }
+        )
+}
+
+/// The two refusals only a standalone movie subject can earn: an episodic
+/// release and a release from another year. Both are identity, not taste, so
+/// they run ahead of every quality and availability gate in every lane.
 pub(crate) fn movie_subject_refusal(
     candidate: &IndexerSearchResult,
     subject: &ResolvedReleaseSearchSubject,
     title_match: Option<&CandidateTitleMatch>,
 ) -> Option<ReleaseAutoDecisionCode> {
-    if subject.search_facet != MediaFacet::Movie {
+    if !subject_is_standalone_movie(subject) {
         return None;
     }
     if movie_year_contradicts_subject(candidate, &subject.title_evidence, title_match) {
@@ -1854,7 +1872,7 @@ pub(crate) fn movie_subject_refusal_unmatched(
     candidate: &IndexerSearchResult,
     subject: &ResolvedReleaseSearchSubject,
 ) -> Option<ReleaseAutoDecisionCode> {
-    if subject.search_facet != MediaFacet::Movie {
+    if !subject_is_standalone_movie(subject) {
         return None;
     }
     let title_match = candidate_title_match(candidate, &subject.title_evidence);
@@ -4944,6 +4962,59 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A movie linked to a series, searched as a movie, the way
+    /// `resolve_release_search_subject_for_series_movie` builds it.
+    fn quillon_linked_movie() -> (Title, ResolvedReleaseSearchSubject) {
+        let (mut title, _) = quillon_movie(2028);
+        title.aliases = vec!["Brightvale - Quillon".to_string()];
+        let mut subject = numbering_scoped_subject(&title, None, None);
+        subject.subject_kind = ReleaseSearchSubjectKind::Title;
+        subject.owner_facet = MediaFacet::Series;
+        subject.id_search_facet = Some(MediaFacet::Movie);
+        subject.submission_scope = SubmissionScope::SeriesMovie {
+            series_movie_link_id: "link-quillon".to_string(),
+        };
+        (title, subject)
+    }
+
+    #[test]
+    fn a_linked_movie_keeps_its_specials_and_series_named_releases() {
+        let (title, subject) = quillon_linked_movie();
+        for release in [
+            "Quillon.S00E01.1080p.WEB-DL-SYNTH",
+            "[SynthSubs] Quillon S00E01 [1080p]",
+            "Brightvale - Quillon 2028 1080p WEB-DL-SYNTH",
+        ] {
+            let candidate = movie_candidate(&subject, release);
+            assert_eq!(
+                movie_subject_refusal_unmatched(&candidate, &subject),
+                None,
+                "{release}"
+            );
+            assert_eq!(
+                decision_for(&title, &subject, &candidate),
+                ReleaseAutoDecisionCode::Eligible,
+                "{release}"
+            );
+        }
+        // Neither movie refusal reaches a linked movie, even for a pack or
+        // another year; those keep whatever the shared ladder decides.
+        for release in [
+            "[SynthSubs] Quillon S01 [1080p]",
+            "Quillon.2000.1080p.WEB-DL-SYNTH",
+        ] {
+            let decision = decision_for(&title, &subject, &movie_candidate(&subject, release));
+            assert!(
+                !matches!(
+                    decision,
+                    ReleaseAutoDecisionCode::EpisodicReleaseForMovie
+                        | ReleaseAutoDecisionCode::TitleYearMismatch
+                ),
+                "{release}: {decision:?}"
+            );
+        }
     }
 
     #[test]
