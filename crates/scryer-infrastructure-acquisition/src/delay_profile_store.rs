@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use chrono::Utc;
 use scryer_application::{
@@ -55,45 +53,55 @@ impl DelayProfileStore {
 #[async_trait]
 impl DelayProfileRepository for DelayProfileStore {
     async fn list(&self) -> AppResult<Vec<DelayProfile>> {
-        let exec = || self.datastore.read_exec();
+        // One round trip: every profile joined to the union of its three sets.
+        // The search lanes read the catalog per evaluation, so four queries
+        // here were four queries per search.
+        let sets = DELAY_PROFILE_SETS
+            .iter()
+            .enumerate()
+            .map(|(kind, (table, column))| {
+                format!(
+                    "SELECT profile_id, {kind} AS kind, position, {column} AS value FROM {table}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        let columns = DELAY_PROFILE_COLUMNS
+            .split(',')
+            .map(|column| format!("p.{}", column.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
         let rows = SqlRuntime::fetch_all(
-            exec(),
-            &format!("SELECT {DELAY_PROFILE_COLUMNS} FROM delay_profiles ORDER BY priority, id"),
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT {columns}, s.kind AS set_kind, s.value AS set_value
+                   FROM delay_profiles p
+                   LEFT JOIN ({sets}) s ON s.profile_id = p.id
+                  ORDER BY p.priority, p.id, s.kind, s.position, s.value"
+            ),
             &[],
         )
         .await?;
-        let mut profiles = rows
-            .iter()
-            .map(row_to_delay_profile)
-            .collect::<AppResult<Vec<_>>>()?;
-
-        let mut sets = Vec::with_capacity(DELAY_PROFILE_SETS.len());
-        for (table, column) in DELAY_PROFILE_SETS {
-            let rows = SqlRuntime::fetch_all(
-                exec(),
-                &format!(
-                    "SELECT profile_id, {column} AS value FROM {table}
-                     ORDER BY profile_id, position, {column}"
-                ),
-                &[],
-            )
-            .await?;
-            let mut by_profile = HashMap::<String, Vec<String>>::new();
-            for row in rows {
-                by_profile
-                    .entry(row.text("profile_id")?)
-                    .or_default()
-                    .push(row.text("value")?);
+        let mut profiles: Vec<DelayProfile> = Vec::new();
+        for row in &rows {
+            let id = row.text("id")?;
+            if profiles.last().is_none_or(|profile| profile.id != id) {
+                profiles.push(row_to_delay_profile(row)?);
             }
-            sets.push(by_profile);
-        }
-        let [mut facets, mut tags, mut libraries]: [HashMap<String, Vec<String>>; 3] = sets
-            .try_into()
-            .map_err(|_| AppError::Repository("delay profile sets did not load".to_string()))?;
-        for profile in &mut profiles {
-            profile.applies_to_facets = facets.remove(&profile.id).unwrap_or_default();
-            profile.tags = tags.remove(&profile.id).unwrap_or_default();
-            profile.library_ids = libraries.remove(&profile.id).unwrap_or_default();
+            let profile = profiles.last_mut().expect("profile pushed above");
+            let Some(value) = row.opt_text("set_value")? else {
+                continue;
+            };
+            match row.opt_i64("set_kind")? {
+                Some(0) => profile.applies_to_facets.push(value),
+                Some(1) => profile.tags.push(value),
+                Some(2) => profile.library_ids.push(value),
+                other => {
+                    return Err(AppError::Repository(format!(
+                        "delay profile {id} has an unknown set kind {other:?}"
+                    )));
+                }
+            }
         }
         Ok(profiles)
     }
