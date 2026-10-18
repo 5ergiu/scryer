@@ -598,6 +598,7 @@ async fn execute_resolved_episode_import(
         crate::import_decide::ImportDecisionOutcome::Reject {
             rejection,
             disposition,
+            better_library_copy,
         } => {
             tracing::info!(
                 title_id = %title.id,
@@ -607,6 +608,22 @@ async fn execute_resolved_episode_import(
                 rejection.message
             );
             let reason_code = Some(rejection.recycle_reason.to_string());
+            if disposition == crate::import_decide::RejectionDisposition::Skip
+                && let Some(copy) = better_library_copy.as_ref()
+                && library_copy_holds_episodes(copy, &existing_incumbents, &target_episode_ids)
+                    .await
+            {
+                // The library already holds every episode this file covers at
+                // least as well, so the episodes are in place and the file has
+                // nothing to add. The existing file is left exactly as it is.
+                return Ok(EpisodeImportOutcome::Skipped {
+                    message: rejection.message,
+                    reason_code,
+                    skip_reason: rejection.skip_reason,
+                    episode_ids: target_episode_ids.clone(),
+                    already_present_destination: None,
+                });
+            }
             return Ok(EpisodeImportOutcome::Rejected {
                 rejection,
                 disposition,
@@ -880,4 +897,34 @@ pub(crate) async fn mark_wanted_completed(
             tracing::warn!(error = %err, title_id = %title_id, "failed to mark wanted item completed");
         }
     }
+}
+
+/// Whether `copy` is still on disk and covers every one of `target_episode_ids`.
+///
+/// Admission refuses a multi-episode file when any one member already has a
+/// better copy, so the refusal alone says nothing about the other members; only
+/// a copy that covers them all shows the library holds the whole scope.
+async fn library_copy_holds_episodes(
+    copy: &crate::import_decide::BetterLibraryCopy,
+    incumbents: &[crate::EpisodeScopedMediaFile],
+    target_episode_ids: &[String],
+) -> bool {
+    if target_episode_ids.is_empty() {
+        return false;
+    }
+    let Some(incumbent) = incumbents
+        .iter()
+        .find(|incumbent| incumbent.media_file.id == copy.file_id)
+    else {
+        return false;
+    };
+    if !target_episode_ids
+        .iter()
+        .all(|episode_id| incumbent.episode_ids.contains(episode_id))
+    {
+        return false;
+    }
+    tokio::fs::try_exists(crate::stored_paths::stored_path_to_path_buf(&copy.path))
+        .await
+        .unwrap_or(false)
 }

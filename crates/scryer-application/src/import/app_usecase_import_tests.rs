@@ -2096,7 +2096,8 @@ fn episode_import_admission(
         operator_intent,
         &crate::import_decide::IncumbentRows::Episodes(incumbents),
         "this episode",
-    )?;
+    )
+    .map_err(|refusal| (refusal.rejection, refusal.disposition))?;
     let crate::import_decide::SupersededIncumbents::Episodes(rows) = admitted.superseded else {
         panic!("episode rows in, episode rows out");
     };
@@ -2368,7 +2369,8 @@ fn link_import_admission(
         false,
         &crate::import_decide::IncumbentRows::Title(existing_files),
         "this series-movie link",
-    )?;
+    )
+    .map_err(|refusal| (refusal.rejection, refusal.disposition))?;
     let crate::import_decide::SupersededIncumbents::Title(rows) = admitted.superseded else {
         panic!("title rows in, title rows out");
     };
