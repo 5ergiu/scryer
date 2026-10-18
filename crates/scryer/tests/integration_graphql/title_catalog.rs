@@ -4299,7 +4299,7 @@ async fn graphql_add_title_default_root_id_stores_library_default() {
 #[tokio::test]
 async fn graphql_wanted_items_missing_view_exposes_fileless_monitored_movie() {
     let ctx = TestContext::new().await;
-    let id = add_test_title(&ctx, "Search Monitored Test", "MOVIE").await;
+    let id = add_available_test_movie(&ctx, "Search Monitored Test").await;
 
     let body = gql(
         &ctx,
@@ -4351,7 +4351,7 @@ async fn graphql_wanted_items_missing_view_exposes_fileless_monitored_movie() {
 #[tokio::test]
 async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
     let ctx = TestContext::new().await;
-    let title_id = add_test_title(&ctx, "Standby Count Test", "MOVIE").await;
+    let title_id = add_available_test_movie(&ctx, "Standby Count Test").await;
     let wanted_item_id = Id::new().0;
     let now = Utc::now();
     ctx.library_state

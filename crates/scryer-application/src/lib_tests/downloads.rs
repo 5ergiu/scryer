@@ -5705,12 +5705,8 @@ fn series_pack_completed_download(
     completed
 }
 
-/// An upgrade the admission ladder refuses ("existing file is better") is a
-/// fair loss, not a lie: canonical scoring disposes it as `Skip`, so the
-/// release is **not** burned and the download parks as import-blocked rather
-/// than failing (design D17). Only a `Blocklist` disposition — a truth verdict
-/// that the release misrepresented itself — sets `release_burned`; that path
-/// needs runtime media analysis and is covered at the `result_state` level.
+/// A verified better library copy satisfies a foreign episode download without
+/// burning its release. A later accepted upgrade still replaces that copy.
 #[tokio::test]
 async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accepted() {
     let (fixture, _) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
@@ -5769,7 +5765,7 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
     let incumbent = events[0].media_updates[0].path.clone();
     let incumbent_size = std::fs::metadata(&incumbent).unwrap().len();
     for (quality, width, height, expected) in [
-        ("480p", 640, 480, scryer_domain::ImportDecision::Rejected),
+        ("480p", 640, 480, scryer_domain::ImportDecision::Skipped),
         ("1080p", 1920, 1080, scryer_domain::ImportDecision::Imported),
     ] {
         let source = tempfile::tempdir().unwrap();
@@ -5788,7 +5784,12 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
             .unwrap();
         assert_eq!(result.title_id.as_deref(), Some(title.id.as_str()));
         assert_eq!(result.decision, expected, "{result:?}");
-        if expected == scryer_domain::ImportDecision::Rejected {
+        if expected == scryer_domain::ImportDecision::Skipped {
+            assert_eq!(
+                result.skip_reason,
+                Some(scryer_domain::ImportSkipReason::AlreadyImported)
+            );
+            assert!(!result.release_burned, "{result:?}");
             assert_eq!(std::fs::metadata(&incumbent).unwrap().len(), incumbent_size);
             assert!(incoming.exists());
         }
@@ -5799,7 +5800,7 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
 }
 
 #[tokio::test]
-async fn automatic_episode_upgrade_rejection_is_not_burned() {
+async fn automatic_episode_downgrade_is_already_present_without_burning() {
     let (
         FailClosedPackFixture {
             app,
@@ -5837,8 +5838,12 @@ async fn automatic_episode_upgrade_rejection_is_not_burned() {
         scryer_domain::ImportDecision::Imported
     );
 
+    let incumbent = import_completed_events_for_title(&app, &title.id).await[0].media_updates[0]
+        .path
+        .clone();
+    let incumbent_bytes = std::fs::read(&incumbent).unwrap();
     let rejected_source = tempfile::tempdir().expect("rejected source tempdir");
-    write_pack_video(
+    let incoming = write_pack_video(
         rejected_source.path(),
         "Fail.Closed.Pack.S01E01.720p.WEB-DL.mkv",
     );
@@ -5857,12 +5862,21 @@ async fn automatic_episode_upgrade_rejection_is_not_burned() {
 
     assert_eq!(
         result.decision,
-        scryer_domain::ImportDecision::Rejected,
+        scryer_domain::ImportDecision::Skipped,
         "{result:?}"
     );
-    assert!(
-        !result.release_burned,
-        "a release that merely lost the upgrade comparison must not be burned: {result:?}"
+    assert_eq!(
+        result.skip_reason,
+        Some(scryer_domain::ImportSkipReason::AlreadyImported)
+    );
+    assert!(!result.release_burned, "{result:?}");
+    assert!(incoming.exists());
+    assert_eq!(std::fs::read(&incumbent).unwrap(), incumbent_bytes);
+    assert_eq!(
+        import_completed_events_for_title(&app, &title.id)
+            .await
+            .len(),
+        1
     );
 }
 
@@ -5986,6 +6000,15 @@ async fn automatic_episode_upgrade_marks_import_completed_as_upgrade() {
 
 #[tokio::test]
 async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
+    automatic_mixed_pack_with_better_incumbent(true).await;
+}
+
+#[tokio::test]
+async fn automatic_multi_file_import_settles_with_a_verified_better_incumbent() {
+    automatic_mixed_pack_with_better_incumbent(false).await;
+}
+
+async fn automatic_mixed_pack_with_better_incumbent(missing_incumbent: bool) {
     let (
         FailClosedPackFixture {
             app,
@@ -5993,6 +6016,7 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
             title,
             episode,
             library_dir: _library_dir,
+            import_artifacts,
             ..
         },
         _submissions,
@@ -6025,8 +6049,15 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
         scryer_domain::ImportDecision::Imported
     );
 
+    let incumbent = import_completed_events_for_title(&app, &title.id).await[0].media_updates[0]
+        .path
+        .clone();
+    let incumbent_bytes = std::fs::read(&incumbent).unwrap();
+    if missing_incumbent {
+        std::fs::remove_file(&incumbent).expect("remove synthetic incumbent fixture");
+    }
     let mixed_source = tempfile::tempdir().expect("mixed source tempdir");
-    write_pack_video(
+    let incoming = write_pack_video(
         mixed_source.path(),
         "Fail.Closed.Pack.S01E01.720p.WEB-DL.mkv",
     );
@@ -6049,10 +6080,38 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
 
     assert_eq!(
         result.decision,
-        scryer_domain::ImportDecision::Rejected,
+        if missing_incumbent {
+            scryer_domain::ImportDecision::Rejected
+        } else {
+            scryer_domain::ImportDecision::Imported
+        },
         "{result:?}"
     );
     assert!(!result.release_burned, "{result:?}");
+    assert!(
+        incoming.exists(),
+        "the unneeded or rejected source is preserved"
+    );
+    if missing_incumbent {
+        assert!(!Path::new(&incumbent).exists());
+    } else {
+        assert_eq!(std::fs::read(&incumbent).unwrap(), incumbent_bytes);
+    }
+    for (filename, expected) in [
+        (
+            "fail.closed.pack.s01e01.720p.web-dl.mkv",
+            if missing_incumbent {
+                "rejected"
+            } else {
+                "already_present"
+            },
+        ),
+        ("fail.closed.pack.s01e02.1080p.web-dl.mkv", "imported"),
+    ] {
+        let artifacts = import_artifacts.artifacts_for_file(filename).await;
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert_eq!(artifacts[0].result, expected, "{artifacts:?}");
+    }
 }
 
 #[tokio::test]

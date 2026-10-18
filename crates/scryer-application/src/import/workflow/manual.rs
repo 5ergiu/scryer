@@ -2933,7 +2933,7 @@ async fn execute_manual_series_movie_import(
                 quality_label: quality_label.clone(),
                 scene_name: Some(parsed.raw_title.clone()),
                 release_group: parsed.release_group.clone(),
-                source_type: crate::release_parser::parsed_release_source_type(&parsed),
+                source_type: crate::release_parser::parsed_release_source_type(parsed),
                 resolution: quality_label,
                 video_codec_parsed: parsed.video_codec,
                 audio_codec_parsed: parsed.audio.as_ref().map(ToString::to_string),
