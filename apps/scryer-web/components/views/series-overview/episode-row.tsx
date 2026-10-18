@@ -362,7 +362,12 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   if (isMobile) {
     return (
       <div
-        id={selectorId("series-overview-episode", episode.id)}
+        id={seriesOverviewEpisodeRowId(
+          facet,
+          episode.seasonNumber,
+          episode.episodeNumber,
+          episode.absoluteNumber,
+        )}
         data-episode-id={episode.id}
         className={cn(
           "@container rounded-lg border border-border bg-card/50 p-3",
@@ -436,7 +441,12 @@ export const EpisodeRow = React.memo(function EpisodeRow({
             <div className="mt-3 flex flex-col gap-2 @md:flex-row">
               {onAutoSearchEpisode ? (
                 <TextActionButton
-                  id={selectorId("series-overview-episode-auto-search", episode.id)}
+                  id={seriesOverviewEpisodeAutoSearchId(
+                    facet,
+                    episode.seasonNumber,
+                    episode.episodeNumber,
+                    episode.absoluteNumber,
+                  )}
                   type="button"
                   size="sm"
                   tone="auto"
@@ -456,7 +466,12 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               ) : null}
               {onRunEpisodeSearch && onQueueFromEpisodeSearch ? (
                 <TextActionButton
-                  id={selectorId("series-overview-episode-interactive-search", episode.id)}
+                  id={seriesOverviewEpisodeInteractiveSearchId(
+                    facet,
+                    episode.seasonNumber,
+                    episode.episodeNumber,
+                    episode.absoluteNumber,
+                  )}
                   type="button"
                   size="sm"
                   tone="search"
