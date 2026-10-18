@@ -37,6 +37,7 @@ fn accepted_existing(submission: DownloadSubmission) -> CanonicalDownloadSubmiss
         info_hash: None,
         download_id: Some(submission.download_id),
         seed_goals: None,
+        grabbed_file_names: Vec::new(),
     };
     CanonicalDownloadSubmissionOutcome::Accepted(CanonicalDownloadSubmission {
         grab,
@@ -183,6 +184,31 @@ impl AppUseCase {
 }
 
 impl AppUseCase {
+    /// Keep the long file names the grab carried with its submission. Best
+    /// effort: without them an import reads a cut name as the client wrote it.
+    pub(crate) async fn record_grabbed_file_names(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+        grab: &DownloadGrabResult,
+    ) {
+        if grab.grabbed_file_names.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .services
+            .workflow
+            .download_submissions
+            .record_grabbed_file_names(download_id, &grab.grabbed_file_names)
+            .await
+        {
+            tracing::warn!(
+                download_id = %download_id,
+                error = %error,
+                "could not keep the grab's long file names"
+            );
+        }
+    }
+
     async fn adopt_canonical_download(
         &self,
         intent: &CanonicalDownloadSubmissionIntent,
@@ -406,6 +432,7 @@ impl AppUseCase {
                                 info_hash: seed_goals.and_then(|goals| goals.info_hash),
                                 download_id: Some(download_id),
                                 seed_goals: None,
+                                grabbed_file_names: Vec::new(),
                             };
                             // The recovered claim is an earlier grab, possibly of
                             // a different release than this intent, so the intent
@@ -824,6 +851,7 @@ impl AppUseCase {
                     stage = "acceptance_recorded",
                     "grab submission stage"
                 );
+                self.record_grabbed_file_names(&download_id, &grab).await;
                 disposition
             }
             Err(error) => {
@@ -1287,6 +1315,7 @@ mod grab_metrics_tests {
             info_hash: None,
             download_id: None,
             seed_goals: None,
+            grabbed_file_names: Vec::new(),
         }
     }
 

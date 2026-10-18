@@ -1253,6 +1253,7 @@ impl DownloadClient for SabnzbdDownloadClient {
                         client_type: "sabnzbd".to_string(),
                         info_hash: None,
                         seed_goals: None,
+                        grabbed_file_names: Vec::new(),
                     })
                 }
                 SabAddfileOutcome::Rejected(detail) => {
@@ -1877,6 +1878,7 @@ impl SabnzbdDownloadClient {
                 client_type: "sabnzbd".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             }),
             None => Err(ambiguous_error),
         }

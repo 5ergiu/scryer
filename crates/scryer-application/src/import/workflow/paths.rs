@@ -943,14 +943,45 @@ fn apply_posted_file_names(
     }
 }
 
-/// Download clients cut a file name to fit their own limit (Weaver at 240
-/// bytes, SABnzbd at 245), and the cut lands just under it once a split
-/// character and trailing separators are dropped. A name at least this long
-/// was probably cut.
-const LIKELY_CUT_FILE_NAME_MIN_BYTES: usize = 224;
+use crate::grabbed_file_names::{file_name_looks_cut, match_cut_file_names};
 
-fn file_name_looks_cut(name: &str) -> bool {
-    name.len() >= LIKELY_CUT_FILE_NAME_MIN_BYTES
+/// The grab's own long file names, matched back to the files whose names
+/// look cut. Only a name the file's own name is the start of is taken, so a
+/// file the client renamed keeps the name it was given.
+async fn posted_names_from_grab(
+    app: &AppUseCase,
+    completed: &CompletedDownload,
+    cut_files: &[(&Path, String)],
+) -> Vec<PostedFileName> {
+    let locator = crate::ClientJobLocator::new(
+        Some(&completed.client_id),
+        &completed.client_type,
+        &completed.download_client_item_id,
+    );
+    let grabbed = app
+        .services
+        .workflow
+        .download_submissions
+        .grabbed_file_names(&locator)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(
+                error = %error,
+                download_client_item_id = %completed.download_client_item_id,
+                "could not read the grab's file names; parsing the names on disk"
+            );
+            Vec::new()
+        });
+    if grabbed.is_empty() {
+        return Vec::new();
+    }
+    let mut on_disk = Vec::with_capacity(cut_files.len());
+    for (path, name) in cut_files {
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            on_disk.push((name.clone(), metadata.len()));
+        }
+    }
+    match_cut_file_names(&grabbed, &on_disk)
 }
 
 /// srrdb filename recovery for one `run_import` call.
@@ -1000,12 +1031,12 @@ impl SrrdbFilenameRecovery {
 
     /// The names this download's files were posted with: the ones the
     /// completed download already carries, else, when a file name looks cut,
-    /// the client's answer, asked for at most once per import. A failure reads
-    /// as no names, which is what the import did before clients reported them.
+    /// the client's answer, else the grab's own long names matched back to the
+    /// cut files. Asked for at most once per import. A failure reads as no
+    /// names, which is what the import did before either source existed.
     ///
     /// TODO(2026-11-17): once Weaver's history reads carry `postedFileNames`,
-    /// read them from `completed` alone and drop the cut-name check and this
-    /// second request.
+    /// read Weaver's names from `completed` alone and drop its second request.
     async fn posted_file_names<'a>(
         &'a mut self,
         app: &AppUseCase,
@@ -1017,17 +1048,18 @@ impl SrrdbFilenameRecovery {
         }
         if self.posted_file_names.is_none() {
             let dest_dir = Path::new(&completed.dest_dir);
-            let any_cut = files.iter().any(|file| {
-                file.physical.starts_with(dest_dir)
-                    && file
-                        .physical
-                        .file_name()
-                        .is_some_and(|name| file_name_looks_cut(&name.to_string_lossy()))
-            });
-            if !any_cut {
+            let cut_files: Vec<(&Path, String)> = files
+                .iter()
+                .filter(|file| file.physical.starts_with(dest_dir))
+                .filter_map(|file| {
+                    let name = file.physical.file_name()?.to_str()?;
+                    file_name_looks_cut(name).then(|| (file.physical.as_path(), name.to_string()))
+                })
+                .collect();
+            if cut_files.is_empty() {
                 return &[];
             }
-            let names = app
+            let mut names = app
                 .services
                 .integrations
                 .download_client
@@ -1045,6 +1077,9 @@ impl SrrdbFilenameRecovery {
                     );
                     Vec::new()
                 });
+            if names.is_empty() {
+                names = posted_names_from_grab(app, completed, &cut_files).await;
+            }
             self.posted_file_names = Some(names);
         }
         self.posted_file_names.as_deref().unwrap_or_default()

@@ -1484,6 +1484,7 @@ impl DownloadClient for NzbgetDownloadClient {
                 client_type: "nzbget".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             })
         }
         .await;
