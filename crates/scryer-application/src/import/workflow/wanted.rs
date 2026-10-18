@@ -899,6 +899,54 @@ pub(crate) async fn mark_wanted_completed(
     }
 }
 
+/// Completes the episode scopes a download settled without importing, because
+/// the library already holds them. Only a row still `grabbed` for this
+/// download's release is completed: a row grabbed for another release belongs
+/// to that download, and a download whose release name cannot be read releases
+/// only rows whose own recorded grab cannot be read either.
+pub(crate) async fn complete_already_present_episode_scopes(
+    app: &AppUseCase,
+    title_id: &str,
+    episode_ids: &[String],
+    release_title: Option<&str>,
+) {
+    let download_key = release_title.and_then(crate::admission::release_key);
+    for episode_id in episode_ids {
+        let row = match app
+            .services
+            .workflow
+            .acquisition_scope_states
+            .get_acquisition_scope_state_for_title(title_id, Some(episode_id))
+            .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id = %title_id,
+                    episode_id = %episode_id,
+                    "failed to read episode scope for an already-present episode"
+                );
+                continue;
+            }
+        };
+        if row.status != crate::AcquisitionScopeStatus::Grabbed {
+            continue;
+        }
+        let recorded_key = crate::quality::canonical_context::grabbed_release_record(&row)
+            .and_then(|record| crate::admission::release_key(&record.title));
+        let claimed_by_this_download = match (download_key, recorded_key) {
+            (Some(download), Some(recorded)) => download == recorded,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        };
+        if claimed_by_this_download {
+            mark_wanted_completed(app, title_id, Some(episode_id), true).await;
+        }
+    }
+}
+
 /// Whether `copy` is still on disk and covers every one of `target_episode_ids`.
 ///
 /// Admission refuses a multi-episode file when any one member already has a
