@@ -1810,10 +1810,6 @@ async fn import_additional_movie_download(
     Ok(result)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "movie import keeps operational completion and release evidence as separate inputs"
-)]
 /// Recorded on the held import's artifact.
 const MOVIE_DOWNLOAD_HOLDS_EPISODES_CODE: &str = "movie_download_holds_episodes";
 
@@ -1841,6 +1837,10 @@ fn distinct_episode_numbered_video_files(video_files: &[ImportVideoFile]) -> usi
         .len()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "movie import keeps operational completion and release evidence as separate inputs"
+)]
 async fn import_movie_download(
     app: &AppUseCase,
     actor: &User,

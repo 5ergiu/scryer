@@ -372,7 +372,7 @@ pub(crate) fn evaluate_import_admission(
     operator_intent: bool,
     rows: &IncumbentRows<'_>,
     scope_label: &str,
-) -> Result<AdmittedIncumbents, ImportAdmissionRefusal> {
+) -> Result<AdmittedIncumbents, Box<ImportAdmissionRefusal>> {
     let policy = if operator_intent {
         crate::admission::AdmissionPolicy::manual()
     } else {
@@ -382,11 +382,11 @@ pub(crate) fn evaluate_import_admission(
     let (ranked_superseded, previous_best_score) =
         match crate::admission::evaluate_admission(subject, candidate, &policy) {
             crate::admission::AdmissionVerdict::Reject(rejection) => {
-                return Err(ImportAdmissionRefusal {
+                return Err(Box::new(ImportAdmissionRefusal {
                     rejection: admission_rejection_to_import(scope_label, &rejection),
                     disposition: disposition_for(&rejection.reason),
                     better_library_copy: better_library_copy(&rejection),
-                });
+                }));
             }
             crate::admission::AdmissionVerdict::Admit {
                 ranked_superseded,
@@ -404,11 +404,11 @@ pub(crate) fn evaluate_import_admission(
     // path used to *blocklist* the release for a bookkeeping mismatch that says
     // nothing about it.
     if !subject.is_unoccupied() && superseded.is_empty() {
-        return Err(ImportAdmissionRefusal {
+        return Err(Box::new(ImportAdmissionRefusal {
             rejection: missing_incumbent_rejection(scope_label),
             disposition: RejectionDisposition::Hold,
             better_library_copy: None,
-        });
+        }));
     }
 
     Ok(AdmittedIncumbents {
