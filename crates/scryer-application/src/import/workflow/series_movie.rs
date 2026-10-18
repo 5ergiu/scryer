@@ -2127,6 +2127,7 @@ async fn import_movie_download(
         crate::import_decide::ImportDecisionOutcome::Reject {
             rejection,
             disposition,
+            ..
         } => {
             return carry_out_import_rejection(
                 app,
@@ -2942,6 +2943,7 @@ async fn import_series_movie_download(
         crate::import_decide::ImportDecisionOutcome::Reject {
             rejection,
             disposition,
+            ..
         } => {
             return carry_out_import_rejection(
                 app,

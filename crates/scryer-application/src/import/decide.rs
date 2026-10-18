@@ -245,7 +245,26 @@ pub(crate) enum ImportDecisionOutcome {
     Reject {
         rejection: ImportedFileRejection,
         disposition: RejectionDisposition,
+        /// The library file that already holds this scope at equal or better
+        /// quality, when that is the whole reason for the refusal.
+        better_library_copy: Option<BetterLibraryCopy>,
     },
+}
+
+/// A library file that already holds the scope at least as well as the
+/// candidate: a higher score, a better quality tier, or a later revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BetterLibraryCopy {
+    pub file_id: String,
+    pub path: String,
+}
+
+/// Why admission refused a candidate, and what the refusal costs the release.
+#[derive(Debug)]
+pub(crate) struct ImportAdmissionRefusal {
+    pub rejection: ImportedFileRejection,
+    pub disposition: RejectionDisposition,
+    pub better_library_copy: Option<BetterLibraryCopy>,
 }
 
 /// Decide whether this file may take this scope. **The one import decision.**
@@ -285,6 +304,7 @@ pub(crate) async fn decide_import(
                 return ImportDecisionOutcome::Reject {
                     rejection,
                     disposition: RejectionDisposition::Hold,
+                    better_library_copy: None,
                 };
             }
             crate::post_download_gate::TruthVerdictAction::ImportAndBlocklist { code, reason } => {
@@ -294,6 +314,7 @@ pub(crate) async fn decide_import(
                 return ImportDecisionOutcome::Reject {
                     rejection: input.origin.held_rejection(rejection),
                     disposition: input.origin.rejection_disposition(),
+                    better_library_copy: None,
                 };
             }
         }
@@ -317,9 +338,10 @@ pub(crate) async fn decide_import(
         &input.incumbent_rows,
         input.scope_label,
     ) {
-        Err((rejection, disposition)) => ImportDecisionOutcome::Reject {
-            rejection,
-            disposition,
+        Err(refusal) => ImportDecisionOutcome::Reject {
+            rejection: refusal.rejection,
+            disposition: refusal.disposition,
+            better_library_copy: refusal.better_library_copy,
         },
         Ok(admitted) => ImportDecisionOutcome::Admit(Box::new(ImportAdmitPlan {
             score: scored.score,
@@ -350,7 +372,7 @@ pub(crate) fn evaluate_import_admission(
     operator_intent: bool,
     rows: &IncumbentRows<'_>,
     scope_label: &str,
-) -> Result<AdmittedIncumbents, (ImportedFileRejection, RejectionDisposition)> {
+) -> Result<AdmittedIncumbents, ImportAdmissionRefusal> {
     let policy = if operator_intent {
         crate::admission::AdmissionPolicy::manual()
     } else {
@@ -360,10 +382,11 @@ pub(crate) fn evaluate_import_admission(
     let (ranked_superseded, previous_best_score) =
         match crate::admission::evaluate_admission(subject, candidate, &policy) {
             crate::admission::AdmissionVerdict::Reject(rejection) => {
-                return Err((
-                    admission_rejection_to_import(scope_label, &rejection),
-                    disposition_for(&rejection.reason),
-                ));
+                return Err(ImportAdmissionRefusal {
+                    rejection: admission_rejection_to_import(scope_label, &rejection),
+                    disposition: disposition_for(&rejection.reason),
+                    better_library_copy: better_library_copy(&rejection),
+                });
             }
             crate::admission::AdmissionVerdict::Admit {
                 ranked_superseded,
@@ -381,10 +404,11 @@ pub(crate) fn evaluate_import_admission(
     // path used to *blocklist* the release for a bookkeeping mismatch that says
     // nothing about it.
     if !subject.is_unoccupied() && superseded.is_empty() {
-        return Err((
-            missing_incumbent_rejection(scope_label),
-            RejectionDisposition::Hold,
-        ));
+        return Err(ImportAdmissionRefusal {
+            rejection: missing_incumbent_rejection(scope_label),
+            disposition: RejectionDisposition::Hold,
+            better_library_copy: None,
+        });
     }
 
     Ok(AdmittedIncumbents {
@@ -466,6 +490,34 @@ pub(crate) fn disposition_for(
         | Reason::FormatCutoffReached { .. }
         | Reason::SeasonIncomplete => RejectionDisposition::Hold,
     }
+}
+
+/// The library file a refusal names, when the refusal says only that the file
+/// already there is at least as good as the candidate.
+///
+/// Exhaustive on purpose, like [`disposition_for`]: a queued release, a cutoff,
+/// a broader span or a profile rule is no proof that the library holds the
+/// scope, so none of them may let a download settle as though it did.
+pub(crate) fn better_library_copy(
+    rejection: &crate::admission::AdmissionRejection,
+) -> Option<BetterLibraryCopy> {
+    use crate::admission::AdmissionRejectionReason as Reason;
+
+    match rejection.reason {
+        Reason::NotAnUpgrade { .. } | Reason::LowerQualityTier | Reason::LowerRevision { .. } => {}
+        Reason::QueuedEqualOrBetter { .. }
+        | Reason::QueuedSameRelease { .. }
+        | Reason::FormatCutoffReached { .. }
+        | Reason::UpgradesDisabled
+        | Reason::BroaderIncumbentSpan
+        | Reason::SeasonIncomplete => return None,
+    }
+    let file_id = rejection.incumbent_file_id.trim();
+    let path = rejection.incumbent_file_path.trim();
+    (!file_id.is_empty() && !path.is_empty()).then(|| BetterLibraryCopy {
+        file_id: file_id.to_string(),
+        path: path.to_string(),
+    })
 }
 
 /// What a refusal raised *before* the decision — by `prepare_import_candidate`'s
@@ -671,5 +723,78 @@ mod tests {
             "a queued-equal-or-better refusal must not be laundered into AlreadyImported"
         );
         assert_eq!(imported.recycle_reason, "already_imported");
+    }
+
+    fn admission_rejection(
+        reason: crate::admission::AdmissionRejectionReason,
+        incumbent_file_path: &str,
+    ) -> crate::admission::AdmissionRejection {
+        crate::admission::AdmissionRejection {
+            reason,
+            message: "refused".to_string(),
+            incumbent_file_id: if incumbent_file_path.is_empty() {
+                String::new()
+            } else {
+                "file-1".to_string()
+            },
+            incumbent_file_path: incumbent_file_path.to_string(),
+        }
+    }
+
+    #[test]
+    fn only_a_better_file_on_disk_counts_as_a_better_library_copy() {
+        use crate::admission::AdmissionRejectionReason as Reason;
+        let path = "/library/Harbor Pals/Season 01/Harbor Pals - S01E01.mkv";
+
+        for reason in [
+            Reason::NotAnUpgrade {
+                incumbent_score: 120,
+                candidate_score: 90,
+                required_delta: 0,
+            },
+            Reason::LowerQualityTier,
+            Reason::LowerRevision {
+                incumbent_revision: 2,
+                candidate_revision: 1,
+            },
+        ] {
+            assert_eq!(
+                better_library_copy(&admission_rejection(reason.clone(), path)),
+                Some(BetterLibraryCopy {
+                    file_id: "file-1".to_string(),
+                    path: path.to_string(),
+                }),
+                "{reason:?}"
+            );
+            assert_eq!(
+                better_library_copy(&admission_rejection(reason.clone(), "")),
+                None,
+                "a refusal naming no file is no proof: {reason:?}"
+            );
+        }
+
+        for reason in [
+            Reason::QueuedEqualOrBetter {
+                queued_title: "Harbor.Pals.S01E01.1080p.WEB-DL".to_string(),
+                queued_score: 100,
+                candidate_score: 90,
+            },
+            Reason::QueuedSameRelease {
+                queued_title: "Harbor.Pals.S01E01.1080p.WEB-DL".to_string(),
+            },
+            Reason::FormatCutoffReached {
+                incumbent_score: 120,
+                cutoff_score: 100,
+            },
+            Reason::UpgradesDisabled,
+            Reason::BroaderIncumbentSpan,
+            Reason::SeasonIncomplete,
+        ] {
+            assert_eq!(
+                better_library_copy(&admission_rejection(reason.clone(), path)),
+                None,
+                "{reason:?}"
+            );
+        }
     }
 }
