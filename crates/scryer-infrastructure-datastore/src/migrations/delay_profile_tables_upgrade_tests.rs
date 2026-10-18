@@ -6,6 +6,20 @@ use sqlx::SqlitePool;
 /// Version the catalog is replayed to before 0293 is applied.
 const PRE_UPGRADE_VERSION: i64 = 292;
 
+type MigratedDelayProfileRow = (
+    String,
+    i64,
+    i64,
+    String,
+    i64,
+    Option<i64>,
+    bool,
+    bool,
+    bool,
+    i64,
+    bool,
+);
+
 async fn pre_upgrade_pool() -> SqlitePool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -72,19 +86,7 @@ async fn the_json_catalog_moves_into_the_tables_and_the_setting_is_removed() {
         .await
         .expect("0293 upgrade should apply");
 
-    let row: (
-        String,
-        i64,
-        i64,
-        String,
-        i64,
-        Option<i64>,
-        bool,
-        bool,
-        bool,
-        i64,
-        bool,
-    ) = sqlx::query_as(
+    let row: MigratedDelayProfileRow = sqlx::query_as(
         "SELECT name, usenet_delay_minutes, torrent_delay_minutes, preferred_protocol,
                     min_age_minutes, bypass_score_threshold, enable_usenet, enable_torrent,
                     bypass_if_highest_quality, priority, enabled
