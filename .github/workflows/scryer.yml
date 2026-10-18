@@ -1296,6 +1296,16 @@ jobs:
               -- cargo build --timings -p scryer --profile "${SCRYER_CARGO_PROFILE}" --locked --target "${{ matrix.target }}"
           fi
 
+      - name: Validate portable Linux entropy
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-linux-entropy.py \
+            "$CARGO_TARGET_DIR/${{ matrix.target }}/$SCRYER_CARGO_PROFILE/build" \
+            --headers "$(bash .github/scripts/prepare-musl-entropy.sh "$RUNNER_TEMP")" \
+            --output-dir "$RUNNER_TEMP/entropy-regression"
+
       - name: Validate native linkage
         if: steps.scope.outputs.run == 'true'
         shell: bash
