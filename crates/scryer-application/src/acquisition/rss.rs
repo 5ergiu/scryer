@@ -484,6 +484,8 @@ fn rss_is_permanent_rejection(code: ReleaseAutoDecisionCode) -> bool {
             | ReleaseAutoDecisionCode::EpisodeMismatch
             | ReleaseAutoDecisionCode::EpisodeNotMonitored
             | ReleaseAutoDecisionCode::SubtitlesOnly
+            | ReleaseAutoDecisionCode::EpisodicReleaseForMovie
+            | ReleaseAutoDecisionCode::TitleYearMismatch
     )
 }
 
@@ -2710,7 +2712,12 @@ impl AppUseCase {
                 )
                 .unwrap_or(ReleaseAutoDecisionCode::AnimeNumberingAmbiguous)
             } else if !is_allowed {
-                ReleaseAutoDecisionCode::QualityBlocked
+                // Identity first: a pack or another year's film is refused as
+                // what it is, not as a quality the profile happens to dislike.
+                crate::acquisition_release_search::movie_subject_refusal_unmatched(
+                    candidate, &subject,
+                )
+                .unwrap_or(ReleaseAutoDecisionCode::QualityBlocked)
             } else if route_key
                 .as_ref()
                 .is_some_and(|route| grabbed_urls.contains(route))

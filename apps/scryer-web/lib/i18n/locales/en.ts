@@ -3358,6 +3358,8 @@ const en: LocaleDictionary = {
   "wanted.type.seriesMovie": "Series movie",
   "wanted.decision.eligible": "Eligible",
   "wanted.decision.titleMismatch": "Title mismatch",
+  "wanted.decision.titleYearMismatch": "Different year",
+  "wanted.decision.episodicReleaseForMovie": "Episodes, not a movie",
   "wanted.decision.episodeMismatch": "Episode mismatch",
   "wanted.decision.categoryMismatch": "Category mismatch",
   "wanted.decision.ambiguousIdentity": "Ambiguous identity",

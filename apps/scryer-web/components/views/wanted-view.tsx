@@ -133,6 +133,8 @@ function formatWantedDecisionCode(code: string, t: Translate) {
   const key = {
     eligible: "wanted.decision.eligible",
     title_mismatch: "wanted.decision.titleMismatch",
+    title_year_mismatch: "wanted.decision.titleYearMismatch",
+    episodic_release_for_movie: "wanted.decision.episodicReleaseForMovie",
     episode_mismatch: "wanted.decision.episodeMismatch",
     category_mismatch: "wanted.decision.categoryMismatch",
     ambiguous_identity: "wanted.decision.ambiguousIdentity",
@@ -232,6 +234,8 @@ function decisionBadge(code: string, t: Translate) {
   const colors: Record<string, string> = {
     eligible: "bg-[var(--scry-success-bg-strong)] text-[var(--scry-success-text)]",
     title_mismatch: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
+    title_year_mismatch: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
+    episodic_release_for_movie: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
     episode_mismatch: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
     category_mismatch: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
     ambiguous_identity: "bg-[var(--scry-danger-bg-strong)] text-[var(--scry-danger-text-soft)]",
