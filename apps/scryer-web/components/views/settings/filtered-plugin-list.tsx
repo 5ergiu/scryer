@@ -39,7 +39,7 @@ const EMPTY_PLUGIN_TYPES: readonly string[] = [];
 type FilteredPluginFamily = ProviderCatalogFamily | "LIST";
 
 const FAMILY_PLUGIN_TYPES: Record<FilteredPluginFamily, readonly string[]> = {
-  INDEXER: ["indexer", "usenet_indexer", "torrent_indexer"],
+  INDEXER: ["indexer", "usenet_indexer", "torrent_indexer", "http_indexer"],
   DOWNLOAD_CLIENT: ["download_client"],
   ARCHIVE_EXTRACTOR: ["archive_extractor"],
   NOTIFICATION: ["notification"],

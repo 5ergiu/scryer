@@ -115,7 +115,14 @@ impl AppUseCase {
             &fields,
             Some(&normalized_config_json),
         )?;
-        let validated_base_url = validate_test_flight_url(&base_url)?;
+        // An empty base URL means the provider declares no connection-URL
+        // field (its endpoint is fixed by the plugin's allowed hosts), so
+        // there is no operator URL to validate or preflight.
+        let validated_base_url = if base_url.is_empty() {
+            None
+        } else {
+            Some(validate_test_flight_url(&base_url)?)
+        };
         let accounting = persisted_config
             .as_ref()
             .and_then(crate::IndexerAccountingContext::for_config);
@@ -218,9 +225,11 @@ impl AppUseCase {
             updated_at: now,
         };
 
-        if !temp_config.is_direct_nab() {
+        if let Some(validated_base_url) = validated_base_url.as_ref()
+            && !temp_config.is_direct_nab()
+        {
             preflight_test_flight_url(
-                &validated_base_url,
+                validated_base_url,
                 proxy_config.as_ref(),
                 accounting.as_ref(),
                 self.services.integrations.indexer_stats.clone(),
@@ -3380,6 +3389,96 @@ mod tests {
         let accounting = provider.seen_client_accounting.lock().unwrap().clone();
         assert_eq!(accounting.len(), 1);
         assert!(accounting[0].is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_without_connection_url_field_skips_url_validation() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "fixed_endpoint",
+            vec![password_field("api_key", "API Key")],
+            searchable_capabilities(),
+            Arc::new(RecordingIndexerClient::new(false)),
+        ));
+        let app = test_app(
+            indexer_repo.clone(),
+            Some(provider.clone()),
+            Arc::new(NullSettingsRepository),
+        );
+
+        app.test_indexer_connection(
+            &test_admin(),
+            "fixed_endpoint",
+            Some(r#"{"api_key":"synthetic-key"}"#),
+            None,
+            None,
+        )
+        .await
+        .expect("a provider without a connection URL field should still probe");
+        {
+            let seen = provider.seen_configs.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].base_url, "");
+        }
+
+        let created = app
+            .create_indexer_config(
+                &test_admin(),
+                NewIndexerConfig {
+                    name: "Fixed Endpoint".to_string(),
+                    provider_type: "fixed_endpoint".to_string(),
+                    rate_limit_seconds: None,
+                    rate_limit_burst: None,
+                    max_queries_per_minute: None,
+                    is_enabled: true,
+                    enable_interactive_search: true,
+                    enable_auto_search: true,
+                    proxy_config_id: None,
+                    download_client_id: None,
+                    config_json: Some(r#"{"api_key":"synthetic-key"}"#.to_string()),
+                },
+            )
+            .await
+            .expect("an enabled provider without a connection URL field should save");
+        assert_eq!(created.base_url, "");
+        assert!(created.is_enabled);
+    }
+
+    #[tokio::test]
+    async fn probe_with_connection_url_field_still_requires_valid_url() {
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "url_endpoint",
+            vec![string_field(
+                "base_url",
+                "Base URL",
+                Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+            )],
+            searchable_capabilities(),
+            Arc::new(RecordingIndexerClient::new(false)),
+        ));
+        let app = test_app(
+            Arc::new(RecordingIndexerConfigRepo::new()),
+            Some(provider.clone()),
+            Arc::new(NullSettingsRepository),
+        );
+
+        let missing = app
+            .test_indexer_connection(&test_admin(), "url_endpoint", Some("{}"), None, None)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("Base URL is required"));
+        let invalid = app
+            .test_indexer_connection(
+                &test_admin(),
+                "url_endpoint",
+                Some(r#"{"base_url":"not a url"}"#),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(invalid.to_string().contains("invalid base URL"));
+        assert!(provider.seen_configs.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

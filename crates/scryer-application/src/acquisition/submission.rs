@@ -328,6 +328,10 @@ impl AppUseCase {
         &self,
         intent: CanonicalDownloadSubmissionIntent,
     ) -> AppResult<CanonicalDownloadSubmissionOutcome> {
+        super::http_grab::require_http_release_for_http_source(
+            intent.request.source_kind,
+            intent.http_release.as_ref(),
+        )?;
         let title_id = intent.request.title.id.clone();
         let _title_guard = self
             .runtime

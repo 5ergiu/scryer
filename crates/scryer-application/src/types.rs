@@ -2343,6 +2343,17 @@ impl IndexerSearchResult {
     }
 
     pub fn canonical_download_source(&self) -> Option<(String, DownloadSourceKind)> {
+        // An HTTP release is identified by its canonical provider page, never
+        // by a download or CDN URL the indexer may also have set, and a
+        // release that offers only a provider page sets neither.
+        if let Some(page_url) = self
+            .http
+            .as_ref()
+            .map(|http| http.page_url.trim())
+            .filter(|page_url| !page_url.is_empty())
+        {
+            return Some((page_url.to_string(), DownloadSourceKind::HttpResource));
+        }
         let explicit_nzb = matches!(
             self.source_kind,
             Some(DownloadSourceKind::NzbFile | DownloadSourceKind::NzbUrl)
@@ -2460,6 +2471,27 @@ mod canonical_download_source_tests {
                 DownloadSourceKind::TorrentFile,
             )
         );
+    }
+
+    #[test]
+    fn http_release_is_identified_by_its_provider_page() {
+        let page_url = "https://video.invalid/watch?v=synthetic-1";
+        let mut result = result(None);
+        result.source_kind = Some(DownloadSourceKind::HttpResource);
+        result.http = Some(scryer_plugin_sdk::PluginHttpRelease {
+            provider: "synthetic".to_string(),
+            item_id: "synthetic-1".to_string(),
+            page_url: format!(" {page_url} "),
+            ..Default::default()
+        });
+        let expected = Some((page_url.to_string(), DownloadSourceKind::HttpResource));
+        // A download URL the indexer also set is not the release identity.
+        assert_eq!(result.canonical_download_source(), expected);
+
+        // A provider-page-only release carries neither link nor download URL.
+        result.link = None;
+        result.download_url = None;
+        assert_eq!(result.canonical_download_source(), expected);
     }
 
     #[test]

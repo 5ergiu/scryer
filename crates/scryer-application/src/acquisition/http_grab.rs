@@ -62,6 +62,24 @@ pub(crate) fn verify_resolved_http_release(
     Ok(())
 }
 
+/// An HTTP-family grab must carry the release its indexer listed. Without it
+/// there is nothing to describe to the client, and the source hint is a
+/// provider page, not an artifact the host may fetch. That happens when the
+/// listing that offered the result has expired, so the grab is refused with a
+/// prompt to search again rather than submitted as a page download.
+pub(crate) fn require_http_release_for_http_source(
+    source_kind: Option<DownloadSourceKind>,
+    http_release: Option<&PluginHttpRelease>,
+) -> AppResult<()> {
+    if matches!(source_kind, Some(DownloadSourceKind::HttpResource)) && http_release.is_none() {
+        return Err(AppError::Validation(
+            "this HTTP release's details are no longer available; search again and grab it from the new results"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the host selection for a release from the effective quality profile
 /// and the subtitle preferences.
 ///
@@ -401,6 +419,27 @@ mod tests {
         };
         let error = verify_resolved_http_release(&listed, &other_page).unwrap_err();
         assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+    }
+
+    #[test]
+    fn http_source_without_its_listed_release_is_refused() {
+        let error =
+            require_http_release_for_http_source(Some(DownloadSourceKind::HttpResource), None)
+                .unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+
+        let listed = release();
+        require_http_release_for_http_source(Some(DownloadSourceKind::HttpResource), Some(&listed))
+            .expect("a listed release is submitted");
+        for kind in [
+            None,
+            Some(DownloadSourceKind::NzbUrl),
+            Some(DownloadSourceKind::TorrentFile),
+            Some(DownloadSourceKind::MagnetUri),
+        ] {
+            require_http_release_for_http_source(kind, None)
+                .expect("other families never need an HTTP release");
+        }
     }
 
     #[test]
