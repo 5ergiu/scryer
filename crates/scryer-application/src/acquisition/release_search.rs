@@ -267,6 +267,14 @@ pub(crate) enum ReleaseAutoDecisionCode {
 }
 
 impl ReleaseAutoDecisionCode {
+    fn with_movie_availability(self, blocked: bool) -> Self {
+        if blocked && !self.is_identity_refusal() && self != Self::MinimumSeeders {
+            Self::MovieAvailabilityBlocked
+        } else {
+            self
+        }
+    }
+
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "eligible" => Some(Self::Eligible),
@@ -2912,14 +2920,10 @@ impl AppUseCase {
                 user_invoked,
                 has_active_pending_overlap,
             );
-            let code = if !evaluated_code.is_identity_refusal()
-                && movie_availability.as_ref().is_some_and(|decision| {
-                    decision.status != crate::types::MovieAvailabilityStatus::Available
-                }) {
-                ReleaseAutoDecisionCode::MovieAvailabilityBlocked
-            } else {
-                evaluated_code
-            };
+            let code =
+                evaluated_code.with_movie_availability(movie_availability.as_ref().is_some_and(
+                    |decision| decision.status != crate::types::MovieAvailabilityStatus::Available,
+                ));
             annotate_external_id_diagnostics(candidate, evaluation_context.subject);
             crate::quality::grab_scoring::attach(
                 candidate,
@@ -3680,6 +3684,24 @@ impl PendingReleaseSearchSubject {
 mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, TaggedAlias, Title};
+
+    #[test]
+    fn movie_availability_preserves_non_overridable_refusals() {
+        for code in [
+            ReleaseAutoDecisionCode::MinimumSeeders,
+            ReleaseAutoDecisionCode::TitleMismatch,
+        ] {
+            assert_eq!(code.with_movie_availability(true), code);
+        }
+        assert_eq!(
+            ReleaseAutoDecisionCode::Eligible.with_movie_availability(true),
+            ReleaseAutoDecisionCode::MovieAvailabilityBlocked
+        );
+        assert_eq!(
+            ReleaseAutoDecisionCode::Eligible.with_movie_availability(false),
+            ReleaseAutoDecisionCode::Eligible
+        );
+    }
 
     #[test]
     fn movie_availability_decision_code_round_trips_and_has_summary() {
