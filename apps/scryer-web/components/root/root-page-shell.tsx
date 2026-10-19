@@ -383,64 +383,6 @@ function SmgScryerUpdateBanner({
   );
 }
 
-type OverviewNavigationState = {
-  scryerOverviewTarget?: {
-    view?: unknown;
-    id?: unknown;
-    slug?: unknown;
-    libraryId?: unknown;
-    librarySlug?: unknown;
-  };
-};
-
-function readOverviewTargetFromLocationState(
-  state: unknown,
-  view: ViewId,
-  parsedOverviewSlug: string | null,
-  parsedOverviewLibrarySlug: string | null,
-): OverviewTitleTarget | null {
-  if (
-    !parsedOverviewSlug ||
-    !parsedOverviewLibrarySlug ||
-    state == null ||
-    typeof state !== "object"
-  ) {
-    return null;
-  }
-
-  const overviewState = state as OverviewNavigationState;
-  const target = overviewState.scryerOverviewTarget;
-  if (!target || target.view !== view) {
-    return null;
-  }
-
-  const id = typeof target.id === "string" ? target.id.trim() : "";
-  const slug = typeof target.slug === "string" ? target.slug.trim() : "";
-  const libraryId =
-    typeof target.libraryId === "string" ? target.libraryId.trim() : "";
-  const librarySlug =
-    typeof target.librarySlug === "string" ? target.librarySlug.trim() : "";
-  const effectiveLibrarySlug =
-    librarySlug ||
-    (parsedOverviewLibrarySlug === view ? parsedOverviewLibrarySlug : "");
-  if (
-    !id ||
-    !slug ||
-    slug !== parsedOverviewSlug ||
-    !effectiveLibrarySlug ||
-    effectiveLibrarySlug !== parsedOverviewLibrarySlug
-  ) {
-    return null;
-  }
-
-  return {
-    id,
-    slug,
-    libraryId: libraryId || null,
-    librarySlug: effectiveLibrarySlug,
-  };
-}
-
 /**
  * Renders the main content area.
  */
@@ -585,7 +527,8 @@ function MainContent({
   if (view === "wanted") {
     return (
       <WantedContainer
-        key={`wanted-${wantedSection}`}
+        key={`wanted-${wantedSection}-${discoveryAuthorizationSignature}`}
+        authorizationSignature={discoveryAuthorizationSignature}
         wantedSection={wantedSection}
         onOpenOverview={handleOpenOverview}
       />
@@ -872,17 +815,6 @@ function AuthenticatedHomePage({
     return searchParams.get("id")?.trim() || null;
   }, [view, contentSettingsSection, parsedOverviewSlug, searchParams]);
 
-  const navigationOverviewTarget = useMemo(
-    () =>
-      readOverviewTargetFromLocationState(
-        location.state,
-        view,
-        parsedOverviewSlug,
-        parsedOverviewLibrarySlug,
-      ),
-    [location.state, parsedOverviewLibrarySlug, parsedOverviewSlug, view],
-  );
-
   const overviewEpisodeId = useMemo(
     () => searchParams.get("episodeId")?.trim() || null,
     [searchParams],
@@ -1142,14 +1074,6 @@ function AuthenticatedHomePage({
   useEffect(() => {
     let cancelled = false;
 
-    if (navigationOverviewTarget) {
-      setResolvedOverviewTarget(navigationOverviewTarget);
-      setOverviewSlugLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
     if (
       !isMediaView(view) ||
       contentSettingsSection !== "overview" ||
@@ -1190,7 +1114,7 @@ function AuthenticatedHomePage({
 
         setResolvedOverviewTarget(target);
         if (!target) {
-          navigateTo(view, undefined, "overview", undefined, undefined);
+          navigate(buildViewPath(view), { replace: true });
           return;
         }
 
@@ -1227,8 +1151,8 @@ function AuthenticatedHomePage({
   }, [
     contentSettingsSection,
     navigateTo,
+    navigate,
     navigateToOverview,
-    navigationOverviewTarget,
     overviewEpisodeId,
     parsedOverviewLibrarySlug,
     parsedOverviewSlug,
@@ -1327,7 +1251,7 @@ function AuthenticatedHomePage({
   ]);
 
   const overviewTitleId = parsedOverviewSlug
-    ? (navigationOverviewTarget?.id ?? resolvedOverviewTarget?.id ?? null)
+    ? (resolvedOverviewTarget?.id ?? null)
     : legacyOverviewResolution?.requestedId === legacyOverviewTitleId
       ? legacyOverviewResolution.resolvedId
       : null;

@@ -157,6 +157,7 @@ import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { useLibraryScanProgress } from "@/lib/context/library-scan-progress-context";
 import { useSearchContext } from "@/lib/context/search-context";
+import { catalogDeletionRefresh } from "@/lib/utils/catalog-deletion-refresh";
 import {
   reactiveRefreshEpoch,
   useReactiveRefresh,
@@ -690,7 +691,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   const { registerInteractiveJobRun } = useJobRunToasts();
   const { confirmReplaceConflict, replaceConflictDialog } =
     useDownloadConflictConfirmation();
-  const { queueCatalogTitleRefresh } = useReactiveRefresh();
+  const { queueCatalogTitleRefresh, registerReactiveRefresh } = useReactiveRefresh();
   const [titleDeleteTypedConfirmation, setTitleDeleteTypedConfirmation] =
     React.useState("");
   const [pendingDeletedTitleIds, setPendingDeletedTitleIds] = React.useState<
@@ -2154,6 +2155,15 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     [reloadTitles, titleFilter],
   );
 
+  React.useEffect(() => {
+    if (!shouldLoadCatalogTitles) return;
+    return registerReactiveRefresh(catalogDeletionRefresh(activeFacet, () => {
+      latestCriticalMutationEpochRef.current = reactiveRefreshEpoch();
+      setTitleContextTitles([]);
+      void refreshTitles();
+    }));
+  }, [activeFacet, registerReactiveRefresh, refreshTitles, shouldLoadCatalogTitles]);
+
   const handleCatalogDiscoveryAction = React.useCallback(
     async (item: CatalogDiscoveryItem) => {
       const actionAuthorizationSignature = authorizationSignature;
@@ -2488,12 +2498,16 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
             (title) => !pendingDeletedTitleIdsRef.current.has(title.id),
           ),
         );
+        const deletedIds = new Set(pendingDeletedTitleIdsRef.current);
+        setMonitoredTitles((current) =>
+          current.filter((title) => !deletedIds.has(title.id)),
+        );
         setPendingDeletedTitleIds(new Set());
       }
       void refreshTitles();
       return true;
     },
-    [clearDeletionFallbackTimers, refreshTitles],
+    [clearDeletionFallbackTimers, refreshTitles, setMonitoredTitles],
   );
 
   const refreshTrackedDeletionJobs = React.useCallback(async () => {
@@ -2739,6 +2753,10 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
 
       applySelectedOverviewDetail(titleId, title, requestEpoch);
+      if (!title) {
+        // A response started before this deletion must not resurrect its row.
+        latestCriticalMutationEpochRef.current = requestEpoch;
+      }
 
       setMonitoredTitles((current) => {
         const next = [...current];

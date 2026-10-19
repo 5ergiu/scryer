@@ -7,6 +7,17 @@ import {
   userFacingGraphQlErrorMessage,
 } from "./error-message.ts";
 
+test("missing titles have a clean message even with duplicated GraphQL errors", () => {
+  for (const message of [
+    "not found: title missing-id",
+    "[GraphQL] not found: title missing-id",
+    "not found: title missing-id [GraphQL] not found: title missing-id",
+  ]) {
+    assert.equal(userFacingGraphQlErrorMessage(new Error(message), "Failed"), "Title not found.");
+  }
+  assert.equal(normalizeGraphQlErrorMessage("not found: library missing-id"), "not found: library missing-id");
+});
+
 test("normalizeGraphQlErrorMessage strips GraphQL validation prefixes", () => {
   assert.equal(
     normalizeGraphQlErrorMessage(

@@ -123,6 +123,9 @@ export function normalizeGraphQlErrorMessage(message: string): string {
   }
 
   normalized = normalized.trim();
+  if (/^not found:\s*title(?:\s|$)/i.test(normalized)) {
+    return t("title.notFound", DEFAULT_LANGUAGE);
+  }
   if (/^(?:unauthorized:\s*)?invalid release candidate token:\s*ExpiredSignature$/i.test(normalized)) {
     return t("status.searchResultsExpired", DEFAULT_LANGUAGE);
   }

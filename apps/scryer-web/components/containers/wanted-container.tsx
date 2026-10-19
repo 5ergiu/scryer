@@ -47,8 +47,10 @@ import {
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
 import { autoSearchOutcomeMessage } from "@/lib/utils/auto-search-outcome";
 import { releaseQueueScopeInput } from "@/lib/utils/release-queue-scope";
+import { createWantedNavigationCountsCache } from "@/lib/utils/wanted-navigation-counts";
 
 type WantedContainerProps = {
+  authorizationSignature: string;
   wantedSection: WantedSection;
   onOpenOverview?: (
     targetView: ViewId,
@@ -63,7 +65,7 @@ const CUTOFF_PAGE_SIZE = 50;
 // Switching Wanted sections remounts this container. The sidebar keeps the
 // last counts it showed until the refreshed counts replace them, instead of
 // dropping to zero while the query is in flight.
-const lastNavigationCounts = { wanted: 0, cutoff: 0, pending: 0 };
+const navigationCountsForScope = createWantedNavigationCountsCache();
 // The interactive acquisition-search job runs server-side; its id
 // is kept in sessionStorage so progress survives navigation and reload.
 const ACQUISITION_SEARCH_JOB_STORAGE_KEY = "scryer.acquisitionSearchJobId";
@@ -118,9 +120,11 @@ function cutoffQueueScope(item: CutoffUnmetItem) {
 }
 
 export const WantedContainer = memo(function WantedContainer({
+  authorizationSignature,
   wantedSection,
   onOpenOverview,
 }: WantedContainerProps) {
+  const [lastNavigationCounts] = useState(() => navigationCountsForScope(authorizationSignature));
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
   const client = useClient();
@@ -183,7 +187,7 @@ export const WantedContainer = memo(function WantedContainer({
     lastNavigationCounts.wanted = total;
     lastNavigationCounts.cutoff = cutoffTotal;
     lastNavigationCounts.pending = pendingTotal;
-  }, [total, cutoffTotal, pendingTotal]);
+  }, [lastNavigationCounts, total, cutoffTotal, pendingTotal]);
 
   const refreshWantedNavigationCounts = useCallback(async () => {
     try {
