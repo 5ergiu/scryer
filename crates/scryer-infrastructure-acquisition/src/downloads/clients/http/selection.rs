@@ -4,7 +4,9 @@
 //! The host's selection is a candidate set: every resource of a transport
 //! the client declared, minus thumbnails. This picks the one media file that
 //! best fits the profile's ceiling and preferences, plus one subtitle sidecar
-//! per wanted language, and names each output after the host's basename.
+//! per wanted language, and names each output after the host's basename. The
+//! next-best media files are kept, bounded, for when the server refuses the
+//! chosen one.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +22,17 @@ use super::state::HttpFileRole;
 /// well under this; anything longer is not a name this client wrote.
 const MAX_BASENAME_LEN: usize = 200;
 const MAX_EXTENSION_LEN: usize = 8;
+/// Alternative media resources kept for a job, beyond its first choice.
+pub(crate) const MAX_MEDIA_FALLBACKS: usize = 3;
+
+/// What a job fetches: its files, and the media resources to fall back to,
+/// best first, when the chosen one is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlannedDownload {
+    pub output_dir: PathBuf,
+    pub files: Vec<PlannedFile>,
+    pub media_fallbacks: Vec<PluginHttpResource>,
+}
 
 /// One file the job will write.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,7 +52,7 @@ pub(crate) struct PlannedFile {
 pub(crate) fn plan_download(
     source: &PluginHttpDownloadSource,
     download_dir: &Path,
-) -> AppResult<(PathBuf, Vec<PlannedFile>)> {
+) -> AppResult<PlannedDownload> {
     let basename = validate_output_basename(&source.policy.output_basename)?;
     let offered = source.release.offered_transports();
     if !offered.contains(&HttpTransport::DirectFile) {
@@ -94,14 +107,26 @@ pub(crate) fn plan_download(
             "no_media_resource: the selection holds no direct media file to download".to_string(),
         ));
     }
-    let media = choose_media(&media_candidates, source);
+    let ranked = rank_media(&media_candidates, source);
+    let media = ranked[0];
+    // Retrying the same URL under another candidate would only repeat the
+    // refusal, so each URL is kept once.
+    let mut media_fallbacks: Vec<PluginHttpResource> = Vec::new();
+    for resource in ranked.iter().skip(1) {
+        if media_fallbacks.len() >= MAX_MEDIA_FALLBACKS {
+            break;
+        }
+        if resource.url != media.url && !media_fallbacks.iter().any(|kept| kept.url == resource.url)
+        {
+            media_fallbacks.push((*resource).clone());
+        }
+    }
 
     let output_dir = download_dir.join(basename);
-    let media_extension = extension_for(media, None).unwrap_or_else(|| "bin".to_string());
     let mut files = vec![PlannedFile {
         role: HttpFileRole::Media,
         resource: media.clone(),
-        final_path: output_dir.join(format!("{basename}.{media_extension}")),
+        final_path: media_final_path(&output_dir, basename, media),
         language: None,
     }];
 
@@ -144,7 +169,22 @@ pub(crate) fn plan_download(
         });
     }
 
-    Ok((output_dir, files))
+    Ok(PlannedDownload {
+        output_dir,
+        files,
+        media_fallbacks,
+    })
+}
+
+/// Where a media resource lands: the basename with the resource's own
+/// extension, so a fallback in another container gets the right one.
+pub(crate) fn media_final_path(
+    output_dir: &Path,
+    basename: &str,
+    resource: &PluginHttpResource,
+) -> PathBuf {
+    let extension = extension_for(resource, None).unwrap_or_else(|| "bin".to_string());
+    output_dir.join(format!("{basename}.{extension}"))
 }
 
 /// The host's basename, refused unless it is a single plain path component.
@@ -177,13 +217,14 @@ fn is_complete_media(resource: &PluginHttpResource) -> bool {
     }
 }
 
-/// The tallest candidate within the profile's ceiling (the shortest one when
-/// none fits), then the preferred codec, then the preferred container, then
-/// the indexer's order.
-fn choose_media<'a>(
+/// The candidates best first: the tallest within the profile's ceiling (the
+/// shortest when none fits), then the preferred codec, then the preferred
+/// container, then the indexer's order. When any candidate fits the ceiling,
+/// only those that fit are returned, so a fallback never exceeds it.
+fn rank_media<'a>(
     candidates: &[&'a PluginHttpResource],
     source: &PluginHttpDownloadSource,
-) -> &'a PluginHttpResource {
+) -> Vec<&'a PluginHttpResource> {
     let height = |resource: &PluginHttpResource| resource.video.as_ref().and_then(|v| v.height);
     let ceiling = source.selected.max_height;
     let within: Vec<&'a PluginHttpResource> = candidates
@@ -215,25 +256,20 @@ fn choose_media<'a>(
             ),
         )
     };
+    // Stable sorts, so the indexer's order breaks ties.
     if within.is_empty() {
-        return candidates
-            .iter()
-            .copied()
-            .min_by_key(|resource| (height(resource).unwrap_or(u32::MAX), rank(resource)))
-            .expect("candidates is not empty");
+        let mut ranked = candidates.to_vec();
+        ranked.sort_by_key(|resource| (height(resource).unwrap_or(u32::MAX), rank(resource)));
+        return ranked;
     }
-    // `min_by_key` keeps the first of equal keys, so the indexer's order
-    // breaks ties.
-    within
-        .iter()
-        .copied()
-        .min_by_key(|resource| {
-            (
-                std::cmp::Reverse(height(resource).unwrap_or(0)),
-                rank(resource),
-            )
-        })
-        .expect("within is not empty")
+    let mut ranked = within;
+    ranked.sort_by_key(|resource| {
+        (
+            std::cmp::Reverse(height(resource).unwrap_or(0)),
+            rank(resource),
+        )
+    });
+    ranked
 }
 
 /// One sidecar per wanted language, in the order the languages were asked

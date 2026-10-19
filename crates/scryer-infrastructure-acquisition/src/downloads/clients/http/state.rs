@@ -85,6 +85,26 @@ pub(crate) struct HttpJobFile {
     pub complete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// `403 Forbidden` answers this resource has given. Recorded so the
+    /// retry bound holds across pauses and restarts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub forbidden_answers: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A media resource that was given up on, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RefusedVariant {
+    /// The server kept answering `403 Forbidden`.
+    pub forbidden: bool,
+    pub error: String,
 }
 
 impl HttpJobFile {
@@ -131,6 +151,23 @@ pub(crate) struct HttpJob {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// The other complete media resources of the release, best first, tried
+    /// in order when the active one is refused. Bounded at planning time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_fallbacks: Vec<PluginHttpResource>,
+    /// Which media candidate is active: 0 for the first choice, `n` for
+    /// `media_fallbacks[n - 1]`.
+    #[serde(default)]
+    pub candidate_index: u32,
+    /// `403 Forbidden` answers across every media candidate of the job.
+    #[serde(default)]
+    pub forbidden_requests: u32,
+    /// The media candidates given up on so far, in the order they were tried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_variants: Vec<RefusedVariant>,
+    /// The indexer declared the release geo-restricted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub geo_restricted: bool,
 }
 
 impl HttpJob {
@@ -164,6 +201,45 @@ impl HttpJob {
             })?;
             Some(sum.saturating_add(size))
         })
+    }
+
+    /// Why the job failed once no media candidate is left to try.
+    pub(crate) fn exhausted_message(&self) -> String {
+        let variants = self.refused_variants.len();
+        let Some(last) = self.refused_variants.last() else {
+            return "no media resource could be downloaded".to_string();
+        };
+        if self
+            .refused_variants
+            .iter()
+            .all(|variant| variant.forbidden)
+        {
+            let mut message = format!(
+                "geo-blocked: every variant answered 403 Forbidden ({}, {})",
+                counted(variants, "variant"),
+                counted(self.forbidden_requests as usize, "request")
+            );
+            if self.geo_restricted {
+                message.push_str("; the release is declared geo-restricted");
+            }
+            return message;
+        }
+        if variants == 1 {
+            return last.error.clone();
+        }
+        format!(
+            "no variant could be downloaded ({}); the last one failed with: {}",
+            counted(variants, "variant"),
+            last.error
+        )
+    }
+}
+
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 

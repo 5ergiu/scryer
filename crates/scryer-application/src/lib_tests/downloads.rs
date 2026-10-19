@@ -9193,6 +9193,301 @@ async fn automatic_import_uses_grabbed_episode_for_absolute_numbered_release() {
 }
 
 #[tokio::test]
+async fn automatic_import_names_dated_release_from_assigned_episode_season() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode: template,
+            library_dir,
+            ..
+        },
+        download_submissions,
+    ) = fail_closed_pack_fixture_with_submissions().await;
+    let collection = app
+        .create_collection(
+            &user,
+            title.id.clone(),
+            "season".into(),
+            "2026".into(),
+            Some("Season 2026".into()),
+            None,
+            Some("41".into()),
+            Some("41".into()),
+        )
+        .await
+        .expect("create year-numbered season");
+    let mut episode = template.clone();
+    episode.id = Id::new().0;
+    episode.collection_id = Some(collection.id.clone());
+    episode.season_number = Some("2026".to_string());
+    episode.episode_number = Some("41".to_string());
+    episode.episode_label = Some("S2026E41".to_string());
+    episode.title = Some("Autumn Visit".to_string());
+    episode.air_date = Some("2026-10-11".to_string());
+    app.services
+        .catalog
+        .shows
+        .create_episode(episode.clone())
+        .await
+        .expect("create year-numbered episode");
+
+    // A broadcaster-style title carries only an air date: no season token.
+    let release_title = "Fail Closed Pack vom 11.10.2026 [CHN]";
+    let item_id = "dated-release-year-season";
+    record_pack_identity_submission(
+        &download_submissions,
+        &title.id,
+        item_id,
+        release_title,
+        SubmissionScope::Episode {
+            episode_id: episode.id.clone(),
+        },
+    )
+    .await;
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let job_dir = source_dir
+        .path()
+        .join("Fail_Closed_Pack_vom_11.10.2026_CHN-0f3c9a2e-5b71-4d8e-9c64-2a1b7e9d3f50");
+    std::fs::create_dir_all(&job_dir).expect("create job dir");
+    let source_file = write_pack_video(
+        &job_dir,
+        "Fail_Closed_Pack_vom_11.10.2026_CHN-0f3c9a2e-5b71-4d8e-9c64-2a1b7e9d3f50.mkv",
+    );
+    // The client reports the finished file itself as the output path.
+    let completed = series_pack_completed_download(item_id, &title.id, release_title, &source_file);
+
+    let result = {
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        crate::import::import::import_completed_download(&app, &user, &completed)
+            .await
+            .expect("dated completed import should run")
+    };
+
+    assert_eq!(result.decision, scryer_domain::ImportDecision::Imported);
+    assert_eq!(result.episode_ids, vec![episode.id.clone()]);
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list imported dated file");
+    assert_eq!(media_files.len(), 1, "{media_files:?}");
+    assert_eq!(
+        media_files[0].episode_id.as_deref(),
+        Some(episode.id.as_str())
+    );
+    let dest_path = Path::new(&media_files[0].file_path);
+    let season_folder = dest_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .expect("season folder");
+    assert_eq!(season_folder, "Season 2026", "{}", dest_path.display());
+    let file_name = dest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("destination file name");
+    assert!(
+        file_name.contains("S2026E41"),
+        "the assigned episode row must drive the destination numbering: {file_name}"
+    );
+    assert_eq!(library_video_file_names(library_dir.path()).len(), 1);
+}
+
+/// An operator-chosen replacement of a dated episode that an earlier import
+/// filed under the wrong season lands in the linked episode's season, not
+/// beside the incumbent it replaces.
+#[tokio::test]
+async fn replacement_import_names_dated_release_from_assigned_episode_season() {
+    let (
+        FailClosedPackFixture {
+            app,
+            user,
+            title,
+            episode: template,
+            library_dir,
+            ..
+        },
+        download_submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        series_root_at_library_dir: true,
+        ..Default::default()
+    })
+    .await;
+    let collection = app
+        .create_collection(
+            &user,
+            title.id.clone(),
+            "season".into(),
+            "2026".into(),
+            Some("Season 2026".into()),
+            None,
+            Some("41".into()),
+            Some("41".into()),
+        )
+        .await
+        .expect("create year-numbered season");
+    let mut episode = template.clone();
+    episode.id = Id::new().0;
+    episode.collection_id = Some(collection.id.clone());
+    episode.season_number = Some("2026".to_string());
+    episode.episode_number = Some("41".to_string());
+    episode.episode_label = Some("S2026E41".to_string());
+    episode.title = Some("Autumn Visit".to_string());
+    episode.air_date = Some("2026-10-11".to_string());
+    app.services
+        .catalog
+        .shows
+        .create_episode(episode.clone())
+        .await
+        .expect("create year-numbered episode");
+
+    // An earlier import filed this episode under a season it does not have.
+    let wrong_season = library_dir.path().join("Fail Closed Pack").join("Season 1");
+    std::fs::create_dir_all(&wrong_season).expect("create wrong season folder");
+    let incumbent_path = wrong_season.join("Fail Closed Pack - S01E41 - 1080p.mkv");
+    std::fs::File::create(&incumbent_path)
+        .expect("create incumbent")
+        .set_len(PACK_VIDEO_SIZE_BYTES)
+        .expect("size incumbent");
+    let incumbent_id = app
+        .services
+        .library
+        .media_files
+        .insert_media_file(&InsertMediaFileInput {
+            title_id: title.id.clone(),
+            file_path: incumbent_path.to_string_lossy().into_owned(),
+            size_bytes: PACK_VIDEO_SIZE_BYTES as i64,
+            role: MediaFileRole::Primary,
+            quality_label: Some("1080p".to_string()),
+            resolution: Some("1080p".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("insert incumbent");
+    app.services
+        .library
+        .media_files
+        .link_file_to_episode(&incumbent_id, &episode.id)
+        .await
+        .expect("link incumbent to episode");
+    app.services
+        .library
+        .media_files
+        .set_media_file_roles_for_episode(&title.id, &episode.id, &incumbent_id, &[])
+        .await
+        .expect("make the incumbent the episode's primary");
+
+    // The native HTTP client names its job with its own item id and carries
+    // the grab's download id back on the completed download, so the import
+    // finds the grab by that id: it is the identity the grab must record.
+    let release_title = "Fail Closed Pack vom 11.10.2026 [CHN]";
+    let item_id = "5c0d7e21-8a43-4f6b-9e12-3b7a6c4d2f80";
+    let download_id = scryer_domain::download_identity::DownloadId::new();
+    let download_id_wire = download_id.to_wire();
+    let accepted_identity =
+        crate::accepted_download_submission_identity(crate::AcceptedDownloadIdentityInput {
+            initial_download_id: Some(download_id_wire.as_str()),
+            source_kind: Some(DownloadSourceKind::HttpResource),
+            source_hint: Some("https://media.example.invalid/episode-41"),
+            info_hash_hint: None,
+            client_type: Some("http"),
+            client_item_id: Some(item_id),
+            accepted_info_hash: None,
+        });
+    download_submissions
+        .record_submission_with_identity(
+            DownloadSubmission {
+                download_id,
+                title_id: title.id.clone(),
+                purpose: crate::DownloadSubmissionPurpose::ManualReplacement,
+                facet: "series".to_string(),
+                download_client_id: Some("primary".to_string()),
+                download_client_type: "http".to_string(),
+                download_client_item_id: item_id.to_string(),
+                source_hint: Some("https://media.example.invalid/episode-41".to_string()),
+                source_provider_id: None,
+                source_provider_name: None,
+                source_kind: Some(DownloadSourceKind::HttpResource),
+                source_title: Some(release_title.to_string()),
+                info_hash: None,
+                release_size_bytes: None,
+                request_signature: None,
+                scope: SubmissionScope::Episode {
+                    episode_id: episode.id.clone(),
+                },
+                release_listing_json: None,
+            },
+            accepted_identity,
+            None,
+        )
+        .await
+        .expect("record replacement submission");
+
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    let job_dir = source_dir
+        .path()
+        .join("Fail_Closed_Pack_vom_11.10.2026_CHN-0f3c9a2e-5b71-4d8e-9c64-2a1b7e9d3f50");
+    std::fs::create_dir_all(&job_dir).expect("create job dir");
+    let source_file = write_pack_video(
+        &job_dir,
+        "Fail_Closed_Pack_vom_11.10.2026_CHN-0f3c9a2e-5b71-4d8e-9c64-2a1b7e9d3f50.mkv",
+    );
+    let mut completed =
+        series_pack_completed_download(item_id, &title.id, release_title, &source_file);
+    completed.client_type = "http".to_string();
+    completed.release_name = Some(release_title.to_string());
+    completed.download_id = Some(download_id_wire.clone());
+    completed
+        .parameters
+        .push((crate::DOWNLOAD_ID_PARAMETER.to_string(), download_id_wire));
+
+    let result = {
+        let _probe = probe_agrees_with_the_name(1920, 1080);
+        crate::import::import::import_completed_download(&app, &user, &completed)
+            .await
+            .expect("dated replacement import should run")
+    };
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{result:?}"
+    );
+    assert_eq!(result.episode_ids, vec![episode.id.clone()]);
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list replacement file");
+    let replacement = media_files
+        .iter()
+        .find(|file| file.id != incumbent_id)
+        .unwrap_or_else(|| panic!("a replacement row: {media_files:?}"));
+    let dest_path = Path::new(&replacement.file_path);
+    let season_folder = dest_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .expect("season folder");
+    assert_eq!(season_folder, "Season 2026", "{}", dest_path.display());
+    let file_name = dest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("destination file name");
+    assert!(
+        file_name.contains("S2026E41"),
+        "the assigned episode row must drive the destination numbering: {file_name}"
+    );
+}
+
+#[tokio::test]
 async fn alternate_numbered_sole_scene_file_reconciles_from_typoed_episode_title() {
     let (
         FailClosedPackFixture {

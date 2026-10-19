@@ -39,6 +39,10 @@ const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TRANSIENT_FAILURES: u32 = 5;
 /// Fresh attempts started because a resume could not be trusted.
 const MAX_RESTARTS: u32 = 3;
+/// Further requests for a resource after its first `403 Forbidden`, in case
+/// the refusal was spurious. A geo block answers 403 every time, so the
+/// resource is given up on after this many more.
+pub(crate) const MAX_FORBIDDEN_RETRIES: u32 = 2;
 /// The longest `Retry-After` honored; a longer one fails the file instead of
 /// parking a worker for hours.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
@@ -96,7 +100,25 @@ pub(crate) enum TransferError {
     RetryAfter(Duration, String),
     /// Retrying cannot help.
     Permanent(String),
+    /// `403 Forbidden`: often a geo block, sometimes a one-off refusal.
+    Forbidden(String),
+    /// Any other 4xx: this resource is not available to this client, though
+    /// another of the release's resources may be.
+    Rejected(String),
     Cancelled,
+}
+
+impl TransferError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Transient(message)
+            | Self::RetryAfter(_, message)
+            | Self::Permanent(message)
+            | Self::Forbidden(message)
+            | Self::Rejected(message) => message.clone(),
+            Self::Cancelled => String::new(),
+        }
+    }
 }
 
 /// What was asked of the server.
@@ -160,6 +182,16 @@ pub(crate) fn judge_response(
     }
     if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
         return ResponseVerdict::Failed(TransferError::Transient(format!(
+            "the server answered {status}"
+        )));
+    }
+    if status == StatusCode::FORBIDDEN {
+        return ResponseVerdict::Failed(TransferError::Forbidden(format!(
+            "the server answered {status}"
+        )));
+    }
+    if status.is_client_error() {
+        return ResponseVerdict::Failed(TransferError::Rejected(format!(
             "the server answered {status}"
         )));
     }
@@ -356,6 +388,12 @@ pub(crate) fn scoped_headers(
 #[async_trait]
 pub(crate) trait Checkpoint: Send + Sync {
     async fn record(&self, file: &HttpJobFile) -> AppResult<()>;
+
+    /// Record a `403 Forbidden` answer: the file carries its own count, and
+    /// the job counts them across every resource it tries.
+    async fn record_forbidden(&self, file: &HttpJobFile) -> AppResult<()> {
+        self.record(file).await
+    }
 }
 
 /// Shared pacing for every transfer of one client.
@@ -405,6 +443,14 @@ pub(crate) struct TransferContext<'a> {
     pub cancel: &'a CancellationToken,
     pub live_bytes: &'a Arc<AtomicU64>,
     pub limiter: Option<&'a BandwidthLimiter>,
+    /// The first retry's wait; each further retry doubles it, up to a cap.
+    pub backoff_unit: Duration,
+}
+
+/// The wait before retry number `failures` (1-based).
+fn backoff(unit: Duration, failures: u32) -> Duration {
+    unit.saturating_mul(1u32 << failures.min(6))
+        .min(MAX_BACKOFF)
 }
 
 /// Fetch one file to completion, resuming its partial when that is safe.
@@ -417,6 +463,15 @@ pub(crate) async fn transfer_file(
 ) -> Result<(), TransferError> {
     if file.complete {
         return Ok(());
+    }
+    // Recorded before an interruption: the resource already used up its
+    // retries, so it is not asked again.
+    if file.forbidden_answers > MAX_FORBIDDEN_RETRIES {
+        return Err(TransferError::Forbidden(format!(
+            "the server answered {} to all {} requests",
+            StatusCode::FORBIDDEN,
+            file.forbidden_answers
+        )));
     }
     if let Some(expires_at) = file.resource.expires_at.as_deref()
         && let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at)
@@ -494,6 +549,19 @@ pub(crate) async fn transfer_file(
             }
             ResponseVerdict::Failed(TransferError::Permanent(message)) => {
                 return Err(TransferError::Permanent(message));
+            }
+            ResponseVerdict::Failed(TransferError::Rejected(message)) => {
+                return Err(TransferError::Rejected(message));
+            }
+            ResponseVerdict::Failed(TransferError::Forbidden(message)) => {
+                file.forbidden_answers = file.forbidden_answers.saturating_add(1);
+                context
+                    .checkpoint
+                    .record_forbidden(file)
+                    .await
+                    .map_err(|error| TransferError::Permanent(error.to_string()))?;
+                wait_after_forbidden(context, file, message).await?;
+                continue;
             }
             ResponseVerdict::Failed(error) => {
                 transient_failures += 1;
@@ -588,10 +656,9 @@ async fn wait_before_retry(
 ) -> Result<(), TransferError> {
     let (wait, message) = match error {
         TransferError::RetryAfter(wait, message) => (*wait, message.clone()),
-        TransferError::Transient(message) => (
-            Duration::from_secs(1u64 << failures.min(6)).min(MAX_BACKOFF),
-            message.clone(),
-        ),
+        TransferError::Transient(message) => {
+            (backoff(context.backoff_unit, failures), message.clone())
+        }
         other => return Err(other.clone()),
     };
     if failures > MAX_TRANSIENT_FAILURES {
@@ -605,6 +672,46 @@ async fn wait_before_retry(
         error = message.as_str(),
         "HTTP download will retry"
     );
+    sleep_unless_cancelled(context, wait).await
+}
+
+/// After a `403 Forbidden`: give the resource up once its retries are spent,
+/// otherwise wait the usual backoff before asking again.
+async fn wait_after_forbidden(
+    context: &TransferContext<'_>,
+    file: &HttpJobFile,
+    message: String,
+) -> Result<(), TransferError> {
+    let answers = file.forbidden_answers;
+    if answers > MAX_FORBIDDEN_RETRIES {
+        return Err(TransferError::Forbidden(format!(
+            "{message} to all {answers} requests"
+        )));
+    }
+    let wait = backoff(context.backoff_unit, answers);
+    warn!(
+        url_host = reqwest::Url::parse(&file.resource.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_default(),
+        retry_in_secs = wait.as_secs(),
+        forbidden_answers = answers,
+        "HTTP download was refused with 403 Forbidden; asking again"
+    );
+    sleep_unless_cancelled(context, wait).await
+}
+
+async fn sleep_unless_cancelled(
+    context: &TransferContext<'_>,
+    wait: Duration,
+) -> Result<(), TransferError> {
+    if wait.is_zero() {
+        return if context.cancel.is_cancelled() {
+            Err(TransferError::Cancelled)
+        } else {
+            Ok(())
+        };
+    }
     tokio::select! {
         () = context.cancel.cancelled() => Err(TransferError::Cancelled),
         () = tokio::time::sleep(wait) => Ok(()),

@@ -38,6 +38,7 @@ use scryer_domain::{
     CompletedDownload, DownloadClientConfig, DownloadQueueItem, DownloadQueueState, ProxyConfig,
 };
 use serde_json::Value;
+use tracing::info;
 
 use self::engine::{HttpEngine, HttpEngineLimits, LiveSnapshot};
 use self::state::{HttpFileRole, HttpJob, HttpJobFile, HttpJobState};
@@ -272,7 +273,11 @@ impl DownloadClient for HttpDownloadClient {
             )
         })?;
         check_download_dir(&self.engine.download_dir).await?;
-        let (output_dir, planned) = selection::plan_download(source, &self.engine.download_dir)?;
+        let selection::PlannedDownload {
+            output_dir,
+            files: planned,
+            mut media_fallbacks,
+        } = selection::plan_download(source, &self.engine.download_dir)?;
         if let Some(file) = planned.iter().find(|file| file.resource.auth_ref.is_some()) {
             return Err(AppError::Validation(format!(
                 "unsupported_auth: {} needs the provider's own sign-in, which the HTTP downloader cannot supply",
@@ -294,6 +299,11 @@ impl DownloadClient for HttpDownloadClient {
             }
         }
 
+        // A fallback that needs the provider's sign-in could only fail later.
+        media_fallbacks.retain(|resource| resource.auth_ref.is_none());
+        let geo_restricted =
+            source.release.availability == scryer_plugin_sdk::HttpAvailability::GeoRestricted;
+
         let now = Utc::now();
         let item_id = uuid::Uuid::new_v4().to_string();
         let facet = request
@@ -306,7 +316,12 @@ impl DownloadClient for HttpDownloadClient {
             .unwrap_or_else(|| source.policy.output_basename.clone());
         let job = HttpJob {
             id: item_id.clone(),
-            download_id: request.download_id.as_ref().map(ToString::to_string),
+            // The wire form is what the grab records as this job's identity
+            // and what the tracker and import resolve the job by.
+            download_id: request
+                .download_id
+                .as_ref()
+                .map(scryer_domain::download_identity::DownloadId::to_wire),
             title_id: request.title.id.clone(),
             title_name: request.title.name.clone(),
             facet: facet.as_str().to_string(),
@@ -331,6 +346,7 @@ impl DownloadClient for HttpDownloadClient {
                     validator: None,
                     complete: false,
                     language: file.language,
+                    forbidden_answers: 0,
                 })
                 .collect(),
             state: HttpJobState::Queued,
@@ -339,8 +355,21 @@ impl DownloadClient for HttpDownloadClient {
             queued_at: now,
             updated_at: now,
             completed_at: None,
+            media_fallbacks,
+            candidate_index: 0,
+            forbidden_requests: 0,
+            refused_variants: Vec::new(),
+            geo_restricted,
         };
         self.engine.add_job(job).await?;
+        if geo_restricted {
+            // Only a hint: the operator may well be inside the region.
+            info!(
+                item_id = item_id.as_str(),
+                provider = source.release.provider.as_str(),
+                "release is declared geo-restricted; attempting anyway"
+            );
+        }
         Ok(DownloadGrabResult {
             job_id: item_id,
             client_id: None,

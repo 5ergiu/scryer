@@ -7,17 +7,17 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use scryer_application::{DownloadClient, DownloadClientAddRequest, DownloadSourceKind};
 use scryer_domain::{DownloadClientConfig, MediaFacet, Title};
 use scryer_plugin_sdk::{
-    HttpResourceRole, HttpSubtitleMode, HttpTransport, PluginHttpDownloadSource, PluginHttpHeader,
-    PluginHttpPolicy, PluginHttpRelease, PluginHttpResource, PluginHttpSelection,
+    HttpAvailability, HttpResourceRole, HttpSubtitleMode, HttpTransport, PluginHttpDownloadSource,
+    PluginHttpHeader, PluginHttpPolicy, PluginHttpRelease, PluginHttpResource, PluginHttpSelection,
     PluginHttpSubtitleTrack, PluginHttpValidators, PluginHttpVideoTrack,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-use super::selection::{plan_download, validate_output_basename};
+use super::selection::{MAX_MEDIA_FALLBACKS, plan_download, validate_output_basename};
 use super::state::{
     HttpFileRole, HttpJob, HttpJobFile, HttpJobState, HttpQueueDocument, HttpStateStore,
-    RecordedValidator, part_path_for,
+    RecordedValidator, RefusedVariant, part_path_for,
 };
 use super::transfer::{
     RangeRequest, ResponseVerdict, TransferError, check_final_size, judge_response,
@@ -223,6 +223,7 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
             }),
             complete: false,
             language: None,
+            forbidden_answers: 0,
         }],
         output_dir,
         // As a crash mid-transfer leaves it.
@@ -232,6 +233,11 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
         queued_at: Utc::now(),
         updated_at: Utc::now(),
         completed_at: None,
+        media_fallbacks: Vec::new(),
+        candidate_index: 0,
+        forbidden_requests: 0,
+        refused_variants: Vec::new(),
+        geo_restricted: false,
     }
 }
 
@@ -421,7 +427,13 @@ fn output_lands_in_a_folder_named_after_the_basename() {
     source.selected.max_height = Some(720);
     source.selected.subtitle_mode = HttpSubtitleMode::SidecarPreferred;
     source.selected.subtitle_languages = vec!["en".into()];
-    let (output_dir, files) = plan_download(&source, Path::new("/srv/dl")).unwrap();
+    let planned = plan_download(&source, Path::new("/srv/dl")).unwrap();
+    let (output_dir, files) = (planned.output_dir, planned.files);
+    assert_eq!(
+        planned.media_fallbacks.len(),
+        0,
+        "1080p is over the ceiling"
+    );
     assert_eq!(output_dir, Path::new("/srv/dl/Synthetic.Show.S01E01"));
     assert_eq!(files.len(), 2);
     assert_eq!(files[0].resource.url, "https://media.invalid/v/720.mp4");
@@ -575,14 +587,6 @@ fn throttling_and_errors_are_classified() {
         ),
         ResponseVerdict::Failed(TransferError::Transient(_))
     ));
-    assert!(matches!(
-        judge_response(
-            StatusCode::FORBIDDEN,
-            &HeaderMap::new(),
-            &RangeRequest::Whole
-        ),
-        ResponseVerdict::Failed(TransferError::Permanent(_))
-    ));
     let now = chrono::DateTime::parse_from_rfc2822("Mon, 19 Oct 2026 10:00:00 GMT")
         .unwrap()
         .with_timezone(&Utc);
@@ -734,9 +738,16 @@ async fn downloads_a_file_and_its_sidecar_and_keeps_headers_on_their_origin() {
         completed.subtitle_paths,
         vec![subtitle_path.to_string_lossy().into_owned()]
     );
-    assert_eq!(
-        completed.download_id,
-        request.download_id.map(|id| id.to_string())
+    // The wire form, exactly as the grab records the job's identity.
+    let download_id_wire = request.download_id.map(|id| id.to_wire());
+    assert_eq!(completed.download_id, download_id_wire);
+    assert!(
+        completed.parameters.contains(&(
+            scryer_application::DOWNLOAD_ID_PARAMETER.to_string(),
+            download_id_wire
+                .clone()
+                .expect("the request carries a download id"),
+        ))
     );
     assert!(client.list_queue().await.unwrap().is_empty());
     let history = client.list_history().await.unwrap();
@@ -943,4 +954,375 @@ async fn a_size_mismatch_against_an_exact_size_fails_the_job() {
     assert!(output.join("Synthetic.Show.S01E01.mp4.part").exists());
     let history = client.list_history().await.unwrap();
     assert!(history[0].attention_required);
+}
+
+// ---------------------------------------------------------------------------
+// refusals, retries and media fallbacks
+
+/// A client whose retries do not wait on the clock.
+fn eager_client(config: &DownloadClientConfig) -> HttpDownloadClient {
+    let client = client(config);
+    client.engine().set_backoff_unit(Duration::ZERO);
+    client
+}
+
+fn sized_muxed(url: &str, height: u32, container: &str) -> PluginHttpResource {
+    PluginHttpResource {
+        container: Some(container.into()),
+        ..muxed(url, height)
+    }
+}
+
+#[test]
+fn a_forbidden_answer_is_its_own_class_and_other_client_errors_are_rejections() {
+    assert_eq!(
+        judge_response(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            &RangeRequest::Whole
+        ),
+        ResponseVerdict::Failed(TransferError::Forbidden(
+            "the server answered 403 Forbidden".into()
+        ))
+    );
+    assert_eq!(
+        judge_response(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            &resume_request(4, 34)
+        ),
+        ResponseVerdict::Failed(TransferError::Forbidden(
+            "the server answered 403 Forbidden".into()
+        ))
+    );
+    for status in [
+        StatusCode::NOT_FOUND,
+        StatusCode::GONE,
+        StatusCode::UNAUTHORIZED,
+    ] {
+        assert!(
+            matches!(
+                judge_response(status, &HeaderMap::new(), &RangeRequest::Whole),
+                ResponseVerdict::Failed(TransferError::Rejected(_))
+            ),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn fallbacks_follow_the_media_ranking_within_the_ceiling_and_are_bounded() {
+    let mut source = source(vec![
+        muxed("https://media.invalid/v/2160.mp4", 2160),
+        muxed("https://media.invalid/v/720.mp4", 720),
+        muxed("https://media.invalid/v/1080.mp4", 1080),
+        muxed("https://media.invalid/v/480.mp4", 480),
+        muxed("https://media.invalid/v/360.mp4", 360),
+        muxed("https://media.invalid/v/540.mp4", 540),
+        muxed("https://media.invalid/v/1080.mp4", 1080),
+    ]);
+    source.selected.max_height = Some(1080);
+    let planned = plan_download(&source, Path::new("/srv/dl")).unwrap();
+    assert_eq!(
+        planned.files[0].resource.url,
+        "https://media.invalid/v/1080.mp4"
+    );
+    let fallbacks: Vec<&str> = planned
+        .media_fallbacks
+        .iter()
+        .map(|resource| resource.url.as_str())
+        .collect();
+    assert_eq!(fallbacks.len(), MAX_MEDIA_FALLBACKS);
+    assert_eq!(
+        fallbacks,
+        vec![
+            "https://media.invalid/v/720.mp4",
+            "https://media.invalid/v/540.mp4",
+            "https://media.invalid/v/480.mp4",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_spurious_forbidden_answer_is_retried_on_the_same_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/de/clip.mp4"))
+        .respond_with(ResponseTemplate::new(403))
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/de/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let source = source(vec![muxed(&format!("{}/de/clip.mp4", server.uri()), 720)]);
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.forbidden_requests, 2);
+    assert_eq!(done.candidate_index, 0);
+    assert_eq!(done.files[0].attempt, 1);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn no_request_follows_the_third_forbidden_answer() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/de/clip.mp4"))
+        .respond_with(ResponseTemplate::new(403))
+        .up_to_n_times(3)
+        .expect(3)
+        .mount(&server)
+        .await;
+    // Would succeed, but the retry bound is spent before it is reached.
+    Mock::given(method("GET"))
+        .and(path("/de/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let source = source(vec![muxed(&format!("{}/de/clip.mp4", server.uri()), 720)]);
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    assert_eq!(
+        done.error.as_deref(),
+        Some("geo-blocked: every variant answered 403 Forbidden (1 variant, 3 requests)")
+    );
+    assert_eq!(done.forbidden_requests, 3);
+}
+
+#[tokio::test]
+async fn a_geo_blocked_variant_falls_back_to_the_next_and_its_partial_stays() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/de/clip.mp4"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/weltweit/clip.mkv"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    // An earlier run of variant A left a partial; the restart finds the
+    // fallback list in the queue document.
+    let mut job = seeded_job(dir.path(), &format!("{}/de/clip.mp4", server.uri()), 4);
+    job.media_fallbacks = vec![sized_muxed(
+        &format!("{}/weltweit/clip.mkv", server.uri()),
+        720,
+        "mkv",
+    )];
+    seed_interrupted(&config, dir.path(), &job).await;
+    let first_part = job.files[0].part_path();
+
+    let client = eager_client(&config);
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.candidate_index, 1);
+    assert_eq!(done.forbidden_requests, 3);
+    assert_eq!(
+        done.refused_variants,
+        vec![RefusedVariant {
+            forbidden: true,
+            error: "the server answered 403 Forbidden to all 3 requests".into(),
+        }]
+    );
+    let media = &done.files[0];
+    assert_eq!(media.attempt, 2);
+    assert_eq!(
+        media.final_path,
+        job.output_dir.join("Synthetic.Show.S01E01.mkv")
+    );
+    assert_eq!(std::fs::read(&media.final_path).unwrap(), BODY);
+    // Variant A's partial is untouched.
+    assert_eq!(std::fs::read(&first_part).unwrap(), &BODY[..4]);
+    let completed = client.list_completed_downloads().await.unwrap();
+    assert_eq!(
+        completed[0].dest_dir,
+        media.final_path.to_string_lossy().into_owned()
+    );
+}
+
+#[tokio::test]
+async fn every_variant_forbidden_fails_with_a_geo_blocked_message_and_deletes_nothing() {
+    let server = MockServer::start().await;
+    for name in ["clip_1080.mp4", "clip_720.mp4"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/de/{name}")))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(3)
+            .mount(&server)
+            .await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("Synthetic.Show.S01E01");
+    std::fs::create_dir_all(&output).unwrap();
+    let unrelated = output.join("unrelated.txt");
+    std::fs::write(&unrelated, b"keep").unwrap();
+
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let mut source = source(vec![
+        muxed(&format!("{}/de/clip_1080.mp4", server.uri()), 1080),
+        muxed(&format!("{}/de/clip_720.mp4", server.uri()), 720),
+    ]);
+    source.release.availability = HttpAvailability::GeoRestricted;
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    assert_eq!(
+        done.error.as_deref(),
+        Some(
+            "geo-blocked: every variant answered 403 Forbidden (2 variants, 6 requests); the release is declared geo-restricted"
+        )
+    );
+    assert_eq!(done.forbidden_requests, 6);
+    assert_eq!(done.candidate_index, 1);
+    assert!(done.geo_restricted);
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
+    let history = client.list_history().await.unwrap();
+    assert!(history[0].attention_required);
+    assert_eq!(history[0].attention_reason, done.error);
+}
+
+#[tokio::test]
+async fn a_missing_variant_falls_back_at_once_without_retries() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gone/clip_1080.mp4"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/weltweit/clip_720.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let source = source(vec![
+        muxed(&format!("{}/gone/clip_1080.mp4", server.uri()), 1080),
+        muxed(&format!("{}/weltweit/clip_720.mp4", server.uri()), 720),
+    ]);
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.candidate_index, 1);
+    assert_eq!(done.forbidden_requests, 0);
+    assert_eq!(
+        done.refused_variants,
+        vec![RefusedVariant {
+            forbidden: false,
+            error: "the server answered 404 Not Found".into(),
+        }]
+    );
+    assert_eq!(done.files[0].attempt, 2);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn fallback_fields_round_trip_and_an_older_document_loads_with_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = HttpStateStore::for_client(dir.path(), "synthetic-client");
+    let mut job = seeded_job(dir.path(), "https://media.invalid/de/a.mp4", 4);
+    job.media_fallbacks = vec![sized_muxed(
+        "https://media.invalid/weltweit/a.mkv",
+        720,
+        "mkv",
+    )];
+    job.candidate_index = 1;
+    job.forbidden_requests = 3;
+    job.refused_variants = vec![RefusedVariant {
+        forbidden: true,
+        error: "the server answered 403 Forbidden to all 3 requests".into(),
+    }];
+    job.geo_restricted = true;
+    job.files[0].forbidden_answers = 2;
+    store
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.load().await.unwrap().jobs, vec![job.clone()]);
+
+    // A document written before these fields existed.
+    let mut old = serde_json::to_value(&job).unwrap();
+    let object = old.as_object_mut().unwrap();
+    for key in [
+        "media_fallbacks",
+        "candidate_index",
+        "forbidden_requests",
+        "refused_variants",
+        "geo_restricted",
+    ] {
+        object.remove(key);
+    }
+    object["files"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("forbidden_answers");
+    let document = serde_json::json!({ "version": 1, "jobs": [old] });
+    std::fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+    let loaded = store.load().await.unwrap().jobs.remove(0);
+    assert!(loaded.media_fallbacks.is_empty());
+    assert_eq!(loaded.candidate_index, 0);
+    assert_eq!(loaded.forbidden_requests, 0);
+    assert!(loaded.refused_variants.is_empty());
+    assert!(!loaded.geo_restricted);
+    assert_eq!(loaded.files[0].forbidden_answers, 0);
+    assert_eq!(loaded.files[0].bytes_done, 4);
+}
+
+#[test]
+fn a_mixed_set_of_refusals_names_the_last_one() {
+    let mut job = seeded_job(Path::new("/srv/dl"), "https://media.invalid/a.mp4", 0);
+    job.refused_variants = vec![
+        RefusedVariant {
+            forbidden: true,
+            error: "the server answered 403 Forbidden to all 3 requests".into(),
+        },
+        RefusedVariant {
+            forbidden: false,
+            error: "the server answered 410 Gone".into(),
+        },
+    ];
+    job.forbidden_requests = 3;
+    assert_eq!(
+        job.exhausted_message(),
+        "no variant could be downloaded (2 variants); the last one failed with: the server answered 410 Gone"
+    );
 }

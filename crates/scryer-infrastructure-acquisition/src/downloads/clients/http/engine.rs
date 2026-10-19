@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -22,7 +22,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{info, warn};
 
-use super::state::{HttpJob, HttpJobFile, HttpJobState, HttpQueueDocument, HttpStateStore};
+use super::selection::media_final_path;
+use super::state::{
+    HttpFileRole, HttpJob, HttpJobFile, HttpJobState, HttpQueueDocument, HttpStateStore,
+    RefusedVariant,
+};
 use super::transfer::{
     BandwidthLimiter, Checkpoint, Egress, TransferContext, TransferError, transfer_file,
 };
@@ -32,6 +36,8 @@ pub(crate) const MAX_ACTIVE_JOBS: usize = 1000;
 /// Finished and failed jobs kept for history; the oldest beyond this are
 /// dropped from the queue document (their files stay where they are).
 pub(crate) const MAX_RETAINED_FINISHED_JOBS: usize = 2000;
+/// The first retry's wait; later retries double it.
+const DEFAULT_BACKOFF_UNIT: Duration = Duration::from_secs(1);
 
 /// Operator-tunable limits, adjustable without restarting transfers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +74,7 @@ pub(crate) struct HttpEngine {
     limits: std::sync::Mutex<HttpEngineLimits>,
     egress: std::sync::Mutex<Egress>,
     limiter: Arc<BandwidthLimiter>,
+    backoff_unit: std::sync::Mutex<Duration>,
     inner: Mutex<EngineInner>,
     save_lock: Mutex<()>,
     started: OnceCell<()>,
@@ -95,6 +102,7 @@ impl HttpEngine {
             ))),
             limits: std::sync::Mutex::new(limits),
             egress: std::sync::Mutex::new(egress),
+            backoff_unit: std::sync::Mutex::new(DEFAULT_BACKOFF_UNIT),
             inner: Mutex::new(EngineInner::default()),
             save_lock: Mutex::new(()),
             started: OnceCell::new(),
@@ -122,6 +130,17 @@ impl HttpEngine {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn backoff_unit(&self) -> Duration {
+        *self.backoff_unit.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Shorten retry waits so tests drive retries without waiting on the
+    /// clock.
+    #[cfg(test)]
+    pub(crate) fn set_backoff_unit(&self, unit: Duration) {
+        *self.backoff_unit.lock().unwrap_or_else(|p| p.into_inner()) = unit;
     }
 
     /// Stop scheduling and ask every worker to checkpoint and stop. Their
@@ -413,12 +432,7 @@ impl HttpEngine {
                         // operation already recorded the job's state.
                         Err(TransferError::Cancelled) => {}
                         Err(error) => {
-                            let message = match error {
-                                TransferError::Permanent(message)
-                                | TransferError::Transient(message)
-                                | TransferError::RetryAfter(_, message) => message.clone(),
-                                TransferError::Cancelled => String::new(),
-                            };
+                            let message = error.message();
                             warn!(
                                 item_id = id.as_str(),
                                 error = message.as_str(),
@@ -466,7 +480,8 @@ impl HttpEngine {
                 })?;
             job.files.len()
         };
-        for index in 0..file_count {
+        let mut index = 0;
+        while index < file_count {
             let mut file = {
                 let inner = self.inner.lock().await;
                 let job = inner
@@ -478,6 +493,7 @@ impl HttpEngine {
                 job.files[index].clone()
             };
             if file.complete {
+                index += 1;
                 continue;
             }
             live.file_index.store(index as u64, Ordering::Relaxed);
@@ -494,10 +510,85 @@ impl HttpEngine {
                 cancel,
                 live_bytes: &live.current_file_bytes,
                 limiter: Some(self.limiter.as_ref()),
+                backoff_unit: self.backoff_unit(),
             };
-            transfer_file(&context, &mut file).await?;
+            match transfer_file(&context, &mut file).await {
+                Ok(()) => index += 1,
+                Err(error @ (TransferError::Forbidden(_) | TransferError::Rejected(_)))
+                    if file.role == HttpFileRole::Media =>
+                {
+                    // The same file slot is tried again with the next
+                    // candidate, from zero bytes.
+                    self.advance_media_candidate(id, index, &error).await?;
+                    live.current_file_bytes.store(0, Ordering::Relaxed);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
+    }
+
+    /// Give up on the active media resource and switch the job to its next
+    /// fallback, or fail it when none is left. The new candidate writes a
+    /// fresh attempt file; whatever the earlier one wrote stays on disk.
+    async fn advance_media_candidate(
+        &self,
+        id: &str,
+        index: usize,
+        error: &TransferError,
+    ) -> Result<(), TransferError> {
+        let outcome = {
+            let mut inner = self.inner.lock().await;
+            let job = inner
+                .document
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or(TransferError::Cancelled)?;
+            job.refused_variants.push(RefusedVariant {
+                forbidden: matches!(error, TransferError::Forbidden(_)),
+                error: error.message(),
+            });
+            job.updated_at = Utc::now();
+            let next = usize::try_from(job.candidate_index)
+                .ok()
+                .and_then(|position| job.media_fallbacks.get(position))
+                .cloned();
+            match next {
+                Some(resource) => {
+                    job.candidate_index = job.candidate_index.saturating_add(1);
+                    let final_path =
+                        media_final_path(&job.output_dir, &job.output_basename, &resource);
+                    let candidate = job.candidate_index;
+                    let slot = &mut job.files[index];
+                    let attempt = slot.attempt.saturating_add(1);
+                    *slot = HttpJobFile {
+                        role: HttpFileRole::Media,
+                        resource,
+                        final_path,
+                        attempt,
+                        bytes_done: 0,
+                        total_bytes: None,
+                        validator: None,
+                        complete: false,
+                        language: slot.language.clone(),
+                        forbidden_answers: 0,
+                    };
+                    info!(
+                        item_id = id,
+                        candidate,
+                        reason = error.message().as_str(),
+                        "HTTP download moving to the next media variant"
+                    );
+                    Ok(())
+                }
+                None => Err(TransferError::Permanent(job.exhausted_message())),
+            }
+        };
+        self.persist()
+            .await
+            .map_err(|error| TransferError::Permanent(error.to_string()))?;
+        outcome
     }
 
     /// Record one file's durable progress.
@@ -518,6 +609,27 @@ impl HttpEngine {
         self.persist().await
     }
 
+    /// Record a `403 Forbidden` answer against the file and the job.
+    async fn record_forbidden(
+        &self,
+        job_id: &str,
+        index: usize,
+        file: &HttpJobFile,
+    ) -> AppResult<()> {
+        {
+            let mut inner = self.inner.lock().await;
+            let Some(job) = inner.document.jobs.iter_mut().find(|job| job.id == job_id) else {
+                return Ok(());
+            };
+            if let Some(slot) = job.files.get_mut(index) {
+                *slot = file.clone();
+            }
+            job.forbidden_requests = job.forbidden_requests.saturating_add(1);
+            job.updated_at = Utc::now();
+        }
+        self.persist().await
+    }
+
     /// Prove the download directory can hold this client's queue.
     pub(crate) async fn check_writable(&self) -> AppResult<()> {
         self.store.initialize().await
@@ -535,6 +647,12 @@ impl Checkpoint for JobCheckpoint<'_> {
     async fn record(&self, file: &HttpJobFile) -> AppResult<()> {
         self.engine
             .record_file(self.job_id, self.file_index, file)
+            .await
+    }
+
+    async fn record_forbidden(&self, file: &HttpJobFile) -> AppResult<()> {
+        self.engine
+            .record_forbidden(self.job_id, self.file_index, file)
             .await
     }
 }
