@@ -6701,7 +6701,7 @@ async fn migration_0279_postgres_carries_text_learning_into_v3_and_applies_the_c
 }
 
 #[tokio::test]
-async fn migration_0295_gives_movies_without_an_availability_the_released_default() {
+async fn migration_0295_preserves_inherited_movie_availability() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -6740,7 +6740,7 @@ async fn migration_0295_gives_movies_without_an_availability_the_released_defaul
         vec![
             ("movie-announced".to_string(), Some("announced".to_string())),
             ("movie-cinemas".to_string(), Some("in_cinemas".to_string())),
-            ("movie-unset".to_string(), Some("released".to_string())),
+            ("movie-unset".to_string(), None),
             ("series-unset".to_string(), None),
         ]
     );
