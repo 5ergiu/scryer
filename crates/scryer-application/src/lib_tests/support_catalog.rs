@@ -28,6 +28,7 @@ pub(super) struct MockTitleRepo {
     pub(super) title_tag_definitions: Arc<Mutex<Vec<scryer_domain::TitleTagDefinition>>>,
     pub(super) fail_tag_reads: AtomicBool,
     pub(super) smg_identity_backfill_attempts: Arc<Mutex<HashMap<String, i64>>>,
+    pub(super) metadata_hydration_due: Mutex<HashSet<String>>,
     pub(super) create_or_get_existing_error: Arc<Mutex<Option<String>>>,
     /// `(title_id, message)`: fail folder-ownership writes for one title, so a
     /// compensating transaction can be exercised at the exact commit that fails.
@@ -1077,7 +1078,11 @@ impl TitleRepository for MockTitleRepo {
         Ok(())
     }
 
-    async fn mark_title_metadata_hydration_due_now(&self, _: &str) -> AppResult<()> {
+    async fn mark_title_metadata_hydration_due_now(&self, title_id: &str) -> AppResult<()> {
+        self.metadata_hydration_due
+            .lock()
+            .await
+            .insert(title_id.to_string());
         Ok(())
     }
 
@@ -1217,6 +1222,7 @@ impl TitleRepository for MockTitleRepo {
         title.tagged_aliases = metadata.tagged_aliases;
         title.metadata_language = metadata.metadata_language;
         title.metadata_fetched_at = Some(chrono::Utc::now());
+        self.metadata_hydration_due.lock().await.remove(id);
         if let Some(min_availability) = metadata.min_availability {
             title.min_availability = min_availability;
         }

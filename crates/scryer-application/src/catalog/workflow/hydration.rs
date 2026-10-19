@@ -429,18 +429,11 @@ impl AppUseCase {
     pub(crate) async fn new_title_for_library(
         &self,
         actor: &User,
-        mut request: NewTitle,
+        request: NewTitle,
         library_id: String,
     ) -> AppResult<Title> {
         if request.name.trim().is_empty() {
             return Err(AppError::Validation("title name is required".into()));
-        }
-        if request.facet == MediaFacet::Movie && request.min_availability.is_none() {
-            request.min_availability = Some(
-                self.acquisition_settings()
-                    .await?
-                    .default_movie_availability,
-            );
         }
         let root_folder_id = self
             .resolve_title_root_folder_id_for_library(
@@ -1542,6 +1535,19 @@ impl AppUseCase {
                 self.invalidate_monitored_title_matcher().await;
                 if movie_availability_metadata_changed {
                     self.runtime.acquisition.acquisition_wake.notify_one();
+                }
+                // A settings change may have queued a refresh while this
+                // request was in flight. The metadata write clears retry
+                // state, so restore it after persisting an old-market result.
+                if updated.facet == MediaFacet::Movie
+                    && let Some(dates) = updated.movie_release_dates.as_ref()
+                    && !dates.market.eq_ignore_ascii_case(
+                        &self.acquisition_settings().await?.movie_release_market,
+                    )
+                {
+                    self.services.catalog.titles
+                        .mark_title_metadata_hydration_due_now(&updated.id).await?;
+                    self.runtime.catalog.title_hydration_wake.notify_one();
                 }
                 updated
             }

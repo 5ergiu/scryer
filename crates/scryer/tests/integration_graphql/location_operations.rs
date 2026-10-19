@@ -1549,7 +1549,12 @@ async fn graphql_refuses_the_retired_files_already_there_mode() {
         ),
         (
             "LocationExecutionModeValue",
-            vec!["MOVE_WITH_SCRYER", "USER_MOVED_FILES", "CATALOG_ONLY"],
+            vec![
+                "MOVE_WITH_SCRYER",
+                "COPY_PRESERVE_SOURCES",
+                "USER_MOVED_FILES",
+                "CATALOG_ONLY",
+            ],
         ),
     ] {
         let body = gql(

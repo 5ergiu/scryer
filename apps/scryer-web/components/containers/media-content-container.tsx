@@ -45,7 +45,6 @@ import {
   titleReleaseBlocklistQuery,
   titleCatalogFilterOptionsQuery,
   titleCatalogCountsQuery,
-  titleCatalogIdsQuery,
   titleCatalogManagedBytesQuery,
   buildTitlesQuery,
 } from "@/lib/graphql/queries";
@@ -90,6 +89,7 @@ import {
   EMPTY_TITLE_QUICK_FILTERS,
   buildTitleCatalogQueryVariables,
   titleCatalogProjectionForTable,
+  loadTitleCatalogSelection,
   titleCatalogQueryKey,
   type TitleCatalogAdvancedFilters,
 } from "@/lib/utils/title-catalog-query";
@@ -550,13 +550,13 @@ function librarySettingsInput(
 
 function splitSucceededTitleIds(
   targets: TitleRecord[],
-  predicate: (title: TitleRecord) => boolean,
+  predicate: (title: TitleRecord, index: number) => boolean,
 ): { succeededIds: string[]; failedIds: string[] } {
   const succeededIds: string[] = [];
   const failedIds: string[] = [];
 
-  targets.forEach((title) => {
-    if (predicate(title)) {
+  targets.forEach((title, index) => {
+    if (predicate(title, index)) {
       succeededIds.push(title.id);
     } else {
       failedIds.push(title.id);
@@ -3662,6 +3662,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   );
 
   const toggleTitleSelection = React.useCallback((titleId: string) => {
+    selectAllRequestSeqRef.current += 1;
     setSelectedTitleIds((current) => {
       const next = new Set(current);
       if (next.has(titleId)) {
@@ -3739,9 +3740,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         return;
       }
 
-      // Only the loaded pages are in visibleTitles; page through the ids of
-      // every title matching the current catalog query so select-all covers
-      // the whole list.
+      // Bulk actions need each selected record, including its library and
+      // settings. Load the matching pages before extending the selection.
+      const queryKey = catalogQueryKeyRef.current;
       const variables = buildTitleCatalogQueryVariables({
         facet: activeFacet,
         libraryIds: selectedLibraryIds,
@@ -3753,29 +3754,28 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         offset: 0,
       });
       void (async () => {
-        const ids: string[] = [];
+        let titles: TitleRecord[] | null;
         try {
-          for (let offset = 0; ; offset += TITLE_CATALOG_SELECT_ALL_PAGE_SIZE) {
-            const { data, error } = await client
-              .query(
-                titleCatalogIdsQuery,
-                { ...variables, offset },
-                { requestPolicy: "network-only" },
-              )
-              .toPromise();
-            if (error) {
-              throw error;
-            }
-            if (requestSeq !== selectAllRequestSeqRef.current) {
-              return;
-            }
-            const page = data?.titles;
-            const items = (page?.items ?? []) as { id: string }[];
-            ids.push(...items.map((item) => item.id));
-            if (!page?.hasMore || items.length === 0) {
-              break;
-            }
-          }
+          titles = await loadTitleCatalogSelection<TitleRecord>(
+            TITLE_CATALOG_SELECT_ALL_PAGE_SIZE,
+            async (offset) => {
+              const { data, error } = await client
+                .query(
+                  buildTitlesQuery(
+                    { ...titleCatalogProjection, includeSettings: true },
+                    { includeAggregates: false },
+                  ),
+                  { ...variables, offset },
+                  { requestPolicy: "network-only" },
+                )
+                .toPromise();
+              if (error) throw error;
+              const page = data?.titles;
+              if (!page) throw new Error(t("status.failedToLoad"));
+              return { items: page.items as TitleRecord[], hasMore: Boolean(page.hasMore) };
+            },
+            () => requestSeq === selectAllRequestSeqRef.current && queryKey === catalogQueryKeyRef.current,
+          );
         } catch (error) {
           setGlobalStatus(
             userFacingGraphQlErrorMessage(error, t("status.failedToLoad")),
@@ -3783,10 +3783,17 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           );
           return;
         }
-        if (requestSeq !== selectAllRequestSeqRef.current) {
+        if (!titles || requestSeq !== selectAllRequestSeqRef.current || queryKey !== catalogQueryKeyRef.current) {
           return;
         }
-        setSelectedTitleIds((current) => new Set([...current, ...ids]));
+        setMonitoredTitles((current) => mergeCatalogTitlesPreservingImages(current, titles));
+        setCatalogPaginationState((current) => ({
+          ...current,
+          hasMore: false,
+          nextOffset: titles.length,
+          loadingMore: false,
+        }));
+        setSelectedTitleIds((current) => new Set([...current, ...titles.map((title) => title.id)]));
       })();
     },
     [
@@ -3798,7 +3805,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       effectiveTitleQuickFilters,
       selectedLibraryIds,
       setGlobalStatus,
+      setMonitoredTitles,
       t,
+      titleCatalogProjection,
       visibleTitles,
     ],
   );
@@ -3847,23 +3856,19 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           .toPromise();
         const payload = result.data ?? {};
         const refreshedTitles = await reloadTitles();
-        let { succeededIds, failedIds } = refreshedTitles
+        const inferred = refreshedTitles
           ? inferMonitoredBatchOutcome(targets, refreshedTitles, monitored)
           : {
               succeededIds: [] as string[],
               failedIds: [...targets.map((title) => title.id)],
             };
-        if (!refreshedTitles && !result.error) {
-          succeededIds = [];
-          failedIds = [];
-          targets.forEach((title, index) => {
-            if (payload[batchItemAlias(index)]) {
-              succeededIds.push(title.id);
-            } else {
-              failedIds.push(title.id);
-            }
-          });
-        }
+        // A refreshed first page cannot report on off-page selections. Each
+        // successful mutation alias is authoritative for its selected title.
+        const { succeededIds, failedIds } = splitSucceededTitleIds(targets, (title, index) => {
+          const updated = payload[batchItemAlias(index)];
+          return updated?.id === title.id && updated.monitored === monitored
+            || inferred.succeededIds.includes(title.id);
+        });
         setSelectedTitleIds(new Set(failedIds));
 
         const detail = batchFailureDetail(result.error);
@@ -3990,23 +3995,16 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           .toPromise();
         const payload = result.data ?? {};
         const refreshedTitles = await reloadTitles();
-        let { succeededIds, failedIds } = refreshedTitles
+        const inferred = refreshedTitles
           ? inferTitleUpdateBatchOutcome(targets, refreshedTitles, changes)
           : {
               succeededIds: [] as string[],
               failedIds: [...targets.map((title) => title.id)],
             };
-        if (!refreshedTitles && !result.error) {
-          succeededIds = [];
-          failedIds = [];
-          targets.forEach((title, index) => {
-            if (payload[batchItemAlias(index)]) {
-              succeededIds.push(title.id);
-            } else {
-              failedIds.push(title.id);
-            }
-          });
-        }
+        const { succeededIds, failedIds } = splitSucceededTitleIds(targets, (title, index) =>
+          payload[batchItemAlias(index)]?.id === title.id
+            || inferred.succeededIds.includes(title.id),
+        );
         setSelectedTitleIds(new Set(failedIds));
 
         const detail = batchFailureDetail(result.error);

@@ -1,10 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 
-import {
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("@/lib/")) {
+      const path = specifier.slice("@/lib/".length);
+      return nextResolve(new URL(`../${path}.ts`, import.meta.url).href, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const {
   commitQualityProfileDraftToEntries,
   hasDuplicateQualityProfileName,
-} from "./quality-profile-draft-commit.ts";
+} = await import("./quality-profile-draft-commit.ts");
 import { QUALITY_TIER_CHOICES } from "../constants/quality-profiles.ts";
 import type { ParsedQualityProfileEntry, QualityProfileDraft } from "@/lib/types";
 

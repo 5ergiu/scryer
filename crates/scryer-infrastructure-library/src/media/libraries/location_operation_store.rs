@@ -1384,6 +1384,75 @@ fn row_to_verification(row: &SqlRow) -> AppResult<FileVerificationRecord> {
     })
 }
 
+async fn recovery_catalog_tx(
+    tx: &mut crate::queries::sql_runtime::SqlTx<'_>,
+) -> AppResult<scryer_application::location::title_folder_recovery::RecoveryCatalog> {
+    use scryer_application::location::title_folder_recovery::{
+        MAX_CATALOG_ROWS, RecoveryCatalog, RecoveryMedia, RecoveryOwner,
+    };
+    let root_rows = SqlRuntime::fetch_all(SqlExec::Tx(tx), "SELECT id, library_id, path, is_default, created_at, updated_at FROM library_roots ORDER BY id LIMIT 250001", &[]).await?;
+    let owner_rows = SqlRuntime::fetch_all(
+        SqlExec::Tx(tx),
+        "SELECT id, library_id, folder_path, updated_at FROM titles ORDER BY id LIMIT 250001",
+        &[],
+    )
+    .await?;
+    let media_rows = SqlRuntime::fetch_all(
+        SqlExec::Tx(tx),
+        "SELECT id, title_id, file_path, size_bytes FROM media_files ORDER BY id LIMIT 250001",
+        &[],
+    )
+    .await?;
+    if [root_rows.len(), owner_rows.len(), media_rows.len()]
+        .into_iter()
+        .any(|n| n > MAX_CATALOG_ROWS)
+    {
+        return Err(AppError::Validation(
+            "Recovery catalog evidence limit exceeded; no changes made".into(),
+        ));
+    }
+    let roots = root_rows
+        .into_iter()
+        .map(|r| {
+            Ok(scryer_domain::LibraryRoot {
+                id: r.text("id")?,
+                library_id: r.text("library_id")?,
+                path: r.text("path")?,
+                is_default: r.bool("is_default")?,
+                created_at: r.timestamp("created_at")?,
+                updated_at: r.timestamp("updated_at")?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let owners = owner_rows
+        .into_iter()
+        .map(|r| {
+            Ok(RecoveryOwner {
+                id: r.text("id")?,
+                library_id: r.text("library_id")?,
+                folder_path: r.opt_text("folder_path")?,
+                revision: r.opt_timestamp("updated_at")?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let media = media_rows
+        .into_iter()
+        .map(|r| {
+            Ok(RecoveryMedia {
+                id: r.text("id")?,
+                title_id: r.text("title_id")?,
+                file_path: r.text("file_path")?,
+                size_bytes: r.i64("size_bytes")?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(RecoveryCatalog {
+        roots,
+        owners,
+        media,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2771,73 +2840,4 @@ mod tests {
                 .is_empty()
         );
     }
-}
-
-async fn recovery_catalog_tx(
-    tx: &mut crate::queries::sql_runtime::SqlTx<'_>,
-) -> AppResult<scryer_application::location::title_folder_recovery::RecoveryCatalog> {
-    use scryer_application::location::title_folder_recovery::{
-        MAX_CATALOG_ROWS, RecoveryCatalog, RecoveryMedia, RecoveryOwner,
-    };
-    let root_rows = SqlRuntime::fetch_all(SqlExec::Tx(tx), "SELECT id, library_id, path, is_default, created_at, updated_at FROM library_roots ORDER BY id LIMIT 250001", &[]).await?;
-    let owner_rows = SqlRuntime::fetch_all(
-        SqlExec::Tx(tx),
-        "SELECT id, library_id, folder_path, updated_at FROM titles ORDER BY id LIMIT 250001",
-        &[],
-    )
-    .await?;
-    let media_rows = SqlRuntime::fetch_all(
-        SqlExec::Tx(tx),
-        "SELECT id, title_id, file_path, size_bytes FROM media_files ORDER BY id LIMIT 250001",
-        &[],
-    )
-    .await?;
-    if [root_rows.len(), owner_rows.len(), media_rows.len()]
-        .into_iter()
-        .any(|n| n > MAX_CATALOG_ROWS)
-    {
-        return Err(AppError::Validation(
-            "Recovery catalog evidence limit exceeded; no changes made".into(),
-        ));
-    }
-    let roots = root_rows
-        .into_iter()
-        .map(|r| {
-            Ok(scryer_domain::LibraryRoot {
-                id: r.text("id")?,
-                library_id: r.text("library_id")?,
-                path: r.text("path")?,
-                is_default: r.bool("is_default")?,
-                created_at: r.timestamp("created_at")?,
-                updated_at: r.timestamp("updated_at")?,
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    let owners = owner_rows
-        .into_iter()
-        .map(|r| {
-            Ok(RecoveryOwner {
-                id: r.text("id")?,
-                library_id: r.text("library_id")?,
-                folder_path: r.opt_text("folder_path")?,
-                revision: r.opt_timestamp("updated_at")?,
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    let media = media_rows
-        .into_iter()
-        .map(|r| {
-            Ok(RecoveryMedia {
-                id: r.text("id")?,
-                title_id: r.text("title_id")?,
-                file_path: r.text("file_path")?,
-                size_bytes: r.i64("size_bytes")?,
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    Ok(RecoveryCatalog {
-        roots,
-        owners,
-        media,
-    })
 }

@@ -38,16 +38,16 @@ async fn await_recovery(
     let id = format!("{RECOVERY_VERSION}:{title_id}");
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
-            if let Some(operation) = store.get_location_operation(&id).await.unwrap() {
-                if matches!(
+            if let Some(operation) = store.get_location_operation(&id).await.unwrap()
+                && matches!(
                     operation.state,
                     LocationOperationState::Completed
                         | LocationOperationState::CompletedWithWarnings
                         | LocationOperationState::Failed
                         | LocationOperationState::Canceled
-                ) {
-                    return operation;
-                }
+                )
+            {
+                return operation;
             }
             tokio::task::yield_now().await;
         }

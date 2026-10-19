@@ -545,15 +545,13 @@ impl AppUseCase {
         let implied =
             title_folder_from_media_paths(&root_paths, live.iter().map(|m| m.file_path.as_str()));
         let mut candidates = BTreeMap::<String, String>::new();
-        if let Some(implied) = implied {
-            if live
+        if let Some(implied) = implied
+            && live
                 .iter()
                 .all(|m| unambiguous_layout(&implied, &m.file_path))
-            {
-                folder_identity_matches(&plan.title, &stored_path_to_path_buf(&implied), true)
-                    .await?;
-                candidates.insert(path_key(&implied), implied);
-            }
+        {
+            folder_identity_matches(&plan.title, &stored_path_to_path_buf(&implied), true).await?;
+            candidates.insert(path_key(&implied), implied);
         }
         let mut seen = 0usize;
         for root in &roots {

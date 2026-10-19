@@ -1831,8 +1831,9 @@ fn distinct_episode_numbered_video_files(video_files: &[ImportVideoFile]) -> usi
             } else {
                 episode.episode_numbers.clone()
             };
-            (!numbers.is_empty()).then_some((episode.season, numbers))
+            Some(numbers.into_iter().map(move |number| (episode.season, number)))
         })
+        .flatten()
         .collect::<std::collections::HashSet<_>>()
         .len()
 }
@@ -3769,6 +3770,20 @@ mod movie_episode_file_tests {
 
     #[test]
     fn episodes_are_counted_once_each_and_a_feature_names_none() {
+        assert_eq!(
+            distinct_episode_numbered_video_files(&files(&[
+                "Quillon.S01E01E02.1080p.WEB-DL-SYNTH.mkv",
+            ])),
+            2
+        );
+        assert_eq!(
+            distinct_episode_numbered_video_files(&files(&[
+                "Quillon.S01E01E02.1080p.WEB-DL-SYNTH.mkv",
+                "Quillon.S01E02.1080p.WEB-DL-SYNTH.proof.mkv",
+                "Quillon.S02E01.1080p.WEB-DL-SYNTH.mkv",
+            ])),
+            3
+        );
         assert_eq!(
             distinct_episode_numbered_video_files(&files(&[
                 "Quillon.S01E01.1080p.WEB-DL-SYNTH.mkv",

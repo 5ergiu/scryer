@@ -623,14 +623,33 @@ impl AppUseCase {
         typed_confirmation: Option<&str>,
     ) -> AppResult<()> {
         let context = self
-            .resolve_title_delete_context(title_id, MissingTitleFolder::DeriveAndRecord)
+            .resolve_title_delete_context(title_id, MissingTitleFolder::Derive)
             .await?;
-        self.execute_delete_context(
-            context,
-            preview_fingerprint,
-            DeleteConfirmationAuthority::Human { typed_confirmation },
-        )
-        .await
+        let manifest = self
+            .validate_delete_context(
+                context.clone(),
+                preview_fingerprint,
+                DeleteConfirmationAuthority::Human { typed_confirmation },
+            )
+            .await?;
+        if let UserDeleteContext::Title(context) = context
+            && let Some(folder) = context.folder_path
+        {
+            let mut title = self
+                .services
+                .catalog
+                .titles
+                .get_by_id(title_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("title {title_id}")))?;
+            crate::folder_ownership::claim_title_folder_if_missing(
+                self,
+                &mut title,
+                &stored_path_to_path_buf(&folder),
+            )
+            .await?;
+        }
+        apply_delete_manifest(&manifest).await
     }
 
     /// Maintenance-policy variant of [`Self::execute_delete_title_files`]
@@ -1129,12 +1148,8 @@ impl AppUseCase {
             return Ok(None);
         }
         let folder = implied_title_folder_for(self, title, recorded_paths).await?;
-        let claim = match missing_folder {
-            MissingTitleFolder::DeriveAndRecord => {
-                crate::folder_ownership::claim_title_folder_if_missing(self, title, &folder).await
-            }
-            _ => crate::folder_ownership::ensure_title_folder_claimable(self, title, &folder).await,
-        };
+        let claim =
+            crate::folder_ownership::ensure_title_folder_claimable(self, title, &folder).await;
         // A refused claim leaves the folder unknown. Anything else (storage or
         // filesystem trouble) may pass, and is reported as it is.
         claim.map_err(|error| match error {
@@ -1311,8 +1326,6 @@ enum MissingTitleFolder {
     Refuse,
     /// Use the folder the title's recorded files imply, without recording it.
     Derive,
-    /// Record the folder the title's recorded files imply, then use it.
-    DeriveAndRecord,
 }
 
 /// The one title folder every recorded file of `title` sits in. Nothing here

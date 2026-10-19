@@ -4,6 +4,23 @@ use crate::acquisition::convergence::{
 };
 
 const ACQUISITION_ENABLED_KEY: &str = "acquisition.enabled";
+
+/// Assigned ISO 3166-1 alpha-2 country codes used for regional release dates.
+fn is_movie_release_market(market: &str) -> bool {
+    const COUNTRIES: &str = "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ \
+        BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ \
+        CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ \
+        DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR \
+        GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY \
+        HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP \
+        KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY \
+        MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ \
+        NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY \
+        QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ \
+        TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ \
+        VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW";
+    COUNTRIES.split_ascii_whitespace().any(|code| code == market)
+}
 const ACQUISITION_SAME_TIER_MIN_DELTA_KEY: &str = "acquisition.same_tier_min_delta";
 const ACQUISITION_POLL_INTERVAL_SECONDS_KEY: &str = "acquisition.poll_interval_seconds";
 const ACQUISITION_DEFAULT_MOVIE_AVAILABILITY_KEY: &str = "acquisition.default_movie_availability";
@@ -157,9 +174,7 @@ impl AppUseCase {
             ));
         }
         let release_market = settings.movie_release_market.trim().to_ascii_uppercase();
-        if release_market.len() != 2
-            || !release_market.bytes().all(|byte| byte.is_ascii_uppercase())
-        {
+        if !is_movie_release_market(&release_market) {
             return Err(AppError::Validation(
                 "movie release market must be a two-letter ISO-3166 country code".into(),
             ));

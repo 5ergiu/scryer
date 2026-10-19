@@ -376,7 +376,7 @@ async fn recovery_hash_search_requires_one_match_and_excludes_recycle_and_stagin
         locate_hashed_destination(
             &folder,
             5,
-            &blake3::hash(b"other").to_hex().to_string(),
+            blake3::hash(b"other").to_hex().as_ref(),
             Some(&recycle)
         )
         .await

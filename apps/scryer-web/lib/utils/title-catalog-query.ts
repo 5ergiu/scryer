@@ -1,5 +1,22 @@
 import { userTitleTags } from "./title-tags.ts";
 
+/** Keep selection atomic: callers receive every matching record or none. */
+export async function loadTitleCatalogSelection<T>(
+  pageSize: number,
+  loadPage: (offset: number) => Promise<{ items: T[]; hasMore: boolean }>,
+  isCurrent: () => boolean,
+): Promise<T[] | null> {
+  const titles: T[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await loadPage(offset);
+    if (!isCurrent()) return null;
+    titles.push(...page.items);
+    if (!page.hasMore) return titles;
+    // Let the caller supply its localized load-failure message.
+    if (page.items.length === 0) throw new Error();
+  }
+}
+
 export type TitleCatalogQuickFilters = {
   monitored: boolean;
   unmonitored: boolean;

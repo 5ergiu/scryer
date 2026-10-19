@@ -5861,12 +5861,10 @@ async fn graphql_title_search_language_override_accepts_picker_languages_only() 
     assert!(language_tags(&inherited["data"]["updateTitle"]).is_empty());
 }
 
-/// A movie added without an explicit minimum availability takes the instance
-/// default (`released`), an explicit choice is stored as given, and both read
-/// back through `TitlePayload.minAvailability` and stay editable through
-/// `TitleOptionsInput.minAvailability`.
+/// Unset availability inherits the current default; explicit choices stay
+/// independent of that default and editable through title options.
 #[tokio::test]
-async fn graphql_added_movie_takes_default_availability_and_reads_it_back() {
+async fn graphql_added_movie_inherits_default_availability_and_reads_it_back() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
     let library = create_title_catalog_library(
@@ -5879,7 +5877,7 @@ async fn graphql_added_movie_takes_default_availability_and_reads_it_back() {
     let library_id = library_id(&library);
     let root_id = library_root_id(&library, "/availability-add/default");
     let add = r#"mutation($input: AddTitleInput!) {
-        addTitle(input: $input) { title { id minAvailability } }
+        addTitle(input: $input) { title { id minAvailability movieAvailability { minimumAvailability } } }
     }"#;
     let add_movie = |name: &'static str, tvdb_id: &'static str, availability: Option<&str>| {
         let mut input = json!({
@@ -5906,8 +5904,15 @@ async fn graphql_added_movie_takes_default_availability_and_reads_it_back() {
     assert_no_errors(&defaulted);
     assert_eq!(
         defaulted["data"]["addTitle"]["title"]["minAvailability"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        defaulted["data"]["addTitle"]["title"]["movieAvailability"]["minimumAvailability"],
         "released"
     );
+    let defaulted_id = defaulted["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .unwrap();
 
     let explicit = gql(
         &ctx,
@@ -5920,10 +5925,41 @@ async fn graphql_added_movie_takes_default_availability_and_reads_it_back() {
         .as_str()
         .expect("added title id")
         .to_string();
-    let read = r#"query($id: ID!) { title(id: $id) { minAvailability } }"#;
+    let read = r#"query($id: ID!) { title(id: $id) { minAvailability movieAvailability { minimumAvailability } } }"#;
     let read_back = gql(&ctx, read, json!({ "id": explicit_id })).await;
     assert_no_errors(&read_back);
     assert_eq!(read_back["data"]["title"]["minAvailability"], "in_cinemas");
+
+    let changed_default = gql(
+        &ctx,
+        r#"mutation {
+        updateAcquisitionSettings(input: {
+            enabled: true, sameTierMinDelta: 0, pollIntervalSeconds: 60,
+            walkIntervalSeconds: 60, longTailBackfillMaxScopesPerCycle: 25,
+            longTailReconvergeDays: 0, defaultMovieAvailability: "announced"
+        }) { defaultMovieAvailability }
+    }"#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&changed_default);
+    let inherited = gql(&ctx, read, json!({ "id": defaulted_id })).await;
+    assert_no_errors(&inherited);
+    assert_eq!(
+        inherited["data"]["title"]["minAvailability"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        inherited["data"]["title"]["movieAvailability"]["minimumAvailability"],
+        "announced"
+    );
+    let explicit = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&explicit);
+    assert_eq!(explicit["data"]["title"]["minAvailability"], "in_cinemas");
+    assert_eq!(
+        explicit["data"]["title"]["movieAvailability"]["minimumAvailability"],
+        "in_cinemas"
+    );
 
     let edit = r#"mutation($input: UpdateTitleInput!) {
         updateTitle(input: $input) { id minAvailability }

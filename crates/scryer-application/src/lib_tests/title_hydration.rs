@@ -30,6 +30,140 @@ fn hydration_test_movie(tvdb_id: i64, name: &str) -> MovieMetadata {
     }
 }
 
+#[tokio::test]
+async fn movie_defaults_remain_inherited_and_reject_unassigned_markets() {
+    let (app, user, _) = bootstrap_with_metadata_gateway_and_titles(Arc::new(
+        MovieTitleResolutionGateway::default(),
+    ));
+    let inherited = app
+        .add_title_with_outcome(&user, hydration_test_title("Inherited", 991001))
+        .await
+        .unwrap()
+        .title;
+    let mut explicit_request = hydration_test_title("Explicit", 991002);
+    explicit_request.min_availability = Some("in_cinemas".into());
+    let explicit = app
+        .add_title_with_outcome(&user, explicit_request)
+        .await
+        .unwrap()
+        .title;
+    assert_eq!(inherited.min_availability, None);
+    assert_eq!(explicit.min_availability.as_deref(), Some("in_cinemas"));
+
+    let mut settings = app.get_acquisition_settings(&user).await.unwrap();
+    for market in ["AA", "ZZ", "UK", "USA", "1A", ""] {
+        settings.movie_release_market = market.into();
+        assert!(
+            matches!(
+                app.update_acquisition_settings(&user, settings.clone())
+                    .await,
+                Err(AppError::Validation(_))
+            ),
+            "{market}"
+        );
+    }
+    settings.movie_release_market = " gb ".into();
+    settings.default_movie_availability = "announced".into();
+    let saved = app
+        .update_acquisition_settings(&user, settings)
+        .await
+        .unwrap();
+    assert_eq!(saved.movie_release_market, "GB");
+    assert_eq!(
+        app.get_movie_availability_for_title(&user, &inherited.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .minimum_availability,
+        "announced"
+    );
+    assert_eq!(
+        app.get_movie_availability_for_title(&user, &explicit.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .minimum_availability,
+        "in_cinemas"
+    );
+}
+
+#[tokio::test]
+async fn in_flight_movie_hydration_preserves_a_changed_market_refresh() {
+    for change_market in [false, true] {
+        let mut movie = hydration_test_movie(991003, "Market Race");
+        movie.movie_release_dates = Some(scryer_domain::MovieReleaseDates {
+            market: "US".into(),
+            fetched: true,
+            ..Default::default()
+        });
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let gateway = Arc::new(MovieTitleResolutionGateway {
+            hydration_movies: HashMap::from([(991003, movie)]),
+            hydration_gate: Some((entered.clone(), resume.clone())),
+            ..Default::default()
+        });
+        let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway);
+        let title = app
+            .add_title_with_outcome(&user, hydration_test_title("Market Race", 991003))
+            .await
+            .unwrap()
+            .title;
+        let title_id = title.id.clone();
+        let hydration_app = app.clone();
+        let hydration = tokio::spawn(async move {
+            hydration_app
+                .hydrate_titles_bulk(vec![crate::catalog_workflow::HydrationTarget {
+                    title,
+                    requested_tvdb_id: None,
+                    requested_movie_ref: None,
+                    sync_wanted_after_completion: false,
+                    source: crate::catalog_workflow::HydrationSource::Interactive,
+                }])
+                .await
+        });
+        within_deadline("the movie request to start", entered.notified()).await;
+        if change_market {
+            let mut settings = app.get_acquisition_settings(&user).await.unwrap();
+            settings.movie_release_market = "GB".into();
+            app.update_acquisition_settings(&user, settings)
+                .await
+                .unwrap();
+        }
+        // The settings refresh must precede the old response's metadata write.
+        app.services
+            .catalog
+            .titles
+            .mark_title_metadata_hydration_due_now(&title_id)
+            .await
+            .unwrap();
+        resume.notify_one();
+        let result = within_deadline("the in-flight hydration to finish", hydration)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.failed_titles.is_empty());
+        assert!(result.hydrated_titles.contains_key(&title_id));
+        assert_eq!(
+            titles
+                .metadata_hydration_due
+                .lock()
+                .await
+                .contains(&title_id),
+            change_market
+        );
+        let persisted = app
+            .services
+            .catalog
+            .titles
+            .get_by_id(&title_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.movie_release_dates.unwrap().market, "US");
+    }
+}
+
 fn hydration_test_title(name: &str, tvdb_id: i64) -> NewTitle {
     NewTitle {
         name: name.to_string(),
@@ -108,6 +242,7 @@ struct MovieTitleResolutionGateway {
     movie_title_calls: Mutex<Vec<Vec<MovieTitleRef>>>,
     hydration_movies: HashMap<i64, MovieMetadata>,
     hydration_redirects: Vec<(i64, i64)>,
+    hydration_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 #[async_trait]
@@ -192,6 +327,10 @@ impl MetadataGateway for MovieTitleResolutionGateway {
         _language: &str,
     ) -> AppResult<MovieTitleBulkResult> {
         self.movie_title_calls.lock().await.push(refs.to_vec());
+        if let Some((entered, resume)) = &self.hydration_gate {
+            entered.notify_one();
+            within_deadline("the metadata response to be released", resume.notified()).await;
+        }
         if self.failing {
             return Err(AppError::Repository("fixture title surface failure".into()));
         }
