@@ -1,6 +1,6 @@
 [package]
 name = "scryer-infrastructure-datastore"
-version = "0.21.17"
+version = "0.21.18"
 edition.workspace = true
 publish = false
 build = "build.rs"
