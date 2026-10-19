@@ -10,6 +10,7 @@ import { useGlobalStatus } from "@/lib/context/global-status-context";
 import {
   commitQualityProfileDraftToEntries,
   hasDuplicateQualityProfileName,
+  qualityProfileEditorSaveInput,
 } from "@/lib/utils/quality-profile-draft-commit";
 import {
   buildQualityProfileTemplate,
@@ -25,7 +26,6 @@ import {
   qualityProfileSettingsToCatalogText,
   qualityProfileSettingsToCategoryOverrides,
   qualityProfileSettingsToCategoryPersonaSelections,
-  qualityProfileEntryToMutationInput,
   resolveQualityProfileCatalogState,
   sortStringByNumericDesc,
   toProfileOptions,
@@ -616,13 +616,6 @@ export function useQualityProfilesManager(
 
       const committed = commitQualityProfileDraftToCatalog();
       if (committed === null) return false;
-      const parsedEntries = committed.catalogEntries;
-      const parsedProfiles = parsedEntries.map(({ id, name }) => ({ id, name }));
-
-      const normalizedGlobalProfile = resolveGlobalQualityProfileId(
-        parsedProfiles,
-        globalQualityProfileId,
-      );
 
       setQualityProfilesSaving(true);
       setQualityProfileParseError("");
@@ -630,14 +623,7 @@ export function useQualityProfilesManager(
         const { data: globalData, error: globalError } = await client.mutation(
           saveQualityProfileSettingsMutation,
           {
-            input: {
-              profiles: parsedEntries.map(qualityProfileEntryToMutationInput),
-              globalProfileId: normalizedGlobalProfile,
-              globalScoringPersona,
-              categorySelections: [],
-              categoryPersonaSelections: categoryPersonaSelectionInputs,
-              replaceExisting: true,
-            },
+            input: qualityProfileEditorSaveInput(committed.draftEntry),
           },
         ).toPromise();
         if (globalError) throw globalError;
@@ -660,11 +646,8 @@ export function useQualityProfilesManager(
     },
     [
       applyQualityProfileSettingsPayload,
-      categoryPersonaSelectionInputs,
       client,
       commitQualityProfileDraftToCatalog,
-      globalQualityProfileId,
-      globalScoringPersona,
       qualityProfilesSaving,
       setGlobalStatus,
       t,
