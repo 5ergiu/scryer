@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ru: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "Папка загрузок",
+  "settings.downloadClientHttpDownloadDirHelp": "Куда записываются готовые файлы и их части (путь, как его видит Scryer). Очередь этого загрузчика хранится во вложенной папке .scryer-http.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "Одновременные загрузки",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "Сколько релизов загружается одновременно (от 1 до 8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "Соединений на хост",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "Сколько загрузок могут одновременно получать данные с одного сервера (от 1 до 8).",
+  "settings.downloadClientHttpBandwidthLimit": "Ограничение скорости (КБ/с)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "Общее для всех загрузок этого клиента. Пусто или 0 — без ограничения.",
   "settings.publicUrlTitle": "Публичный URL",
   "settings.publicUrlHelp": "Адрес, по которому люди и сервисы обращаются к Scryer, например https://scryer.example.com. Привязка аккаунтов и OAuth применяют изменение сразу, а ключи доступа — после перезапуска Scryer.",
   "settings.publicUrlLabel": "Публичный URL",

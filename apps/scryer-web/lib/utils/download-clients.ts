@@ -7,8 +7,10 @@ import type {
   ProviderTypeInfo,
 } from "../types/index.ts";
 import {
+  BUILT_IN_DOWNLOAD_CLIENT_CONFIG_FIELDS,
   BUILT_IN_DOWNLOAD_CLIENT_TYPE_LABELS,
   BUILT_IN_DOWNLOAD_CLIENT_TYPES,
+  HOSTLESS_DOWNLOAD_CLIENT_TYPES,
   DEFAULT_DOWNLOAD_CLIENT_TYPE,
   DEFAULT_DOWNLOAD_CLIENT_DRAFT,
   WEAVER_API_KEY_SETUP_PATH,
@@ -26,6 +28,24 @@ export function isBuiltInDownloadClientType(value: string): value is BuiltInDown
   return BUILT_IN_DOWNLOAD_CLIENT_TYPES.includes(normalized as BuiltInDownloadClientType);
 }
 
+/// A built-in client with no server address (Scryer's own HTTP downloader).
+export function isHostlessDownloadClientType(value: string): boolean {
+  return HOSTLESS_DOWNLOAD_CLIENT_TYPES.has(value.trim().toLowerCase());
+}
+
+/// Whether a field's label and help text are translation keys rather than
+/// text a plugin supplied.
+export function isBuiltInDownloadClientConfigField(
+  clientType: string,
+  field: ConfigFieldDef,
+): boolean {
+  return (
+    BUILT_IN_DOWNLOAD_CLIENT_CONFIG_FIELDS[clientType.trim().toLowerCase()]?.some(
+      (builtIn) => builtIn.key === field.key && builtIn.label === field.label,
+    ) ?? false
+  );
+}
+
 export function normalizeDownloadClientType(
   value: string,
   fallback = DEFAULT_DOWNLOAD_CLIENT_TYPE,
@@ -40,6 +60,9 @@ export function buildDownloadClientTypeOptions(
   const options: DownloadClientTypeOption[] = BUILT_IN_DOWNLOAD_CLIENT_TYPES.map((value) => ({
     value,
     label: BUILT_IN_DOWNLOAD_CLIENT_TYPE_LABELS[value],
+    ...(BUILT_IN_DOWNLOAD_CLIENT_CONFIG_FIELDS[value]
+      ? { configFields: BUILT_IN_DOWNLOAD_CLIENT_CONFIG_FIELDS[value] }
+      : {}),
   }));
   const seenValues = new Set(options.map((option) => option.value));
 

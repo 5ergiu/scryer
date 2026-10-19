@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ja: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "ダウンロードフォルダー",
+  "settings.downloadClientHttpDownloadDirHelp": "完了したファイルと途中のファイルを書き込む場所（Scryer から見たパス）。このダウンローダーのキューは中の .scryer-http フォルダーに保存されます。",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "同時ダウンロード数",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "同時にダウンロードするリリース数（1〜8）。",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "ホストごとの接続数",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "同じサーバーから同時に取得できるダウンロード数（1〜8）。",
+  "settings.downloadClientHttpBandwidthLimit": "帯域制限（KB/s）",
+  "settings.downloadClientHttpBandwidthLimitHelp": "このクライアントのすべてのダウンロードで共有されます。空欄または 0 で無制限。",
   "settings.publicUrlTitle": "公開 URL",
   "settings.publicUrlHelp": "ユーザーやサービスが Scryer にアクセスするアドレスです（例: https://scryer.example.com）。アカウント連携と OAuth には変更がすぐに反映され、パスキーには Scryer の再起動後に反映されます。",
   "settings.publicUrlLabel": "公開 URL",

@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const es: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "Carpeta de descargas",
+  "settings.downloadClientHttpDownloadDirHelp": "Donde se escriben los archivos terminados y sus partes, tal como Scryer ve la ruta. Scryer guarda la cola de este descargador en una carpeta .scryer-http dentro de ella.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "Descargas simultáneas",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "Cuántas versiones se descargan a la vez (de 1 a 8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "Conexiones por servidor",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "Cuántas descargas pueden leer del mismo servidor a la vez (de 1 a 8).",
+  "settings.downloadClientHttpBandwidthLimit": "Límite de ancho de banda (KB/s)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "Compartido por todas las descargas de este cliente. Vacío o 0 significa sin límite.",
   "settings.publicUrlTitle": "URL pública",
   "settings.publicUrlHelp": "La dirección que usan las personas y los servicios para acceder a Scryer, como https://scryer.example.com. La vinculación de cuentas y OAuth aplican un cambio de inmediato; las passkeys, después de reiniciar Scryer.",
   "settings.publicUrlLabel": "URL pública",

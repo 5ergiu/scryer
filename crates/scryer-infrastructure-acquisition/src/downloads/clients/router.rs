@@ -29,6 +29,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use super::http::HttpDownloadClient;
 use super::nzbget::NzbgetDownloadClient;
 use super::sabnzbd::SabnzbdDownloadClient;
 use super::weaver::WeaverDownloadClient;
@@ -2056,6 +2057,10 @@ impl PrioritizedDownloadClientRouter {
                 .with_http_client(http_client);
                 Self::wrap_feedback_client(Arc::new(client), feedback_read_timeout)
             }
+            "http" => {
+                let client = HttpDownloadClient::for_config(config, proxy_config, http_client)?;
+                Self::wrap_feedback_client(Arc::new(client), feedback_read_timeout)
+            }
             _ => {
                 return Err(AppError::Validation(format!(
                     "unsupported download client type '{}' for config {}",
@@ -2755,10 +2760,10 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
 
         if let Some(http) = request.http.as_ref() {
             clients.retain(|config| {
-                let capabilities = self
-                    .plugin_provider
-                    .as_ref()
-                    .and_then(|provider| provider.http_capabilities_for_provider(&config.client_type));
+                let capabilities = scryer_application::http_capabilities_for_client(
+                    &config.client_type,
+                    self.plugin_provider.as_ref(),
+                );
                 let compatible = capabilities
                     .as_ref()
                     .is_some_and(|capabilities| http_client_accepts_release(capabilities, &http.release));
@@ -2947,14 +2952,12 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
 
             let mut effective_request = effective_request;
             if let Some(http) = effective_request.http.as_mut() {
-                let declared = self
-                    .plugin_provider
-                    .as_ref()
-                    .and_then(|provider| {
-                        provider.http_capabilities_for_provider(&config.client_type)
-                    })
-                    .map(|capabilities| client_http_transports(&capabilities))
-                    .unwrap_or_default();
+                let declared = scryer_application::http_capabilities_for_client(
+                    &config.client_type,
+                    self.plugin_provider.as_ref(),
+                )
+                .map(|capabilities| client_http_transports(&capabilities))
+                .unwrap_or_default();
                 http.selected.transport_preference = narrow_http_transport_preference(
                     &http.selected.transport_preference,
                     &declared,

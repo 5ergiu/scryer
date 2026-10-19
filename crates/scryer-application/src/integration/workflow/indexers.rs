@@ -1937,9 +1937,7 @@ fn download_client_supports_protocol_families(
         .iter()
         .any(|input| matches!(input, DownloadSourceKind::HttpResource))
         && download_client_supports_http_transports(
-            plugin_provider
-                .and_then(|provider| provider.http_capabilities_for_provider(client_type))
-                .as_ref(),
+            crate::http_capabilities_for_client(client_type, plugin_provider).as_ref(),
             indexer_http,
         );
     required_families.iter().all(|family| match *family {

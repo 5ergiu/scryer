@@ -35,6 +35,7 @@ import {
   buildDownloadClientTypeOptions,
   ensureDownloadClientTypeOption,
   isBuiltInDownloadClientType,
+  isHostlessDownloadClientType,
   normalizeDownloadClientType,
 } from "@/lib/utils/download-clients";
 import {
@@ -504,7 +505,10 @@ export function SettingsDownloadClientsContainer({
       isEnabled: draft.isEnabled,
     };
 
-    if (!payload.name || !payload.host) {
+    if (
+      !payload.name ||
+      (!payload.host && !isHostlessDownloadClientType(payload.clientType))
+    ) {
       const message = t("settings.downloadClientValidation");
       setGlobalStatus(message);
       return;
