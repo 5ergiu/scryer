@@ -2533,6 +2533,7 @@ const ko: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}}회 가져옴",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "릴리스 세부 정보",
   "indexerSearch.detail.publishDate": "게시일",
   "indexerSearch.detail.releaseGroup": "릴리스 그룹",

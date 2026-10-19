@@ -5674,6 +5674,7 @@ mod tests {
         category: Option<&str>,
     ) -> CompletedDownload {
         CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: client_type.to_string(),
             client_id: "client-1".to_string(),
             download_client_item_id: item_id.to_string(),

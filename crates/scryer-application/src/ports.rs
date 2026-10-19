@@ -9695,6 +9695,17 @@ pub trait IndexerClient: Send + Sync {
     ) -> AppResult<Option<ResolvedDownloadArtifact>> {
         Ok(None)
     }
+
+    /// Re-run the indexer's `resolve` action for an HTTP-family release right
+    /// before submission, returning the fresh release it describes. `None`
+    /// means the provider declares no such action, so the release is submitted
+    /// as it was listed. The caller refuses a result whose identity changed.
+    async fn resolve_http_release(
+        &self,
+        _release: &scryer_plugin_sdk::PluginHttpRelease,
+    ) -> AppResult<Option<scryer_plugin_sdk::PluginHttpRelease>> {
+        Ok(None)
+    }
 }
 
 /// Persisted identity charged for an observed request, independent of the
@@ -9969,6 +9980,14 @@ pub trait DownloadClientPluginProvider: Send + Sync {
     }
     fn accepted_inputs_for_provider(&self, _provider_type: &str) -> Vec<String> {
         vec![]
+    }
+    /// The `http` capability block a download-client plugin declared, when
+    /// it accepts HTTP-family releases.
+    fn http_capabilities_for_provider(
+        &self,
+        _provider_type: &str,
+    ) -> Option<scryer_domain::DownloadClientHttpCapabilities> {
+        None
     }
     fn upsert_runtime_plugin(&self, plugin: RuntimePluginLoad) -> Result<(), String> {
         let _ = plugin;

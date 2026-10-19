@@ -2019,6 +2019,7 @@ pub(super) fn completed_download_fixture_item(
     dest_dir: &str,
 ) -> CompletedDownload {
     CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: "nzbget".to_string(),
         client_id: "primary".to_string(),
         download_client_item_id: download_client_item_id.to_string(),
@@ -2174,6 +2175,7 @@ pub(super) fn pending_movie_release(
 ) -> PendingRelease {
     let now = Utc::now();
     PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted_id.to_string(),
         title_id: title.id.clone(),

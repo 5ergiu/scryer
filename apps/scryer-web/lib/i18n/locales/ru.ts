@@ -6082,6 +6082,7 @@ const ru: LocaleDictionary = {
   "indexerSearch.row.grabs": "Загрузок: {{count}}",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "Подробности релиза",
   "indexerSearch.detail.publishDate": "Опубликовано",
   "indexerSearch.detail.releaseGroup": "Релиз-группа",

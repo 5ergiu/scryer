@@ -2577,6 +2577,7 @@ const ja: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}} 回取得",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "リリースの詳細",
   "indexerSearch.detail.publishDate": "公開日",
   "indexerSearch.detail.releaseGroup": "リリースグループ",

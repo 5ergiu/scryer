@@ -153,6 +153,7 @@ impl AppUseCase {
         let delay_until = now + Duration::minutes(delay_minutes);
 
         let pending = PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -454,6 +455,7 @@ impl AppUseCase {
 
         let canonical_source = candidate.canonical_download_source();
         let pending = PendingRelease {
+            http_release: candidate.http.clone(),
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -1646,7 +1648,9 @@ impl AppUseCase {
         );
         let canonical_result = self
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
+                http_release: pr.http_release.clone(),
                 request: DownloadClientAddRequest {
+                    http: None,
                     title: title.clone(),
                     search_facet: (wanted.media_type == "series_movie")
                         .then_some(scryer_domain::MediaFacet::Movie),

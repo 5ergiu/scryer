@@ -1504,6 +1504,7 @@ pub(crate) struct ReleaseCandidateListingTicket {
     pub source_hint: String,
     pub source_title: String,
     pub listing: crate::quality::release_listing::ReleaseListingSnapshot,
+    pub http_release: Option<scryer_plugin_sdk::PluginHttpRelease>,
     pub expires_at: DateTime<Utc>,
 }
 

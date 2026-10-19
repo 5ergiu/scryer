@@ -2291,6 +2291,7 @@ where
             });
 
         let standby = PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: item.id.clone(),
             title_id: title.id.clone(),
@@ -2430,6 +2431,7 @@ mod client_snapshot_tests {
 
     fn standby(id: &str, score: i32, added_at: &str) -> PendingRelease {
         PendingRelease {
+            http_release: None,
             id: id.to_string(),
             wanted_item_id: "wanted".to_string(),
             title_id: "title".to_string(),

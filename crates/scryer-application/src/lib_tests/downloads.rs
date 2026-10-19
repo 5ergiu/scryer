@@ -3240,6 +3240,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "nzbget".into(),
             client_id: config.id.clone(),
             download_client_item_id: item_id.into(),

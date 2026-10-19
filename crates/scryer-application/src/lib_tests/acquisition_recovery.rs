@@ -268,6 +268,7 @@ async fn failed_grab_retries_standby_candidate(
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -495,6 +496,7 @@ async fn a_gone_standby_link_expires_and_grabs_the_next_row_in_the_same_walk() {
         .await
         .expect("seed wanted scope");
     let standby = |title_suffix: &str, score| PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted.id.clone(),
         title_id: title.id.clone(),
@@ -1442,6 +1444,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -4125,6 +4128,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
 
                 indexer_outcomes: Vec::new(),
                 results: vec![IndexerSearchResult {
+                    http: None,
                     indexer_id: None,
                     source: "nzbgeek".into(),
                     title: release_title.clone(),
@@ -4521,6 +4525,7 @@ fn series_pack_anchor_standby(
 ) -> PendingRelease {
     let release_guid = format!("anchor-standby-{wanted_item_id}");
     PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted_item_id.to_string(),
         title_id: title.id.clone(),
@@ -7372,6 +7377,7 @@ async fn pending_release_submit_unavailable_records_pending_without_failed_signa
     let now = Utc::now().to_rfc3339();
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: pending_id.clone(),
             wanted_item_id: wanted_id.clone(),
             title_id: title.id.clone(),
@@ -7709,6 +7715,7 @@ impl IndexerClient for PendingStatusAssertingIndexerClient {
 
             indexer_outcomes: Vec::new(),
             results: vec![IndexerSearchResult {
+                http: None,
                 indexer_id: None,
                 source: "nzbgeek".into(),
                 title: self.release_title.clone(),
@@ -8632,6 +8639,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
         .expect("seed wanted item");
 
     let standby = |release_title: &str, score: i32, seeders: Option<i64>| PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted.id.clone(),
         title_id: title.id.clone(),
@@ -10148,6 +10156,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -10292,6 +10301,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -10591,6 +10601,7 @@ async fn acquisition_cycle_drops_saved_results_of_a_completed_scope() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -12099,6 +12110,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                 .map(|release_title| {
                     let release_slug = release_title.replace(' ', ".");
                     IndexerSearchResult {
+                        http: None,
                         indexer_id: None,
                         source: "nzbgeek".into(),
                         title: release_title.clone(),
@@ -12739,6 +12751,7 @@ async fn assert_pending_release_submit_decision(
     let now = Utc::now().to_rfc3339();
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: pending_id.clone(),
             wanted_item_id: wanted_id.clone(),
             title_id: title.id.clone(),

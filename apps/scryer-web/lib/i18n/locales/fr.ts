@@ -2642,6 +2642,7 @@ const fr: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}} captures",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "Détail de la release",
   "indexerSearch.detail.publishDate": "Publiée",
   "indexerSearch.detail.releaseGroup": "Groupe de release",

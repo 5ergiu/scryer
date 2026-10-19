@@ -4461,6 +4461,7 @@ const zh_HK: LocaleDictionary = {
   "indexerSearch.row.grabs": "抓取 {{count}} 次",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "發佈詳情",
   "indexerSearch.detail.publishDate": "發佈時間",
   "indexerSearch.detail.releaseGroup": "發佈組",

@@ -406,6 +406,7 @@ fn map_source_kind(kind: DownloadSourceKind) -> DownloadInputKind {
         DownloadSourceKind::NzbUrl => DownloadInputKind::NzbUrl,
         DownloadSourceKind::TorrentFile => DownloadInputKind::TorrentFile,
         DownloadSourceKind::MagnetUri => DownloadInputKind::MagnetUri,
+        DownloadSourceKind::HttpResource => DownloadInputKind::HttpResource,
     }
 }
 
@@ -558,7 +559,7 @@ fn map_queue_item(
     client_type: &str,
 ) -> DownloadQueueItem {
     let attention = attention_required(&item);
-    let attention_reason = item.message.clone();
+    let attention_reason = http_phase_message(item.http.as_ref(), item.message.clone());
     let info_hash = normalized_plugin_info_hash(item.info_hash.as_deref())
         .or_else(|| {
             item.torrent
@@ -626,6 +627,30 @@ fn map_queue_item(
     }
 }
 
+/// The queue item message, with the HTTP download phase in front when the
+/// client reports one. The phase is what an operator sees while a provider
+/// page is being resolved or tracks are being muxed, so it must not be lost
+/// behind an empty client message.
+fn http_phase_message(
+    http: Option<&scryer_plugin_sdk::PluginHttpItem>,
+    message: Option<String>,
+) -> Option<String> {
+    let phase = http.and_then(|http| http.phase).map(|phase| match phase {
+        scryer_plugin_sdk::HttpDownloadPhase::Resolving => "Resolving provider page",
+        scryer_plugin_sdk::HttpDownloadPhase::Downloading => "Downloading",
+        scryer_plugin_sdk::HttpDownloadPhase::Muxing => "Muxing tracks",
+        scryer_plugin_sdk::HttpDownloadPhase::WritingSubtitles => "Writing subtitles",
+    });
+    let message = message
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty());
+    match (phase, message) {
+        (Some(phase), Some(message)) => Some(format!("{phase}: {message}")),
+        (Some(phase), None) => Some(phase.to_string()),
+        (None, message) => message,
+    }
+}
+
 fn retain_queue_item(item: &PluginDownloadItem) -> bool {
     !matches!(
         item.state,
@@ -671,6 +696,12 @@ fn map_completed_download(
         completed_at: parse_timestamp(item.completed_at),
         parameters: item.parameters,
         posted_file_names: Vec::new(),
+        subtitle_paths: item
+            .subtitle_paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect(),
     }
 }
 
@@ -932,6 +963,7 @@ fn build_plugin_add_request(
             nzb_file_name: resolved.nzb_file_name,
             nzb_content_type: resolved.nzb_content_type,
             source_title: request.source_title_without_password(),
+            http: request.http.clone(),
             source_password: request.password_candidates().first().map(str::to_string),
             password_candidates: request.password_candidates().iter().cloned().collect(),
         },
@@ -1677,6 +1709,7 @@ mod tests {
             removed: None,
             raw_state: None,
             completed_at: None,
+            http: None,
         }
     }
 
@@ -1861,6 +1894,7 @@ mod tests {
                 size_bytes: Some(1),
                 completed_at: None,
                 parameters: Vec::new(),
+                subtitle_paths: Vec::new(),
             },
             "client-1",
             "qBittorrent",
@@ -1911,6 +1945,7 @@ mod tests {
                 size_bytes: Some(1),
                 completed_at: None,
                 parameters: Vec::new(),
+                subtitle_paths: Vec::new(),
             },
             "client-1",
             "qBittorrent",
@@ -1922,6 +1957,7 @@ mod tests {
 
     fn sample_request() -> DownloadClientAddRequest {
         DownloadClientAddRequest {
+            http: None,
             search_facet: None,
             title: scryer_domain::Title {
                 id: "title-1".to_string(),
@@ -2263,6 +2299,126 @@ mod tests {
         );
     }
 
+    fn http_release() -> scryer_plugin_sdk::PluginHttpRelease {
+        scryer_plugin_sdk::PluginHttpRelease {
+            provider: "mediathek".to_string(),
+            item_id: "item-7".to_string(),
+            page_url: "https://provider.invalid/watch/item-7".to_string(),
+            duration_seconds: Some(1800),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_plugin_add_request_carries_the_http_block_verbatim() {
+        let http = scryer_plugin_sdk::PluginHttpDownloadSource {
+            release: http_release(),
+            selected: scryer_plugin_sdk::PluginHttpSelection {
+                transport_preference: vec![scryer_plugin_sdk::HttpTransport::ProviderPage],
+                max_height: Some(1080),
+                audio_languages: vec!["deu".to_string()],
+                subtitle_languages: vec!["eng".to_string()],
+                subtitle_mode: scryer_plugin_sdk::HttpSubtitleMode::SidecarPreferred,
+                ..Default::default()
+            },
+            policy: scryer_plugin_sdk::PluginHttpPolicy {
+                output_basename: "Example-download-1".to_string(),
+                expected_duration_seconds: Some(1800),
+                ..Default::default()
+            },
+        };
+        let request = DownloadClientAddRequest {
+            source_kind: Some(DownloadSourceKind::HttpResource),
+            source_hint: Some("https://provider.invalid/watch/item-7".to_string()),
+            http: Some(http.clone()),
+            ..sample_request()
+        };
+        let plugin_request = build_plugin_add_request(
+            &request,
+            DownloadSourceKind::HttpResource,
+            ResolvedTorrentSource {
+                download_url: request.source_hint.clone(),
+                magnet_uri: None,
+                torrent_bytes_base64: None,
+                torrent_url: None,
+                torrent_file_name: None,
+                torrent_content_type: None,
+                nzb_bytes_base64: None,
+                nzb_file_name: None,
+                nzb_content_type: None,
+            },
+        );
+
+        assert_eq!(plugin_request.source.kind, DownloadInputKind::HttpResource);
+        assert_eq!(plugin_request.source.http, Some(http));
+    }
+
+    #[test]
+    fn http_phase_leads_the_queue_item_message() {
+        let mut item = queue_filter_item(DownloadItemState::Downloading);
+        item.http = Some(scryer_plugin_sdk::PluginHttpItem {
+            transport_in_use: Some(scryer_plugin_sdk::HttpTransport::ProviderPage),
+            phase: Some(scryer_plugin_sdk::HttpDownloadPhase::Muxing),
+        });
+        item.message = Some(" 2 of 3 tracks ".to_string());
+        let queue_item = map_queue_item(item, "client-1", "MeTube", "metube");
+        assert_eq!(
+            queue_item.attention_reason.as_deref(),
+            Some("Muxing tracks: 2 of 3 tracks")
+        );
+        assert!(!queue_item.attention_required);
+
+        let mut bare = queue_filter_item(DownloadItemState::Downloading);
+        bare.http = Some(scryer_plugin_sdk::PluginHttpItem {
+            transport_in_use: None,
+            phase: Some(scryer_plugin_sdk::HttpDownloadPhase::Resolving),
+        });
+        let queue_item = map_queue_item(bare, "client-1", "MeTube", "metube");
+        assert_eq!(
+            queue_item.attention_reason.as_deref(),
+            Some("Resolving provider page")
+        );
+
+        let plain = queue_filter_item(DownloadItemState::Downloading);
+        let queue_item = map_queue_item(plain, "client-1", "MeTube", "metube");
+        assert_eq!(queue_item.attention_reason, None);
+    }
+
+    #[test]
+    fn completed_download_carries_subtitle_sidecar_paths() {
+        let completed = map_completed_download(
+            PluginCompletedDownload {
+                client_item_id: "http-1".to_string(),
+                download_id: None,
+                info_hash: None,
+                name: "Example Episode".to_string(),
+                release_name: None,
+                dest_dir: "/downloads/series".to_string(),
+                category: Some("series".to_string()),
+                output_kind: None,
+                content_paths: vec!["/downloads/series/Example.Episode.mkv".to_string()],
+                size_bytes: Some(1234),
+                completed_at: Some("2026-05-02T00:00:00Z".to_string()),
+                parameters: vec![],
+                subtitle_paths: vec![
+                    "/downloads/series/Example.Episode.eng.srt".to_string(),
+                    "  ".to_string(),
+                    " /downloads/series/Example.Episode.deu.srt ".to_string(),
+                ],
+            },
+            "client-1",
+            "metube",
+        );
+
+        assert_eq!(
+            completed.subtitle_paths,
+            vec![
+                "/downloads/series/Example.Episode.eng.srt".to_string(),
+                "/downloads/series/Example.Episode.deu.srt".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn completed_history_fallback_maps_to_completed_queue_item() {
         let queue_item = map_history_item_from_completed(
@@ -2279,6 +2435,7 @@ mod tests {
                 size_bytes: Some(1234),
                 completed_at: Some("2026-05-02T00:00:00Z".to_string()),
                 parameters: vec![],
+                subtitle_paths: Vec::new(),
             },
             "client-1",
             "qBittorrent",
@@ -2322,6 +2479,7 @@ mod tests {
                 removed: None,
                 raw_state: None,
                 completed_at: None,
+                http: None,
             },
             "client-1",
             "Plugin Client",
@@ -2346,6 +2504,7 @@ mod tests {
                 size_bytes: Some(2048),
                 completed_at: Some("2026-05-02T00:00:00Z".to_string()),
                 parameters: vec![],
+                subtitle_paths: Vec::new(),
             },
             "client-1",
             "Plugin Client",
@@ -2403,6 +2562,7 @@ mod tests {
                 removed: Some(false),
                 raw_state: Some("uploading".to_string()),
                 completed_at: Some("2026-05-02T00:00:00Z".to_string()),
+                http: None,
             },
             "client-1",
             "Decypharr qBit",
@@ -2578,6 +2738,7 @@ mod tests {
                 removed: Some(false),
                 raw_state: None,
                 completed_at: None,
+                http: None,
             },
             "client-1",
             "Plugin Client",
@@ -2614,6 +2775,7 @@ mod tests {
                 size_bytes: Some(4096),
                 completed_at: Some("2026-05-03T00:00:00Z".to_string()),
                 parameters: vec![("source".to_string(), "decypharr".to_string())],
+                subtitle_paths: Vec::new(),
             },
             "client-1",
             "qbittorrent",
@@ -2654,6 +2816,7 @@ mod tests {
                     size_bytes: None,
                     completed_at: None,
                     parameters: Vec::new(),
+                    subtitle_paths: Vec::new(),
                 },
                 "client-1",
                 "plugin-client",
@@ -2686,6 +2849,7 @@ mod tests {
                     size_bytes: None,
                     completed_at: None,
                     parameters: Vec::new(),
+                    subtitle_paths: Vec::new(),
                 },
                 "client-1",
                 "plugin-client",

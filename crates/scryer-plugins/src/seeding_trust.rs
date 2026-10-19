@@ -193,6 +193,7 @@ mod tests {
             removed: None,
             raw_state: None,
             completed_at: None,
+            http: None,
         }
     }
 

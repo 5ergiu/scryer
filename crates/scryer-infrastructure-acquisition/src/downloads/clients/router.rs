@@ -1353,6 +1353,7 @@ impl PrioritizedDownloadClientRouter {
             DownloadSourceKind::NzbUrl => "NZB URL",
             DownloadSourceKind::TorrentFile => "torrent file",
             DownloadSourceKind::MagnetUri => "magnet",
+            DownloadSourceKind::HttpResource => "HTTP resource",
         }
     }
 
@@ -1447,7 +1448,12 @@ impl PrioritizedDownloadClientRouter {
         request: &DownloadClientAddRequest,
         _indexer: Option<&scryer_domain::IndexerConfig>,
     ) -> AppResult<DownloadClientAddRequest> {
-        if request.resolved_download_artifact.is_some() || request.staged_nzb.is_some() {
+        if request.resolved_download_artifact.is_some()
+            || request.staged_nzb.is_some()
+            // An HTTP release carries its own resolved block; the indexer
+            // resolved it before routing and there is no artifact to fetch.
+            || request.http.is_some()
+        {
             return Ok(request.clone());
         }
         let source = request
@@ -2747,6 +2753,54 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
             }
         }
 
+        if let Some(http) = request.http.as_ref() {
+            clients.retain(|config| {
+                let capabilities = self
+                    .plugin_provider
+                    .as_ref()
+                    .and_then(|provider| provider.http_capabilities_for_provider(&config.client_type));
+                let compatible = capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| http_client_accepts_release(capabilities, &http.release));
+                if !compatible {
+                    warn!(
+                        client_id = config.id.as_str(),
+                        client_name = config.name.as_str(),
+                        client_type = config.client_type.as_str(),
+                        provider = http.release.provider.as_str(),
+                        offered_transports = ?http.release.offered_transports(),
+                        "download client skipped because it declares none of the transports this HTTP release offers"
+                    );
+                }
+                compatible
+            });
+            if clients.is_empty() {
+                if let Some(mapped_client_id) = mapped_client_id {
+                    let indexer = indexer_config
+                        .as_ref()
+                        .expect("mapped client requires indexer configuration");
+                    let mapped_client = selection
+                        .all_clients
+                        .iter()
+                        .find(|config| config.id == mapped_client_id);
+                    return Err(Self::mapped_routing_failure(
+                        indexer,
+                        mapped_client,
+                        mapped_client_id,
+                        Self::routing_scope_label(selection.routing.as_ref()),
+                        format!(
+                            "mapped download client declares none of the transports this HTTP release offers ({})",
+                            http_transport_labels(&http.release.offered_transports())
+                        ),
+                    ));
+                }
+                return Err(AppError::download_submit_unavailable(format!(
+                    "no enabled download client declares a transport this HTTP release offers ({})",
+                    http_transport_labels(&http.release.offered_transports())
+                )));
+            }
+        }
+
         let mut last_error: Option<AppError> = None;
         let staged_nzb = if let Some(staged_nzb) = request.staged_nzb.clone() {
             if let Err(error) = self
@@ -2890,6 +2944,38 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                     continue;
                 }
             };
+
+            let mut effective_request = effective_request;
+            if let Some(http) = effective_request.http.as_mut() {
+                let declared = self
+                    .plugin_provider
+                    .as_ref()
+                    .and_then(|provider| {
+                        provider.http_capabilities_for_provider(&config.client_type)
+                    })
+                    .map(|capabilities| client_http_transports(&capabilities))
+                    .unwrap_or_default();
+                http.selected.transport_preference = narrow_http_transport_preference(
+                    &http.selected.transport_preference,
+                    &declared,
+                );
+                if http.selected.transport_preference.is_empty() {
+                    warn!(
+                        client_id = config.id.as_str(),
+                        client_name = config.name.as_str(),
+                        client_type = config.client_type.as_str(),
+                        offered_transports = ?http.release.offered_transports(),
+                        declared_transports = ?declared,
+                        "download client skipped because no offered HTTP transport is one it declared"
+                    );
+                    last_error = Some(AppError::download_submit_unavailable(format!(
+                        "download client {} declares none of the transports this HTTP release offers ({})",
+                        config.name,
+                        http_transport_labels(&http.release.offered_transports())
+                    )));
+                    continue;
+                }
+            }
 
             debug!(
                 client_id = config.id.as_str(),
@@ -4062,6 +4148,81 @@ fn compare_completed_downloads_desc(
     })
 }
 
+/// The SDK transport for a client-declared capability.
+fn http_transport_from_capability(
+    capability: scryer_domain::HttpTransportCapability,
+) -> scryer_plugin_sdk::HttpTransport {
+    match capability {
+        scryer_domain::HttpTransportCapability::ProviderPage => {
+            scryer_plugin_sdk::HttpTransport::ProviderPage
+        }
+        scryer_domain::HttpTransportCapability::DirectFile => {
+            scryer_plugin_sdk::HttpTransport::DirectFile
+        }
+        scryer_domain::HttpTransportCapability::Hls => scryer_plugin_sdk::HttpTransport::Hls,
+        scryer_domain::HttpTransportCapability::Dash => scryer_plugin_sdk::HttpTransport::Dash,
+    }
+}
+
+/// The transports a download client declared, in SDK terms.
+fn client_http_transports(
+    capabilities: &scryer_domain::DownloadClientHttpCapabilities,
+) -> Vec<scryer_plugin_sdk::HttpTransport> {
+    capabilities
+        .transports
+        .iter()
+        .copied()
+        .map(http_transport_from_capability)
+        .collect()
+}
+
+/// Whether a client can take this particular release: some transport the
+/// release offers is one the client declared, and the client either accepts
+/// any provider or lists this one. Decided per release at grab time, since
+/// one indexer may list releases that offer different transports.
+fn http_client_accepts_release(
+    capabilities: &scryer_domain::DownloadClientHttpCapabilities,
+    release: &scryer_plugin_sdk::PluginHttpRelease,
+) -> bool {
+    let provider_ok = capabilities.providers.is_empty()
+        || capabilities
+            .providers
+            .iter()
+            .any(|provider| provider.eq_ignore_ascii_case(&release.provider));
+    let declared = client_http_transports(capabilities);
+    provider_ok
+        && release
+            .offered_transports()
+            .iter()
+            .any(|transport| declared.contains(transport))
+}
+
+/// The host's transport order with everything the client did not declare
+/// removed. Order is the host's; membership is the client's.
+fn narrow_http_transport_preference(
+    preference: &[scryer_plugin_sdk::HttpTransport],
+    declared: &[scryer_plugin_sdk::HttpTransport],
+) -> Vec<scryer_plugin_sdk::HttpTransport> {
+    preference
+        .iter()
+        .copied()
+        .filter(|transport| declared.contains(transport))
+        .collect()
+}
+
+fn http_transport_labels(transports: &[scryer_plugin_sdk::HttpTransport]) -> String {
+    transports
+        .iter()
+        .map(|transport| match transport {
+            scryer_plugin_sdk::HttpTransport::ProviderPage => "provider page",
+            scryer_plugin_sdk::HttpTransport::DirectFile => "direct file",
+            scryer_plugin_sdk::HttpTransport::Hls => "HLS",
+            scryer_plugin_sdk::HttpTransport::Dash => "DASH",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4153,6 +4314,7 @@ mod tests {
         source_kind: Option<DownloadSourceKind>,
     ) -> DownloadClientAddRequest {
         DownloadClientAddRequest {
+            http: None,
             title: test_title(),
             search_facet: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -4613,6 +4775,7 @@ mod tests {
                 .unwrap()
                 .push((client_ids.to_vec(), client_types.to_vec()));
             Ok(vec![scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: "default".to_string(),
                 download_client_item_id: "qbit-1".to_string(),
@@ -6406,6 +6569,7 @@ mod tests {
 
         let submit_error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6478,6 +6642,7 @@ mod tests {
 
         let result = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6517,6 +6682,224 @@ mod tests {
         assert_eq!(torrent_client.submissions.lock().unwrap().len(), 1);
     }
 
+    /// A plugin provider whose clients declare HTTP transports per client
+    /// type, the way an `http`-family download-client descriptor does.
+    struct HttpMockDownloadClientPluginProvider {
+        capabilities: HashMap<String, scryer_domain::DownloadClientHttpCapabilities>,
+        clients: Vec<(String, Arc<dyn DownloadClient>)>,
+    }
+
+    impl DownloadClientPluginProvider for HttpMockDownloadClientPluginProvider {
+        fn client_for_config(
+            &self,
+            config: &DownloadClientConfig,
+        ) -> Option<Arc<dyn DownloadClient>> {
+            self.clients
+                .iter()
+                .find(|(id, _)| id == &config.id)
+                .map(|(_, client)| Arc::clone(client))
+        }
+
+        fn available_provider_types(&self) -> Vec<String> {
+            self.capabilities.keys().cloned().collect()
+        }
+
+        fn accepted_inputs_for_provider(&self, _provider_type: &str) -> Vec<String> {
+            vec!["http_resource".to_string()]
+        }
+
+        fn http_capabilities_for_provider(
+            &self,
+            provider_type: &str,
+        ) -> Option<scryer_domain::DownloadClientHttpCapabilities> {
+            self.capabilities.get(provider_type).cloned()
+        }
+    }
+
+    fn http_capabilities(
+        transports: &[scryer_domain::HttpTransportCapability],
+    ) -> scryer_domain::DownloadClientHttpCapabilities {
+        scryer_domain::DownloadClientHttpCapabilities {
+            transports: transports.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn http_request(
+        resources: Vec<scryer_plugin_sdk::PluginHttpResource>,
+    ) -> DownloadClientAddRequest {
+        let release = scryer_plugin_sdk::PluginHttpRelease {
+            provider: "mediathek".to_string(),
+            item_id: "item-1".to_string(),
+            page_url: "https://provider.invalid/watch/item-1".to_string(),
+            resources,
+            ..Default::default()
+        };
+        let offered = release.offered_transports();
+        DownloadClientAddRequest {
+            http: Some(scryer_plugin_sdk::PluginHttpDownloadSource {
+                selected: scryer_plugin_sdk::PluginHttpSelection {
+                    transport_preference: offered,
+                    ..Default::default()
+                },
+                policy: scryer_plugin_sdk::PluginHttpPolicy {
+                    output_basename: "Example-1".to_string(),
+                    ..Default::default()
+                },
+                release,
+            }),
+            title: test_title(),
+            search_facet: None,
+            purpose: scryer_application::DownloadSubmissionPurpose::Standard,
+            download_id: None,
+            source_hint: Some("https://provider.invalid/watch/item-1".to_string()),
+            staged_nzb: None,
+            resolved_download_artifact: None,
+            source_kind: Some(DownloadSourceKind::HttpResource),
+            source_title: Some("Example Episode".to_string()),
+            source_password: None,
+            category: None,
+            queue_priority: None,
+            download_directory: None,
+            release_title: Some("Example Episode".to_string()),
+            indexer_name: None,
+            indexer_id: None,
+            info_hash_hint: None,
+            seed_goal_ratio: None,
+            seed_goal_seconds: None,
+            tracker_min_seed_ratio: None,
+            tracker_min_seed_time_minutes: None,
+            season_pack_seed_ratio: None,
+            season_pack_seed_time_minutes: None,
+            is_recent: None,
+            season_pack: None,
+            pinned_download_client_id: None,
+        }
+    }
+
+    fn http_resource(
+        transport: scryer_plugin_sdk::HttpTransport,
+    ) -> scryer_plugin_sdk::PluginHttpResource {
+        scryer_plugin_sdk::PluginHttpResource {
+            transport,
+            role: scryer_plugin_sdk::HttpResourceRole::Muxed,
+            url: "https://cdn.invalid/stream".to_string(),
+            expires_at: None,
+            headers: Vec::new(),
+            auth_ref: None,
+            size_bytes: None,
+            size_estimate: None,
+            validators: Default::default(),
+            container: None,
+            video: None,
+            audio: None,
+            subtitle: None,
+            separate_tracks: false,
+            range_support: Default::default(),
+        }
+    }
+
+    fn http_router(
+        configs: Vec<DownloadClientConfig>,
+        provider: HttpMockDownloadClientPluginProvider,
+    ) -> PrioritizedDownloadClientRouter {
+        let plugin_provider: Arc<dyn DownloadClientPluginProvider> = Arc::new(provider);
+        PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository { configs }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            Some(plugin_provider),
+        )
+    }
+
+    #[tokio::test]
+    async fn submit_download_routes_http_release_to_a_client_declaring_an_offered_transport() {
+        let page_client = Arc::new(MockDownloadClient::default());
+        let file_client = Arc::new(MockDownloadClient::default());
+        let router = http_router(
+            vec![
+                test_config("page", "Page Client", "page_client", 0),
+                test_config("file", "File Client", "file_client", 1),
+            ],
+            HttpMockDownloadClientPluginProvider {
+                capabilities: HashMap::from([
+                    (
+                        "page_client".to_string(),
+                        http_capabilities(&[scryer_domain::HttpTransportCapability::ProviderPage]),
+                    ),
+                    (
+                        "file_client".to_string(),
+                        http_capabilities(&[
+                            scryer_domain::HttpTransportCapability::DirectFile,
+                            scryer_domain::HttpTransportCapability::Hls,
+                        ]),
+                    ),
+                ]),
+                clients: vec![
+                    ("page".to_string(), page_client.clone()),
+                    ("file".to_string(), file_client.clone()),
+                ],
+            },
+        );
+
+        // Offers HLS and a direct file; the page-only client (higher priority)
+        // declares neither, so the file client takes it with the host order
+        // narrowed to what it declared.
+        let result = router
+            .submit_download(&http_request(vec![
+                http_resource(scryer_plugin_sdk::HttpTransport::Hls),
+                http_resource(scryer_plugin_sdk::HttpTransport::DirectFile),
+                http_resource(scryer_plugin_sdk::HttpTransport::Dash),
+            ]))
+            .await
+            .expect("a client declaring an offered transport takes the release");
+
+        assert_eq!(result.client_id.as_deref(), Some("file"));
+        assert!(page_client.submissions.lock().unwrap().is_empty());
+        let submissions = file_client.submissions.lock().unwrap();
+        assert_eq!(submissions.len(), 1);
+        let http = submissions[0]
+            .http
+            .as_ref()
+            .expect("http block survives routing");
+        assert_eq!(
+            http.selected.transport_preference,
+            vec![
+                scryer_plugin_sdk::HttpTransport::Hls,
+                scryer_plugin_sdk::HttpTransport::DirectFile
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_download_refuses_http_release_no_client_can_transport() {
+        let file_client = Arc::new(MockDownloadClient::default());
+        let router = http_router(
+            vec![test_config("file", "File Client", "file_client", 0)],
+            HttpMockDownloadClientPluginProvider {
+                capabilities: HashMap::from([(
+                    "file_client".to_string(),
+                    http_capabilities(&[scryer_domain::HttpTransportCapability::DirectFile]),
+                )]),
+                clients: vec![("file".to_string(), file_client.clone())],
+            },
+        );
+
+        // No resources: a provider-page release, which only a page-capable
+        // client can take.
+        let error = router
+            .submit_download(&http_request(Vec::new()))
+            .await
+            .expect_err("a provider-page release must not reach a direct-file-only client");
+
+        assert!(
+            matches!(error, AppError::DownloadSubmitUnavailable(ref message) if message.contains("provider page")),
+            "{error:?}"
+        );
+        assert!(file_client.submissions.lock().unwrap().is_empty());
+    }
+
     /// Head shape taken from the incident NZB: the indexer declared the
     /// release as anime, and Scryer submitted it for a live-action series.
     const ANIME_CATEGORY_NZB: &[u8] = br#"<?xml version="1.0" encoding="iso-8859-1" ?>
@@ -6547,6 +6930,7 @@ mod tests {
 
     fn resolved_nzb_request(facet: MediaFacet) -> DownloadClientAddRequest {
         DownloadClientAddRequest {
+            http: None,
             title: test_title_for_facet(facet),
             search_facet: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6659,6 +7043,7 @@ mod tests {
         );
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6727,6 +7112,7 @@ mod tests {
 
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6797,6 +7183,7 @@ mod tests {
 
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6869,6 +7256,7 @@ mod tests {
 
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -6946,6 +7334,7 @@ mod tests {
 
         let result = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7027,6 +7416,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title_for_facet(MediaFacet::Movie),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7059,6 +7449,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title_for_facet(MediaFacet::Anime),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7125,6 +7516,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7191,6 +7583,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7329,6 +7722,7 @@ mod tests {
 
     fn torrent_add_request(indexer_id: Option<&str>) -> DownloadClientAddRequest {
         DownloadClientAddRequest {
+            http: None,
             title: test_title(),
             search_facet: None,
             purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7535,6 +7929,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7596,6 +7991,7 @@ mod tests {
 
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title: test_title(),
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7682,6 +8078,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title,
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7762,6 +8159,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title,
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7830,6 +8228,7 @@ mod tests {
 
         router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title,
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -7893,6 +8292,7 @@ mod tests {
 
         let error = router
             .submit_download(&DownloadClientAddRequest {
+                http: None,
                 title,
                 search_facet: None,
                 purpose: scryer_application::DownloadSubmissionPurpose::Standard,
@@ -8213,6 +8613,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(scryer_domain::CompletedDownload {
+                        subtitle_paths: Vec::new(),
                         client_type: "qbittorrent".to_string(),
                         client_id: String::new(),
                         download_client_item_id: format!("completed-{prefix}-{index:03}"),
@@ -8328,6 +8729,7 @@ mod tests {
 
         client_a.completed_downloads.lock().unwrap().extend([
             scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "a-1".to_string(),
@@ -8342,6 +8744,7 @@ mod tests {
                 posted_file_names: Vec::new(),
             },
             scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "a-2".to_string(),
@@ -8358,6 +8761,7 @@ mod tests {
         ]);
         client_b.completed_downloads.lock().unwrap().extend([
             scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "b-1".to_string(),
@@ -8372,6 +8776,7 @@ mod tests {
                 posted_file_names: Vec::new(),
             },
             scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "b-2".to_string(),
@@ -8437,6 +8842,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "qbit-1".to_string(),
@@ -8498,6 +8904,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "qbit-1".to_string(),
@@ -8591,6 +8998,7 @@ mod tests {
             let release_dir = root.path().join(release_name);
             std::fs::create_dir(&release_dir).unwrap();
             let mut item = scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "any-torrent-client".to_string(),
                 client_id: "client-a".to_string(),
                 download_client_item_id: "archive-1".to_string(),
@@ -8621,6 +9029,7 @@ mod tests {
             "missing.7z",
         ] {
             let mut item = scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "any-torrent-client".to_string(),
                 client_id: "client-a".to_string(),
                 download_client_item_id: "archive-1".to_string(),
@@ -8654,6 +9063,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "torrent-client".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "archive-1".to_string(),
@@ -8731,6 +9141,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "remote-1".to_string(),
@@ -8782,6 +9193,7 @@ mod tests {
         // recent activity, so they arrive on the snapshot, unconditioned.
         *client.prefetched_completed.lock().unwrap() =
             Some(vec![scryer_domain::CompletedDownload {
+                subtitle_paths: Vec::new(),
                 client_type: "qbittorrent".to_string(),
                 client_id: String::new(),
                 download_client_item_id: "remote-1".to_string(),

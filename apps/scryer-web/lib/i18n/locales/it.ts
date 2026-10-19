@@ -2620,6 +2620,7 @@ const it: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}} acquisizioni",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "Dettagli della release",
   "indexerSearch.detail.publishDate": "Pubblicata",
   "indexerSearch.detail.releaseGroup": "Gruppo di release",

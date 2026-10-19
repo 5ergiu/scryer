@@ -3109,6 +3109,10 @@ pub struct CompletedDownload {
     /// none; only Weaver does.
     #[serde(default)]
     pub posted_file_names: Vec<PostedFileName>,
+    /// Subtitle sidecar files an HTTP-family plugin client wrote next to the
+    /// media, as absolute paths. Empty for every other client.
+    #[serde(default)]
+    pub subtitle_paths: Vec<String>,
 }
 
 /// A downloaded file's name on disk and the name it was posted with.
@@ -7114,6 +7118,7 @@ fn default_true() -> bool {
 pub enum IndexerProtocolCapability {
     Usenet,
     Torrent,
+    Http,
     Mixed,
     #[default]
     Unknown,
@@ -7347,6 +7352,87 @@ pub struct IndexerProviderCapabilities {
     pub torrent: Option<IndexerTorrentCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_features: Option<IndexerResponseFeatures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<IndexerHttpCapabilities>,
+}
+
+/// How an HTTP-family release may be fetched.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTransportCapability {
+    ProviderPage,
+    DirectFile,
+    Hls,
+    Dash,
+}
+
+impl HttpTransportCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderPage => "provider_page",
+            Self::DirectFile => "direct_file",
+            Self::Hls => "hls",
+            Self::Dash => "dash",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "provider_page" => Some(Self::ProviderPage),
+            "direct_file" => Some(Self::DirectFile),
+            "hls" => Some(Self::Hls),
+            "dash" => Some(Self::Dash),
+            _ => None,
+        }
+    }
+}
+
+/// What an HTTP-family indexer's releases may offer.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexerHttpCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<HttpTransportCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+/// What an HTTP-family download client can take.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DownloadClientHttpCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<HttpTransportCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    #[serde(default)]
+    pub muxes_separate_tracks: bool,
+    #[serde(default)]
+    pub writes_subtitle_sidecars: bool,
+    #[serde(default)]
+    pub reports_final_paths: bool,
+}
+
+impl DownloadClientHttpCapabilities {
+    /// Whether some transport the indexer may emit is one this client takes,
+    /// and the indexer's providers are allowed. An indexer that declares no
+    /// transports is treated as provider-page only.
+    pub fn accepts_indexer(&self, indexer: &IndexerHttpCapabilities) -> bool {
+        let provider_ok = self.providers.is_empty()
+            || indexer.providers.is_empty()
+            || indexer.providers.iter().any(|provider| {
+                self.providers
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(provider))
+            });
+        let offered: &[HttpTransportCapability] = if indexer.transports.is_empty() {
+            &[HttpTransportCapability::ProviderPage]
+        } else {
+            &indexer.transports
+        };
+        provider_ok
+            && offered
+                .iter()
+                .any(|transport| self.transports.contains(transport))
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -8199,6 +8285,41 @@ pub fn normalize_tags(tags: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn http_client_accepts_indexer_by_transport_and_provider() {
+        use super::{
+            DownloadClientHttpCapabilities, HttpTransportCapability, IndexerHttpCapabilities,
+        };
+        let page_only_indexer = IndexerHttpCapabilities {
+            transports: vec![HttpTransportCapability::ProviderPage],
+            providers: vec!["youtube".to_string()],
+        };
+        let undeclared_indexer = IndexerHttpCapabilities::default();
+        let direct_client = DownloadClientHttpCapabilities {
+            transports: vec![HttpTransportCapability::DirectFile],
+            ..DownloadClientHttpCapabilities::default()
+        };
+        let page_client = DownloadClientHttpCapabilities {
+            transports: vec![
+                HttpTransportCapability::ProviderPage,
+                HttpTransportCapability::DirectFile,
+            ],
+            ..DownloadClientHttpCapabilities::default()
+        };
+        let other_provider_client = DownloadClientHttpCapabilities {
+            transports: vec![HttpTransportCapability::ProviderPage],
+            providers: vec!["mediathekviewweb".to_string()],
+            ..DownloadClientHttpCapabilities::default()
+        };
+
+        assert!(!direct_client.accepts_indexer(&page_only_indexer));
+        assert!(!direct_client.accepts_indexer(&undeclared_indexer));
+        assert!(page_client.accepts_indexer(&page_only_indexer));
+        assert!(page_client.accepts_indexer(&undeclared_indexer));
+        assert!(!other_provider_client.accepts_indexer(&page_only_indexer));
+        assert!(other_provider_client.accepts_indexer(&undeclared_indexer));
+    }
+
     use super::*;
 
     #[test]

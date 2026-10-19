@@ -1811,6 +1811,10 @@ pub struct PendingRelease {
     /// opaque JSON, so the delayed grab submits the same listing facts the
     /// park-time decision read. `None` for rows parked before the column.
     pub release_listing_json: Option<String>,
+    /// The HTTP-family release description captured when the release was
+    /// parked, so the delayed grab can resolve and submit it. `None` for
+    /// every other protocol family and for rows parked before the column.
+    pub http_release: Option<scryer_plugin_sdk::PluginHttpRelease>,
 }
 
 impl PendingReleaseObservation {
@@ -1996,6 +2000,9 @@ pub enum DownloadSourceKind {
     NzbUrl,
     TorrentFile,
     MagnetUri,
+    /// An HTTP-family release: a provider page, direct file, or HLS/DASH
+    /// manifest that an HTTP download client fetches.
+    HttpResource,
 }
 
 impl DownloadSourceKind {
@@ -2005,6 +2012,7 @@ impl DownloadSourceKind {
             Self::NzbUrl => "nzb_url",
             Self::TorrentFile => "torrent_file",
             Self::MagnetUri => "magnet_uri",
+            Self::HttpResource => "http_resource",
         }
     }
 
@@ -2014,7 +2022,17 @@ impl DownloadSourceKind {
             "nzb_url" => Some(Self::NzbUrl),
             "torrent" | "torrent_file" | "torrent_url" | "torrent_bytes" => Some(Self::TorrentFile),
             "magnet" | "magnet_uri" => Some(Self::MagnetUri),
+            "http" | "http_resource" => Some(Self::HttpResource),
             _ => None,
+        }
+    }
+
+    /// The protocol family this kind belongs to, as the routing code names it.
+    pub fn protocol_family(self) -> &'static str {
+        match self {
+            Self::NzbFile | Self::NzbUrl => "usenet",
+            Self::TorrentFile | Self::MagnetUri => "torrent",
+            Self::HttpResource => "http",
         }
     }
 
@@ -2091,6 +2109,7 @@ impl DownloadSourceKind {
         match plugin_type.map(|value| value.trim().to_ascii_lowercase()) {
             Some(plugin_type) if plugin_type == "torrent_indexer" => Some(Self::TorrentFile),
             Some(plugin_type) if plugin_type == "usenet_indexer" => Some(Self::NzbUrl),
+            Some(plugin_type) if plugin_type == "http_indexer" => Some(Self::HttpResource),
             _ => None,
         }
     }
@@ -2257,6 +2276,10 @@ pub struct IndexerSearchResult {
     /// snapshot that was scored; a replayed pending row arrives with its own.
     /// `None` on a result no scoring pass has seen.
     pub release_listing_json: Option<String>,
+    /// The HTTP-family release description an `http` indexer attached. The
+    /// grab carries it to submission, where the host resolves it and builds
+    /// the client selection. `None` for every other protocol family.
+    pub http: Option<scryer_plugin_sdk::PluginHttpRelease>,
 }
 
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
@@ -2369,6 +2392,7 @@ mod canonical_download_source_tests {
             );
         }
         IndexerSearchResult {
+            http: None,
             indexer_id: None,
             source: "test".to_string(),
             title: "release".to_string(),
@@ -2451,6 +2475,30 @@ mod canonical_download_source_tests {
                 "https://example.test/download".to_string(),
                 DownloadSourceKind::NzbUrl,
             )
+        );
+    }
+
+    #[test]
+    fn http_resource_source_kind_round_trips_and_names_its_family() {
+        assert_eq!(
+            DownloadSourceKind::parse(DownloadSourceKind::HttpResource.as_str()),
+            Some(DownloadSourceKind::HttpResource)
+        );
+        assert_eq!(
+            DownloadSourceKind::parse("http"),
+            Some(DownloadSourceKind::HttpResource)
+        );
+        assert_eq!(DownloadSourceKind::HttpResource.protocol_family(), "http");
+        assert_eq!(DownloadSourceKind::NzbUrl.protocol_family(), "usenet");
+        assert_eq!(DownloadSourceKind::MagnetUri.protocol_family(), "torrent");
+        assert_eq!(
+            DownloadSourceKind::infer_from_indexer_result(
+                Some("http_indexer"),
+                Some("https://video.example/watch?v=abc123"),
+                None,
+                &HashMap::new(),
+            ),
+            Some(DownloadSourceKind::HttpResource)
         );
     }
 

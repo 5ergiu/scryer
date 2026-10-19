@@ -409,6 +409,8 @@ pub enum DownloadSourceKindValue {
     TorrentFile,
     /// Torrent supplied as a magnet URI.
     MagnetUri,
+    /// HTTP-family release: a provider page, direct file, or streaming manifest.
+    HttpResource,
 }
 
 /// Reason a queued download was requested.

@@ -17,6 +17,9 @@ pub(crate) struct CanonicalDownloadSubmissionIntent {
     pub release_size_bytes: Option<i64>,
     /// Frozen indexer listing snapshot (opaque JSON) persisted on the submission.
     pub release_listing_json: Option<String>,
+    /// The HTTP-family release the indexer attached to the grabbed result.
+    /// Submission resolves it and builds the client `http` block from it.
+    pub http_release: Option<scryer_plugin_sdk::PluginHttpRelease>,
 }
 
 pub(crate) enum CanonicalDownloadSubmissionOutcome {
@@ -642,6 +645,20 @@ impl AppUseCase {
             download_id: Some(download_id),
             ..intent.request.clone()
         };
+        // An HTTP release is resolved by its indexer and described to the
+        // client as a structured block; there is no artifact to fetch.
+        if let Some(listed) = intent.http_release.as_ref() {
+            request.source_kind = Some(DownloadSourceKind::HttpResource);
+            request.http = Some(
+                self.build_http_download_source(
+                    &request,
+                    listed,
+                    &download_id,
+                    intent.release_size_bytes,
+                )
+                .await?,
+            );
+        }
         // Keep the staged file active through submission and every client
         // failover; the request contains only a reference to the lease.
         let _prepared_artifact = self
@@ -970,6 +987,7 @@ impl AppUseCase {
     ) -> AppResult<Option<PreparedIndexerArtifact>> {
         if request.resolved_download_artifact.is_some()
             || request.staged_nzb.is_some()
+            || request.http.is_some()
             || !request
                 .source_hint
                 .as_deref()
