@@ -17,10 +17,10 @@ use async_trait::async_trait;
 use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use scryer_application::AppResult;
-use scryer_plugin_sdk::PluginHttpResource;
+use scryer_plugin_sdk::{PluginHttpResource, PluginHttpVerify};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::state::{HttpJobFile, RecordedValidator};
 
@@ -436,6 +436,138 @@ impl BandwidthLimiter {
     }
 }
 
+/// A failed request, described without its URL. reqwest names the request
+/// URL in its errors, and a CDN URL carries signed query tokens that must not
+/// reach the queue document, the logs or the UI.
+pub(crate) fn describe_request_error(prefix: &str, error: reqwest::Error) -> String {
+    format!("{prefix}: {}", error.without_url())
+}
+
+/// What the probe could tell about a finished media file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MediaProbeOutcome {
+    /// The container was read. `None` means that fact stayed unknown.
+    Probed {
+        duration_seconds: Option<u64>,
+        has_video: Option<bool>,
+    },
+    /// The container could not be read at all (an unsupported format, for
+    /// one); nothing about it can be checked.
+    Unverifiable(String),
+}
+
+/// Reads the facts a finished media file is checked against.
+#[async_trait]
+pub(crate) trait MediaProbe: Send + Sync {
+    async fn probe(&self, path: &Path) -> MediaProbeOutcome;
+}
+
+/// The host's pure-Rust media analyzer, the one imports and library scans
+/// use.
+pub(crate) struct NativeMediaProbe;
+
+#[async_trait]
+impl MediaProbe for NativeMediaProbe {
+    async fn probe(&self, path: &Path) -> MediaProbeOutcome {
+        use scryer_application::{MediaAnalysisOutcome, MediaAnalyzer};
+        let positive = |seconds: Option<i32>| {
+            seconds
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .filter(|seconds| *seconds > 0)
+        };
+        match scryer_application::NativeMediaAnalyzer
+            .analyze_file(path.to_path_buf())
+            .await
+        {
+            Ok(MediaAnalysisOutcome::Valid(analysis)) => MediaProbeOutcome::Probed {
+                duration_seconds: positive(analysis.duration_seconds),
+                has_video: Some(true),
+            },
+            Ok(MediaAnalysisOutcome::Inconclusive(analysis)) => MediaProbeOutcome::Probed {
+                duration_seconds: positive(analysis.duration_seconds),
+                // An incomplete read that found no video proves nothing.
+                has_video: (analysis.video_codec.is_some()
+                    || analysis.details.selected_video_id.is_some())
+                .then_some(true),
+            },
+            Ok(MediaAnalysisOutcome::Invalid(reason))
+                if reason == scryer_application::NOT_A_VALID_VIDEO_REASON =>
+            {
+                MediaProbeOutcome::Probed {
+                    duration_seconds: None,
+                    has_video: Some(false),
+                }
+            }
+            Ok(MediaAnalysisOutcome::Invalid(reason)) => MediaProbeOutcome::Unverifiable(reason),
+            Err(error) => MediaProbeOutcome::Unverifiable(error.to_string()),
+        }
+    }
+}
+
+/// How the media file of a job is checked once its bytes are all written.
+pub(crate) struct MediaCheck<'a> {
+    pub probe: &'a dyn MediaProbe,
+    pub expected_duration_seconds: Option<u64>,
+    pub verify: PluginHttpVerify,
+}
+
+/// Judge a probed media file against the job's expectations. Facts the probe
+/// could not establish are not held against the file.
+pub(crate) fn judge_media(
+    outcome: &MediaProbeOutcome,
+    expected_duration_seconds: Option<u64>,
+    verify: &PluginHttpVerify,
+) -> Result<(), TransferError> {
+    let MediaProbeOutcome::Probed {
+        duration_seconds,
+        has_video,
+    } = outcome
+    else {
+        return Ok(());
+    };
+    if verify.require_video && *has_video == Some(false) {
+        return Err(TransferError::Permanent(
+            "the finished download has no video track".into(),
+        ));
+    }
+    let ratio = f64::from(verify.min_duration_ratio);
+    if let (Some(expected), Some(actual)) = (expected_duration_seconds, *duration_seconds)
+        && expected > 0
+        && ratio.is_finite()
+        && ratio > 0.0
+    {
+        let minimum = ratio.min(1.0) * expected as f64;
+        if (actual as f64) < minimum {
+            return Err(TransferError::Permanent(format!(
+                "the finished download runs {actual}s but {expected}s were expected \
+                 (at least {}s required)",
+                minimum.ceil() as u64
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), TransferError> {
+    let outcome = check.probe.probe(path).await;
+    match &outcome {
+        MediaProbeOutcome::Unverifiable(reason) => debug!(
+            path = %path.display(),
+            reason = reason.as_str(),
+            "HTTP download media could not be probed; leaving it unverified"
+        ),
+        MediaProbeOutcome::Probed {
+            duration_seconds: None,
+            ..
+        } if check.expected_duration_seconds.is_some() => debug!(
+            path = %path.display(),
+            "HTTP download media has no readable duration; its running time is unverified"
+        ),
+        MediaProbeOutcome::Probed { .. } => {}
+    }
+    judge_media(&outcome, check.expected_duration_seconds, &check.verify)
+}
+
 /// Everything one file transfer needs from its job and engine.
 pub(crate) struct TransferContext<'a> {
     pub egress: Egress,
@@ -445,6 +577,8 @@ pub(crate) struct TransferContext<'a> {
     pub limiter: Option<&'a BandwidthLimiter>,
     /// The first retry's wait; each further retry doubles it, up to a cap.
     pub backoff_unit: Duration,
+    /// Set for the job's media file only; sidecars are not probed.
+    pub media_check: Option<MediaCheck<'a>>,
 }
 
 /// The wait before retry number `failures` (1-based).
@@ -747,7 +881,7 @@ async fn open_resource(
             () = context.cancel.cancelled() => return Err(TransferError::Cancelled),
             result = tokio::time::timeout(RESPONSE_HEADERS_TIMEOUT, request.send()) => match result {
                 Err(_) => return Err(TransferError::Transient("the server did not answer in time".into())),
-                Ok(Err(error)) => return Err(TransferError::Transient(format!("request failed: {error}"))),
+                Ok(Err(error)) => return Err(TransferError::Transient(describe_request_error("request failed", error))),
                 Ok(Ok(response)) => response,
             },
         };
@@ -838,7 +972,7 @@ async fn stream_body(
                 }
                 Ok(Err(error)) => {
                     checkpoint_written(context, file, &mut output, &part_path, written).await?;
-                    return Err(StreamError::Transient(format!("the transfer broke off: {error}")));
+                    return Err(StreamError::Transient(describe_request_error("the transfer broke off", error)));
                 }
                 Ok(Ok(chunk)) => chunk,
             },
@@ -920,6 +1054,11 @@ async fn finish_file(
     let on_disk = existing_len(&part_path).await?;
     let total = file.total_bytes.unwrap_or(file.bytes_done);
     check_final_size(on_disk, total, &file.resource)?;
+    // Checked under the partial's name, so a file that fails never appears
+    // under its final one.
+    if let Some(check) = &context.media_check {
+        verify_media(check, &part_path).await?;
+    }
     if tokio::fs::try_exists(&file.final_path)
         .await
         .unwrap_or(true)

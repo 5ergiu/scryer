@@ -230,6 +230,8 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
         state: HttpJobState::Downloading,
         error: None,
         expected_size_bytes: None,
+        expected_duration_seconds: None,
+        verify: Default::default(),
         queued_at: Utc::now(),
         updated_at: Utc::now(),
         completed_at: None,
@@ -1324,5 +1326,266 @@ fn a_mixed_set_of_refusals_names_the_last_one() {
     assert_eq!(
         job.exhausted_message(),
         "no variant could be downloaded (2 variants); the last one failed with: the server answered 410 Gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// proxied egress, error redaction and finished-media checks
+
+fn transport_proxy(base_url: &str) -> scryer_domain::ProxyConfig {
+    let created_at = Utc::now();
+    scryer_domain::ProxyConfig {
+        id: format!("proxy-{}", uuid::Uuid::new_v4()),
+        name: "Synthetic Proxy".to_string(),
+        provider_type: scryer_domain::ProxyProviderType::Http,
+        protocol: None,
+        base_url: base_url.to_string(),
+        request_timeout_seconds: 30,
+        is_enabled: true,
+        username_encrypted: None,
+        password_encrypted: None,
+        remote_dns: false,
+        last_health_status: None,
+        last_error_message: None,
+        last_error_at: None,
+        created_at,
+        updated_at: created_at,
+        host_key_fingerprint: None,
+        host_key_pinned_at: None,
+        private_key_encrypted: None,
+        private_key_passphrase_encrypted: None,
+        peer_public_key: None,
+        preshared_key_encrypted: None,
+        tunnel_public_key: None,
+        tunnel_addresses: Vec::new(),
+        tunnel_dns_servers: Vec::new(),
+        tunnel_mtu: None,
+        tunnel_keepalive_seconds: None,
+    }
+}
+
+#[tokio::test]
+async fn a_proxied_egress_hands_every_redirect_to_the_transfer() {
+    // The mock stands in for an HTTP forward proxy: every request it carries
+    // is answered with a redirect.
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "http://elsewhere.invalid/next"),
+        )
+        .mount(&proxy)
+        .await;
+    let egress = egress_for(Some(&transport_proxy(&proxy.uri()))).expect("proxied egress");
+    let Egress::Proxied(client) = egress else {
+        panic!("a transport proxy must give a proxied egress");
+    };
+
+    let response = client
+        .get("http://origin.invalid/media/clip.mp4")
+        .send()
+        .await
+        .expect("the proxy answered");
+
+    // The redirect comes back to the caller instead of being followed.
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers().get("location").unwrap(),
+        "http://elsewhere.invalid/next"
+    );
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+}
+
+#[test]
+fn no_proxy_or_a_challenge_solver_keeps_the_direct_egress() {
+    assert!(matches!(egress_for(None).unwrap(), Egress::Direct));
+    let mut solver = transport_proxy("http://solver.invalid:8191");
+    solver.provider_type = scryer_domain::ProxyProviderType::Trawl;
+    assert!(matches!(egress_for(Some(&solver)).unwrap(), Egress::Direct));
+}
+
+#[tokio::test]
+async fn a_failed_request_is_described_without_its_signed_url() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Accept the connection and close it before answering.
+    let closer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+    });
+    let error = scryer_outbound_http::generic_reqwest_client()
+        .get(format!("http://{address}/media/clip.mp4?token=secret"))
+        .send()
+        .await
+        .expect_err("the connection was closed without an answer");
+    closer.await.unwrap();
+    assert!(
+        error.to_string().contains("secret"),
+        "the raw error names the URL: {error}"
+    );
+
+    let message = super::transfer::describe_request_error("request failed", error);
+    assert!(message.starts_with("request failed: "), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+    assert!(!message.contains("token="), "{message}");
+}
+
+/// A probe that answers with fixed facts and records what it was asked.
+struct FixedProbe {
+    outcome: super::transfer::MediaProbeOutcome,
+    probed: std::sync::Mutex<Vec<std::path::PathBuf>>,
+}
+
+impl FixedProbe {
+    fn new(outcome: super::transfer::MediaProbeOutcome) -> Arc<Self> {
+        Arc::new(Self {
+            outcome,
+            probed: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn probed(&self) -> Vec<std::path::PathBuf> {
+        self.probed.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl super::transfer::MediaProbe for FixedProbe {
+    async fn probe(&self, path: &Path) -> super::transfer::MediaProbeOutcome {
+        self.probed.lock().unwrap().push(path.to_path_buf());
+        self.outcome.clone()
+    }
+}
+
+fn probed(
+    duration_seconds: Option<u64>,
+    has_video: Option<bool>,
+) -> super::transfer::MediaProbeOutcome {
+    super::transfer::MediaProbeOutcome::Probed {
+        duration_seconds,
+        has_video,
+    }
+}
+
+#[test]
+fn finished_media_is_judged_against_its_expected_running_time_and_video() {
+    use super::transfer::{MediaProbeOutcome, judge_media};
+    use scryer_plugin_sdk::PluginHttpVerify;
+    let verify = PluginHttpVerify::default();
+
+    assert_eq!(
+        judge_media(&probed(Some(3500), Some(true)), Some(3600), &verify),
+        Ok(())
+    );
+    let short = judge_media(&probed(Some(600), Some(true)), Some(3600), &verify)
+        .expect_err("a sixth of the running time is a truncated file");
+    assert!(matches!(short, TransferError::Permanent(_)), "{short:?}");
+    let message = short.message();
+    assert!(
+        message.contains("600s") && message.contains("3600s"),
+        "{message}"
+    );
+
+    let silent = judge_media(&probed(Some(3600), Some(false)), Some(3600), &verify)
+        .expect_err("no video track");
+    assert!(silent.message().contains("no video"), "{silent:?}");
+
+    // Facts the probe could not establish are not held against the file.
+    assert_eq!(
+        judge_media(&probed(None, Some(true)), Some(3600), &verify),
+        Ok(())
+    );
+    assert_eq!(judge_media(&probed(Some(10), None), None, &verify), Ok(()));
+    assert_eq!(
+        judge_media(
+            &MediaProbeOutcome::Unverifiable("unsupported format: part".into()),
+            Some(3600),
+            &verify
+        ),
+        Ok(())
+    );
+
+    // The release's own policy decides.
+    let lenient = PluginHttpVerify {
+        min_duration_ratio: 0.1,
+        require_video: false,
+    };
+    assert_eq!(
+        judge_media(&probed(Some(600), Some(false)), Some(3600), &lenient),
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn a_truncated_media_file_fails_the_job_and_its_sidecar_is_not_probed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/subs/en.vtt"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"WEBVTT\n".as_slice()))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let probe = FixedProbe::new(probed(Some(600), Some(true)));
+    client.engine().set_media_probe(probe.clone());
+
+    let mut source = source(vec![
+        muxed(&format!("{}/media/clip.mp4", server.uri()), 720),
+        subtitle(&format!("{}/subs/en.vtt", server.uri()), "en"),
+    ]);
+    source.selected.subtitle_mode = HttpSubtitleMode::SidecarPreferred;
+    source.selected.subtitle_languages = vec!["en".into()];
+    source.policy.expected_duration_seconds = Some(3600);
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    let error = done.error.unwrap_or_default();
+    assert!(error.contains("600s") && error.contains("3600s"), "{error}");
+
+    let output = dir.path().join("Synthetic.Show.S01E01");
+    let part = output.join("Synthetic.Show.S01E01.mp4.part");
+    // Only the media file was probed, under its partial name; it never
+    // reached its final name and its bytes stay on disk.
+    assert_eq!(probe.probed(), vec![part.clone()]);
+    assert!(part.exists());
+    assert!(!output.join("Synthetic.Show.S01E01.mp4").exists());
+}
+
+#[tokio::test]
+async fn media_that_passes_its_checks_completes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let probe = FixedProbe::new(probed(Some(3590), Some(true)));
+    client.engine().set_media_probe(probe.clone());
+
+    let mut source = source(vec![muxed(
+        &format!("{}/media/clip.mp4", server.uri()),
+        720,
+    )]);
+    source.policy.expected_duration_seconds = Some(3600);
+    let grab = client.submit_download(&request(source)).await.unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(probe.probed().len(), 1);
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
     );
 }

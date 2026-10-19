@@ -332,6 +332,9 @@ impl AppUseCase {
             intent.request.source_kind,
             intent.http_release.as_ref(),
         )?;
+        if let Some(listed) = intent.http_release.as_ref() {
+            super::http_grab::refuse_unavailable_http_release(listed)?;
+        }
         let title_id = intent.request.title.id.clone();
         let _title_guard = self
             .runtime

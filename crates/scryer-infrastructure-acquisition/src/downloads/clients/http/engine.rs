@@ -28,7 +28,8 @@ use super::state::{
     RefusedVariant,
 };
 use super::transfer::{
-    BandwidthLimiter, Checkpoint, Egress, TransferContext, TransferError, transfer_file,
+    BandwidthLimiter, Checkpoint, Egress, MediaCheck, MediaProbe, NativeMediaProbe,
+    TransferContext, TransferError, transfer_file,
 };
 
 /// Jobs that may wait or run at once. Submissions past this are refused.
@@ -75,6 +76,7 @@ pub(crate) struct HttpEngine {
     egress: std::sync::Mutex<Egress>,
     limiter: Arc<BandwidthLimiter>,
     backoff_unit: std::sync::Mutex<Duration>,
+    media_probe: std::sync::Mutex<Arc<dyn MediaProbe>>,
     inner: Mutex<EngineInner>,
     save_lock: Mutex<()>,
     started: OnceCell<()>,
@@ -103,6 +105,7 @@ impl HttpEngine {
             limits: std::sync::Mutex::new(limits),
             egress: std::sync::Mutex::new(egress),
             backoff_unit: std::sync::Mutex::new(DEFAULT_BACKOFF_UNIT),
+            media_probe: std::sync::Mutex::new(Arc::new(NativeMediaProbe)),
             inner: Mutex::new(EngineInner::default()),
             save_lock: Mutex::new(()),
             started: OnceCell::new(),
@@ -141,6 +144,16 @@ impl HttpEngine {
     #[cfg(test)]
     pub(crate) fn set_backoff_unit(&self, unit: Duration) {
         *self.backoff_unit.lock().unwrap_or_else(|p| p.into_inner()) = unit;
+    }
+
+    fn media_probe(&self) -> Arc<dyn MediaProbe> {
+        Arc::clone(&self.media_probe.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Replace the probe that checks finished media files.
+    #[cfg(test)]
+    pub(crate) fn set_media_probe(&self, probe: Arc<dyn MediaProbe>) {
+        *self.media_probe.lock().unwrap_or_else(|p| p.into_inner()) = probe;
     }
 
     /// Stop scheduling and ask every worker to checkpoint and stop. Their
@@ -482,7 +495,7 @@ impl HttpEngine {
         };
         let mut index = 0;
         while index < file_count {
-            let mut file = {
+            let (mut file, expected_duration_seconds, verify) = {
                 let inner = self.inner.lock().await;
                 let job = inner
                     .document
@@ -490,7 +503,11 @@ impl HttpEngine {
                     .iter()
                     .find(|job| job.id == id)
                     .ok_or(TransferError::Cancelled)?;
-                job.files[index].clone()
+                (
+                    job.files[index].clone(),
+                    job.expected_duration_seconds,
+                    job.verify.clone(),
+                )
             };
             if file.complete {
                 index += 1;
@@ -499,6 +516,7 @@ impl HttpEngine {
             live.file_index.store(index as u64, Ordering::Relaxed);
             live.current_file_bytes
                 .store(file.bytes_done, Ordering::Relaxed);
+            let probe = self.media_probe();
             let checkpoint = JobCheckpoint {
                 engine: self,
                 job_id: id,
@@ -511,6 +529,11 @@ impl HttpEngine {
                 live_bytes: &live.current_file_bytes,
                 limiter: Some(self.limiter.as_ref()),
                 backoff_unit: self.backoff_unit(),
+                media_check: (file.role == HttpFileRole::Media).then(|| MediaCheck {
+                    probe: probe.as_ref(),
+                    expected_duration_seconds,
+                    verify,
+                }),
             };
             match transfer_file(&context, &mut file).await {
                 Ok(()) => index += 1,

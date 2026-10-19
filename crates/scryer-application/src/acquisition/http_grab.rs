@@ -11,8 +11,8 @@
 use super::*;
 
 use scryer_plugin_sdk::{
-    HttpResourceRole, HttpSubtitleMode, HttpTransport, PluginHttpDownloadSource, PluginHttpPolicy,
-    PluginHttpRelease, PluginHttpSelection, PluginHttpVerify,
+    HttpAvailability, HttpResourceRole, HttpSubtitleMode, HttpTransport, PluginHttpDownloadSource,
+    PluginHttpPolicy, PluginHttpRelease, PluginHttpSelection, PluginHttpVerify,
 };
 
 use crate::quality::profile::QualityProfile;
@@ -78,6 +78,32 @@ pub(crate) fn require_http_release_for_http_source(
         ));
     }
     Ok(())
+}
+
+/// Refuse a release the provider says cannot be downloaded now. These are
+/// safety guards, not user rules, so they apply to operator grabs as well:
+/// a live stream, an announcement, a removed item, a DRM-protected item and
+/// one behind a provider sign-in would all reach the client and fail there.
+///
+/// A geo-restricted release is still submitted, since the client retries a
+/// geo block and an assigned proxy may route around it. An expired one is
+/// submitted for the indexer to resolve again. `Unknown` is the default for
+/// indexers that do not report availability.
+pub(crate) fn refuse_unavailable_http_release(release: &PluginHttpRelease) -> AppResult<()> {
+    let reason = match release.availability {
+        HttpAvailability::Live => "this release is a live stream",
+        HttpAvailability::Upcoming => "this release is not yet available",
+        HttpAvailability::Removed => "this release was removed by the provider",
+        HttpAvailability::Drm => "this release is DRM-protected",
+        HttpAvailability::AuthRequired => "this release needs provider sign-in",
+        HttpAvailability::Available
+        | HttpAvailability::Expired
+        | HttpAvailability::GeoRestricted
+        | HttpAvailability::Unknown => return Ok(()),
+    };
+    Err(AppError::Validation(format!(
+        "{reason}, so it cannot be downloaded; refusing to submit"
+    )))
 }
 
 /// Build the host selection for a release from the effective quality profile
@@ -336,6 +362,7 @@ impl AppUseCase {
         match client.resolve_http_release(listed).await? {
             Some(resolved) => {
                 verify_resolved_http_release(listed, &resolved)?;
+                refuse_unavailable_http_release(&resolved)?;
                 Ok(resolved)
             }
             None => Ok(listed.clone()),
@@ -439,6 +466,46 @@ mod tests {
         ] {
             require_http_release_for_http_source(kind, None)
                 .expect("other families never need an HTTP release");
+        }
+    }
+
+    #[test]
+    fn unavailable_releases_are_refused_with_a_reason_per_availability() {
+        for (availability, reason) in [
+            (HttpAvailability::Live, "live stream"),
+            (HttpAvailability::Upcoming, "not yet available"),
+            (HttpAvailability::Removed, "removed by the provider"),
+            (HttpAvailability::Drm, "DRM-protected"),
+            (HttpAvailability::AuthRequired, "needs provider sign-in"),
+        ] {
+            let listed = PluginHttpRelease {
+                availability,
+                ..release()
+            };
+            let error = refuse_unavailable_http_release(&listed).unwrap_err();
+            match error {
+                AppError::Validation(message) => {
+                    assert!(message.contains(reason), "{availability:?}: {message}")
+                }
+                other => panic!("{availability:?}: unexpected error {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn downloadable_or_retryable_releases_are_submitted() {
+        for availability in [
+            HttpAvailability::Available,
+            HttpAvailability::Unknown,
+            HttpAvailability::GeoRestricted,
+            HttpAvailability::Expired,
+        ] {
+            let listed = PluginHttpRelease {
+                availability,
+                ..release()
+            };
+            refuse_unavailable_http_release(&listed)
+                .unwrap_or_else(|error| panic!("{availability:?} refused: {error:?}"));
         }
     }
 

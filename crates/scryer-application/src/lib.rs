@@ -542,7 +542,7 @@ pub use library_scan_progress::{
     LibraryScanTracker,
 };
 pub use location::model::VerificationDepth;
-pub use media::analyzer::NativeMediaAnalyzer;
+pub use media::analyzer::{NOT_A_VALID_VIDEO_REASON, NativeMediaAnalyzer};
 pub use notifications::dispatcher::start_notification_dispatcher;
 pub use null_repositories::NullIndexerErrorRepository;
 pub use null_repositories::{

@@ -175,10 +175,13 @@ impl HttpDownloadClient {
     pub(crate) fn for_config(
         config: &DownloadClientConfig,
         proxy_config: Option<&ProxyConfig>,
-        http_client: reqwest::Client,
+        // The router's client for this configuration follows redirects
+        // itself, which would hide them from the transfer's own redirect
+        // checks; the proxied egress builds its own client instead.
+        _http_client: reqwest::Client,
     ) -> AppResult<Self> {
         let settings = HttpClientSettings::from_config_json(&config.config_json)?;
-        let egress = egress_for(proxy_config, http_client);
+        let egress = egress_for(proxy_config)?;
         Ok(Self {
             engine: engine_for(&config.id, &settings, egress),
         })
@@ -194,13 +197,26 @@ impl HttpDownloadClient {
     }
 }
 
-/// A proxy that carries traffic gets the proxied client; otherwise every hop
+/// A proxy that carries traffic gets a proxied client; otherwise every hop
 /// is checked and pinned by the direct egress path.
-fn egress_for(proxy_config: Option<&ProxyConfig>, http_client: reqwest::Client) -> Egress {
-    match proxy_config {
-        Some(proxy) if !proxy.is_challenge_solver() => Egress::Proxied(http_client),
-        _ => Egress::Direct,
-    }
+///
+/// The proxied client follows no redirects: the transfer follows them one
+/// hop at a time, so the hop limit, the https downgrade refusal and the
+/// origin scoping of the resource's headers hold through a proxy too.
+fn egress_for(proxy_config: Option<&ProxyConfig>) -> AppResult<Egress> {
+    let Some(proxy) = proxy_config.filter(|proxy| !proxy.is_challenge_solver()) else {
+        return Ok(Egress::Direct);
+    };
+    scryer_application::transport_proxy::transport_proxied_reqwest_client_with_redirect_policy(
+        proxy,
+        "",
+        reqwest::redirect::Policy::none(),
+    )
+    .map(Egress::Proxied)
+    .map_err(|message| {
+        scryer_application::transport_proxy::record_transport_proxy_failure(proxy, &message);
+        AppError::Validation(message)
+    })
 }
 
 /// The connection test for a configuration that may not be saved yet: the
@@ -352,6 +368,8 @@ impl DownloadClient for HttpDownloadClient {
             state: HttpJobState::Queued,
             error: None,
             expected_size_bytes: source.policy.expected_size_bytes,
+            expected_duration_seconds: source.policy.expected_duration_seconds,
+            verify: source.policy.verify.clone(),
             queued_at: now,
             updated_at: now,
             completed_at: None,

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use scryer_application::{AppError, AppResult};
-use scryer_plugin_sdk::PluginHttpResource;
+use scryer_plugin_sdk::{PluginHttpResource, PluginHttpVerify};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -147,6 +147,13 @@ pub(crate) struct HttpJob {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_size_bytes: Option<i64>,
+    /// The running time the indexer stated, checked against the finished
+    /// media file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_duration_seconds: Option<u64>,
+    /// How the finished media file is checked.
+    #[serde(default)]
+    pub verify: PluginHttpVerify,
     pub queued_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
