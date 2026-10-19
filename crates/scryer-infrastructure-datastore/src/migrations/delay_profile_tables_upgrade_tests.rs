@@ -165,6 +165,96 @@ async fn the_json_catalog_moves_into_the_tables_and_the_setting_is_removed() {
 }
 
 #[tokio::test]
+async fn tied_delay_profiles_keep_the_json_array_order_after_upgrade() {
+    let pool = pre_upgrade_pool().await;
+    seed_catalog(
+        &pool,
+        r#"[
+        {"id":"z-first","name":"First","priority":2},
+        {"id":"a-second","name":"Second","priority":2}
+    ]"#,
+    )
+    .await;
+    crate::migrations::run_migrations(&pool, crate::MigrationMode::Apply)
+        .await
+        .expect("upgrade tied profiles");
+    assert_eq!(
+        strings(
+            &pool,
+            "SELECT id FROM delay_profiles ORDER BY priority, position, id"
+        )
+        .await,
+        vec!["z-first", "a-second"]
+    );
+}
+
+#[tokio::test]
+async fn postgres_delay_profile_order_and_inherited_availability_survive_upgrade() {
+    let Ok(url) = std::env::var("SCRYER_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect to test postgres");
+    let mut tx = pool.begin().await.expect("begin fixture");
+    let schema = format!("upgrade_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; SET LOCAL search_path TO {schema};"
+    )))
+    .execute(&mut *tx)
+    .await
+    .expect("isolate fixture");
+    sqlx::raw_sql(
+        "CREATE TABLE libraries (id text PRIMARY KEY NOT NULL);
+         CREATE TABLE settings_definitions (id text PRIMARY KEY NOT NULL, scope text, key_name text);
+         CREATE TABLE settings_values (id text PRIMARY KEY NOT NULL, setting_definition_id text,
+             scope text, scope_id text, value_json jsonb);
+         INSERT INTO settings_definitions VALUES ('profiles', 'system', 'acquisition.delay_profiles');
+         INSERT INTO settings_values VALUES ('value', 'profiles', 'system', NULL,
+             '[{\"id\":\"z-first\",\"name\":\"First\",\"priority\":2},
+               {\"id\":\"a-second\",\"name\":\"Second\",\"priority\":2}]');
+         CREATE TABLE titles (id text PRIMARY KEY NOT NULL, facet text, min_availability text);
+         INSERT INTO titles VALUES ('inherited', 'movie', NULL), ('explicit', 'movie', 'announced');"
+    ).execute(&mut *tx).await.expect("seed fixture");
+    sqlx::raw_sql(include_str!(
+        "../../../scryer/src/db/postgres/migrations/0293_delay_profile_tables.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("create profile tables");
+    super::delay_profile_tables::import_delay_profile_catalog_postgres(&mut tx)
+        .await
+        .expect("migrate catalog");
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM delay_profiles ORDER BY priority, position, id")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("load order");
+    assert_eq!(ids, vec!["z-first", "a-second"]);
+    sqlx::raw_sql(include_str!(
+        "../../../scryer/src/db/postgres/migrations/0295_movie_default_availability.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("migrate availability");
+    let states: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, min_availability FROM titles ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("load availability");
+    assert_eq!(
+        states,
+        vec![
+            ("explicit".into(), Some("announced".into())),
+            ("inherited".into(), None)
+        ]
+    );
+    tx.rollback().await.expect("roll back synthetic fixture");
+}
+
+#[tokio::test]
 async fn a_fresh_upgrade_without_a_catalog_creates_empty_tables() {
     let pool = pre_upgrade_pool().await;
     crate::migrations::run_migrations(&pool, crate::MigrationMode::Apply)

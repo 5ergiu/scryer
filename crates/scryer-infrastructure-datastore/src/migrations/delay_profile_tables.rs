@@ -93,13 +93,13 @@ pub async fn import_delay_profile_catalog_sqlite(
         .map_err(repo_err)?;
     let profiles = plan_import(raw.as_deref())?;
     let now = chrono::Utc::now().to_rfc3339();
-    for profile in &profiles {
+    for (position, profile) in profiles.iter().enumerate() {
         sqlx::query(
             "INSERT INTO delay_profiles (
                  id, name, usenet_delay_minutes, torrent_delay_minutes, preferred_protocol,
                  min_age_minutes, bypass_score_threshold, enable_usenet, enable_torrent,
-                 bypass_if_highest_quality, priority, enabled, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                 bypass_if_highest_quality, priority, enabled, created_at, updated_at, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
         )
         .bind(&profile.id)
         .bind(&profile.name)
@@ -114,6 +114,7 @@ pub async fn import_delay_profile_catalog_sqlite(
         .bind(profile.priority)
         .bind(profile.enabled)
         .bind(&now)
+        .bind(position as i64)
         .execute(&mut **tx)
         .await
         .map_err(repo_err)?;
@@ -164,13 +165,13 @@ pub async fn import_delay_profile_catalog_postgres(
         .map_err(repo_err)?;
     let profiles = plan_import(raw.as_deref())?;
     let now = chrono::Utc::now();
-    for profile in &profiles {
+    for (position, profile) in profiles.iter().enumerate() {
         sqlx::query(
             "INSERT INTO delay_profiles (
                  id, name, usenet_delay_minutes, torrent_delay_minutes, preferred_protocol,
                  min_age_minutes, bypass_score_threshold, enable_usenet, enable_torrent,
-                 bypass_if_highest_quality, priority, enabled, created_at, updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)",
+                 bypass_if_highest_quality, priority, enabled, created_at, updated_at, position
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14)",
         )
         .bind(&profile.id)
         .bind(&profile.name)
@@ -185,6 +186,7 @@ pub async fn import_delay_profile_catalog_postgres(
         .bind(profile.priority)
         .bind(profile.enabled)
         .bind(now)
+        .bind(position as i64)
         .execute(&mut **tx)
         .await
         .map_err(repo_err)?;

@@ -13,9 +13,10 @@ const DELAY_PROFILE_COLUMNS: &str = "id, name, usenet_delay_minutes, torrent_del
 const DELAY_PROFILE_UPSERT_SQL: &str = "INSERT INTO delay_profiles (
     id, name, usenet_delay_minutes, torrent_delay_minutes, preferred_protocol, min_age_minutes,
     bypass_score_threshold, enable_usenet, enable_torrent, bypass_if_highest_quality, priority,
-    enabled, created_at, updated_at
+    enabled, created_at, updated_at, position
 ) VALUES (
-    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+    (SELECT COALESCE(MAX(position), -1) + 1 FROM delay_profiles)
 )
 ON CONFLICT(id) DO UPDATE SET
     name = excluded.name,
@@ -77,7 +78,7 @@ impl DelayProfileRepository for DelayProfileStore {
                 "SELECT {columns}, s.kind AS set_kind, s.value AS set_value
                    FROM delay_profiles p
                    LEFT JOIN ({sets}) s ON s.profile_id = p.id
-                  ORDER BY p.priority, p.id, s.kind, s.position, s.value"
+                  ORDER BY p.priority, p.position, p.id, s.kind, s.position, s.value"
             ),
             &[],
         )
@@ -301,6 +302,24 @@ mod tests {
         assert_eq!(first.applies_to_facets, vec!["series", "movie"]);
         assert_eq!(first.tags, vec!["keep", "needs review"]);
         assert_eq!(first.library_ids, vec!["library-b", "library-a"]);
+    }
+
+    #[tokio::test]
+    async fn tied_delay_profiles_keep_insertion_order_across_edits() {
+        let (store, _pool) = store().await;
+        store
+            .save_many(vec![profile("z-first", 10), profile("a-second", 10)])
+            .await
+            .expect("save tied profiles");
+        store
+            .save_many(vec![profile("z-first", 10)])
+            .await
+            .expect("edit first profile");
+        let loaded = store.list().await.expect("load profiles");
+        assert_eq!(
+            loaded.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["z-first", "a-second"]
+        );
     }
 
     #[tokio::test]

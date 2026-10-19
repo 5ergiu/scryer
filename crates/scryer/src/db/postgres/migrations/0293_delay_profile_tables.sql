@@ -13,6 +13,7 @@ CREATE TABLE delay_profiles (
     enable_torrent boolean NOT NULL DEFAULT TRUE,
     bypass_if_highest_quality boolean NOT NULL DEFAULT FALSE,
     priority integer NOT NULL DEFAULT 0,
+    position bigint NOT NULL DEFAULT 0,
     enabled boolean NOT NULL DEFAULT TRUE,
     created_at timestamptz NOT NULL DEFAULT NOW(),
     updated_at timestamptz NOT NULL DEFAULT NOW()
