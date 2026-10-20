@@ -4680,7 +4680,7 @@ const en: LocaleDictionary = {
   "settings.maintenanceTemplateNewestSeasonsTitle": "Keep newest 2 downloaded seasons",
   "settings.maintenanceTemplateNewestSeasonsDescription":
     "Caution: this season-scoped template unmonitors and deletes files from seasons ranked older than the newest two by each season's newest eligible downloaded episode. Specials, future episodes, missing files, and unresolved dates receive no rank; protected seasons still occupy slots.",
-  "settings.maintenanceTemplateLeftEveryListTitle": "Left every public list",
+  "settings.maintenanceTemplateLeftEveryListTitle": "Left every list",
   "settings.maintenanceTemplateLeftEveryListDescription":
     "Titles every list has dropped, public or personal, once each departure has been handled and the last one is more than 30 days old. The scope is unmonitored and the files stay where they are.",
   "settings.maintenanceTemplateListAddedUnwatchedTitle": "Added by a list and never watched",

@@ -5375,7 +5375,7 @@ const ru: LocaleDictionary = {
     "settings.maintenanceTemplateNewestEpisodesDescription": "Caution: this episode-scoped template unmonitors and deletes downloaded episodes ranked older than the newest three by air date. Specials, future episodes, missing files, and unresolved dates receive no rank, so they do not match. Protected episodes still occupy the newest-three slots.",
     "settings.maintenanceTemplateNewestSeasonsTitle": "Оставить 2 новейших загруженных сезона",
     "settings.maintenanceTemplateNewestSeasonsDescription": "Caution: this season-scoped template unmonitors and deletes files from seasons ranked older than the newest two by each season's newest eligible downloaded episode. Specials, future episodes, missing files, and unresolved dates receive no rank; protected seasons still occupy slots.",
-    "settings.maintenanceTemplateLeftEveryListTitle": "Выбыло из всех публичных списков",
+    "settings.maintenanceTemplateLeftEveryListTitle": "Выбыло из всех списков",
     "settings.maintenanceTemplateLeftEveryListDescription":
       "Тайтлы, из которых выбыли все списки, публичные и личные, когда каждое выбытие обработано и последнее произошло более 30 дней назад. Область снимается с отслеживания, а файлы остаются на месте.",
     "settings.maintenanceTemplateListAddedUnwatchedTitle": "Добавлено списком и ни разу не просмотрено",
