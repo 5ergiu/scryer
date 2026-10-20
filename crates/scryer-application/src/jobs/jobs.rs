@@ -19,7 +19,7 @@ use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::time::UNIX_EPOCH;
 use tokio::sync::broadcast;
-use tracing::{Instrument, debug, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 const BACKGROUND_LIBRARY_REFRESH_INTERVAL_SECONDS: i64 = 6 * 60 * 60;
 const BACKGROUND_LIBRARY_REFRESH_STAGGER_SECONDS: i64 = 15 * 60;
@@ -3834,12 +3834,8 @@ impl AppUseCase {
         run.completed_at = Some(completed_at);
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
-        let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        let rerun = self
-            .runtime
-            .jobs
-            .job_run_tracker
-            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, library_scan_progress))
+        let (ended, rerun, write_error) = self
+            .end_job_run_in_store_and_tracker(&run, library_scan_progress)
             .await;
         let payload = if matches!(run.status, JobRunStatus::Failed) {
             DomainEventPayload::JobRunFailed(JobRunFailedEventData {
@@ -3857,14 +3853,58 @@ impl AppUseCase {
         let _ = self
             .append_domain_event(new_job_run_domain_event(
                 event_actor,
-                updated.id.clone(),
+                ended.id.clone(),
                 payload,
             ))
             .await;
         if let Some(actor) = rerun {
-            self.start_requested_rerun(actor, updated.job_key);
+            self.start_requested_rerun(actor, ended.job_key);
         }
-        Ok(())
+        write_error.map_or(Ok(()), Err)
+    }
+
+    /// Store `run`, which has just reached a terminal status, and end it in
+    /// the job run tracker.
+    ///
+    /// The tracker is the duplicate-start guard, so it is moved to the
+    /// terminal state whether or not the store accepts the write: a run left
+    /// active there would reject every later start of its job, and hold back
+    /// any rerun requested meanwhile, until the process restarts. When the
+    /// write fails, the tracker ends the run from `run` itself and the store
+    /// error is handed back for the caller to report.
+    ///
+    /// Returns the run as it ended (the stored row, or `run` when the write
+    /// failed), the rerun taken from the tracker, and the store error.
+    async fn end_job_run_in_store_and_tracker(
+        &self,
+        run: &JobRunRecord,
+        library_scan_progress: Option<LibraryScanSession>,
+    ) -> (JobRunRecord, Option<User>, Option<AppError>) {
+        let (ended, write_error) = match self.services.events.job_runs.update_job_run(run).await {
+            Ok(updated) => (updated, None),
+            Err(error) => {
+                error!(
+                    run_id = %run.id,
+                    job_key = run.job_key.as_str(),
+                    status = run.status.as_str(),
+                    error = %error,
+                    "could not store the end of a job run; ending it in the tracker anyway"
+                );
+                metrics::counter!(
+                    JOB_RUN_TERMINAL_WRITE_FAILURES_TOTAL,
+                    "job_key" => run.job_key.as_str()
+                )
+                .increment(1);
+                (run.clone(), Some(error))
+            }
+        };
+        let rerun = self
+            .runtime
+            .jobs
+            .job_run_tracker
+            .upsert_active_run_taking_rerun(JobRun::from_record(&ended, library_scan_progress))
+            .await;
+        (ended, rerun, write_error)
     }
 
     /// Start the run asked for while the one that just ended was active.
@@ -3885,7 +3925,7 @@ impl AppUseCase {
         tokio::spawn(start);
     }
 
-    async fn fail_job_run(
+    pub(crate) async fn fail_job_run(
         &self,
         mut run: JobRunRecord,
         event_actor: DomainEventActor,
@@ -3899,30 +3939,29 @@ impl AppUseCase {
         run.completed_at = Some(completed_at);
         run.updated_at = completed_at;
         record_job_freshness_gauges(run.job_key, run.status, completed_at);
-        let updated = self.services.events.job_runs.update_job_run(&run).await?;
-        let rerun = self
-            .runtime
-            .jobs
-            .job_run_tracker
-            .upsert_active_run_taking_rerun(JobRun::from_record(&updated, None))
-            .await;
+        let (ended, rerun, write_error) = self.end_job_run_in_store_and_tracker(&run, None).await;
         let _ = self
             .append_domain_event(new_job_run_domain_event(
                 event_actor,
-                updated.id.clone(),
+                ended.id.clone(),
                 DomainEventPayload::JobRunFailed(JobRunFailedEventData {
-                    run_id: updated.id.clone(),
-                    job_key: updated.job_key.as_str().to_string(),
-                    error_text: updated.error_text.clone(),
+                    run_id: ended.id.clone(),
+                    job_key: ended.job_key.as_str().to_string(),
+                    error_text: ended.error_text.clone(),
                 }),
             ))
             .await;
         if let Some(actor) = rerun {
-            self.start_requested_rerun(actor, updated.job_key);
+            self.start_requested_rerun(actor, ended.job_key);
         }
-        Ok(())
+        write_error.map_or(Ok(()), Err)
     }
 }
+
+/// Job runs whose terminal status the job run store refused, labelled by job
+/// key. Each one is a run the store still shows unfinished until the next
+/// boot reconciles it, although the tracker has already ended it.
+const JOB_RUN_TERMINAL_WRITE_FAILURES_TOTAL: &str = "scryer_job_run_terminal_write_failures_total";
 
 /// Records the freshness gauges for a job run that has just reached a terminal
 /// status.

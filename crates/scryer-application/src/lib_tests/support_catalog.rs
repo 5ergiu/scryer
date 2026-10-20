@@ -60,6 +60,9 @@ pub(crate) struct RecordingJobRunRepo {
     /// Stands in for the sqlite writer gate: set it and every job-run write
     /// takes the same process-wide mutex a real sqlite write would.
     writer_gate: Option<Arc<Mutex<()>>>,
+    /// Set it and every update that ends a run fails, as a store that is
+    /// locked or unreachable at that moment would. Other writes still land.
+    pub(super) reject_terminal_updates: AtomicBool,
 }
 
 impl RecordingJobRunRepo {
@@ -151,6 +154,11 @@ impl JobRunRepository for RecordingJobRunRepo {
     }
 
     async fn update_job_run(&self, run: &JobRunRecord) -> AppResult<JobRunRecord> {
+        if run.status.is_terminal() && self.reject_terminal_updates.load(Ordering::SeqCst) {
+            return Err(AppError::Repository(
+                "job run store refused the terminal write".to_string(),
+            ));
+        }
         let _writer = match &self.writer_gate {
             Some(gate) => Some(gate.lock().await),
             None => None,
