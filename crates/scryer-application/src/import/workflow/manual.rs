@@ -1294,13 +1294,38 @@ async fn preview_manual_import(
         // Translate community anime numbering into the catalog's own before the
         // suggestion lookups, so a file named in per-cour numbering points at
         // the episode the user actually has. Inert without a bridge.
-        let numbering = crate::anime_numbering::translate_release_numbering(
+        let literal_parsed = parsed.clone();
+        let mut numbering = crate::anime_numbering::translate_release_numbering(
             anime_numbering_bridge.as_ref(),
             title,
             available_episodes,
             &mut parsed,
             file_reference_date(path),
         );
+        // A community season index can collide with an official season. The
+        // recorded grab disambiguates that collision when every literal member
+        // is inside its scope and the community reading is wholly outside it.
+        // A named cour or an ambiguous reading is stronger evidence and must
+        // still go through the normal refusal path.
+        if matches!(
+            &numbering,
+            crate::anime_numbering::NumberingResolution::Resolved(candidate)
+                if candidate.kind == crate::anime_numbering::NumberingCandidateKind::Community
+                    && candidate.episode_ids.iter().all(|id| !grabbed_episode_ids.contains(id))
+        ) && let Some(literal) = literal_parsed.episode.as_ref()
+            && let Some(season) = literal.season
+            && !literal.episode_numbers.is_empty()
+            && literal.episode_numbers.iter().all(|number| {
+                available_episodes.iter().any(|episode| {
+                    episode.season_number.as_deref() == Some(season.to_string().as_str())
+                        && episode.episode_number.as_deref() == Some(number.to_string().as_str())
+                        && grabbed_episode_ids.contains(&episode.id)
+                })
+            })
+        {
+            parsed = literal_parsed;
+            numbering = crate::anime_numbering::NumberingResolution::Unchanged;
+        }
         // Several readings fit equally well: suggest nothing rather than the
         // wrong episode, and let the user pick.
         let numbering_ambiguous = numbering.is_ambiguous()

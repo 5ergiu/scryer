@@ -9310,6 +9310,112 @@ async fn manual_import_preview_reconciles_alternate_numbered_typoed_episode_titl
 }
 
 #[tokio::test]
+async fn manual_import_preview_keeps_catalog_numbering_inside_grabbed_episode_set() {
+    let (
+        FailClosedPackFixture {
+            app, user, title, ..
+        },
+        submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        facet: MediaFacet::Anime,
+        title_name: "Lantern Academy".to_string(),
+        ..Default::default()
+    })
+    .await;
+    let mut catalog = Vec::new();
+    let mut intended = Vec::new();
+    for season in [2, 3] {
+        for number in 1..=14 {
+            let episode = create_pack_episode_in_season(
+                &app, &user, &title.id, season, number, None, "standard",
+            )
+            .await;
+            if season == 3 {
+                intended.push(episode.id.clone());
+            }
+            catalog.push(episode);
+        }
+    }
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
+        generated_on: "2026-09-26".into(),
+        corroborating_order: None,
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 3,
+            anidb_id: None,
+            anilist_id: None,
+            mal_id: None,
+            titles: vec!["Lantern Academy II".into()],
+            ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                community_episode_start: 1,
+                community_episode_end: Some(12),
+                tvdb_season: 2,
+                tvdb_episode_start: 1,
+                tvdb_episode_end: Some(12),
+            }],
+            absolute_start: Some(26),
+            contiguous_absolute_start: Some(24),
+            episode_count: Some(24),
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store numbering bridge");
+    let release = "[Group] Lantern Academy S03E01-E14 1080p WEB-DL Dual-Audio";
+    let item_id = "catalog-numbered-cour-pack";
+    record_pack_identity_submission(
+        &submissions,
+        &title.id,
+        item_id,
+        release,
+        SubmissionScope::EpisodeSet {
+            episode_ids: intended.clone(),
+        },
+    )
+    .await;
+    let source = tempfile::tempdir().expect("source fixture");
+    for number in 1..=14 {
+        write_pack_video(
+            source.path(),
+            &format!(
+                "Lantern.Academy.2021.S03E{number:02}.1080p.CR.WEB-DL.DUAL.DDP2.0.H.264-Group.mkv"
+            ),
+        );
+    }
+    let completed = series_pack_completed_download(item_id, &title.id, release, source.path());
+    write_pack_video(
+        source.path(),
+        "Lantern.Academy.2021.S02E14.1080p.WEB-DL.mkv",
+    );
+    let evidence = crate::import::workflow::resolve_release_evidence_for_completed_download(
+        &app, &completed, None,
+    )
+    .await
+    .expect("release evidence");
+    let suggestions =
+        crate::import::workflow::preview_manual_import_suggested_episode_ids_for_tests(
+            &app,
+            source.path(),
+            &title,
+            &evidence,
+            &catalog,
+        )
+        .await
+        .expect("preview");
+    assert_eq!(suggestions.len(), 15);
+    assert_eq!(
+        suggestions.iter().filter(|id| id.is_none()).count(),
+        1,
+        "{suggestions:?}"
+    );
+    let actual: std::collections::HashSet<_> = suggestions.into_iter().flatten().collect();
+    assert_eq!(actual, intended.into_iter().collect());
+}
+
+#[tokio::test]
 async fn alternate_numbered_verified_pack_member_reconciles_from_typoed_episode_title() {
     let (
         FailClosedPackFixture {
