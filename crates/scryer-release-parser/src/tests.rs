@@ -9,6 +9,114 @@ use crate::{
 };
 
 #[test]
+fn standard_episode_revision_suffix_preserves_episode_coordinates() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        let target = context(facet, "Hero Academy");
+        for (marker, version) in [
+            ("S07E12v1", 1),
+            ("S07E12v2", 2),
+            ("S07E12v3", 3),
+            ("S07E12V10", 10),
+            ("7x12v2", 2),
+        ] {
+            let raw = format!(
+                "Hero Academy (2016) - {marker} - Episode Name [Bluray-1080p][Opus 2.0][Dual Audio][AV1]-Group"
+            );
+            let parsed = crate::best_parse_for_target(&raw, &target);
+            let episode = parsed.episode.expect(&raw);
+            assert_eq!(episode.season, Some(7), "{raw}");
+            assert_eq!(episode.episode_numbers, vec![12], "{raw}");
+            assert_eq!(parsed.anime_version, Some(version), "{raw}");
+            assert_eq!(parsed.is_proper_upload, version > 1, "{raw}");
+            assert_eq!(parsed.revision, i32::from(version > 1), "{raw}");
+        }
+    }
+}
+
+#[test]
+fn episode_revision_ranges_preserve_all_members() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        let target = context(facet, "Hero Academy");
+        for (marker, season, members) in [
+            ("S07E12-E14v3", 7, vec![12, 13, 14]),
+            ("S07E12E13v3", 7, vec![12, 13]),
+            ("S07E12-S07E14v3", 7, vec![12, 13, 14]),
+            ("7x12-14v3", 7, vec![12, 13, 14]),
+            ("E12v3", 1, vec![12]),
+        ] {
+            let raw = format!("Hero Academy {marker} 1080p WEB-DL-GRP");
+            let parsed = crate::best_parse_for_target(&raw, &target);
+            let episode = parsed.episode.expect(&raw);
+            assert_eq!(episode.season, Some(season), "{raw}");
+            assert_eq!(episode.episode_numbers, members, "{raw}");
+            assert!(!episode.full_season, "{raw}");
+            assert_eq!(parsed.anime_version, Some(3), "{raw}");
+        }
+    }
+}
+
+#[test]
+fn episode_revision_rejects_malformed_suffixes_and_dimensions() {
+    let target = context(ContextFacetHint::Series, "Hero Academy");
+    for marker in [
+        "S07E12v",
+        "S07E12vTwo",
+        "S07E12v2extra",
+        "S07E12v2v3",
+        "S07E12v0",
+        "S07E12v4294967296",
+        "1920x1080v2",
+        "3840x2160v3",
+    ] {
+        let raw = format!("Hero Academy {marker} WEB-DL-GRP");
+        let parsed = crate::best_parse_for_target(&raw, &target);
+        assert!(parsed.episode.is_none(), "{raw}: {:?}", parsed.episode);
+    }
+}
+
+#[test]
+fn episode_revision_does_not_consume_title_or_group_tokens() {
+    for facet in [
+        ContextFacetHint::Anime,
+        ContextFacetHint::Series,
+        ContextFacetHint::Movie,
+    ] {
+        let target = context(facet, "Project E12v3");
+        let parsed = crate::best_parse_for_target("Project E12v3 2024 1080p WEB-DL-GRP", &target);
+        assert!(parsed.episode.is_none(), "{facet:?}: {:?}", parsed.episode);
+        assert_eq!(parsed.anime_version, None);
+    }
+    let target = context(ContextFacetHint::Series, "Hero Academy");
+    let parsed = crate::best_parse_for_target("Hero.Academy.S07E12.1080p.WEB-DL-Groupv3", &target);
+    assert_eq!(parsed.episode.unwrap().episode_numbers, vec![12]);
+    assert_eq!(parsed.anime_version, None);
+    assert_eq!(parsed.release_group.as_deref(), Some("Groupv3"));
+}
+
+#[test]
+fn episode_revision_preserves_real_episode_after_known_title_and_bounds_ranges() {
+    let target = context(ContextFacetHint::Series, "Project E12v3");
+    let parsed = crate::best_parse_for_target("Project E12v3 S02E04v2 1080p WEB-DL-GRP", &target);
+    let episode = parsed.episode.unwrap();
+    assert_eq!(episode.season, Some(2));
+    assert_eq!(episode.episode_numbers, vec![4]);
+    assert_eq!(parsed.anime_version, Some(2));
+    let target = context(ContextFacetHint::Series, "Hero Academy");
+    for marker in ["S07E12-E1000v2", "S07E12-1000v3", "S07E12-S07E1000v2"] {
+        let parsed = crate::best_parse_for_target(
+            &format!("Hero Academy {marker} 1080p WEB-DL-GRP"),
+            &target,
+        );
+        assert!(
+            parsed
+                .episode
+                .is_none_or(|episode| episode.episode_numbers.len() <= 1),
+            "{marker}"
+        );
+    }
+}
+
+#[test]
 fn multilingual_spelling_preserves_native_letters_and_raw_offsets() {
     for (name, language) in [
         ("Майский вечер", "RUSSIAN"),
