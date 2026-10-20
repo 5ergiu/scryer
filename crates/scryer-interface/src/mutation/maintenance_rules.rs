@@ -318,10 +318,16 @@ impl MaintenanceRuleMutations {
                 &actor,
                 rule_set_id.as_ref(),
                 crate::mappers::maintenance_rule_state_into_application(state),
-                confirmation.map(|reviewed| scryer_domain::MaintenanceRuleArmingConfirmation {
-                    revision_number: i64::from(reviewed.revision_number),
-                    library_ids: reviewed.library_ids.into_iter().map(|id| id.to_string()).collect(),
-                }),
+                confirmation.map(
+                    |reviewed| scryer_domain::MaintenanceRuleArmingConfirmation {
+                        revision_number: i64::from(reviewed.revision_number),
+                        library_ids: reviewed
+                            .library_ids
+                            .into_iter()
+                            .map(|id| id.to_string())
+                            .collect(),
+                    },
+                ),
                 candidate_count,
             )
             .await

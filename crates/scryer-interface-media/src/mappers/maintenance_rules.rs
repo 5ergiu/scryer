@@ -34,7 +34,9 @@ fn to_graphql_int(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-pub fn maintenance_rule_state_value(state: scryer_domain::MaintenanceRuleState) -> MaintenanceRuleState {
+pub fn maintenance_rule_state_value(
+    state: scryer_domain::MaintenanceRuleState,
+) -> MaintenanceRuleState {
     match state {
         scryer_domain::MaintenanceRuleState::Disabled => MaintenanceRuleState::Disabled,
         scryer_domain::MaintenanceRuleState::DryRun => MaintenanceRuleState::DryRun,
@@ -81,7 +83,6 @@ pub fn maintenance_effect_arming_value(
         scryer_domain::MaintenanceEffectArming::Destructive => MaintenanceEffectArming::Destructive,
     }
 }
-
 
 /// One action-handler attempt. An action kind this build cannot parse renders
 /// nothing rather than a wrong kind, but by construction the executor only
