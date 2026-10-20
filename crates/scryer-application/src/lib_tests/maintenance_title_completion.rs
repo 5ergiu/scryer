@@ -14,16 +14,15 @@ use crate::lib_tests::media_server_signals::{
     jellyfin_connection,
 };
 use crate::maintenance_rules::{
-    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceGatesUpdate,
-    MaintenancePreviewMatcher, MaintenancePreviewRequest, MaintenancePreviewSelection,
-    MaintenanceRuleDraft,
+    MaintenanceActionKind, MaintenanceActionSpec, MaintenancePreviewMatcher,
+    MaintenancePreviewRequest, MaintenancePreviewSelection, MaintenanceRuleDraft,
 };
 use crate::ports::MediaServerSignalRepository;
 use scryer_domain::{
     ExternalAccountProvider, ExternalAccountStatus, LifecycleActionRunStatus,
-    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
-    MaintenanceRuleSubjectKind, MediaServerProvider, MediaServerSignalKind,
-    MediaServerSignalSyncState, NewUserMediaSignal, UserExternalAccount,
+    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceRuleSubjectKind,
+    MediaServerProvider, MediaServerSignalKind, MediaServerSignalSyncState, NewUserMediaSignal,
+    UserExternalAccount,
 };
 use scryer_rules::maintenance::MaintenanceOutcome;
 use std::path::{Path, PathBuf};
@@ -218,33 +217,19 @@ async fn create_destructive_rule(
                 grace_days: 0,
                 storage_root_id: None,
                 library_ids: vec![],
-                evaluation_mode: None,
             },
         )
         .await
         .expect("create maintenance rule");
-    fixture
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.user,
-            &created.rule_set.id,
-            MaintenanceEvaluationMode::Observe,
-        )
-        .await
-        .expect("enable observation");
-    fixture
-        .app
-        .set_maintenance_instance_gates(
-            &fixture.user,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                result_display_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("open maintenance gates");
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &created.rule_set.id,
+        scryer_domain::MaintenanceRuleState::DryRun,
+        None,
+    )
+    .await;
+    super::maintenance_rules::open_maintenance_gates(&fixture.app, false, true).await;
     fixture
         .app
         .run_maintenance_rule_evaluation_job()
@@ -259,17 +244,14 @@ async fn create_destructive_rule(
             candidate.rule_set_id == created.rule_set.id && !candidate.state.is_terminal()
         })
         .count();
-    fixture
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.user,
-            &created.rule_set.id,
-            MaintenanceEffectArming::Destructive,
-            Some(candidates as i64),
-            Some((&created.rule_set).into()),
-        )
-        .await
-        .expect("arm destructive rule");
+    super::maintenance_rules::arm_rule(
+        &fixture.app,
+        &fixture.user,
+        &created.rule_set.id,
+        MaintenanceEffectArming::Destructive,
+        Some(candidates as i64),
+    )
+    .await;
     created.rule_set.id
 }
 

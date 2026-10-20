@@ -15,7 +15,7 @@ use crate::location::ownership_guard::OwnedEntity;
 use crate::location::test_support::InMemoryLocationOperationStore;
 use crate::maintenance_rules::{
     MAINTENANCE_MAX_ACTION_ATTEMPTS, MaintenanceActionKind, MaintenanceActionSpec,
-    MaintenanceGatesUpdate, MaintenanceMatcherDraft, MaintenanceRuleDraft, execution_reason,
+    MaintenanceMatcherDraft, MaintenanceRuleDraft, execution_reason,
 };
 use crate::ports::{
     ConnectionPlaybackActivity, MediaServerPlaybackProbe, PlaybackActivitySnapshot,
@@ -23,7 +23,7 @@ use crate::ports::{
 };
 use scryer_domain::{
     MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
-    MediaServerProvider,
+    MaintenanceRuleState, MediaServerProvider,
 };
 
 /// A playback probe whose answer the test chooses.
@@ -102,7 +102,6 @@ pub(super) fn unmonitor_draft(rego_source: &str) -> MaintenanceRuleDraft {
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -118,7 +117,6 @@ fn delete_draft() -> MaintenanceRuleDraft {
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -150,39 +148,36 @@ impl ExecutionFixture {
             .create_maintenance_rule_set(&self.user, draft)
             .await
             .expect("create rule set");
-        self.app
-            .set_maintenance_rule_evaluation_mode(
-                &self.user,
-                &created.rule_set.id,
-                MaintenanceEvaluationMode::Observe,
-            )
-            .await
-            .expect("observe rule");
+        super::maintenance_rules::set_rule_state(
+            &self.app,
+            &self.user,
+            &created.rule_set.id,
+            MaintenanceRuleState::DryRun,
+            None,
+        )
+        .await;
         created.rule_set.id
     }
 
     async fn open_gates(&self, reversible: bool, destructive: bool) {
-        self.app
-            .set_maintenance_instance_gates(
-                &self.user,
-                MaintenanceGatesUpdate {
-                    evaluation_enabled: Some(true),
-                    result_display_enabled: Some(true),
-                    reversible_effects_enabled: Some(reversible),
-                    destructive_effects_enabled: Some(destructive),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("arm gates");
+        super::maintenance_rules::open_maintenance_gates(&self.app, reversible, destructive).await;
     }
 
     async fn arm(&self, rule_set_id: &str, arming: MaintenanceEffectArming, ack: Option<i64>) {
-        let rule = self.rules.get_rule_set(rule_set_id).await.unwrap().unwrap();
+        super::maintenance_rules::arm_rule(&self.app, &self.user, rule_set_id, arming, ack).await;
+    }
+
+    async fn set_state(
+        &self,
+        actor: &User,
+        rule_set_id: &str,
+        state: MaintenanceRuleState,
+        ack: Option<i64>,
+        confirmation: Option<scryer_domain::MaintenanceRuleArmingConfirmation>,
+    ) -> AppResult<crate::maintenance_rules::MaintenanceRuleSetDetail> {
         self.app
-            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack, Some((&rule).into()))
+            .set_maintenance_rule_state(actor, rule_set_id, state, confirmation, ack)
             .await
-            .expect("arm rule");
     }
 
     async fn evaluate(&self) {
@@ -688,18 +683,6 @@ async fn both_effect_gates_off_executes_nothing() {
         .arm(&rule_id, MaintenanceEffectArming::Reversible, None)
         .await;
     seed_title(&fixture.app, &fixture.user, "Watched Movie", true).await;
-    // The evaluation gate is off too here; open only it for the evaluation.
-    fixture
-        .app
-        .set_maintenance_instance_gates(
-            &fixture.user,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("evaluation gate");
     fixture.evaluate().await;
 
     let report = fixture.handle().await;
@@ -965,44 +948,51 @@ async fn a_destructive_rule_needs_both_the_gate_and_destructive_arming() {
     let report = fixture.handle().await;
     assert_eq!(report.rules_eligible, 0, "{report:?}");
     assert!(fixture.evaluation.all_action_runs().await.is_empty());
+
+    // Both gates open, but a stored row armed only for library updates (no
+    // longer writable through the state control) still cannot delete.
+    fixture.open_gates(true, true).await;
+    assert!(
+        fixture
+            .rules
+            .update_rule_set_state(
+                &rule_id,
+                MaintenanceEvaluationMode::Observe,
+                MaintenanceEffectArming::Reversible,
+                None,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+    );
+    let report = fixture.handle().await;
+    assert_eq!(report.rules_eligible, 0, "{report:?}");
+    assert!(fixture.evaluation.all_action_runs().await.is_empty());
 }
 
 #[tokio::test]
-async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
+async fn enabling_derives_arming_and_destructive_demands_the_current_count() {
     let fixture = execution_app(None);
     let unmonitor_rule = fixture.observed_rule(unmonitor_draft(ALWAYS_MATCHER)).await;
 
-    // A medium-risk action cannot be armed destructive at all.
-    let refused = fixture
-        .app
-        .set_maintenance_rule_arming(
+    // A medium-risk rule arms library updates only, with no confirmation.
+    let enabled = fixture
+        .set_state(
             &fixture.user,
             &unmonitor_rule,
-            MaintenanceEffectArming::Destructive,
-            Some(0),
-            super::maintenance_rules::arming_confirmation(&fixture.app, &unmonitor_rule).await,
+            MaintenanceRuleState::Enabled,
+            None,
+            None,
         )
         .await
-        .expect_err("destructive arming of a medium-risk action must be refused");
-    assert!(
-        refused.to_string().contains("high-risk")
-            || refused.to_string().contains("can delete files"),
-        "{refused}"
+        .expect("enabling a reversible rule needs no confirmation");
+    assert_eq!(
+        enabled.rule_set.effect_arming,
+        MaintenanceEffectArming::Reversible
     );
 
     let delete_rule = fixture.observed_rule(delete_draft()).await;
     fixture.open_gates(true, false).await;
-    fixture
-        .app
-        .set_maintenance_instance_gates(
-            &fixture.user,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("evaluation gate");
     seed_title(&fixture.app, &fixture.user, "A", true).await;
     seed_title(&fixture.app, &fixture.user, "B", true).await;
     fixture.evaluate().await;
@@ -1010,11 +1000,10 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
     // The acknowledgement must equal the current non-terminal count, and the
     // refusal names that count so a client can re-present it.
     let mismatch = fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &delete_rule,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(1),
             super::maintenance_rules::arming_confirmation(&fixture.app, &delete_rule).await,
         )
@@ -1028,11 +1017,10 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
     );
 
     let armed = fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &delete_rule,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(2),
             super::maintenance_rules::arming_confirmation(&fixture.app, &delete_rule).await,
         )
@@ -1043,7 +1031,7 @@ async fn destructive_arming_demands_a_high_risk_action_and_the_current_count() {
         MaintenanceEffectArming::Destructive
     );
 
-    // Disarming never needs an acknowledgement.
+    // Falling back to dry run never needs an acknowledgement.
     fixture
         .arm(&delete_rule, MaintenanceEffectArming::None, None)
         .await;
@@ -1056,16 +1044,15 @@ async fn destructive_arming_rejects_missing_or_stale_revision_even_with_the_same
     fixture.open_gates(true, true).await;
     let reviewed = super::maintenance_rules::arming_confirmation(&fixture.app, &rule_id).await;
     fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &rule_id,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(0),
             None,
         )
         .await
-        .expect_err("legacy requests must not arm deletion without configuration confirmation");
+        .expect_err("deletion must not be armed without configuration confirmation");
 
     let draft = delete_draft();
     fixture
@@ -1083,11 +1070,10 @@ async fn destructive_arming_rejects_missing_or_stale_revision_even_with_the_same
         .await
         .unwrap();
     fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &rule_id,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(0),
             reviewed,
         )
@@ -1098,13 +1084,12 @@ async fn destructive_arming_rejects_missing_or_stale_revision_even_with_the_same
     fixture
         .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(0))
         .await;
-    // Disarming remains available without any confirmation, including to old clients.
+    // Disabling remains available without any confirmation.
     fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &rule_id,
-            MaintenanceEffectArming::None,
+            MaintenanceRuleState::Disabled,
             None,
             None,
         )
@@ -1131,11 +1116,10 @@ async fn destructive_arming_rejects_a_stale_scope_even_with_the_same_revision_an
         .await
         .unwrap();
     fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &fixture.user,
             &rule_id,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(0),
             reviewed,
         )
@@ -1151,6 +1135,7 @@ async fn destructive_arming_rejects_a_stale_scope_even_with_the_same_revision_an
 #[tokio::test]
 async fn destructive_arming_requires_system_settings_authority() {
     let fixture = execution_app(None);
+    let unmonitor_rule = fixture.observed_rule(unmonitor_draft(ALWAYS_MATCHER)).await;
     let delete_rule = fixture.observed_rule(delete_draft()).await;
     let mut outsider = User::new_admin("outsider");
     outsider.authorization = scryer_domain::UserAuthorization {
@@ -1161,28 +1146,26 @@ async fn destructive_arming_requires_system_settings_authority() {
         ..Default::default()
     };
 
-    // Catalog authority is enough for reversible…
+    // Catalog authority is enough to enable a reversible rule…
     fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &outsider,
-            &delete_rule,
-            MaintenanceEffectArming::Reversible,
+            &unmonitor_rule,
+            MaintenanceRuleState::Enabled,
             None,
             None,
         )
         .await
         .expect("reversible arming under catalog authority");
 
-    // …but destructive arming is elevated (RFC 15).
+    // …but enabling a rule that deletes files is elevated.
     let refused = fixture
-        .app
-        .set_maintenance_rule_arming(
+        .set_state(
             &outsider,
             &delete_rule,
-            MaintenanceEffectArming::Destructive,
+            MaintenanceRuleState::Enabled,
             Some(0),
-            None,
+            super::maintenance_rules::arming_confirmation(&fixture.app, &delete_rule).await,
         )
         .await
         .expect_err("destructive arming must demand system-settings authority");
@@ -1256,33 +1239,20 @@ async fn an_unreachable_media_server_fails_closed() {
 }
 
 #[tokio::test]
-async fn a_shadow_rule_never_acts_even_when_armed() {
+async fn a_dry_run_rule_never_acts() {
     let fixture = execution_app(None);
-    let created = fixture
-        .app
-        .create_maintenance_rule_set(&fixture.user, unmonitor_draft(MONITORED_MATCHER))
-        .await
-        .expect("create rule");
-    let rule_id = created.rule_set.id;
-    fixture
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.user,
-            &rule_id,
-            MaintenanceEvaluationMode::Shadow,
-        )
-        .await
-        .expect("shadow mode");
-    fixture.open_gates(true, true).await;
-    fixture
-        .arm(&rule_id, MaintenanceEffectArming::Reversible, None)
+    let rule_id = fixture
+        .observed_rule(unmonitor_draft(MONITORED_MATCHER))
         .await;
-    seed_title(&fixture.app, &fixture.user, "Shadowed", true).await;
+    fixture.open_gates(true, true).await;
+    seed_title(&fixture.app, &fixture.user, "Dry Run", true).await;
     fixture.evaluate().await;
 
     let report = fixture.handle().await;
     assert_eq!(report.rules_eligible, 0, "{report:?}");
     assert!(fixture.evaluation.all_action_runs().await.is_empty());
+    let rule = fixture.rules.get_rule_set(&rule_id).await.unwrap().unwrap();
+    assert_eq!(rule.effect_arming, MaintenanceEffectArming::None);
 }
 
 #[tokio::test]

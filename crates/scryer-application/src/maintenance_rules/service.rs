@@ -82,8 +82,6 @@ pub struct MaintenanceRuleDraft {
     pub storage_root_id: Option<String>,
     /// Empty means every library.
     pub library_ids: Vec<String>,
-    /// Only [`MaintenanceEvaluationMode::Disabled`] is accepted in this wave.
-    pub evaluation_mode: Option<MaintenanceEvaluationMode>,
 }
 
 /// A replacement matcher for an existing rule set. Applying one always appends
@@ -261,7 +259,6 @@ impl AppUseCase {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
 
-        require_dormant_evaluation_mode(draft.evaluation_mode)?;
         let name = require_non_empty(&draft.name, "name")?;
         let storage_root_id = draft.storage_root_id;
 
@@ -339,9 +336,10 @@ impl AppUseCase {
     /// armed rule's matcher and have the next handler pass act destructively
     /// under someone else's acknowledgement.
     ///
-    /// A mode change or a metadata rename does *not* disarm: neither changes
-    /// what the rule matches or what it does, so the acknowledgement still
-    /// describes the same blast radius.
+    /// A rule that was armed is flagged as edited since it was enabled, so the
+    /// operator is told to review it and enable it again. A metadata rename
+    /// does *not* disarm: it changes neither what the rule matches nor what it
+    /// does, so the acknowledgement still describes the same blast radius.
     ///
     /// [`MaintenanceEffectArming::None`]: scryer_domain::MaintenanceEffectArming::None
     pub async fn update_maintenance_rule_matcher(
@@ -411,8 +409,7 @@ impl AppUseCase {
         rule_set.current_revision_number = revision_number;
         // Mirrors what `add_revision` wrote in the same transaction, so the
         // detail this returns can never claim an arming the store just cleared.
-        rule_set.effect_arming = scryer_domain::MaintenanceEffectArming::None;
-        rule_set.destructive_rearm_required = false;
+        rule_set.disarm_after_edit();
         rule_set.updated_at = now;
         Ok(MaintenanceRuleSetDetail {
             rule_set,
@@ -473,7 +470,7 @@ impl AppUseCase {
         if scope_changed {
             // Mirrors what the store wrote in the same statement, so the rule
             // this returns can never claim an arming the store just cleared.
-            rule_set.effect_arming = scryer_domain::MaintenanceEffectArming::None;
+            rule_set.disarm_after_edit();
         }
         rule_set.updated_at = now;
         Ok(rule_set)
@@ -513,7 +510,7 @@ impl AppUseCase {
         if has_history {
             return Err(AppError::Validation(format!(
                 "\"{}\" has already run actions on your library, and deleting it would erase the \
-                 record of what it did. Set its mode to disabled instead: the rule stops \
+                 record of what it did. Set it to Disabled instead: the rule stops \
                  immediately and its history is kept.",
                 rule_set.name
             )));
@@ -525,7 +522,7 @@ impl AppUseCase {
         if active_candidates > 0 {
             return Err(AppError::Validation(format!(
                 "\"{}\" is currently tracking {active_candidates} title(s), and deleting it would \
-                 drop them without a trace. Set its mode to disabled instead, or clear the \
+                 drop them without a trace. Set it to Disabled instead, or clear the \
                  candidates first.",
                 rule_set.name
             )));
@@ -1299,15 +1296,6 @@ pub(super) fn validate_title_scope_action(spec: &MaintenanceActionSpec) -> AppRe
     Err(AppError::Validation(format!(
         "maintenance action is not valid for a title-scoped rule: {error}"
     )))
-}
-
-fn require_dormant_evaluation_mode(mode: Option<MaintenanceEvaluationMode>) -> AppResult<()> {
-    match mode {
-        None | Some(MaintenanceEvaluationMode::Disabled) => Ok(()),
-        Some(_) => Err(AppError::Validation(
-            "shadow and observe evaluation are not yet available; maintenance rules can only be saved as disabled".to_string(),
-        )),
-    }
 }
 
 /// Whether two library scopes describe different sets of libraries.

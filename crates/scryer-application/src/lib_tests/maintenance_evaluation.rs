@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use crate::lib_tests::maintenance_rules::InMemoryMaintenanceRuleRepo;
 use crate::maintenance_rules::{
     ACTION_SEQUENCE_KIND, MaintenanceActionDefinition, MaintenanceActionKind,
-    MaintenanceActionSpec, MaintenanceCandidateFilter, MaintenanceGatesUpdate,
+    MaintenanceActionSpec, MaintenanceCandidateFilter, MaintenanceGates, MaintenanceGatesUpdate,
     MaintenanceMatcherDraft, MaintenanceRuleDraft, candidate_reason,
 };
 use crate::ports::{MaintenanceActionStepCandidateKey, MaintenanceCandidateQuery};
@@ -20,9 +20,10 @@ use scryer_domain::{
     Id, LifecycleActionRun, LifecycleActionRunStatus, LifecycleCandidate,
     MaintenanceActionJobReceipt, MaintenanceActionJobReceiptState, MaintenanceActionStepAttempt,
     MaintenanceActionStepKey, MaintenanceActionStepRun, MaintenanceActionStepState,
-    MaintenanceCandidateState, MaintenanceEvaluationMode, MaintenanceEvaluationRun,
-    MaintenanceEvaluationRunStatus, MaintenanceRuleExclusion, MaintenanceRuleRevision,
-    MaintenanceSequenceTerminalMembership, MaintenanceSequenceTerminalOutcome,
+    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
+    MaintenanceEvaluationRun, MaintenanceEvaluationRunStatus, MaintenanceRuleExclusion,
+    MaintenanceRuleRevision, MaintenanceRuleState, MaintenanceSequenceTerminalMembership,
+    MaintenanceSequenceTerminalOutcome,
 };
 
 /// Matches every monitored title.
@@ -1405,7 +1406,6 @@ fn draft(rego_source: &str, grace_days: i64) -> MaintenanceRuleDraft {
         grace_days,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -1426,35 +1426,35 @@ async fn seed_title(app: &AppUseCase, user: &User, name: &str, monitored: bool) 
 }
 
 impl EvaluationFixture {
-    /// Create a rule and arm it, which is always two deliberate steps.
+    /// Create a rule and move it to dry run, which is always two deliberate
+    /// steps.
     async fn armed_rule(&self, rego_source: &str, grace_days: i64) -> String {
         let created = self
             .app
             .create_maintenance_rule_set(&self.user, draft(rego_source, grace_days))
             .await
             .expect("create rule set");
-        self.app
-            .set_maintenance_rule_evaluation_mode(
-                &self.user,
-                &created.rule_set.id,
-                MaintenanceEvaluationMode::Shadow,
-            )
-            .await
-            .expect("arm rule");
+        super::maintenance_rules::set_rule_state(
+            &self.app,
+            &self.user,
+            &created.rule_set.id,
+            MaintenanceRuleState::DryRun,
+            None,
+        )
+        .await;
         created.rule_set.id
     }
 
+    /// Evaluation alone, with candidate display left off.
     async fn open_evaluation_gate(&self) {
-        self.app
-            .set_maintenance_instance_gates(
-                &self.user,
-                MaintenanceGatesUpdate {
-                    evaluation_enabled: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("arm the evaluation gate");
+        super::maintenance_rules::store_maintenance_gates(
+            &self.app,
+            MaintenanceGates {
+                evaluation_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await;
     }
 
     async fn evaluate(&self) -> crate::maintenance_rules::MaintenanceEvaluationReport {
@@ -1474,7 +1474,7 @@ impl EvaluationFixture {
 // ── Gates ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn every_gate_defaults_off_and_updates_are_independent() {
+async fn the_switches_default_off_and_write_their_gates_in_pairs() {
     let fixture = evaluation_app();
 
     let initial = fixture
@@ -1484,42 +1484,71 @@ async fn every_gate_defaults_off_and_updates_are_independent() {
         .expect("read gates");
     assert_eq!(
         initial,
-        crate::maintenance_rules::MaintenanceGates::default(),
+        MaintenanceGates::default(),
         "an unconfigured instance must evaluate and act on nothing"
     );
+    assert!(!initial.enabled());
+    assert!(initial.actions_paused());
 
-    let updated = fixture
+    let enabled = fixture
         .app
         .set_maintenance_instance_gates(
             &fixture.user,
             MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
+                enabled: Some(true),
                 ..Default::default()
             },
         )
         .await
         .expect("set gates");
-    assert!(updated.evaluation_enabled);
-    assert!(updated.destructive_effects_enabled);
-    assert!(!updated.result_display_enabled);
+    assert!(enabled.evaluation_enabled && enabled.result_display_enabled);
+    assert!(
+        !enabled.reversible_effects_enabled && !enabled.destructive_effects_enabled,
+        "enabling maintenance must not unpause actions"
+    );
 
-    // Omitting a field must leave it exactly as stored, or arming one gate
-    // would silently disarm the others.
-    let partial = fixture
+    // Omitting a switch must leave its gates exactly as stored.
+    let unpaused = fixture
         .app
         .set_maintenance_instance_gates(
             &fixture.user,
             MaintenanceGatesUpdate {
-                result_display_enabled: Some(true),
+                actions_paused: Some(false),
                 ..Default::default()
             },
         )
         .await
         .expect("set gates");
-    assert!(partial.evaluation_enabled);
-    assert!(partial.destructive_effects_enabled);
-    assert!(partial.result_display_enabled);
+    assert!(unpaused.enabled());
+    assert!(unpaused.reversible_effects_enabled && unpaused.destructive_effects_enabled);
+    assert!(!unpaused.actions_paused());
+
+    let paused = fixture
+        .app
+        .set_maintenance_instance_gates(
+            &fixture.user,
+            MaintenanceGatesUpdate {
+                enabled: Some(false),
+                actions_paused: Some(true),
+            },
+        )
+        .await
+        .expect("set gates");
+    assert_eq!(paused, MaintenanceGates::default());
+}
+
+#[test]
+fn actions_read_as_paused_only_when_no_effect_can_run() {
+    let reversible_only = MaintenanceGates {
+        reversible_effects_enabled: true,
+        ..Default::default()
+    };
+    assert!(!reversible_only.actions_paused());
+    let display_only = MaintenanceGates {
+        result_display_enabled: true,
+        ..Default::default()
+    };
+    assert!(!display_only.enabled());
 }
 
 #[tokio::test]
@@ -1567,10 +1596,10 @@ async fn the_evaluation_gate_makes_a_run_a_no_op() {
     );
 }
 
-// ── Rule mode ───────────────────────────────────────────────────────────────
+// ── Rule state ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn setting_a_mode_derives_enabled_and_creation_still_ships_dark() {
+async fn each_state_writes_its_mode_and_arming_and_creation_still_ships_dark() {
     let fixture = evaluation_app();
     let created = fixture
         .app
@@ -1578,24 +1607,208 @@ async fn setting_a_mode_derives_enabled_and_creation_still_ships_dark() {
         .await
         .expect("create rule set");
     assert!(!created.rule_set.enabled, "rules are created disabled");
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&created),
+        MaintenanceRuleState::Disabled
+    );
 
-    for (mode, expected_enabled) in [
-        (MaintenanceEvaluationMode::Shadow, true),
-        (MaintenanceEvaluationMode::Observe, true),
-        (MaintenanceEvaluationMode::Disabled, false),
+    for (state, mode, arming) in [
+        (
+            MaintenanceRuleState::DryRun,
+            MaintenanceEvaluationMode::Observe,
+            MaintenanceEffectArming::None,
+        ),
+        (
+            MaintenanceRuleState::Enabled,
+            MaintenanceEvaluationMode::Observe,
+            MaintenanceEffectArming::Reversible,
+        ),
+        (
+            MaintenanceRuleState::DryRun,
+            MaintenanceEvaluationMode::Observe,
+            MaintenanceEffectArming::None,
+        ),
+        (
+            MaintenanceRuleState::Enabled,
+            MaintenanceEvaluationMode::Observe,
+            MaintenanceEffectArming::Reversible,
+        ),
+        (
+            MaintenanceRuleState::Disabled,
+            MaintenanceEvaluationMode::Disabled,
+            MaintenanceEffectArming::None,
+        ),
     ] {
         let detail = fixture
             .app
-            .set_maintenance_rule_evaluation_mode(&fixture.user, &created.rule_set.id, mode)
+            .set_maintenance_rule_state(&fixture.user, &created.rule_set.id, state, None, None)
             .await
-            .expect("set mode");
-        assert_eq!(detail.rule_set.evaluation_mode, mode);
-        assert_eq!(detail.rule_set.enabled, expected_enabled);
+            .expect("set state");
+        assert_eq!(detail.rule_set.evaluation_mode, mode, "{state:?}");
+        assert_eq!(detail.rule_set.effect_arming, arming, "{state:?}");
+        assert_eq!(
+            detail.rule_set.enabled,
+            mode != MaintenanceEvaluationMode::Disabled
+        );
+        assert_eq!(
+            crate::maintenance_rules::maintenance_rule_state(&detail),
+            state
+        );
+        let stored = fixture
+            .app
+            .services
+            .customization
+            .maintenance_rule_sets
+            .get_rule_set(&created.rule_set.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored, detail.rule_set,
+            "the detail mirrors the store write"
+        );
         assert_eq!(
             detail.rule_set.current_revision_number, 1,
-            "a mode change is not a matcher change, so no revision is appended"
+            "a state change is not a matcher change, so no revision is appended"
         );
     }
+}
+
+#[tokio::test]
+async fn a_rule_whose_action_changes_nothing_cannot_be_enabled() {
+    let fixture = evaluation_app();
+    let mut tracking = draft(MONITORED_MATCHER, 7);
+    tracking.action_definition = MaintenanceActionDefinition::Legacy(MaintenanceActionSpec::new(
+        MaintenanceActionKind::DoNothing,
+    ));
+    let created = fixture
+        .app
+        .create_maintenance_rule_set(&fixture.user, tracking)
+        .await
+        .expect("create rule set");
+
+    let refused = fixture
+        .app
+        .set_maintenance_rule_state(
+            &fixture.user,
+            &created.rule_set.id,
+            MaintenanceRuleState::Enabled,
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing to arm");
+    assert!(matches!(refused, AppError::Validation(_)), "{refused:?}");
+}
+
+#[tokio::test]
+async fn an_edit_drops_an_enabled_rule_to_dry_run_until_it_is_enabled_again() {
+    let fixture = evaluation_app();
+    let created = fixture
+        .app
+        .create_maintenance_rule_set(&fixture.user, draft(MONITORED_MATCHER, 7))
+        .await
+        .expect("create rule set");
+    let id = created.rule_set.id;
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &id,
+        MaintenanceRuleState::Enabled,
+        None,
+    )
+    .await;
+
+    let edited = fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &id,
+            MaintenanceMatcherDraft {
+                rego_source: MONITORED_MATCHER.into(),
+                action_definition: created.action_definition.clone(),
+                grace_days: 3,
+                storage_root_id: None,
+            },
+        )
+        .await
+        .expect("edit matcher");
+    assert_eq!(edited.rule_set.effect_arming, MaintenanceEffectArming::None);
+    assert!(edited.rule_set.destructive_rearm_required);
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&edited),
+        MaintenanceRuleState::DryRun
+    );
+    let stored = fixture
+        .app
+        .services
+        .customization
+        .maintenance_rule_sets
+        .get_rule_set(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored, edited.rule_set,
+        "the detail mirrors the store write"
+    );
+
+    // A second edit keeps the flag; it only reflects that the rule was enabled.
+    let again = fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &id,
+            MaintenanceMatcherDraft {
+                rego_source: MONITORED_MATCHER.into(),
+                action_definition: created.action_definition.clone(),
+                grace_days: 4,
+                storage_root_id: None,
+            },
+        )
+        .await
+        .expect("edit matcher");
+    assert!(again.rule_set.destructive_rearm_required);
+
+    let reenabled = super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &id,
+        MaintenanceRuleState::Enabled,
+        None,
+    )
+    .await;
+    assert!(!reenabled.rule_set.destructive_rearm_required);
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&reenabled),
+        MaintenanceRuleState::Enabled
+    );
+
+    // A rule that was never enabled is not flagged by an edit.
+    let dry = super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &id,
+        MaintenanceRuleState::DryRun,
+        None,
+    )
+    .await;
+    assert!(!dry.rule_set.destructive_rearm_required);
+    let edited_dry = fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &id,
+            MaintenanceMatcherDraft {
+                rego_source: MONITORED_MATCHER.into(),
+                action_definition: created.action_definition,
+                grace_days: 5,
+                storage_root_id: None,
+            },
+        )
+        .await
+        .expect("edit matcher");
+    assert!(!edited_dry.rule_set.destructive_rearm_required);
 }
 
 // ── The state machine ───────────────────────────────────────────────────────
@@ -1992,15 +2205,14 @@ async fn a_disabled_rule_is_skipped_and_its_candidates_are_left_alone() {
     fixture.evaluate().await;
     let before = fixture.only_candidate().await;
 
-    fixture
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.user,
-            &rule_set_id,
-            MaintenanceEvaluationMode::Disabled,
-        )
-        .await
-        .expect("disable rule");
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &rule_set_id,
+        MaintenanceRuleState::Disabled,
+        None,
+    )
+    .await;
 
     let report = fixture.evaluate().await;
     assert_eq!(report.rules_considered, 1);
@@ -2040,7 +2252,7 @@ async fn a_pass_records_a_run_with_the_counts_it_produced() {
 }
 
 #[tokio::test]
-async fn candidates_are_only_visible_through_the_gate_or_an_explicit_shadow_request() {
+async fn candidates_are_only_visible_while_maintenance_is_enabled() {
     let fixture = evaluation_app();
     seed_title(&fixture.app, &fixture.user, "Monitored", true).await;
     fixture.armed_rule(MONITORED_MATCHER, 7).await;
@@ -2054,43 +2266,28 @@ async fn candidates_are_only_visible_through_the_gate_or_an_explicit_shadow_requ
         .expect("list candidates");
     assert!(
         hidden.is_empty(),
-        "shadow results stay dark until the operator asks for them"
+        "results stay dark while result display is off"
     );
 
-    let shown = fixture
-        .app
-        .list_maintenance_candidates(
-            &fixture.user,
-            MaintenanceCandidateFilter {
-                include_shadow: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("list candidates");
-    assert_eq!(shown.len(), 1);
-    assert_eq!(shown[0].title_name, "Monitored");
-    assert_eq!(shown[0].rule_name, "Stale movies");
-
-    // Arming result display still hides shadow, because shadow is about the
-    // rule, not about the instance.
     fixture
         .app
         .set_maintenance_instance_gates(
             &fixture.user,
             MaintenanceGatesUpdate {
-                result_display_enabled: Some(true),
+                enabled: Some(true),
                 ..Default::default()
             },
         )
         .await
-        .expect("arm result display");
-    let still_hidden = fixture
+        .expect("enable maintenance");
+    let shown = fixture
         .app
         .list_maintenance_candidates(&fixture.user, MaintenanceCandidateFilter::default())
         .await
         .expect("list candidates");
-    assert!(still_hidden.is_empty());
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].title_name, "Monitored");
+    assert_eq!(shown[0].rule_name, "Stale movies");
 }
 
 // ── Provenance facts ────────────────────────────────────────────────────────

@@ -5556,21 +5556,14 @@ pub struct RulePackMember {
     pub removed: bool,
 }
 
-/// How far a maintenance rule set is allowed to act (RFC 137 section 7).
-///
-/// Only [`Self::Disabled`] is reachable in the foundation wave: nothing
-/// evaluates stored maintenance rules yet, so a rule that claimed to be running
-/// in shadow or observe mode would be advertising a capability that does not
-/// exist. The other two variants are declared here because the storage column
-/// is written now and must not need a migration when the evaluator lands.
+/// Whether a maintenance rule set is evaluated at all. Whether an evaluated
+/// rule may act is its [`MaintenanceEffectArming`].
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceEvaluationMode {
     #[default]
     Disabled,
-    /// Evaluate and record candidates; never act.
-    Shadow,
-    /// Evaluate, record, and surface candidates for manual approval.
+    /// Evaluate and record candidates.
     Observe,
 }
 
@@ -5578,7 +5571,6 @@ impl MaintenanceEvaluationMode {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::Shadow => "shadow",
             Self::Observe => "observe",
         }
     }
@@ -5586,11 +5578,22 @@ impl MaintenanceEvaluationMode {
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "disabled" => Some(Self::Disabled),
-            "shadow" => Some(Self::Shadow),
             "observe" => Some(Self::Observe),
             _ => None,
         }
     }
+}
+
+/// The one operator-facing control of a maintenance rule set.
+///
+/// Disabled is never evaluated. Dry run is evaluated and records candidates
+/// but never acts. Enabled is evaluated and armed for the effects its own
+/// action can have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaintenanceRuleState {
+    Disabled,
+    DryRun,
+    Enabled,
 }
 
 /// Granularity a maintenance rule set is scoped to.
@@ -5639,9 +5642,9 @@ pub struct MaintenanceRuleSet {
     /// How far this rule's effects are armed, independent of its mode. The
     /// action handler requires both this and the instance effect gates.
     pub effect_arming: MaintenanceEffectArming,
-    /// Set only by the one-time compatibility migration when newly available
-    /// show facts could widen an already destructively armed title rule.
-    /// Operators must review and arm the rule again before it can execute.
+    /// The rule was armed when its matcher, action, or scope last changed (or a
+    /// compatibility migration widened what it can match), so it must be
+    /// reviewed and enabled again. Any state change clears it.
     #[serde(default)]
     pub destructive_rearm_required: bool,
     /// Libraries this rule is confined to. Empty means every library.
@@ -5651,6 +5654,15 @@ pub struct MaintenanceRuleSet {
     pub current_revision_number: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl MaintenanceRuleSet {
+    /// What a matcher or scope edit does to arming: an armed rule drops to dry
+    /// run and is flagged for review.
+    pub fn disarm_after_edit(&mut self) {
+        self.destructive_rearm_required |= self.effect_arming != MaintenanceEffectArming::None;
+        self.effect_arming = MaintenanceEffectArming::None;
+    }
 }
 
 /// The rule configuration an operator reviewed before arming deletion.

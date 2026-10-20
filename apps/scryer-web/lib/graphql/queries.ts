@@ -3760,9 +3760,9 @@ export const MAINTENANCE_RULE_SET_FIELDS = `
     id
     name
     description
-    enabled
-    evaluationMode
-    destructiveRearmRequired
+    state
+    enabledArming
+    editedSinceEnabled
     libraryIds
     subjectKind
     currentRevisionNumber
@@ -3800,13 +3800,8 @@ const maintenanceRuleRevisionFieldSelection = `
     createdBy
     createdAt`;
 
-/// The list is the only rule-set document that reads `effectArming`: the field
-/// is not on the shared selection because every mutation payload also embeds
-/// that selection, and arming is refetched from the list after a mutation
-/// rather than read back off it.
 export const maintenanceRuleSetsQuery = `query MaintenanceRuleSets {
   maintenanceRuleSets {${MAINTENANCE_RULE_SET_FIELDS}
-    effectArming
   }
 }`;
 
@@ -3878,12 +3873,10 @@ export const maintenanceActionStepDescriptorsQuery = `query MaintenanceActionSte
   }
 }`;
 
-/// Candidates. This admin surface always passes `includeShadow: true`: with the
-/// result-display gate closed the server otherwise returns nothing, and an
-/// operator deciding whether to open that gate has to see what shadow
-/// evaluation actually found first.
-export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetId: ID, $states: [MaintenanceCandidateState!], $libraryId: ID, $includeShadow: Boolean, $limit: Int) {
-  maintenanceCandidates(ruleSetId: $ruleSetId, states: $states, libraryId: $libraryId, includeShadow: $includeShadow, limit: $limit) {
+/// Candidates, soonest due first. The server returns none while maintenance
+/// is switched off for the instance.
+export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetId: ID, $states: [MaintenanceCandidateState!], $libraryId: ID, $limit: Int) {
+  maintenanceCandidates(ruleSetId: $ruleSetId, states: $states, libraryId: $libraryId, limit: $limit) {
     id
     ruleSetId
     ruleName
@@ -4046,11 +4039,8 @@ export const maintenanceActionRunsQuery = `query MaintenanceActionRuns($ruleSetI
 /// and renders the panel read-locked instead of failing the whole section.
 export const maintenanceInstanceGatesQuery = `query MaintenanceInstanceGates {
   maintenanceInstanceGates {
-    evaluationEnabled
-    resultDisplayEnabled
-    presentationEffectsEnabled
-    reversibleEffectsEnabled
-    destructiveEffectsEnabled
+    enabled
+    actionsPaused
   }
 }`;
 

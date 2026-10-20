@@ -12,13 +12,12 @@ use crate::lib_tests::maintenance_evaluation::InMemoryMaintenanceEvaluationRepo;
 use crate::lib_tests::maintenance_rules::InMemoryMaintenanceRuleRepo;
 use crate::lib_tests::request_rules_support::InMemoryLifecycleClaimRepo;
 use crate::maintenance_rules::{
-    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceGatesUpdate,
-    MaintenancePreviewMatcher, MaintenancePreviewRequest, MaintenancePreviewSelection,
-    MaintenanceRuleDraft, execution_reason,
+    MaintenanceActionKind, MaintenanceActionSpec, MaintenancePreviewMatcher,
+    MaintenancePreviewRequest, MaintenancePreviewSelection, MaintenanceRuleDraft, execution_reason,
 };
 use scryer_domain::{
     LifecycleClaim, LifecycleClaimKind, LifecycleClaimProducer, LifecycleClaimState,
-    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
+    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceRuleState,
 };
 use scryer_rules::maintenance::MaintenanceOutcome;
 
@@ -63,49 +62,29 @@ fn claims_app() -> ClaimFixture {
 }
 
 impl ClaimFixture {
-    async fn rule(&self, draft: MaintenanceRuleDraft, mode: MaintenanceEvaluationMode) -> String {
+    async fn rule(&self, draft: MaintenanceRuleDraft, state: MaintenanceRuleState) -> String {
         let created = self
             .app
             .create_maintenance_rule_set(&self.user, draft)
             .await
             .expect("create rule set");
-        self.app
-            .set_maintenance_rule_evaluation_mode(&self.user, &created.rule_set.id, mode)
-            .await
-            .expect("set mode");
+        super::maintenance_rules::set_rule_state(
+            &self.app,
+            &self.user,
+            &created.rule_set.id,
+            state,
+            None,
+        )
+        .await;
         created.rule_set.id
     }
 
     async fn open_gates(&self, reversible: bool, destructive: bool) {
-        self.app
-            .set_maintenance_instance_gates(
-                &self.user,
-                MaintenanceGatesUpdate {
-                    evaluation_enabled: Some(true),
-                    result_display_enabled: Some(true),
-                    reversible_effects_enabled: Some(reversible),
-                    destructive_effects_enabled: Some(destructive),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("arm gates");
+        super::maintenance_rules::open_maintenance_gates(&self.app, reversible, destructive).await;
     }
 
     async fn arm(&self, rule_set_id: &str, arming: MaintenanceEffectArming, ack: Option<i64>) {
-        let rule = self
-            .app
-            .services
-            .customization
-            .maintenance_rule_sets
-            .get_rule_set(rule_set_id)
-            .await
-            .unwrap()
-            .unwrap();
-        self.app
-            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack, Some((&rule).into()))
-            .await
-            .expect("arm rule");
+        super::maintenance_rules::arm_rule(&self.app, &self.user, rule_set_id, arming, ack).await;
     }
 
     async fn evaluate(&self) -> crate::maintenance_rules::MaintenanceEvaluationReport {
@@ -147,7 +126,6 @@ fn draft(rego_source: &str, kind: MaintenanceActionKind) -> MaintenanceRuleDraft
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -226,7 +204,7 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -330,7 +308,7 @@ async fn destructive_execution_reads_claims_under_the_approval_guard() {
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -411,7 +389,7 @@ async fn an_unreadable_claim_store_holds_a_destructive_action() {
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -452,7 +430,7 @@ async fn a_live_lease_does_not_hold_a_reversible_action() {
                 ALWAYS_MATCHER,
                 MaintenanceActionKind::UnmonitorScopeKeepFiles,
             ),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, false).await;
@@ -491,7 +469,7 @@ async fn the_shipped_template_matches_an_expired_lease_with_no_keep() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -514,7 +492,7 @@ async fn the_shipped_template_spares_a_title_with_a_keep_claim() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -541,7 +519,7 @@ async fn the_shipped_template_spares_a_title_whose_lease_is_still_running() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -566,7 +544,7 @@ async fn an_unreadable_claim_store_holds_a_rule_that_reads_a_lease_fact() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;

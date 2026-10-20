@@ -1639,20 +1639,10 @@ impl MaintenanceRuleSetRepository for NullMaintenanceRuleSetRepository {
             "maintenance rule repository is not configured".to_string(),
         ))
     }
-    async fn update_rule_set_evaluation_mode(
+    async fn update_rule_set_state(
         &self,
         _id: &str,
         _mode: scryer_domain::MaintenanceEvaluationMode,
-        _enabled: bool,
-        _updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
-        Err(AppError::Repository(
-            "maintenance rule repository is not configured".to_string(),
-        ))
-    }
-    async fn update_rule_set_arming(
-        &self,
-        _id: &str,
         _arming: scryer_domain::MaintenanceEffectArming,
         _confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         _updated_at: DateTime<Utc>,

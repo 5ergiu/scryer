@@ -139,9 +139,6 @@ impl MaintenanceRuleMutations {
                     grace_days: grace_days(input.grace_days),
                     storage_root_id: input.storage_root_id,
                     library_ids: input.library_ids.unwrap_or_default(),
-                    // Maintenance rules ship dark: the service accepts only the
-                    // disabled mode, so the client never chooses one.
-                    evaluation_mode: None,
                 },
             )
             .await
@@ -295,62 +292,37 @@ impl MaintenanceRuleMutations {
         Ok(crate::mappers::from_maintenance_preview_result(result))
     }
 
-    /// Move a maintenance rule set between evaluation modes.
+    /// Set a maintenance rule to Disabled, Dry run, or Enabled.
     ///
-    /// Creation always produces a disabled rule, so arming one is always this
-    /// deliberate second step. A rule moved back to disabled keeps the
-    /// candidates it already opened: flipping a rule off must not destroy the
-    /// membership and grace clocks it established.
-    async fn set_maintenance_rule_mode(
+    /// Enabled arms the effects the rule's own action can have. Enabling a rule
+    /// that can delete files requires a confirmation of the reviewed revision,
+    /// library scope, and current candidate count. A rule moved back to
+    /// Disabled keeps the candidates it already opened.
+    async fn set_maintenance_rule_state(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Rule-set identity and the evaluation mode to store.")]
-        input: SetMaintenanceRuleModeInput,
+        #[graphql(desc = "Rule-set ID.")] rule_set_id: ID,
+        #[graphql(desc = "The state to store.")] state: MaintenanceRuleState,
+        #[graphql(desc = "Required when enabling a rule that can delete files.")]
+        confirmation: Option<MaintenanceRuleArmingConfirmationInput>,
     ) -> GqlResult<MaintenanceRuleSet> {
         let app = app_from_ctx(ctx)?;
         let actor =
             require_config_app_permission(ctx, AppPermission::ManageCatalogSettings).await?;
 
+        let candidate_count = confirmation
+            .as_ref()
+            .map(|reviewed| i64::from(reviewed.candidate_count));
         let detail = app
-            .set_maintenance_rule_evaluation_mode(
+            .set_maintenance_rule_state(
                 &actor,
-                input.id.as_ref(),
-                crate::mappers::maintenance_evaluation_mode_into_application(input.mode),
-            )
-            .await
-            .map_err(to_gql_error)?;
-
-        Ok(crate::mappers::from_maintenance_rule_set(&detail))
-    }
-
-    /// Set how far one rule set's effects are armed. Destructive arming requires acknowledging the rule's current candidate count.
-    async fn set_maintenance_rule_arming(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(
-            desc = "Rule-set identity, the arming level, and the acknowledged candidate count for destructive arming."
-        )]
-        input: SetMaintenanceRuleArmingInput,
-    ) -> GqlResult<MaintenanceRuleSet> {
-        let app = app_from_ctx(ctx)?;
-        let actor =
-            require_config_app_permission(ctx, AppPermission::ManageCatalogSettings).await?;
-
-        let detail = app
-            .set_maintenance_rule_arming(
-                &actor,
-                input.id.as_ref(),
-                crate::mappers::maintenance_effect_arming_into_application(input.arming),
-                input.acknowledged_candidate_count.map(i64::from),
-                input
-                    .acknowledged_revision_number
-                    .zip(input.acknowledged_library_ids)
-                    .map(|(revision_number, library_ids)| {
-                        scryer_domain::MaintenanceRuleArmingConfirmation {
-                            revision_number: i64::from(revision_number),
-                            library_ids: library_ids.into_iter().map(|id| id.to_string()).collect(),
-                        }
-                    }),
+                rule_set_id.as_ref(),
+                crate::mappers::maintenance_rule_state_into_application(state),
+                confirmation.map(|reviewed| scryer_domain::MaintenanceRuleArmingConfirmation {
+                    revision_number: i64::from(reviewed.revision_number),
+                    library_ids: reviewed.library_ids.into_iter().map(|id| id.to_string()).collect(),
+                }),
+                candidate_count,
             )
             .await
             .map_err(to_gql_error)?;
@@ -378,11 +350,11 @@ impl MaintenanceRuleMutations {
         })
     }
 
-    /// Arm or disarm the instance-wide maintenance gates. Omitted fields keep their stored value.
+    /// Set the instance-wide maintenance switches. Omitted fields keep their stored value.
     async fn set_maintenance_instance_gates(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The gates to change; omit a field to leave that gate alone.")]
+        #[graphql(desc = "The switches to change; omit a field to leave that switch alone.")]
         input: SetMaintenanceInstanceGatesInput,
     ) -> GqlResult<MaintenanceInstanceGates> {
         let app = app_from_ctx(ctx)?;
@@ -392,11 +364,8 @@ impl MaintenanceRuleMutations {
             .set_maintenance_instance_gates(
                 &actor,
                 scryer_application::maintenance_rules::MaintenanceGatesUpdate {
-                    evaluation_enabled: input.evaluation_enabled,
-                    result_display_enabled: input.result_display_enabled,
-                    presentation_effects_enabled: input.presentation_effects_enabled,
-                    reversible_effects_enabled: input.reversible_effects_enabled,
-                    destructive_effects_enabled: input.destructive_effects_enabled,
+                    enabled: input.enabled,
+                    actions_paused: input.actions_paused,
                 },
             )
             .await

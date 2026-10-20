@@ -3,17 +3,18 @@ use chrono::{DateTime, Utc};
 
 // ── Enums ──────────────────────────────────────────────────────────────────
 
-/// How a maintenance rule set is evaluated.
+/// The one control of a maintenance rule set.
 #[derive(Enum, Copy, Clone, Debug, Eq, PartialEq)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
-pub enum MaintenanceEvaluationMode {
+pub enum MaintenanceRuleState {
     /// Stored but never evaluated. A disabled rule opens no candidates and runs
-    /// no actions, and it is the mode every new rule set is created in.
+    /// no actions, and it is the state every new rule set is created in.
     Disabled,
     /// Evaluate and record candidates, never act.
-    Shadow,
-    /// Evaluate, record, and surface candidates for manual approval.
-    Observe,
+    DryRun,
+    /// Evaluate and act on due candidates with the effects the rule's own
+    /// action can have, while the instance does not pause actions.
+    Enabled,
 }
 
 /// Granularity a maintenance rule set is scoped to.
@@ -28,8 +29,7 @@ pub enum MaintenanceRuleSubjectKind {
     Episode,
 }
 
-/// How far a rule set's effects are armed. Arming is per rule and independent
-/// of the instance effect gates; an action executes only when both permit it.
+/// The class of effects a rule's action can have.
 #[derive(Enum, Copy, Clone, Debug, Eq, PartialEq)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
 pub enum MaintenanceEffectArming {
@@ -161,17 +161,14 @@ pub struct MaintenanceRuleSet {
     pub name: String,
     /// Rule-set description; empty when the author supplied none.
     pub description: String,
-    /// Whether the rule set is enabled. Derived from `evaluationMode` rather
-    /// than set independently: false for `DISABLED`, true for `SHADOW` and
-    /// `OBSERVE`.
-    pub enabled: bool,
-    /// Evaluation mode currently stored for the rule set.
-    pub evaluation_mode: MaintenanceEvaluationMode,
-    /// How far this rule's effects are armed, independent of its mode.
-    pub effect_arming: MaintenanceEffectArming,
-    /// This rule was disarmed because new show facts can change its destructive
-    /// title matches. Review the matcher and arm it again to acknowledge them.
-    pub destructive_rearm_required: bool,
+    /// Disabled, dry run, or enabled.
+    pub state: MaintenanceRuleState,
+    /// What enabling this rule arms. `DESTRUCTIVE` means enabling it requires
+    /// the candidate-count confirmation.
+    pub enabled_arming: MaintenanceEffectArming,
+    /// The rule was enabled when its matcher, action, or scope last changed, so
+    /// it fell back to dry run. Review its candidates and enable it again.
+    pub edited_since_enabled: bool,
     /// Libraries the rule is confined to. Empty means every library.
     pub library_ids: Vec<String>,
     /// Granularity the rule is scoped to.
@@ -602,36 +599,21 @@ pub struct MaintenanceEvaluationRun {
     pub error: Option<String>,
 }
 
-/// The five independent instance-wide maintenance gates. Every one of them
-/// defaults off, an unconfigured instance therefore evaluates nothing and acts
-/// on nothing, and each gate is read at the start of every scheduled pass so a
-/// change takes effect on the next run without a restart.
+/// The two instance-wide maintenance switches. An unconfigured instance has
+/// maintenance off and actions paused, and both are read at the start of every
+/// scheduled pass so a change takes effect on the next run without a restart.
 ///
-/// A gate is only ever the instance half of a permission. Executing an action
-/// additionally requires the individual rule to be in `OBSERVE` mode and armed
-/// for that action's risk class, so opening a gate cannot by itself start
-/// anything.
+/// A switch is only ever the instance half of a permission. Executing an action
+/// additionally requires the individual rule to be `ENABLED`, so unpausing
+/// actions cannot by itself start anything.
 #[derive(SimpleObject, Clone, Copy)]
 pub struct MaintenanceInstanceGates {
-    /// Whether the scheduled evaluator may run at all. While this is off no rule
-    /// is evaluated, no candidate is opened or closed, and no evaluation run is
-    /// recorded.
-    pub evaluation_enabled: bool,
-    /// Whether candidate results are returned to clients.
-    pub result_display_enabled: bool,
-    /// Reserved for provider collection projection and lifecycle notifications.
-    /// Nothing reads it yet.
-    pub presentation_effects_enabled: bool,
-    /// Whether low and medium risk actions may execute, such as unmonitoring a
-    /// title or changing its quality profile. A rule armed as `REVERSIBLE` or
-    /// `DESTRUCTIVE` starts running those actions on its due candidates while
-    /// this is on.
-    pub reversible_effects_enabled: bool,
-    /// Whether high risk actions may execute, meaning the ones that delete media
-    /// files. Turning this on lets every rule already armed as `DESTRUCTIVE`
-    /// begin deleting its due candidates on the next handler pass, without any
-    /// further confirmation.
-    pub destructive_effects_enabled: bool,
+    /// Whether rules are evaluated and their candidates shown. While this is
+    /// off no rule is evaluated and no candidate is opened or closed.
+    pub enabled: bool,
+    /// Whether every action is paused. While this is off, enabled rules act on
+    /// their due candidates, including deleting files for rules that do so.
+    pub actions_paused: bool,
 }
 
 /// A subject a maintenance rule must never act on.
@@ -834,51 +816,29 @@ pub struct UpdateMaintenanceRuleMetadataInput {
     pub library_ids: Option<Vec<String>>,
 }
 
-/// Moves a rule set between evaluation modes.
+/// What the operator reviewed before enabling a rule that can delete files.
 #[derive(InputObject)]
-pub struct SetMaintenanceRuleModeInput {
-    /// Rule-set ID.
-    pub id: ID,
-    /// Mode to store. Anything other than `DISABLED` also enables the rule.
-    pub mode: MaintenanceEvaluationMode,
+pub struct MaintenanceRuleArmingConfirmationInput {
+    /// The reviewed matcher/action revision.
+    pub revision_number: i32,
+    /// The reviewed library scope. An empty list explicitly acknowledges all
+    /// libraries.
+    pub library_ids: Vec<ID>,
+    /// The candidate count the operator saw; must equal the rule's current
+    /// non-terminal count.
+    pub candidate_count: i32,
 }
 
-/// Sets how far one rule set's effects are armed.
-#[derive(InputObject)]
-pub struct SetMaintenanceRuleArmingInput {
-    /// Rule-set ID.
-    pub id: ID,
-    /// Arming level to store. `DESTRUCTIVE` requires acknowledging the rule's
-    /// current candidate count and applies only to high-risk actions.
-    pub arming: MaintenanceEffectArming,
-    /// The candidate count the operator saw and acknowledged; required for
-    /// `DESTRUCTIVE` and must equal the rule's current non-terminal count.
-    pub acknowledged_candidate_count: Option<i32>,
-    /// The reviewed matcher/action revision; required for `DESTRUCTIVE`.
-    pub acknowledged_revision_number: Option<i32>,
-    /// The reviewed library scope; required for `DESTRUCTIVE`. An empty list
-    /// explicitly acknowledges all libraries; omission is not confirmation.
-    pub acknowledged_library_ids: Option<Vec<ID>>,
-}
-
-/// Arms or disarms the instance-wide maintenance gates. An omitted field leaves
-/// that gate exactly as stored.
+/// Sets the instance-wide maintenance switches. An omitted field leaves that
+/// switch exactly as stored.
 #[derive(InputObject)]
 pub struct SetMaintenanceInstanceGatesInput {
-    /// Whether the scheduled evaluator may run.
-    pub evaluation_enabled: Option<bool>,
-    /// Whether candidate results are returned to clients.
-    pub result_display_enabled: Option<bool>,
-    /// Reserved for provider collection projection and lifecycle notifications.
-    /// Nothing reads it yet.
-    pub presentation_effects_enabled: Option<bool>,
-    /// Whether low and medium risk actions may execute for rules that are armed
-    /// and in `OBSERVE` mode.
-    pub reversible_effects_enabled: Option<bool>,
-    /// Whether high risk actions may execute. Setting this to true lets every
-    /// rule already armed as `DESTRUCTIVE` begin deleting media files on the
-    /// next handler pass.
-    pub destructive_effects_enabled: Option<bool>,
+    /// Whether rules are evaluated and their candidates shown.
+    pub enabled: Option<bool>,
+    /// Whether every action is paused. Setting this to false lets every rule
+    /// that is already `ENABLED` begin acting, including deleting media files,
+    /// on the next handler pass.
+    pub actions_paused: Option<bool>,
 }
 
 /// Excludes one subject from maintenance rules.

@@ -1261,41 +1261,51 @@ async fn deleting_a_rule_set_takes_its_candidates_runs_and_exclusions_with_it() 
 }
 
 #[tokio::test]
-async fn evaluation_mode_and_enabled_move_together() {
+async fn a_state_write_moves_mode_enabled_and_arming_together() {
     let (services, db) = temp_services("scryer_maintenance_rule_mode").await;
     seed_rule_set(&services, "rule-a").await;
     let rules = crate::MaintenanceRuleSetStore::new(services.datastore());
 
-    rules
-        .update_rule_set_evaluation_mode(
-            "rule-a",
-            MaintenanceEvaluationMode::Shadow,
-            true,
-            Utc::now(),
-        )
-        .await
-        .expect("arm rule");
+    assert!(
+        rules
+            .update_rule_set_state(
+                "rule-a",
+                MaintenanceEvaluationMode::Observe,
+                scryer_domain::MaintenanceEffectArming::Reversible,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("enable rule")
+    );
     let armed = rules
         .get_rule_set("rule-a")
         .await
         .expect("read")
         .expect("exists");
-    assert_eq!(armed.evaluation_mode, MaintenanceEvaluationMode::Shadow);
+    assert_eq!(armed.evaluation_mode, MaintenanceEvaluationMode::Observe);
     assert!(armed.enabled);
     assert_eq!(
+        armed.effect_arming,
+        scryer_domain::MaintenanceEffectArming::Reversible
+    );
+    assert_eq!(
         armed.current_revision_number, 1,
-        "a mode change never appends a revision"
+        "a state change never appends a revision"
     );
 
-    rules
-        .update_rule_set_evaluation_mode(
-            "rule-a",
-            MaintenanceEvaluationMode::Disabled,
-            false,
-            Utc::now(),
-        )
-        .await
-        .expect("disarm rule");
+    assert!(
+        rules
+            .update_rule_set_state(
+                "rule-a",
+                MaintenanceEvaluationMode::Disabled,
+                scryer_domain::MaintenanceEffectArming::None,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("disable rule")
+    );
     let disarmed = rules
         .get_rule_set("rule-a")
         .await
@@ -1306,6 +1316,23 @@ async fn evaluation_mode_and_enabled_move_together() {
         MaintenanceEvaluationMode::Disabled
     );
     assert!(!disarmed.enabled);
+    assert_eq!(
+        disarmed.effect_arming,
+        scryer_domain::MaintenanceEffectArming::None
+    );
+    assert!(
+        !rules
+            .update_rule_set_state(
+                "absent",
+                MaintenanceEvaluationMode::Observe,
+                scryer_domain::MaintenanceEffectArming::None,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("missing rule"),
+        "a missing rule reports no write"
+    );
 
     let _ = std::fs::remove_file(db);
 }
@@ -1926,8 +1953,9 @@ async fn effect_arming_and_attempts_round_trip() {
     let now = Utc::now();
 
     rules
-        .update_rule_set_arming(
+        .update_rule_set_state(
             "rule-a",
+            scryer_domain::MaintenanceEvaluationMode::Observe,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(&scryer_domain::MaintenanceRuleArmingConfirmation::from(
                 &rules.get_rule_set("rule-a").await.unwrap().unwrap(),

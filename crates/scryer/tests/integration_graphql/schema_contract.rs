@@ -816,8 +816,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // `linkListAccountWithKey`: 271->272.
     // Abandoning an account link the member walked away from adds
     // `cancelListAccountLink`: 272->273.
+    // One maintenance rule state mutation replaces the separate mode and
+    // arming mutations: 275->274.
     assert_eq!(
-        mutation_field_count, 275,
+        mutation_field_count, 274,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1153,9 +1155,12 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     }
     assert!(mutation_field_names.contains(&"refreshFileScores"));
     assert!(mutation_field_names.contains(&"cancelFileScoreRefresh"));
-    assert_eq!(public_types.len(), 971);
+    // The rule state enum replaces the evaluation mode enum, and one
+    // confirmation input replaces the mode and arming inputs: public types
+    // 971->970, INPUT_OBJECT 240->239.
+    assert_eq!(public_types.len(), 970);
     assert_eq!(kind_count("OBJECT"), 524);
-    assert_eq!(kind_count("INPUT_OBJECT"), 240);
+    assert_eq!(kind_count("INPUT_OBJECT"), 239);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
@@ -1324,7 +1329,8 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     assert!(query_field_names.contains(&"maintenanceEvaluationRuns"));
     assert!(query_field_names.contains(&"maintenanceInstanceGates"));
     assert!(query_field_names.contains(&"maintenanceExclusions"));
-    assert!(mutation_field_names.contains(&"setMaintenanceRuleMode"));
+    assert!(mutation_field_names.contains(&"setMaintenanceRuleState"));
+    assert!(!mutation_field_names.contains(&"setMaintenanceRuleMode"));
     assert!(mutation_field_names.contains(&"setMaintenanceInstanceGates"));
     assert!(mutation_field_names.contains(&"excludeMaintenanceSubject"));
     assert!(mutation_field_names.contains(&"removeMaintenanceExclusion"));
@@ -1339,11 +1345,14 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
 
     // The maintenance action-executor contract the same web wave binds to.
     assert!(query_field_names.contains(&"maintenanceActionRuns"));
-    assert!(mutation_field_names.contains(&"setMaintenanceRuleArming"));
+    assert!(!mutation_field_names.contains(&"setMaintenanceRuleArming"));
+    assert!(public_type_names.contains(&"MaintenanceRuleState"));
+    assert!(public_type_names.contains(&"MaintenanceRuleArmingConfirmationInput"));
+    assert!(!public_type_names.contains(&"MaintenanceEvaluationMode"));
     assert!(mutation_field_names.contains(&"runMaintenanceActionHandlerNow"));
     assert!(public_type_names.contains(&"MaintenanceActionRun"));
     assert!(public_type_names.contains(&"MaintenanceEffectArming"));
-    assert!(public_type_names.contains(&"SetMaintenanceRuleArmingInput"));
+    assert!(!public_type_names.contains(&"SetMaintenanceRuleArmingInput"));
 
     // 0.17.0 API surface trim (root wave): dead root fields and their
     // exclusive snapshot payload types are gone.

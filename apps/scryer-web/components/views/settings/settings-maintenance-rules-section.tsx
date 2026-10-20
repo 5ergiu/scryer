@@ -3,12 +3,10 @@ import { formatBytes } from "@/lib/utils/activity-utils";
 import * as React from "react";
 import { MaintenanceSubjectPicker } from "@/components/common/maintenance-subject-picker";
 import {
-  AlertTriangle,
   BookOpen,
   ChevronDown,
   Copy,
   Edit,
-  Info,
   Plus,
   Sparkles,
   Trash2,
@@ -44,12 +42,8 @@ import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import { formatUiDateTime } from "@/lib/utils/date-format";
 import { useTranslate } from "@/lib/context/translate-context";
 import type {
-  MaintenanceActionDescriptor,
   MaintenanceActionSequence,
   MaintenanceActionStepDescriptor,
-  MaintenanceEffectArming,
-  MaintenanceEvaluationMode,
-  MaintenanceInstanceGates,
   MaintenancePreviewResult,
   MaintenancePreviewSource,
   MaintenancePreviewTitle,
@@ -57,21 +51,18 @@ import type {
   MaintenanceTestSubject,
   MaintenanceRuleSetDraft,
   MaintenanceRuleSetRecord,
+  MaintenanceRuleState,
   MaintenanceValidationResult,
 } from "@/lib/types/maintenance-rule-sets";
 import {
   MAINTENANCE_PREVIEW_LIMIT_MAX,
   actionKindLabelKey,
   actionStepKindLabelKey,
-  armingOptionsFor,
-  effectArmingBadgeTone,
-  effectArmingLabelKey,
-  evaluationModeHelpKey,
-  evaluationModeLabelKey,
-  maintenanceStatusBanner,
-  maintenanceStatusBannerKeys,
   previewOutcomeBadgeTone,
   previewOutcomeLabelKey,
+  ruleStateHelpKey,
+  ruleStateLabelKey,
+  ruleStateOptionsFor,
 } from "@/lib/utils/maintenance-rule-sets";
 import { selectorId } from "@/lib/utils/dom-ids";
 
@@ -82,12 +73,6 @@ export type MaintenanceStorageRootOption = {
   path: string;
   libraryName: string;
 };
-
-const EVALUATION_MODE_OPTIONS: MaintenanceEvaluationMode[] = [
-  "DISABLED",
-  "SHADOW",
-  "OBSERVE",
-];
 
 type SettingsMaintenanceRulesSectionProps = {
   isEditorOpen: boolean;
@@ -102,7 +87,6 @@ type SettingsMaintenanceRulesSectionProps = {
   /// here: the container prefills the draft and the operator still saves it.
   applyTemplate: (template: MaintenanceRuleTemplate) => void;
   ruleSetRecords: MaintenanceRuleSetRecord[];
-  actionDescriptors: MaintenanceActionDescriptor[];
   actionStepDescriptors: MaintenanceActionStepDescriptor[];
   actionStepDescriptorsLoaded: boolean;
   libraries: MaintenanceLibraryOption[];
@@ -126,11 +110,10 @@ type SettingsMaintenanceRulesSectionProps = {
   previewing: boolean;
   previewResult: MaintenancePreviewResult | null;
   previewError: string | null;
-  /// Null when the gates query was refused, which on this page means the reader
-  /// is not a system administrator and cannot see the instance state at all.
-  gates: MaintenanceInstanceGates | null;
-  setRuleMode: (record: MaintenanceRuleSetRecord, mode: MaintenanceEvaluationMode) => void;
-  setRuleArming: (record: MaintenanceRuleSetRecord, arming: MaintenanceEffectArming) => void;
+  /// The two instance-wide switches, rendered by the container above every
+  /// pane so what the instance may do is never scrolled past.
+  instanceSwitches: React.ReactNode;
+  setRuleState: (record: MaintenanceRuleSetRecord, state: MaintenanceRuleState) => void;
   /// Which pane of the maintenance gutter is open. Only the rule list wants the
   /// editor, the preview and the reference rail; the operational panes are a
   /// single panel each and read better across the full width.
@@ -144,52 +127,6 @@ type SettingsMaintenanceRulesSectionProps = {
 type RefField = { field: string; type: string; descKey: string };
 type RefSectionDef = { titleKey: string; path: string; fields: RefField[] };
 const REF_SECTIONS = maintenanceInputContract.sections as RefSectionDef[];
-
-/// What this instance will actually do with these rules right now. This used to
-/// be a permanent "nothing runs yet" notice; the pipeline is live, so the line
-/// is derived from the instance gates and the rules' own modes instead, and it
-/// stays above the list where it cannot be scrolled past.
-function MaintenanceStatusBanner({
-  gates,
-  ruleSetRecords,
-}: {
-  gates: MaintenanceInstanceGates | null;
-  ruleSetRecords: MaintenanceRuleSetRecord[];
-}) {
-  const t = useTranslate();
-  const { variant, tone } = maintenanceStatusBanner(gates, ruleSetRecords);
-  const { titleKey, bodyKey } = maintenanceStatusBannerKeys(variant);
-  const warning = tone === "warning";
-  const Icon = warning ? AlertTriangle : Info;
-
-  return (
-    <div
-      id="settings-maintenance-rules-status-notice"
-      data-maintenance-status={variant}
-      className={`flex items-start gap-2.5 rounded border px-3 py-2.5 ${
-        warning
-          ? "border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] text-[var(--scry-warning-text)]"
-          : "border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] text-[var(--scry-info-text)]"
-      }`}
-    >
-      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="space-y-1">
-        <p className="font-semibold">{t(titleKey)}</p>
-        <p className="text-[13px] leading-5">{t(bodyKey)}</p>
-      </div>
-    </div>
-  );
-}
-
-function ArmingBadge({ arming }: { arming: string }) {
-  const t = useTranslate();
-  const labelKey = effectArmingLabelKey(arming);
-  return (
-    <Badge tone={effectArmingBadgeTone(arming)}>
-      {labelKey ? t(labelKey) : arming}
-    </Badge>
-  );
-}
 
 function ActionLabel({ kind }: { kind: string }) {
   const t = useTranslate();
@@ -795,7 +732,6 @@ export function SettingsMaintenanceRulesSection({
   startCreateRuleSet,
   applyTemplate,
   ruleSetRecords,
-  actionDescriptors,
   actionStepDescriptors,
   actionStepDescriptorsLoaded,
   libraries,
@@ -807,24 +743,23 @@ export function SettingsMaintenanceRulesSection({
   validateDraft,
   validating,
   validationResult,
-  gates,
-  setRuleMode,
-  setRuleArming,
+  instanceSwitches,
+  setRuleState,
   section,
   operationsPanels,
   ...previewProps
 }: SettingsMaintenanceRulesSectionProps) {
   const t = useTranslate();
 
-  // Candidates, history and gates are one panel each. They keep the status
-  // banner, because what the instance is allowed to do explains every row they
-  // show, but they get the full column: there is no editor to sit beside and no
-  // rule being written for the reference rail to describe.
+  // Candidates and history are one pane each. They keep the instance switches,
+  // because what the instance is allowed to do explains every row they show,
+  // but they get the full column: there is no editor to sit beside and no rule
+  // being written for the reference rail to describe.
   if (section !== "rules") {
     return (
       <div id="settings-maintenance-rules-section" className="space-y-4 text-sm">
         <div className="mx-auto w-full max-w-[1600px] space-y-4">
-          <MaintenanceStatusBanner gates={gates} ruleSetRecords={ruleSetRecords} />
+          {instanceSwitches}
           {operationsPanels}
         </div>
       </div>
@@ -836,10 +771,7 @@ export function SettingsMaintenanceRulesSection({
       <div className="mx-auto flex w-full max-w-[2176px] flex-col gap-4 2xl:flex-row 2xl:items-start">
         <div className="min-w-0 basis-[900px] flex-1">
           <div className="mx-auto w-full max-w-[1280px] space-y-4">
-            <MaintenanceStatusBanner
-              gates={gates}
-              ruleSetRecords={ruleSetRecords}
-            />
+            {instanceSwitches}
 
             <div className="overflow-hidden rounded border border-border bg-card">
               <div className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -863,11 +795,8 @@ export function SettingsMaintenanceRulesSection({
                       <TableHead className="text-center">
                         {t("settings.maintenanceRuleGraceDays")}
                       </TableHead>
-                      <TableHead className="w-[190px]">
-                        {t("settings.maintenanceRuleMode")}
-                      </TableHead>
-                      <TableHead className="w-[210px]">
-                        {t("settings.maintenanceRuleArming")}
+                      <TableHead className="w-[240px]">
+                        {t("settings.maintenanceRuleState")}
                       </TableHead>
                       <TableHead className="text-center">
                         {t("settings.maintenanceRuleRevision")}
@@ -879,18 +808,7 @@ export function SettingsMaintenanceRulesSection({
                   </TableHeader>
                   <TableBody>
                     {ruleSetRecords.map((record) => {
-                      const sequenceAllowsFileDeletion =
-                        record.actionSequence?.steps.some((step) =>
-                          actionStepDescriptors
-                            .find((descriptor) => descriptor.kind === step.kind)
-                            ?.effectClasses.includes("DELETE_FILES"),
-                        ) ?? false;
-                      const modeHelpKey = evaluationModeHelpKey(record.evaluationMode);
-                      const armingOptions = record.actionSequence
-                        ? sequenceAllowsFileDeletion
-                          ? ["NONE", "REVERSIBLE", "DESTRUCTIVE"]
-                          : ["NONE", "REVERSIBLE"]
-                        : armingOptionsFor(actionDescriptors, record.actionSpec.kind);
+                      const stateHelpKey = ruleStateHelpKey(record.state);
                       return (
                         <TableRow
                           data-ui="settings-table-row"
@@ -921,57 +839,39 @@ export function SettingsMaintenanceRulesSection({
                             <div className="space-y-1">
                               <SingleSelectField
                                 id={selectorId(
-                                  "settings-maintenance-rule-mode",
+                                  "settings-maintenance-rule-state",
                                   record.id,
                                 )}
                                 size="sm"
-                                value={record.evaluationMode}
+                                value={record.state}
+                                disabled={mutatingRuleSetId === record.id}
                                 onValueChange={(value) =>
-                                  setRuleMode(
-                                    record,
-                                    value as MaintenanceEvaluationMode,
-                                  )
+                                  setRuleState(record, value as MaintenanceRuleState)
                                 }
-                                options={EVALUATION_MODE_OPTIONS.map((mode) => {
-                                  const key = evaluationModeLabelKey(mode);
+                                options={ruleStateOptionsFor(record).map((state) => {
+                                  const key = ruleStateLabelKey(state);
                                   return {
-                                    value: mode,
-                                    label: key ? t(key) : mode,
+                                    value: state,
+                                    ariaLabel: state,
+                                    label: key ? t(key) : state,
                                   };
                                 })}
                               />
-                              {modeHelpKey ? (
+                              {record.editedSinceEnabled ? (
+                                <p
+                                  id={selectorId(
+                                    "settings-maintenance-rule-edited-since-enabled",
+                                    record.id,
+                                  )}
+                                  className="rounded border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-2 py-1 text-xs text-[var(--scry-warning-text)]"
+                                >
+                                  {t("settings.maintenanceRuleEditedSinceEnabled")}
+                                </p>
+                              ) : stateHelpKey ? (
                                 <p className="text-xs text-muted-foreground">
-                                  {t(modeHelpKey)}
+                                  {t(stateHelpKey)}
                                 </p>
                               ) : null}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="space-y-1">
-                              <SingleSelectField
-                                id={selectorId(
-                                  "settings-maintenance-rule-arming",
-                                  record.id,
-                                )}
-                                size="sm"
-                                value={record.effectArming}
-                                onValueChange={(value) =>
-                                  setRuleArming(
-                                    record,
-                                    value as MaintenanceEffectArming,
-                                  )
-                                }
-                                options={armingOptions.map((arming) => {
-                                  const key = effectArmingLabelKey(arming);
-                                  return {
-                                    value: arming,
-                                    ariaLabel: arming,
-                                    label: key ? t(key) : arming,
-                                  };
-                                })}
-                              />
-                              <ArmingBadge arming={record.effectArming} />
                             </div>
                           </TableCell>
                           <TableCell className="text-center">
@@ -1029,7 +929,7 @@ export function SettingsMaintenanceRulesSection({
                 </Table>
               </div>
               <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-                {t("settings.maintenanceRuleArmingHelp")}
+                {t("settings.maintenanceRuleStateHelp")}
               </p>
             </div>
 
