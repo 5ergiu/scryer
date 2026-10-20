@@ -50,25 +50,29 @@ async fn movie_defaults_remain_inherited_and_reject_unassigned_markets() {
     assert_eq!(inherited.min_availability, None);
     assert_eq!(explicit.min_availability.as_deref(), Some("in_cinemas"));
 
-    let mut settings = app.get_acquisition_settings(&user).await.unwrap();
-    for market in ["AA", "ZZ", "UK", "USA", "1A", ""] {
-        settings.movie_release_market = market.into();
+    for market in ["AA", "ZZ", "UK", "USA", "1A"] {
         assert!(
             matches!(
-                app.update_acquisition_settings(&user, settings.clone())
-                    .await,
+                app.update_media_settings(
+                    &user,
+                    MediaFacet::Movie,
+                    movie_availability_update(None, Some(market), None),
+                )
+                .await,
                 Err(AppError::Validation(_))
             ),
             "{market}"
         );
     }
-    settings.movie_release_market = " gb ".into();
-    settings.default_movie_availability = "announced".into();
     let saved = app
-        .update_acquisition_settings(&user, settings)
+        .update_media_settings(
+            &user,
+            MediaFacet::Movie,
+            movie_availability_update(Some("announced"), Some(" gb "), None),
+        )
         .await
         .unwrap();
-    assert_eq!(saved.movie_release_market, "GB");
+    assert_eq!(saved.movie_availability.unwrap().release_market, "GB");
     assert_eq!(
         app.get_movie_availability_for_title(&user, &inherited.id)
             .await
@@ -124,11 +128,13 @@ async fn in_flight_movie_hydration_preserves_a_changed_market_refresh() {
         });
         within_deadline("the movie request to start", entered.notified()).await;
         if change_market {
-            let mut settings = app.get_acquisition_settings(&user).await.unwrap();
-            settings.movie_release_market = "GB".into();
-            app.update_acquisition_settings(&user, settings)
-                .await
-                .unwrap();
+            app.update_media_settings(
+                &user,
+                MediaFacet::Movie,
+                movie_availability_update(None, Some("GB"), None),
+            )
+            .await
+            .unwrap();
         }
         // The settings refresh must precede the old response's metadata write.
         app.services
@@ -161,6 +167,152 @@ async fn in_flight_movie_hydration_preserves_a_changed_market_refresh() {
             .unwrap()
             .unwrap();
         assert_eq!(persisted.movie_release_dates.unwrap().market, "US");
+    }
+}
+
+/// The effective threshold is the title's own, then its library's override,
+/// then the Movie facet's; the market and delay come from the library or the
+/// facet. A change to the market a library uses marks its movies for
+/// rehydration.
+#[tokio::test]
+async fn movie_availability_resolves_title_then_library_then_facet() {
+    let gateway = Arc::new(MovieTitleResolutionGateway::default());
+    let (app, user, titles) = bootstrap_with_metadata_gateway_and_titles(gateway);
+    let inherited = app
+        .add_title_with_outcome(&user, hydration_test_title("Inherits Gate", 991011))
+        .await
+        .unwrap()
+        .title;
+    let mut explicit_request = hydration_test_title("Own Gate", 991012);
+    explicit_request.min_availability = Some("released".into());
+    let explicit = app
+        .add_title_with_outcome(&user, explicit_request)
+        .await
+        .unwrap()
+        .title;
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    assert_eq!(inherited.library_id, library_id);
+    let projection = |title_id: String| {
+        let app = app.clone();
+        let user = user.clone();
+        async move {
+            let projection = app
+                .get_movie_availability_for_title(&user, &title_id)
+                .await
+                .unwrap()
+                .unwrap();
+            (projection.minimum_availability, projection.release_market)
+        }
+    };
+    let due = |title_id: String| {
+        let titles = titles.clone();
+        async move {
+            titles
+                .metadata_hydration_due
+                .lock()
+                .await
+                .contains(&title_id)
+        }
+    };
+
+    app.update_media_settings(
+        &user,
+        MediaFacet::Movie,
+        movie_availability_update(Some("in_cinemas"), Some("DE"), Some(3)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        projection(inherited.id.clone()).await,
+        ("in_cinemas".to_string(), "DE".to_string())
+    );
+    assert_eq!(
+        projection(explicit.id.clone()).await,
+        ("released".to_string(), "DE".to_string())
+    );
+    assert!(due(inherited.id.clone()).await, "the facet market changed");
+
+    titles.metadata_hydration_due.lock().await.clear();
+    let mut overrides = empty_library_settings_override();
+    overrides.movie_availability = MovieAvailabilityOverrides {
+        default_availability: Some("announced".into()),
+        release_market: Some("GB".into()),
+        delay_days: None,
+    };
+    let library = app
+        .update_library_settings(&user, &library_id, overrides)
+        .await
+        .unwrap();
+    assert_eq!(
+        library.movie_availability,
+        Some(MovieAvailabilitySettings {
+            default_availability: "announced".into(),
+            release_market: "GB".into(),
+            delay_days: 3,
+        })
+    );
+    assert_eq!(
+        projection(inherited.id.clone()).await,
+        ("announced".to_string(), "GB".to_string())
+    );
+    assert_eq!(
+        projection(explicit.id.clone()).await,
+        ("released".to_string(), "GB".to_string())
+    );
+    assert!(due(explicit.id.clone()).await, "the library market changed");
+
+    titles.metadata_hydration_due.lock().await.clear();
+    let mut delay_only = empty_library_settings_override();
+    delay_only.movie_availability.delay_days = Some(-1);
+    app.update_library_settings(&user, &library_id, delay_only)
+        .await
+        .unwrap();
+    assert_eq!(
+        projection(inherited.id.clone()).await,
+        ("in_cinemas".to_string(), "DE".to_string()),
+        "unset library fields inherit the facet again"
+    );
+    assert!(
+        due(inherited.id.clone()).await,
+        "the market reverted to the facet's"
+    );
+
+    titles.metadata_hydration_due.lock().await.clear();
+    let mut delay_only = empty_library_settings_override();
+    delay_only.movie_availability.delay_days = Some(5);
+    app.update_library_settings(&user, &library_id, delay_only)
+        .await
+        .unwrap();
+    assert!(
+        !due(inherited.id.clone()).await,
+        "a delay change keeps the release dates already fetched"
+    );
+
+    let mut series_override = empty_library_settings_override();
+    series_override.movie_availability.release_market = Some("GB".into());
+    assert!(matches!(
+        app.update_library_settings(
+            &user,
+            &scryer_domain::default_library_id_for_facet(&MediaFacet::Series),
+            series_override,
+        )
+        .await,
+        Err(AppError::Validation(_))
+    ));
+}
+
+fn movie_availability_update(
+    default_availability: Option<&str>,
+    release_market: Option<&str>,
+    delay_days: Option<i32>,
+) -> UpdateMediaSettings {
+    UpdateMediaSettings {
+        movie_availability: MovieAvailabilityOverrides {
+            default_availability: default_availability.map(str::to_string),
+            release_market: release_market.map(str::to_string),
+            delay_days,
+        },
+        ..empty_update_media_settings()
     }
 }
 

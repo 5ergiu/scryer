@@ -544,6 +544,9 @@ function librarySettingsInput(
     fileChmod: settings.fileChmod,
     folderChmod: settings.folderChmod,
     chownGroup: settings.chownGroup,
+    defaultMovieAvailability: settings.defaultMovieAvailability ?? null,
+    movieReleaseMarket: settings.movieReleaseMarket ?? null,
+    movieAvailabilityDelayDays: settings.movieAvailabilityDelayDays ?? null,
     indexerRouting: settings.indexerRouting,
     downloadClientRouting: settings.downloadClientRouting,
   };

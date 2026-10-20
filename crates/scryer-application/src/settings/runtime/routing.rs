@@ -39,6 +39,9 @@ pub struct LibrarySettingsOverrideDraft {
     pub chown_group: Option<String>,
     pub indexer_routing: Option<Vec<IndexerRoutingSettingsEntry>>,
     pub download_client_routing: Option<Vec<DownloadClientRoutingSettingsEntry>>,
+    /// Movie availability gate overrides; an unset field inherits the Movie
+    /// facet value. Valid only for Movie libraries.
+    pub movie_availability: MovieAvailabilityOverrides,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -106,6 +109,10 @@ pub struct LibrarySettings {
     pub chown_group: Option<String>,
     pub indexer_routing_override: Option<Vec<IndexerRoutingSettingsEntry>>,
     pub download_client_routing_override: Option<Vec<DownloadClientRoutingSettingsEntry>>,
+    /// This library's own movie availability gate settings.
+    pub movie_availability_override: MovieAvailabilityOverrides,
+    /// The settings in force for this library; `None` for non-Movie libraries.
+    pub movie_availability: Option<MovieAvailabilitySettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

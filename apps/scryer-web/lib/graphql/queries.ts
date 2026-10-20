@@ -1685,6 +1685,12 @@ export const librarySettingsQuery = `query LibrarySettings($libraryId: ID!) {
     folderChmod
     chownGroupOverride
     chownGroup
+    defaultMovieAvailabilityOverride
+    defaultMovieAvailability
+    movieReleaseMarketOverride
+    movieReleaseMarket
+    movieAvailabilityDelayDaysOverride
+    movieAvailabilityDelayDays
     indexerRoutingOverride {
       indexerId
       enabled
@@ -2933,9 +2939,23 @@ export const acquisitionSettingsQuery = `query AcquisitionSettings {
     walkIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays
+  }
+}`;
+
+// The Movie facet's availability gate settings.
+export const movieAvailabilitySettingsQuery = `query MovieAvailabilitySettings {
+  mediaSettings(scope: MOVIE) {
+    scope
     defaultMovieAvailability
     movieReleaseMarket
     movieAvailabilityDelayDays
+  }
+}`;
+
+// The availability threshold a movie added to this library inherits.
+export const libraryDefaultMovieAvailabilityQuery = `query LibraryDefaultMovieAvailability($libraryId: ID!) {
+  librarySettings(libraryId: $libraryId) {
+    defaultMovieAvailability
   }
 }`;
 

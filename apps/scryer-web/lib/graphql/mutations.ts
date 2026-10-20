@@ -864,6 +864,12 @@ export const updateAcquisitionSettingsMutation = `mutation UpdateAcquisitionSett
     walkIntervalSeconds
     longTailBackfillMaxScopesPerCycle
     longTailReconvergeDays
+  }
+}`;
+
+export const updateMovieAvailabilitySettingsMutation = `mutation UpdateMovieAvailabilitySettings($input: UpdateMediaSettingsInput!) {
+  updateMediaSettings(input: $input) {
+    scope
     defaultMovieAvailability
     movieReleaseMarket
     movieAvailabilityDelayDays

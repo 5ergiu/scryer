@@ -30,6 +30,8 @@ mod list_search_mode_upgrade_tests;
 #[cfg(test)]
 #[path = "migration_progress_tests.rs"]
 mod migration_progress_tests;
+#[cfg(test)]
+mod movie_availability_facet_settings_upgrade_tests;
 pub mod notification_targets;
 pub mod post_0_16_6_prerelease;
 pub mod post_processing_output;

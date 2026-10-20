@@ -975,6 +975,17 @@ impl AppUseCase {
         let download_client_routing_override = self
             .load_download_client_routing_override(&library.id)
             .await?;
+        let (movie_availability_override, movie_availability) =
+            if library.facet == MediaFacet::Movie {
+                let overrides = self
+                    .movie_availability_library_overrides(&library.id)
+                    .await?;
+                let facet = self.movie_availability_facet_settings().await?;
+                let effective = facet.overridden_by(&overrides);
+                (overrides, Some(effective))
+            } else {
+                (MovieAvailabilityOverrides::default(), None)
+            };
 
         Ok(LibrarySettings {
             search_languages: self
@@ -1023,6 +1034,8 @@ impl AppUseCase {
             chown_group: import_permissions.chown_group,
             indexer_routing_override,
             download_client_routing_override,
+            movie_availability_override,
+            movie_availability,
         })
     }
 }
@@ -1486,6 +1499,17 @@ impl AppUseCase {
                     .to_string(),
             ));
         }
+        let movie_availability = settings.movie_availability.clone().normalized()?;
+        if library.facet != MediaFacet::Movie && !movie_availability.is_empty() {
+            return Err(AppError::Validation(
+                "movie availability settings require a movie library".to_string(),
+            ));
+        }
+        let movie_availability_before = if library.facet == MediaFacet::Movie {
+            Some(self.movie_availability_policies().await?)
+        } else {
+            None
+        };
 
         if let Some(profile_id) = settings
             .quality_profile_id
@@ -1813,6 +1837,13 @@ impl AppUseCase {
             .await?;
         }
 
+        let movie_availability_keys = if library.facet == MediaFacet::Movie {
+            self.write_movie_availability_values(&library.id, &movie_availability, true, &actor.id)
+                .await?
+        } else {
+            Vec::new()
+        };
+
         let mut changed_keys = vec![
             REQUIRED_AUDIO_LANGUAGES_KEY.to_string(),
             METADATA_LANGUAGE_KEY.to_string(),
@@ -1833,6 +1864,7 @@ impl AppUseCase {
         if let Some(key_name) = plexmatch_write_on_import_key(&library.facet) {
             changed_keys.push(key_name.to_string());
         }
+        changed_keys.extend(movie_availability_keys);
 
         self.refresh_download_client_category_admission_best_effort()
             .await;
@@ -1873,6 +1905,11 @@ impl AppUseCase {
         }
         if metadata_language_changed {
             self.queue_library_metadata_rehydration(&library.id).await?;
+        }
+        if let Some(before) = movie_availability_before {
+            let after = self.movie_availability_policies().await?;
+            self.queue_movie_release_market_refresh_where_changed(&before, &after)
+                .await?;
         }
 
         self.emit_settings_saved(

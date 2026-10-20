@@ -441,9 +441,11 @@ fn movie_availability_result(
     }
 }
 
+/// The gate decision for one title under the title, library, facet
+/// precedence `policies` resolves.
 pub(crate) fn movie_availability_decision_for_title(
     title: &scryer_domain::Title,
-    settings: &crate::AcquisitionSettings,
+    policies: &crate::settings::runtime::MovieAvailabilityPolicies,
     now: &DateTime<Utc>,
 ) -> MovieAvailabilityDecision {
     movie_availability_decision(
@@ -451,12 +453,9 @@ pub(crate) fn movie_availability_decision_for_title(
         title.metadata_fetched_at.is_some(),
         title.first_aired.as_deref(),
         title.digital_release_date.as_deref(),
-        MovieAvailabilityPolicy {
-            minimum_availability: title.min_availability.as_deref(),
-            default_minimum_availability: &settings.default_movie_availability,
-            release_market: &settings.movie_release_market,
-            delay_days: settings.movie_availability_delay_days,
-        },
+        policies
+            .for_library(&title.library_id)
+            .policy(title.min_availability.as_deref()),
         now,
     )
 }
@@ -683,7 +682,7 @@ impl AppUseCase {
         title_id: Option<&str>,
         respect_title_monitoring: bool,
     ) -> AppResult<Vec<AcquisitionTarget>> {
-        let acquisition_settings = self.acquisition_settings().await?;
+        let movie_availability = self.movie_availability_policies().await?;
         let candidates = self
             .services
             .library
@@ -760,12 +759,9 @@ impl AppUseCase {
                 title.metadata_fetched,
                 title.first_aired.as_deref(),
                 title.digital_release_date.as_deref(),
-                MovieAvailabilityPolicy {
-                    minimum_availability: title.min_availability.as_deref(),
-                    default_minimum_availability: &acquisition_settings.default_movie_availability,
-                    release_market: &acquisition_settings.movie_release_market,
-                    delay_days: acquisition_settings.movie_availability_delay_days,
-                },
+                movie_availability
+                    .for_library(&title.library_id)
+                    .policy(title.min_availability.as_deref()),
                 now,
             );
             if availability.status != MovieAvailabilityStatus::Available {
@@ -875,7 +871,7 @@ impl AppUseCase {
         title_id: Option<&str>,
         respect_title_monitoring: bool,
     ) -> AppResult<Vec<AcquisitionTarget>> {
-        let acquisition_settings = self.acquisition_settings().await?;
+        let movie_availability = self.movie_availability_policies().await?;
         let items = self
             .compute_cutoff_unmet_items_for_search(None, None, title_id, respect_title_monitoring)
             .await?;
@@ -888,13 +884,9 @@ impl AppUseCase {
                         item.metadata_fetched,
                         item.first_aired.as_deref(),
                         item.digital_release_date.as_deref(),
-                        MovieAvailabilityPolicy {
-                            minimum_availability: item.min_availability.as_deref(),
-                            default_minimum_availability: &acquisition_settings
-                                .default_movie_availability,
-                            release_market: &acquisition_settings.movie_release_market,
-                            delay_days: acquisition_settings.movie_availability_delay_days,
-                        },
+                        movie_availability
+                            .for_library(&item.library_id)
+                            .policy(item.min_availability.as_deref()),
                         now,
                     )
                     .status
@@ -954,7 +946,7 @@ impl AppUseCase {
                 title_id,
                 respect_title_monitoring,
                 &seen,
-                &acquisition_settings,
+                &movie_availability,
             )
             .await?
         {
@@ -985,7 +977,7 @@ impl AppUseCase {
         title_id: Option<&str>,
         respect_title_monitoring: bool,
         already_targeted: &HashSet<String>,
-        acquisition_settings: &crate::AcquisitionSettings,
+        movie_availability: &crate::settings::runtime::MovieAvailabilityPolicies,
     ) -> AppResult<Vec<AcquisitionTarget>> {
         /// How many scopes are re-scored per batch. Each page is one media-file
         /// query plus one scoring context per distinct title on it.
@@ -1050,8 +1042,7 @@ impl AppUseCase {
                     return None;
                 }
                 if summary.episode_id.is_none()
-                    && movie_availability_decision_for_title(title, acquisition_settings, now)
-                        .status
+                    && movie_availability_decision_for_title(title, movie_availability, now).status
                         != MovieAvailabilityStatus::Available
                 {
                     return None;

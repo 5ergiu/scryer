@@ -105,6 +105,11 @@ fn library_settings_draft(
                 )
                 .collect()
         }),
+        movie_availability: scryer_application::MovieAvailabilityOverrides {
+            default_availability: input.default_movie_availability,
+            release_market: input.movie_release_market,
+            delay_days: input.movie_availability_delay_days,
+        },
     })
 }
 

@@ -73,6 +73,7 @@ impl AppUseCase {
                     file_chmod: None,
                     folder_chmod: None,
                     chown_group: None,
+                    movie_availability: Default::default(),
                 },
             )
             .await?;

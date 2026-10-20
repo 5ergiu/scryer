@@ -8,17 +8,84 @@ const REMATCH_DERIVED_TAG_PREFIXES: &[&str] = &[
 ];
 
 impl AppUseCase {
+    /// Movie metadata with release dates for the Movie facet's market, for
+    /// reads not tied to a library: search previews, request enrichment and
+    /// artwork.
     pub(crate) async fn get_movie_titles_for_current_release_market(
         &self,
         refs: &[crate::MovieTitleRef],
         language: &str,
     ) -> AppResult<crate::MovieTitleBulkResult> {
-        let market = self.acquisition_settings().await?.movie_release_market;
+        let market = self
+            .movie_availability_facet_settings()
+            .await?
+            .release_market;
         self.services
             .library
             .metadata_gateway
             .get_movie_titles_for_release_market(refs, language, &market)
             .await
+    }
+
+    /// Movie metadata with each title's release dates for the market its
+    /// library uses. `library_ids[i]` is the library of `refs[i]`; one request
+    /// is made per distinct market and the answers keep the input indexes.
+    pub(crate) async fn get_movie_titles_for_library_release_markets(
+        &self,
+        refs: &[crate::MovieTitleRef],
+        library_ids: &[&str],
+        language: &str,
+    ) -> AppResult<crate::MovieTitleBulkResult> {
+        debug_assert_eq!(refs.len(), library_ids.len());
+        let policies = self.movie_availability_policies().await?;
+        let mut indexes_by_market = std::collections::BTreeMap::<String, Vec<usize>>::new();
+        for (index, library_id) in library_ids.iter().enumerate() {
+            indexes_by_market
+                .entry(policies.for_library(library_id).release_market.clone())
+                .or_default()
+                .push(index);
+        }
+        if indexes_by_market.len() <= 1 {
+            let market = indexes_by_market
+                .into_keys()
+                .next()
+                .unwrap_or_else(|| policies.facet().release_market.clone());
+            return self
+                .services
+                .library
+                .metadata_gateway
+                .get_movie_titles_for_release_market(refs, language, &market)
+                .await;
+        }
+        let mut result = crate::MovieTitleBulkResult::default();
+        for (market, indexes) in indexes_by_market {
+            let market_refs = indexes
+                .iter()
+                .map(|&index| refs[index].clone())
+                .collect::<Vec<_>>();
+            let market_result = self
+                .services
+                .library
+                .metadata_gateway
+                .get_movie_titles_for_release_market(&market_refs, language, &market)
+                .await?;
+            for (market_index, movie) in market_result.by_ref_index {
+                if let Some(&index) = indexes.get(market_index) {
+                    result.by_ref_index.insert(index, movie);
+                }
+            }
+            result.missing_ref_indexes.extend(
+                market_result
+                    .missing_ref_indexes
+                    .into_iter()
+                    .filter_map(|market_index| indexes.get(market_index).copied()),
+            );
+            result.redirects.extend(market_result.redirects);
+        }
+        result.missing_ref_indexes.sort_unstable();
+        result.redirects.sort_unstable();
+        result.redirects.dedup();
+        Ok(result)
     }
 }
 
@@ -34,10 +101,17 @@ impl AppUseCase {
         if title.facet != MediaFacet::Movie {
             return Ok(None);
         }
-        let settings = self.acquisition_settings().await?;
-        let decision = crate::acquisition::targets::movie_availability_decision_for_title(
-            &title,
-            &settings,
+        // The resolved threshold already includes the title's own, so the
+        // policy carries no separate per-title threshold.
+        let settings = self
+            .effective_movie_availability_policy_for_title(&title)
+            .await?;
+        let decision = crate::acquisition::targets::movie_availability_decision(
+            title.movie_release_dates.as_ref(),
+            title.metadata_fetched_at.is_some(),
+            title.first_aired.as_deref(),
+            title.digital_release_date.as_deref(),
+            settings.policy(None),
             &Utc::now(),
         );
         Ok(Some(crate::types::MovieAvailabilityProjection {
@@ -50,26 +124,19 @@ impl AppUseCase {
             effective_date: decision.effective_date,
             estimated: decision.estimated,
             reason: decision.reason,
-            release_market: settings.movie_release_market,
-            minimum_availability: title
-                .min_availability
-                .unwrap_or(settings.default_movie_availability),
+            release_market: settings.release_market.clone(),
+            minimum_availability: settings.default_availability.clone(),
         }))
     }
 }
 
 impl AppUseCase {
-    pub(crate) async fn queue_movie_release_market_refresh(&self) -> AppResult<()> {
-        let libraries = self
-            .services
-            .catalog
-            .libraries
-            .list(Some(MediaFacet::Movie))
-            .await?;
-        let library_ids = libraries
-            .iter()
-            .map(|library| library.id.clone())
-            .collect::<Vec<_>>();
+    /// Marks every movie in these libraries for rehydration, so their release
+    /// dates are fetched again for the market each library now uses.
+    pub(crate) async fn queue_movie_release_market_refresh_for_libraries(
+        &self,
+        library_ids: &[String],
+    ) -> AppResult<()> {
         if library_ids.is_empty() {
             return Ok(());
         }
@@ -77,7 +144,7 @@ impl AppUseCase {
             .services
             .catalog
             .titles
-            .list_for_libraries(Some(MediaFacet::Movie), &library_ids, None)
+            .list_for_libraries(Some(MediaFacet::Movie), library_ids, None)
             .await?;
         let title_ids = titles
             .into_iter()
@@ -983,8 +1050,9 @@ impl AppUseCase {
                         .resolve_metadata_language_for_title(&existing_title)
                         .await;
                     let movie = self
-                        .get_movie_titles_for_current_release_market(
+                        .get_movie_titles_for_library_release_markets(
                             std::slice::from_ref(&requested_ref),
+                            &[existing_title.library_id.as_str()],
                             &language,
                         )
                         .await?

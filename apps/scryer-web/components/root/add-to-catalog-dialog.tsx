@@ -38,7 +38,8 @@ import {
   INHERIT_CATALOG_QUALITY_PROFILE_VALUE,
 } from "@/lib/utils/catalog-add-quality-profile";
 import { LoadingMark } from "@/components/common/loading-mark";
-import { acquisitionSettingsQuery } from "@/lib/graphql/queries";
+import { libraryDefaultMovieAvailabilityQuery } from "@/lib/graphql/queries";
+import { MOVIE_AVAILABILITY_VALUES, isMovieAvailabilityValue } from "@/lib/types/settings";
 
 type AddToCatalogDialogProps = {
   open: boolean;
@@ -93,13 +94,8 @@ function buildDefaultDraft(
   };
 }
 
-const MOVIE_AVAILABILITY_VALUES = ["announced", "in_cinemas", "released"] as const;
-/** Select value standing for the instance default when it cannot be read. */
-const INSTANCE_DEFAULT_AVAILABILITY_VALUE = "default";
-
-function isMovieAvailabilityValue(value: string | null | undefined): value is string {
-  return MOVIE_AVAILABILITY_VALUES.some((candidate) => candidate === value);
-}
+/** Select value standing for the library default when it cannot be read. */
+const LIBRARY_DEFAULT_AVAILABILITY_VALUE = "default";
 
 function resultTvdbId(result: MetadataTvdbSearchItem): string {
   return String(result.tvdbId ?? "").trim();
@@ -181,37 +177,50 @@ export function AddToCatalogDialog({
     open,
   ]);
 
-  // The instance default is read only to preselect it. Reading it needs the
-  // catalog-settings permission; without it the select offers "use instance
-  // default" instead, and the server applies the same default on add.
-  const [instanceDefaultAvailability, setInstanceDefaultAvailability] =
-    React.useState<string | null>(null);
-  React.useEffect(() => {
-    if (!open || facet !== "MOVIE") return;
-    let current = true;
-    void client
-      .query<{ acquisitionSettings?: { defaultMovieAvailability?: string | null } | null }>(
-        acquisitionSettingsQuery,
-        {},
-      )
-      .toPromise()
-      .then(({ data }) => {
-        const value = data?.acquisitionSettings?.defaultMovieAvailability;
-        if (current) setInstanceDefaultAvailability(isMovieAvailabilityValue(value) ? value : null);
-      });
-    return () => {
-      current = false;
-    };
-  }, [client, facet, open]);
-  const minAvailabilityValue =
-    draft.minAvailability ?? instanceDefaultAvailability ?? INSTANCE_DEFAULT_AVAILABILITY_VALUE;
-  const showNoReleaseDateHint =
-    facet === "MOVIE" && !result.year && minAvailabilityValue !== "announced";
-
   const selectedLibrary =
     libraries.find((library) => library.id === draft.libraryId) ||
     defaultLibrary(libraries) ||
     null;
+
+  // The library's effective threshold is read only to preselect it. Reading
+  // it needs permission to manage the library; without it the select offers
+  // "use library default" instead, and the server applies the same default
+  // on add.
+  const selectedLibraryId = selectedLibrary?.id ?? null;
+  const [loadedDefaultAvailability, setLoadedDefaultAvailability] = React.useState<{
+    libraryId: string;
+    value: string | null;
+  } | null>(null);
+  React.useEffect(() => {
+    if (!open || facet !== "MOVIE" || !selectedLibraryId) return;
+    let current = true;
+    void client
+      .query<{ librarySettings?: { defaultMovieAvailability?: string | null } | null }>(
+        libraryDefaultMovieAvailabilityQuery,
+        { libraryId: selectedLibraryId },
+      )
+      .toPromise()
+      .then(({ data }) => {
+        const value = data?.librarySettings?.defaultMovieAvailability;
+        if (current) {
+          setLoadedDefaultAvailability({
+            libraryId: selectedLibraryId,
+            value: isMovieAvailabilityValue(value) ? value : null,
+          });
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, facet, open, selectedLibraryId]);
+  const libraryDefaultAvailability =
+    loadedDefaultAvailability?.libraryId === selectedLibraryId
+      ? loadedDefaultAvailability.value
+      : null;
+  const minAvailabilityValue =
+    draft.minAvailability ?? libraryDefaultAvailability ?? LIBRARY_DEFAULT_AVAILABILITY_VALUE;
+  const showNoReleaseDateHint =
+    facet === "MOVIE" && !result.year && minAvailabilityValue !== "announced";
   const qualityProfileValue = catalogQualityProfileSelectValue(draft.qualityProfileId);
   const inheritedQualityProfileLabel = inheritedCatalogQualityProfileLabel(
     selectedLibrary,
@@ -469,8 +478,8 @@ export function AddToCatalogDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {instanceDefaultAvailability ? null : (
-                    <SelectItem value={INSTANCE_DEFAULT_AVAILABILITY_VALUE}>
+                  {libraryDefaultAvailability ? null : (
+                    <SelectItem value={LIBRARY_DEFAULT_AVAILABILITY_VALUE}>
                       {t("settings.minAvailability.default")}
                     </SelectItem>
                   )}

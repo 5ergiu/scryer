@@ -5066,7 +5066,10 @@ mod tests {
             dated.any_market_theatrical_dates,
             vec!["2028-02-14".to_string(), "2028-03-10".to_string()]
         );
-        assert_eq!(dated.any_market_digital_dates, vec!["2028-04-20".to_string()]);
+        assert_eq!(
+            dated.any_market_digital_dates,
+            vec!["2028-04-20".to_string()]
+        );
         assert!(dated.any_market_physical_dates.is_empty());
         assert!(dated.any_market_home_dates_unusable);
 
