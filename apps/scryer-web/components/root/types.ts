@@ -56,7 +56,7 @@ export type RulesSection = "scoring" | "maintenance" | "request";
 /// what a bare maintenance-rules link always meant. Exclusions live with the
 /// gates because both answer "what is this instance allowed to do", not "what
 /// would a rule match".
-export type MaintenanceRulesSection = "rules" | "candidates" | "history" | "gates";
+export type MaintenanceRulesSection = "rules" | "candidates" | "history";
 
 /// Panes of the Indexers settings page. Seeding profiles live here rather than
 /// in their own settings section because a profile is only ever reached

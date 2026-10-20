@@ -284,19 +284,14 @@ async fn sequence_unmonitor_then_delete_files_removes_only_the_matched_title_fil
     .await;
     let sibling_path = fixture.root.join("sibling/movie.mkv");
     let sibling_file_id = add_movie_file(&fixture.execution.app, &sibling.id, &sibling_path).await;
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(1),
-            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
-                .await,
-        )
-        .await
-        .expect("arm destructive sequence");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(1),
+    )
+    .await;
 
     let report = fixture
         .execution
@@ -390,19 +385,14 @@ async fn episode_sequence_unmonitor_then_delete_files_preserves_other_season_rec
     );
     let (rule_set_id, candidate) = arm_and_evaluate(&fixture.execution, draft).await;
     assert_eq!(candidate.subject_id, selected.id);
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(1),
-            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
-                .await,
-        )
-        .await
-        .expect("arm destructive episode sequence");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(1),
+    )
+    .await;
 
     let report = fixture
         .execution
@@ -501,17 +491,14 @@ async fn a_fresh_re_monitor_cancels_the_sequence_delete_files_step_and_preserves
         .set_title_monitored(&fixture.user, &target.id, true)
         .await
         .expect("external re-monitor before deletion");
-    fixture
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.user,
-            &_rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(1),
-            super::maintenance_rules::arming_confirmation(&fixture.app, &_rule_set_id).await,
-        )
-        .await
-        .expect("arm destructive sequence");
+    super::maintenance_rules::arm_rule(
+        &fixture.app,
+        &fixture.user,
+        &_rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(1),
+    )
+    .await;
 
     let report = fixture
         .app
@@ -551,19 +538,14 @@ async fn storage_sequence_holds_its_journal_when_target_or_root_identity_changes
     let mut draft = sequence_draft(deletion_steps());
     draft.storage_root_id = Some(root_id);
     let (rule_set_id, candidate) = arm_and_evaluate(&fixture.execution, draft).await;
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(1),
-            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
-                .await,
-        )
-        .await
-        .expect("arm destructive storage sequence");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(1),
+    )
+    .await;
 
     let first = fixture
         .execution
@@ -714,19 +696,14 @@ async fn completed_storage_sequence_releases_its_exact_marker_after_root_filter_
     let mut draft = sequence_draft(deletion_steps());
     draft.storage_root_id = Some(root_id);
     let (rule_set_id, candidate) = arm_and_evaluate(&fixture.execution, draft).await;
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(1),
-            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
-                .await,
-        )
-        .await
-        .expect("arm destructive storage sequence");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(1),
+    )
+    .await;
 
     let executed = fixture
         .execution

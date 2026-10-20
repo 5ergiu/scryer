@@ -14915,8 +14915,7 @@ enum MaintenanceCandidateState {
 }
 
 """
-How far a rule set's effects are armed. Arming is per rule and independent
-of the instance effect gates; an action executes only when both permit it.
+The class of effects a rule's action can have.
 """
 enum MaintenanceEffectArming {
 	"""
@@ -14932,25 +14931,6 @@ enum MaintenanceEffectArming {
 	rule's current candidate count when set.
 	"""
 	DESTRUCTIVE
-}
-
-"""
-How a maintenance rule set is evaluated.
-"""
-enum MaintenanceEvaluationMode {
-	"""
-	Stored but never evaluated. A disabled rule opens no candidates and runs
-	no actions, and it is the mode every new rule set is created in.
-	"""
-	DISABLED
-	"""
-	Evaluate and record candidates, never act.
-	"""
-	SHADOW
-	"""
-	Evaluate, record, and surface candidates for manual approval.
-	"""
-	OBSERVE
 }
 
 """
@@ -15074,46 +15054,25 @@ type MaintenanceExclusion {
 }
 
 """
-The five independent instance-wide maintenance gates. Every one of them
-defaults off, an unconfigured instance therefore evaluates nothing and acts
-on nothing, and each gate is read at the start of every scheduled pass so a
-change takes effect on the next run without a restart.
+The two instance-wide maintenance switches. An unconfigured instance has
+maintenance off and actions paused, and both are read at the start of every
+scheduled pass so a change takes effect on the next run without a restart.
 
-A gate is only ever the instance half of a permission. Executing an action
-additionally requires the individual rule to be in `OBSERVE` mode and armed
-for that action's risk class, so opening a gate cannot by itself start
-anything.
+A switch is only ever the instance half of a permission. Executing an action
+additionally requires the individual rule to be `ENABLED`, so unpausing
+actions cannot by itself start anything.
 """
 type MaintenanceInstanceGates {
 	"""
-	Whether the scheduled evaluator may run at all. While this is off no rule
-	is evaluated, no candidate is opened or closed, and no evaluation run is
-	recorded.
+	Whether rules are evaluated and their candidates shown. While this is
+	off no rule is evaluated and no candidate is opened or closed.
 	"""
-	evaluationEnabled: Boolean!
+	enabled: Boolean!
 	"""
-	Whether candidate results are returned to clients.
+	Whether every action is paused. While this is off, enabled rules act on
+	their due candidates, including deleting files for rules that do so.
 	"""
-	resultDisplayEnabled: Boolean!
-	"""
-	Reserved for provider collection projection and lifecycle notifications.
-	Nothing reads it yet.
-	"""
-	presentationEffectsEnabled: Boolean!
-	"""
-	Whether low and medium risk actions may execute, such as unmonitoring a
-	title or changing its quality profile. A rule armed as `REVERSIBLE` or
-	`DESTRUCTIVE` starts running those actions on its due candidates while
-	this is on.
-	"""
-	reversibleEffectsEnabled: Boolean!
-	"""
-	Whether high risk actions may execute, meaning the ones that delete media
-	files. Turning this on lets every rule already armed as `DESTRUCTIVE`
-	begin deleting its due candidates on the next handler pass, without any
-	further confirmation.
-	"""
-	destructiveEffectsEnabled: Boolean!
+	actionsPaused: Boolean!
 }
 
 """
@@ -15260,6 +15219,26 @@ enum MaintenanceRiskClass {
 }
 
 """
+What the operator reviewed before enabling a rule that can delete files.
+"""
+input MaintenanceRuleArmingConfirmationInput {
+	"""
+	The reviewed matcher/action revision.
+	"""
+	revisionNumber: Int!
+	"""
+	The reviewed library scope. An empty list explicitly acknowledges all
+	libraries.
+	"""
+	libraryIds: [ID!]!
+	"""
+	The candidate count the operator saw; must equal the rule's current
+	non-terminal count.
+	"""
+	candidateCount: Int!
+}
+
+"""
 One immutable revision of a maintenance rule set's matcher and action.
 """
 type MaintenanceRuleRevision {
@@ -15322,24 +15301,19 @@ type MaintenanceRuleSet {
 	"""
 	description: String!
 	"""
-	Whether the rule set is enabled. Derived from `evaluationMode` rather
-	than set independently: false for `DISABLED`, true for `SHADOW` and
-	`OBSERVE`.
+	Disabled, dry run, or enabled.
 	"""
-	enabled: Boolean!
+	state: MaintenanceRuleState!
 	"""
-	Evaluation mode currently stored for the rule set.
+	What enabling this rule arms. `DESTRUCTIVE` means enabling it requires
+	the candidate-count confirmation.
 	"""
-	evaluationMode: MaintenanceEvaluationMode!
+	enabledArming: MaintenanceEffectArming!
 	"""
-	How far this rule's effects are armed, independent of its mode.
+	The rule was enabled when its matcher, action, or scope last changed, so
+	it fell back to dry run. Review its candidates and enable it again.
 	"""
-	effectArming: MaintenanceEffectArming!
-	"""
-	This rule was disarmed because new show facts can change its destructive
-	title matches. Review the matcher and arm it again to acknowledge them.
-	"""
-	destructiveRearmRequired: Boolean!
+	editedSinceEnabled: Boolean!
 	"""
 	Libraries the rule is confined to. Empty means every library.
 	"""
@@ -15396,6 +15370,26 @@ type MaintenanceRuleSetDetail {
 	null and continue to expose their original `actionSpec` unchanged.
 	"""
 	actionSequence: MaintenanceActionSequence
+}
+
+"""
+The one control of a maintenance rule set.
+"""
+enum MaintenanceRuleState {
+	"""
+	Stored but never evaluated. A disabled rule opens no candidates and runs
+	no actions, and it is the state every new rule set is created in.
+	"""
+	DISABLED
+	"""
+	Evaluate and record candidates, never act.
+	"""
+	DRY_RUN
+	"""
+	Evaluate and act on due candidates with the effects the rule's own
+	action can have, while the instance does not pause actions.
+	"""
+	ENABLED
 }
 
 """
@@ -20179,38 +20173,37 @@ type MutationRoot {
 		input: PreviewMaintenanceRuleInput!
 	): MaintenancePreviewPayload!
 	"""
-	Move a maintenance rule set between evaluation modes.
+	Set a maintenance rule to Disabled, Dry run, or Enabled.
 	
-	Creation always produces a disabled rule, so arming one is always this
-	deliberate second step. A rule moved back to disabled keeps the
-	candidates it already opened: flipping a rule off must not destroy the
-	membership and grace clocks it established.
+	Enabled arms the effects the rule's own action can have. Enabling a rule
+	that can delete files requires a confirmation of the reviewed revision,
+	library scope, and current candidate count. A rule moved back to
+	Disabled keeps the candidates it already opened.
 	"""
-	setMaintenanceRuleMode(
+	setMaintenanceRuleState(
 		"""
-		Rule-set identity and the evaluation mode to store.
+		Rule-set ID.
 		"""
-		input: SetMaintenanceRuleModeInput!
-	): MaintenanceRuleSet!
-	"""
-	Set how far one rule set's effects are armed. Destructive arming requires acknowledging the rule's current candidate count.
-	"""
-	setMaintenanceRuleArming(
+		ruleSetId: ID!,
 		"""
-		Rule-set identity, the arming level, and the acknowledged candidate count for destructive arming.
+		The state to store.
 		"""
-		input: SetMaintenanceRuleArmingInput!
+		state: MaintenanceRuleState!,
+		"""
+		Required when enabling a rule that can delete files.
+		"""
+		confirmation: MaintenanceRuleArmingConfirmationInput
 	): MaintenanceRuleSet!
 	"""
 	Run the maintenance action handler immediately instead of waiting for its schedule.
 	"""
 	runMaintenanceActionHandlerNow: MaintenanceEvaluationTriggerPayload!
 	"""
-	Arm or disarm the instance-wide maintenance gates. Omitted fields keep their stored value.
+	Set the instance-wide maintenance switches. Omitted fields keep their stored value.
 	"""
 	setMaintenanceInstanceGates(
 		"""
-		The gates to change; omit a field to leave that gate alone.
+		The switches to change; omit a field to leave that switch alone.
 		"""
 		input: SetMaintenanceInstanceGatesInput!
 	): MaintenanceInstanceGates!
@@ -24664,15 +24657,8 @@ type QueryRoot {
 	"""
 	List lifecycle candidates the maintenance evaluator has recorded; requires catalog-settings management permission.
 	
-	Two independent things hide rows, and they are not the same thing. A
-	rule in shadow mode is dark by definition, so its candidates are
-	returned only when `includeShadow` is true. Separately, the instance
-	result-display gate hides everything while it is off.
-	
-	`includeShadow` overrides the gate as well as the mode filter, on
-	purpose: an operator deciding whether to arm result display has to be
-	able to see what shadow evaluation actually found first, and reaching
-	this query already requires catalog-settings management.
+	Candidates are ordered by due time across rules, soonest first, and
+	none are returned while maintenance is switched off for the instance.
 	"""
 	maintenanceCandidates(
 		"""
@@ -24687,10 +24673,6 @@ type QueryRoot {
 		Return candidates whose subject belongs to this library only.
 		"""
 		libraryId: ID,
-		"""
-		Include candidates produced by rules running in shadow mode.
-		"""
-		includeShadow: Boolean,
 		"""
 		Maximum number of candidates to return.
 		"""
@@ -24714,7 +24696,7 @@ type QueryRoot {
 		limit: Int
 	): [MaintenanceEvaluationRun!]!
 	"""
-	Read the five instance-wide maintenance gates; requires system-settings management permission.
+	Read the two instance-wide maintenance switches; requires system-settings management permission.
 	"""
 	maintenanceInstanceGates: MaintenanceInstanceGates!
 	"""
@@ -28190,77 +28172,20 @@ input SetIndexerSeedingProfileInput {
 }
 
 """
-Arms or disarms the instance-wide maintenance gates. An omitted field leaves
-that gate exactly as stored.
+Sets the instance-wide maintenance switches. An omitted field leaves that
+switch exactly as stored.
 """
 input SetMaintenanceInstanceGatesInput {
 	"""
-	Whether the scheduled evaluator may run.
+	Whether rules are evaluated and their candidates shown.
 	"""
-	evaluationEnabled: Boolean
+	enabled: Boolean
 	"""
-	Whether candidate results are returned to clients.
+	Whether every action is paused. Setting this to false lets every rule
+	that is already `ENABLED` begin acting, including deleting media files,
+	on the next handler pass.
 	"""
-	resultDisplayEnabled: Boolean
-	"""
-	Reserved for provider collection projection and lifecycle notifications.
-	Nothing reads it yet.
-	"""
-	presentationEffectsEnabled: Boolean
-	"""
-	Whether low and medium risk actions may execute for rules that are armed
-	and in `OBSERVE` mode.
-	"""
-	reversibleEffectsEnabled: Boolean
-	"""
-	Whether high risk actions may execute. Setting this to true lets every
-	rule already armed as `DESTRUCTIVE` begin deleting media files on the
-	next handler pass.
-	"""
-	destructiveEffectsEnabled: Boolean
-}
-
-"""
-Sets how far one rule set's effects are armed.
-"""
-input SetMaintenanceRuleArmingInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Arming level to store. `DESTRUCTIVE` requires acknowledging the rule's
-	current candidate count and applies only to high-risk actions.
-	"""
-	arming: MaintenanceEffectArming!
-	"""
-	The candidate count the operator saw and acknowledged; required for
-	`DESTRUCTIVE` and must equal the rule's current non-terminal count.
-	"""
-	acknowledgedCandidateCount: Int
-	"""
-	The reviewed matcher/action revision; required for `DESTRUCTIVE`.
-	"""
-	acknowledgedRevisionNumber: Int
-	"""
-	The reviewed library scope; required for `DESTRUCTIVE`. An empty list
-	explicitly acknowledges all libraries; omission is not confirmation.
-	"""
-	acknowledgedLibraryIds: [ID!]
-}
-
-"""
-Moves a rule set between evaluation modes.
-"""
-input SetMaintenanceRuleModeInput {
-	"""
-	Rule-set ID.
-	"""
-	id: ID!
-	"""
-	Mode to store. Anything other than `DISABLED` also enables the rule.
-	"""
-	mode: MaintenanceEvaluationMode!
+	actionsPaused: Boolean
 }
 
 """

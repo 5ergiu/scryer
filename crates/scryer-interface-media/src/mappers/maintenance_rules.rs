@@ -22,7 +22,7 @@ use scryer_application::maintenance_rules::{
     MaintenanceEffectClass as AppEffectClass, MaintenanceRepeatMode as AppRepeatMode,
     MaintenanceRiskClass as AppRiskClass, MaintenanceSearchCondition as AppSearchCondition,
     MaintenanceSubjectKind as AppSubjectKind, MaintenanceTimingMode as AppTimingMode,
-    action_catalog, action_sequence_catalog,
+    action_catalog, action_sequence_catalog, derived_effect_arming, maintenance_rule_state,
 };
 use scryer_application::maintenance_rules::{
     MaintenancePreviewResult as AppPreviewResult, MaintenanceRuleSetDetail as AppRuleSetDetail,
@@ -34,23 +34,21 @@ fn to_graphql_int(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-pub fn maintenance_evaluation_mode_value(
-    mode: scryer_domain::MaintenanceEvaluationMode,
-) -> MaintenanceEvaluationMode {
-    match mode {
-        scryer_domain::MaintenanceEvaluationMode::Disabled => MaintenanceEvaluationMode::Disabled,
-        scryer_domain::MaintenanceEvaluationMode::Shadow => MaintenanceEvaluationMode::Shadow,
-        scryer_domain::MaintenanceEvaluationMode::Observe => MaintenanceEvaluationMode::Observe,
+pub fn maintenance_rule_state_value(state: scryer_domain::MaintenanceRuleState) -> MaintenanceRuleState {
+    match state {
+        scryer_domain::MaintenanceRuleState::Disabled => MaintenanceRuleState::Disabled,
+        scryer_domain::MaintenanceRuleState::DryRun => MaintenanceRuleState::DryRun,
+        scryer_domain::MaintenanceRuleState::Enabled => MaintenanceRuleState::Enabled,
     }
 }
 
-pub fn maintenance_evaluation_mode_into_application(
-    mode: MaintenanceEvaluationMode,
-) -> scryer_domain::MaintenanceEvaluationMode {
-    match mode {
-        MaintenanceEvaluationMode::Disabled => scryer_domain::MaintenanceEvaluationMode::Disabled,
-        MaintenanceEvaluationMode::Shadow => scryer_domain::MaintenanceEvaluationMode::Shadow,
-        MaintenanceEvaluationMode::Observe => scryer_domain::MaintenanceEvaluationMode::Observe,
+pub fn maintenance_rule_state_into_application(
+    state: MaintenanceRuleState,
+) -> scryer_domain::MaintenanceRuleState {
+    match state {
+        MaintenanceRuleState::Disabled => scryer_domain::MaintenanceRuleState::Disabled,
+        MaintenanceRuleState::DryRun => scryer_domain::MaintenanceRuleState::DryRun,
+        MaintenanceRuleState::Enabled => scryer_domain::MaintenanceRuleState::Enabled,
     }
 }
 
@@ -84,15 +82,6 @@ pub fn maintenance_effect_arming_value(
     }
 }
 
-pub fn maintenance_effect_arming_into_application(
-    arming: MaintenanceEffectArming,
-) -> scryer_domain::MaintenanceEffectArming {
-    match arming {
-        MaintenanceEffectArming::None => scryer_domain::MaintenanceEffectArming::None,
-        MaintenanceEffectArming::Reversible => scryer_domain::MaintenanceEffectArming::Reversible,
-        MaintenanceEffectArming::Destructive => scryer_domain::MaintenanceEffectArming::Destructive,
-    }
-}
 
 /// One action-handler attempt. An action kind this build cannot parse renders
 /// nothing rather than a wrong kind, but by construction the executor only
@@ -306,10 +295,11 @@ pub fn from_maintenance_rule_set(detail: &AppRuleSetDetail) -> MaintenanceRuleSe
         id: ID::from(rule_set.id.clone()),
         name: rule_set.name.clone(),
         description: rule_set.description.clone(),
-        enabled: rule_set.enabled,
-        evaluation_mode: maintenance_evaluation_mode_value(rule_set.evaluation_mode),
-        effect_arming: maintenance_effect_arming_value(rule_set.effect_arming),
-        destructive_rearm_required: rule_set.destructive_rearm_required,
+        state: maintenance_rule_state_value(maintenance_rule_state(detail)),
+        enabled_arming: maintenance_effect_arming_value(derived_effect_arming(
+            &detail.action_definition,
+        )),
+        edited_since_enabled: rule_set.destructive_rearm_required,
         library_ids: rule_set.library_ids.clone(),
         subject_kind: maintenance_rule_subject_kind_value(rule_set.subject_kind),
         current_revision_number: to_graphql_int(rule_set.current_revision_number),
@@ -755,11 +745,8 @@ pub fn from_maintenance_instance_gates(
     gates: scryer_application::maintenance_rules::MaintenanceGates,
 ) -> MaintenanceInstanceGates {
     MaintenanceInstanceGates {
-        evaluation_enabled: gates.evaluation_enabled,
-        result_display_enabled: gates.result_display_enabled,
-        presentation_effects_enabled: gates.presentation_effects_enabled,
-        reversible_effects_enabled: gates.reversible_effects_enabled,
-        destructive_effects_enabled: gates.destructive_effects_enabled,
+        enabled: gates.enabled(),
+        actions_paused: gates.actions_paused(),
     }
 }
 

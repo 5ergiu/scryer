@@ -8449,7 +8449,8 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
 
     /// Append `revision`, repoint the rule set at it, and reset its
     /// `effect_arming` to [`scryer_domain::MaintenanceEffectArming::None`] — all
-    /// three atomically. Existing revisions are never rewritten.
+    /// three atomically, flagging a rule that was armed as edited since it was
+    /// enabled. Existing revisions are never rewritten.
     ///
     /// The disarm is part of the same write on purpose: arming acknowledges the
     /// blast radius of one specific matcher and action, so it must never outlive
@@ -8475,7 +8476,8 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
     /// revision — the matcher, action, and grace period are untouched.
     ///
     /// `disarm` resets `effect_arming` to
-    /// [`scryer_domain::MaintenanceEffectArming::None`] in the *same* write. The
+    /// [`scryer_domain::MaintenanceEffectArming::None`] in the *same* write,
+    /// with the same edited-since-enabled flag as `add_revision`. The
     /// caller sets it when the library scope actually changed: scope is the
     /// rule's blast radius, so a re-scoped rule is no longer the rule an
     /// operator acknowledged, exactly as a new revision is not. Writing the two
@@ -8502,23 +8504,14 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
         ))
     }
 
-    /// Move a rule set between evaluation modes. `enabled` is derived by the
-    /// caller from the mode so the two columns can never disagree; no revision
-    /// is created, because the matcher is untouched.
-    async fn update_rule_set_evaluation_mode(
+    /// Atomically write a rule's mode and arming, derive `enabled` from the
+    /// mode, and clear the edited-since-enabled flag. Destructive arming first
+    /// checks the reviewed configuration under the row lock; a stale or missing
+    /// confirmation, or a missing row, returns false without changing the rule.
+    async fn update_rule_set_state(
         &self,
         id: &str,
         mode: scryer_domain::MaintenanceEvaluationMode,
-        enabled: bool,
-        updated_at: DateTime<Utc>,
-    ) -> AppResult<()>;
-
-    /// Atomically checks the reviewed configuration and changes arming.
-    /// Destructive arming requires a confirmation. A stale or missing
-    /// confirmation returns false without changing the rule.
-    async fn update_rule_set_arming(
-        &self,
-        id: &str,
         arming: scryer_domain::MaintenanceEffectArming,
         confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,

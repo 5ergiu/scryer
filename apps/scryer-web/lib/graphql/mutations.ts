@@ -2584,9 +2584,8 @@ export const uninstallTrackedRulePackMutation = `mutation UninstallTrackedRulePa
 
 // ── Maintenance Rules ─────────────────────────────────────────────────
 //
-// Maintenance rule sets are saved disabled and nothing evaluates or executes
-// them yet. Preview is the only mutation here that runs a matcher, and it is
-// read-only: it reports what a rule would select, and changes nothing.
+// Maintenance rule sets are saved disabled. Preview runs a matcher read-only:
+// it reports what a rule would select, and changes nothing.
 
 export const createMaintenanceRuleSetMutation = `mutation CreateMaintenanceRuleSet($input: CreateMaintenanceRuleSetInput!) {
   createMaintenanceRuleSet(input: $input) {${MAINTENANCE_RULE_SET_DETAIL_FIELDS}
@@ -2641,34 +2640,22 @@ export const previewMaintenanceRuleMutation = `mutation PreviewMaintenanceRule($
   }
 }`;
 
-/// Mode and arming both return the whole rule set, but the caller refetches the
-/// list afterwards rather than patching state from the payload, so these
-/// selections stay at the identity the caller needs to correlate the response.
-export const setMaintenanceRuleModeMutation = `mutation SetMaintenanceRuleMode($input: SetMaintenanceRuleModeInput!) {
-  setMaintenanceRuleMode(input: $input) {
+/// Enabling a rule that deletes files must confirm the reviewed revision, scope
+/// and current candidate count. When the count no longer matches, the server
+/// rejects the call with the real count in the message and the dialog re-asks
+/// against that number. The caller refetches the list afterwards, so the
+/// selection stays at what it needs to correlate the response.
+export const setMaintenanceRuleStateMutation = `mutation SetMaintenanceRuleState($ruleSetId: ID!, $state: MaintenanceRuleState!, $confirmation: MaintenanceRuleArmingConfirmationInput) {
+  setMaintenanceRuleState(ruleSetId: $ruleSetId, state: $state, confirmation: $confirmation) {
     id
-    evaluationMode
-    enabled
-  }
-}`;
-
-/// Arming to `DESTRUCTIVE` must acknowledge the rule's current non-terminal
-/// candidate count. When it no longer matches, the server rejects the call with
-/// the real count in the message and the dialog re-asks against that number.
-export const setMaintenanceRuleArmingMutation = `mutation SetMaintenanceRuleArming($input: SetMaintenanceRuleArmingInput!) {
-  setMaintenanceRuleArming(input: $input) {
-    id
-    effectArming
+    state
   }
 }`;
 
 export const setMaintenanceInstanceGatesMutation = `mutation SetMaintenanceInstanceGates($input: SetMaintenanceInstanceGatesInput!) {
   setMaintenanceInstanceGates(input: $input) {
-    evaluationEnabled
-    resultDisplayEnabled
-    presentationEffectsEnabled
-    reversibleEffectsEnabled
-    destructiveEffectsEnabled
+    enabled
+    actionsPaused
   }
 }`;
 

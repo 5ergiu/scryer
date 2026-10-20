@@ -21,12 +21,12 @@ use crate::maintenance_rules::{
 };
 use crate::ports::{
     LifecycleActionRunRepository, MaintenanceActionStepRepository, MaintenanceCandidateRepository,
+    MaintenanceRuleSetRepository,
 };
 use chrono::{Duration, Utc};
 use scryer_domain::{
     MaintenanceActionStepKey, MaintenanceActionStepRun, MaintenanceActionStepState,
-    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
-    MaintenanceRuleSubjectKind, MediaFacet,
+    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceRuleSubjectKind, MediaFacet,
 };
 use std::collections::HashMap;
 
@@ -44,7 +44,6 @@ pub(super) fn sequence_draft(steps: Vec<MaintenanceActionStep>) -> MaintenanceRu
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -69,41 +68,55 @@ async fn arm_and_evaluate_all(
         .create_maintenance_rule_set(&fixture.user, draft)
         .await
         .expect("create sequence rule");
-    let rule_set_id = created.rule_set.id;
-    fixture
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.user,
-            &rule_set_id,
-            MaintenanceEvaluationMode::Observe,
-        )
-        .await
-        .expect("observe sequence rule");
+    let rule_set_id = created.rule_set.id.clone();
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &rule_set_id,
+        scryer_domain::MaintenanceRuleState::DryRun,
+        None,
+    )
+    .await;
     fixture
         .app
         .set_maintenance_instance_gates(
             &fixture.user,
             MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                result_display_enabled: Some(true),
-                reversible_effects_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
-                ..Default::default()
+                enabled: Some(true),
+                actions_paused: Some(false),
             },
         )
         .await
-        .expect("open maintenance gates");
-    fixture
-        .app
-        .set_maintenance_rule_arming(
+        .expect("enable maintenance and unpause actions");
+    if crate::maintenance_rules::derived_effect_arming(&created.action_definition)
+        == MaintenanceEffectArming::Reversible
+    {
+        super::maintenance_rules::arm_rule(
+            &fixture.app,
             &fixture.user,
             &rule_set_id,
             MaintenanceEffectArming::Reversible,
             None,
-            None,
         )
-        .await
-        .expect("arm sequence rule");
+        .await;
+    } else {
+        // A rule that deletes, or does nothing, cannot be enabled for library
+        // updates only. Stored rows can still hold that arming, and the
+        // executor must treat them exactly as it always has.
+        assert!(
+            fixture
+                .rules
+                .update_rule_set_state(
+                    &rule_set_id,
+                    scryer_domain::MaintenanceEvaluationMode::Observe,
+                    MaintenanceEffectArming::Reversible,
+                    None,
+                    chrono::Utc::now(),
+                )
+                .await
+                .expect("store reversible arming")
+        );
+    }
     fixture
         .app
         .run_maintenance_rule_evaluation_job()
@@ -1352,19 +1365,14 @@ async fn high_risk_sequence_failures_trip_the_per_pass_breaker_before_a_fourth_d
     let draft = selected_root_sequence_deletion_draft(&fixture).await;
     let (rule_set_id, candidates) = arm_and_evaluate_all(&fixture.execution, draft).await;
     assert_eq!(candidates.len(), 4, "{candidates:?}");
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &rule_set_id,
-            MaintenanceEffectArming::Destructive,
-            Some(4),
-            super::maintenance_rules::arming_confirmation(&fixture.execution.app, &rule_set_id)
-                .await,
-        )
-        .await
-        .expect("destructively arm the four candidates");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &rule_set_id,
+        MaintenanceEffectArming::Destructive,
+        Some(4),
+    )
+    .await;
     fixture
         .execution
         .media_files

@@ -9,13 +9,13 @@ import type {
   MaintenanceCandidate,
   MaintenanceCandidateState,
   MaintenanceEffectArming,
-  MaintenanceInstanceGates,
   MaintenancePreviewOutcome,
   MaintenanceRiskClass,
   MaintenanceRuleSetDetail,
   MaintenanceRuleSetDraft,
   MaintenanceRuleSetRecord,
   MaintenanceRuleScope,
+  MaintenanceRuleState,
 } from "@/lib/types/maintenance-rule-sets";
 // Relative rather than aliased on purpose: `node --test` runs these modules
 // without the bundler's path aliases, so a value import through `@/` would
@@ -490,16 +490,6 @@ export function riskClassLabelKey(risk: string): string | null {
   return RISK_CLASS_LABEL_KEYS[risk as MaintenanceRiskClass] ?? null;
 }
 
-const EVALUATION_MODE_LABEL_KEYS: Record<string, string> = {
-  DISABLED: "settings.maintenanceModeDisabled",
-  SHADOW: "settings.maintenanceModeShadow",
-  OBSERVE: "settings.maintenanceModeObserve",
-};
-
-export function evaluationModeLabelKey(mode: string): string | null {
-  return EVALUATION_MODE_LABEL_KEYS[mode] ?? null;
-}
-
 const PREVIEW_OUTCOME_LABEL_KEYS: Record<MaintenancePreviewOutcome, string> = {
   MATCH: "settings.maintenancePreviewOutcomeMatch",
   NO_MATCH: "settings.maintenancePreviewOutcomeNoMatch",
@@ -510,7 +500,7 @@ export function previewOutcomeLabelKey(outcome: string): string | null {
   return PREVIEW_OUTCOME_LABEL_KEYS[outcome as MaintenancePreviewOutcome] ?? null;
 }
 
-// ── Operating a rule: modes, arming, gates ────────────────────────────
+// ── Operating a rule: state and switches ──────────────────────────────
 
 const EFFECT_ARMING_LABEL_KEYS: Record<MaintenanceEffectArming, string> = {
   NONE: "settings.maintenanceArmingNone",
@@ -522,159 +512,46 @@ export function effectArmingLabelKey(arming: string): string | null {
   return EFFECT_ARMING_LABEL_KEYS[arming as MaintenanceEffectArming] ?? null;
 }
 
-/// Badge tone for a rule's arming. `DESTRUCTIVE` reads destructive because a
-/// rule armed that far can delete files the moment its gate opens.
-export function effectArmingBadgeTone(
-  arming: MaintenanceEffectArming | string,
-): "neutral" | "info" | "warning" | "negative" {
-  switch (arming) {
-    case "DESTRUCTIVE":
-      return "negative";
-    case "REVERSIBLE":
-      return "warning";
-    default:
-      return "neutral";
-  }
-}
-
-const EVALUATION_MODE_HELP_KEYS: Record<MaintenanceEvaluationModeKey, string> = {
-  DISABLED: "settings.maintenanceModeDisabledHelp",
-  SHADOW: "settings.maintenanceModeShadowHelp",
-  OBSERVE: "settings.maintenanceModeObserveHelp",
+const RULE_STATE_KEYS: Record<MaintenanceRuleState, { label: string; help: string }> = {
+  DISABLED: {
+    label: "settings.maintenanceRuleStateDisabled",
+    help: "settings.maintenanceRuleStateDisabledHelp",
+  },
+  DRY_RUN: {
+    label: "settings.maintenanceRuleStateDryRun",
+    help: "settings.maintenanceRuleStateDryRunHelp",
+  },
+  ENABLED: {
+    label: "settings.maintenanceRuleStateEnabled",
+    help: "settings.maintenanceRuleStateEnabledHelp",
+  },
 };
 
-type MaintenanceEvaluationModeKey = "DISABLED" | "SHADOW" | "OBSERVE";
-
-export function evaluationModeHelpKey(mode: string): string | null {
-  return EVALUATION_MODE_HELP_KEYS[mode as MaintenanceEvaluationModeKey] ?? null;
+export function ruleStateLabelKey(state: string): string | null {
+  return RULE_STATE_KEYS[state as MaintenanceRuleState]?.label ?? null;
 }
 
-/// `DESTRUCTIVE` is only offered for a rule whose action actually deletes
-/// something. Read from the descriptor rather than a hardcoded kind list, so a
-/// new high-risk action is covered the day the API ships it.
-export function destructiveArmingOfferable(
-  descriptors: MaintenanceActionDescriptor[],
-  kind: MaintenanceActionKind | string,
+export function ruleStateHelpKey(state: string): string | null {
+  return RULE_STATE_KEYS[state as MaintenanceRuleState]?.help ?? null;
+}
+
+/// A rule whose action never changes anything can only run as a dry run, so
+/// `ENABLED` is not offered for it.
+export function ruleStateOptionsFor(
+  record: Pick<MaintenanceRuleSetRecord, "enabledArming">,
+): MaintenanceRuleState[] {
+  return record.enabledArming === "NONE"
+    ? ["DISABLED", "DRY_RUN"]
+    : ["DISABLED", "DRY_RUN", "ENABLED"];
+}
+
+/// Enabling a rule that deletes files is the one state change that confirms
+/// first, against the candidates it would act on.
+export function ruleStateNeedsConfirmation(
+  record: Pick<MaintenanceRuleSetRecord, "enabledArming">,
+  state: MaintenanceRuleState,
 ): boolean {
-  return (
-    descriptorForActionKind(descriptors, kind as MaintenanceActionKind)?.riskClass ===
-    "HIGH"
-  );
-}
-
-export function armingOptionsFor(
-  descriptors: MaintenanceActionDescriptor[],
-  kind: MaintenanceActionKind | string,
-): MaintenanceEffectArming[] {
-  return destructiveArmingOfferable(descriptors, kind)
-    ? ["NONE", "REVERSIBLE", "DESTRUCTIVE"]
-    : ["NONE", "REVERSIBLE"];
-}
-
-/// The five gates in the order the panel renders them: what may run, then what
-/// may be seen, then the three effect classes from least to most damaging.
-export const MAINTENANCE_GATE_ORDER = [
-  "evaluationEnabled",
-  "resultDisplayEnabled",
-  "presentationEffectsEnabled",
-  "reversibleEffectsEnabled",
-  "destructiveEffectsEnabled",
-] as const satisfies readonly (keyof MaintenanceInstanceGates)[];
-
-export type MaintenanceStatusBannerVariant =
-  | "gatesUnknown"
-  | "evaluationDisabled"
-  | "noActiveRules"
-  | "effectsDisabled"
-  | "reversibleArmed"
-  | "destructiveArmed";
-
-/// What the page says about itself, derived rather than hardcoded: the section
-/// used to carry a permanent "nothing runs yet" notice, and that is no longer
-/// true of every instance.
-///
-/// `gates` is null when the gates query failed, which for this page means the
-/// reader is not a system administrator and cannot see the instance state.
-export function maintenanceStatusBanner(
-  gates: MaintenanceInstanceGates | null,
-  ruleSets: Pick<MaintenanceRuleSetRecord, "evaluationMode">[],
-): { variant: MaintenanceStatusBannerVariant; tone: "info" | "warning" } {
-  if (!gates) {
-    return { variant: "gatesUnknown", tone: "info" };
-  }
-  if (!gates.evaluationEnabled) {
-    return { variant: "evaluationDisabled", tone: "info" };
-  }
-  if (!ruleSets.some((ruleSet) => ruleSet.evaluationMode !== "DISABLED")) {
-    return { variant: "noActiveRules", tone: "info" };
-  }
-  if (gates.destructiveEffectsEnabled) {
-    return { variant: "destructiveArmed", tone: "warning" };
-  }
-  if (gates.reversibleEffectsEnabled || gates.presentationEffectsEnabled) {
-    return { variant: "reversibleArmed", tone: "info" };
-  }
-  return { variant: "effectsDisabled", tone: "info" };
-}
-
-const STATUS_BANNER_KEYS: Record<
-  MaintenanceStatusBannerVariant,
-  { titleKey: string; bodyKey: string }
-> = {
-  gatesUnknown: {
-    titleKey: "settings.maintenanceStatusUnknownTitle",
-    bodyKey: "settings.maintenanceStatusUnknownBody",
-  },
-  evaluationDisabled: {
-    titleKey: "settings.maintenanceStatusEvaluationOffTitle",
-    bodyKey: "settings.maintenanceStatusEvaluationOffBody",
-  },
-  noActiveRules: {
-    titleKey: "settings.maintenanceStatusNoRulesTitle",
-    bodyKey: "settings.maintenanceStatusNoRulesBody",
-  },
-  effectsDisabled: {
-    titleKey: "settings.maintenanceStatusEffectsOffTitle",
-    bodyKey: "settings.maintenanceStatusEffectsOffBody",
-  },
-  reversibleArmed: {
-    titleKey: "settings.maintenanceStatusReversibleTitle",
-    bodyKey: "settings.maintenanceStatusReversibleBody",
-  },
-  destructiveArmed: {
-    titleKey: "settings.maintenanceStatusDestructiveTitle",
-    bodyKey: "settings.maintenanceStatusDestructiveBody",
-  },
-};
-
-export function maintenanceStatusBannerKeys(
-  variant: MaintenanceStatusBannerVariant,
-): { titleKey: string; bodyKey: string } {
-  return STATUS_BANNER_KEYS[variant];
-}
-
-const GATE_LABEL_KEYS: Record<keyof MaintenanceInstanceGates, string> = {
-  evaluationEnabled: "settings.maintenanceGateEvaluation",
-  resultDisplayEnabled: "settings.maintenanceGateResultDisplay",
-  presentationEffectsEnabled: "settings.maintenanceGatePresentationEffects",
-  reversibleEffectsEnabled: "settings.maintenanceGateReversibleEffects",
-  destructiveEffectsEnabled: "settings.maintenanceGateDestructiveEffects",
-};
-
-const GATE_HELP_KEYS: Record<keyof MaintenanceInstanceGates, string> = {
-  evaluationEnabled: "settings.maintenanceGateEvaluationHelp",
-  resultDisplayEnabled: "settings.maintenanceGateResultDisplayHelp",
-  presentationEffectsEnabled: "settings.maintenanceGatePresentationEffectsHelp",
-  reversibleEffectsEnabled: "settings.maintenanceGateReversibleEffectsHelp",
-  destructiveEffectsEnabled: "settings.maintenanceGateDestructiveEffectsHelp",
-};
-
-export function gateLabelKey(gate: keyof MaintenanceInstanceGates): string {
-  return GATE_LABEL_KEYS[gate];
-}
-
-export function gateHelpKey(gate: keyof MaintenanceInstanceGates): string {
-  return GATE_HELP_KEYS[gate];
+  return state === "ENABLED" && record.enabledArming === "DESTRUCTIVE";
 }
 
 /// Sentinel for "no filter". The select primitive refuses an empty-string
@@ -727,9 +604,9 @@ export function candidateStateBadgeTone(
   }
 }
 
-/// Candidate states that are still moving. Arming a rule destructively has to
-/// acknowledge exactly these, because they are the ones an armed handler could
-/// still act on.
+/// Candidate states that are still moving. Enabling a rule that deletes files
+/// has to acknowledge exactly these, because they are the ones the handler
+/// could still act on.
 export const MAINTENANCE_NON_TERMINAL_CANDIDATE_STATES = [
   "OBSERVING",
   "PENDING_ACTION",
@@ -744,8 +621,8 @@ export function isNonTerminalCandidateState(state: string): boolean {
   );
 }
 
-/// How many of a rule's candidates an armed handler could still act on. This is
-/// the number destructive arming makes the operator acknowledge.
+/// How many of a rule's candidates the handler could still act on. This is the
+/// number enabling a deleting rule makes the operator acknowledge.
 export function nonTerminalCandidateCount(
   candidates: Pick<MaintenanceCandidate, "state">[],
 ): number {
@@ -855,8 +732,8 @@ export function maintenanceSearchHistoryState(
   return progress?.run?.state.toLowerCase() ?? "waiting";
 }
 
-/// The server rejects a destructive arming whose acknowledged count no longer
-/// matches, and puts the current count in the message. Pull it out so the
+/// The server rejects enabling a deleting rule whose acknowledged count no
+/// longer matches, and puts the current count in the message. Pull it out so the
 /// confirm dialog can re-ask against the number the server actually has,
 /// instead of making the operator refresh the page to find out.
 ///
@@ -873,24 +750,27 @@ export function parseAcknowledgedCandidateCountMismatch(
   return Number.isFinite(count) ? count : null;
 }
 
-export function setMaintenanceRuleArmingInput(
-  id: string,
-  arming: MaintenanceEffectArming,
-  acknowledgedCandidateCount?: number,
-  reviewed?: Pick<MaintenanceRuleSetRecord, "currentRevisionNumber" | "libraryIds">,
+export function setMaintenanceRuleStateVariables(
+  record: Pick<
+    MaintenanceRuleSetRecord,
+    "id" | "enabledArming" | "currentRevisionNumber" | "libraryIds"
+  >,
+  state: MaintenanceRuleState,
+  candidateCount?: number,
 ) {
   return {
-    id,
-    arming,
-    /// Only a destructive arming carries an acknowledgement; sending one for
-    /// `NONE` or `REVERSIBLE` would invite the server to check a number the UI
-    /// never showed anyone.
-    acknowledgedCandidateCount:
-      arming === "DESTRUCTIVE" ? acknowledgedCandidateCount : undefined,
-    acknowledgedRevisionNumber:
-      arming === "DESTRUCTIVE" ? reviewed?.currentRevisionNumber : undefined,
-    acknowledgedLibraryIds:
-      arming === "DESTRUCTIVE" ? reviewed?.libraryIds.slice() : undefined,
+    ruleSetId: record.id,
+    state,
+    /// Only enabling a rule that deletes files carries a confirmation; sending
+    /// one otherwise would invite the server to check a number the UI never
+    /// showed anyone.
+    confirmation: ruleStateNeedsConfirmation(record, state)
+      ? {
+          revisionNumber: record.currentRevisionNumber,
+          libraryIds: record.libraryIds.slice(),
+          candidateCount: candidateCount ?? 0,
+        }
+      : undefined,
   };
 }
 

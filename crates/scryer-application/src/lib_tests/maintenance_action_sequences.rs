@@ -130,7 +130,6 @@ fn draft(
         grace_days,
         storage_root_id,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -156,15 +155,14 @@ async fn an_ordered_sequence_is_saved_as_an_immutable_revision_and_disarms_on_ch
         MaintenanceActionDefinition::Sequence(first_sequence.clone())
     );
 
-    app.set_maintenance_rule_arming(
+    super::maintenance_rules::arm_rule(
+        &app,
         &user,
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
         None,
-        None,
     )
-    .await
-    .expect("arm the reversible sequence");
+    .await;
 
     let reordered = reordered_profile_then_search_sequence();
     assert_ne!(
@@ -187,14 +185,16 @@ async fn an_ordered_sequence_is_saved_as_an_immutable_revision_and_disarms_on_ch
         .expect("save reordered sequence as a new revision");
 
     assert_eq!(updated.rule_set.current_revision_number, 2);
-    assert!(
-        !updated.rule_set.enabled,
-        "a revision copy remains disabled"
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&updated),
+        scryer_domain::MaintenanceRuleState::DryRun,
+        "a new revision drops an enabled rule back to dry run"
     );
     assert_eq!(
         updated.rule_set.effect_arming,
         MaintenanceEffectArming::None
     );
+    assert!(updated.rule_set.destructive_rearm_required);
     assert_eq!(updated.revision.grace_days, 41);
     assert_eq!(
         updated.revision.matcher_content_hash, created.revision.matcher_content_hash,

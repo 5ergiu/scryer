@@ -19,7 +19,6 @@ import {
   Server,
   Settings2,
   ShieldCheck,
-  ShieldAlert,
   Network,
   SlidersHorizontal,
   SquareTerminal,
@@ -263,7 +262,6 @@ const MAINTENANCE_RULES_SECTIONS: {
     icon: ListChecks,
   },
   { section: "history", labelKey: "settings.maintenanceNavHistory", icon: History },
-  { section: "gates", labelKey: "settings.maintenanceNavGates", icon: ShieldAlert },
 ];
 
 /// Kind switcher for the Rules page. Scoring and maintenance rules are two

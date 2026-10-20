@@ -53,8 +53,7 @@ use crate::media_server_signals::SIGNAL_SYNC_PROVIDERS;
 use crate::ports::MaintenanceCandidateQuery;
 use crate::settings::keys::{
     MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY, MAINTENANCE_GATE_EVALUATION_KEY,
-    MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY, MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
-    MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+    MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
 };
 use crate::{AppError, AppResult, AppUseCase};
 
@@ -123,30 +122,39 @@ pub mod candidate_reason {
 
 // ── Instance gates ──────────────────────────────────────────────────────────
 
-/// The five independent instance-wide gates (RFC 137 section 10).
+/// The stored instance-wide gates.
 ///
 /// All default off, and a missing settings row reads as off, so an instance
-/// that has never been configured evaluates nothing. This wave consumes only
-/// `evaluation` and `result_display`; the other three are stored for the
-/// executor wave so an operator's arming survives that upgrade.
+/// that has never been configured evaluates nothing and acts on nothing.
+/// Operators drive them in pairs through [`MaintenanceGatesUpdate`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintenanceGates {
     pub evaluation_enabled: bool,
     pub result_display_enabled: bool,
-    pub presentation_effects_enabled: bool,
     pub reversible_effects_enabled: bool,
     pub destructive_effects_enabled: bool,
 }
 
-/// A partial gate update. `None` leaves the stored value alone, so a client can
-/// arm one gate without restating the others.
+impl MaintenanceGates {
+    /// Maintenance is enabled when rules are evaluated and their candidates
+    /// are shown.
+    pub fn enabled(&self) -> bool {
+        self.evaluation_enabled && self.result_display_enabled
+    }
+
+    /// Actions are paused only when no effect of either class may run.
+    pub fn actions_paused(&self) -> bool {
+        !self.reversible_effects_enabled && !self.destructive_effects_enabled
+    }
+}
+
+/// The two operator switches. `None` leaves that switch's gates as stored.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MaintenanceGatesUpdate {
-    pub evaluation_enabled: Option<bool>,
-    pub result_display_enabled: Option<bool>,
-    pub presentation_effects_enabled: Option<bool>,
-    pub reversible_effects_enabled: Option<bool>,
-    pub destructive_effects_enabled: Option<bool>,
+    /// Writes both the evaluation and the result display gate.
+    pub enabled: Option<bool>,
+    /// Writes both effect gates: paused closes them, unpaused opens them.
+    pub actions_paused: Option<bool>,
 }
 
 // ── Read models ─────────────────────────────────────────────────────────────
@@ -193,9 +201,7 @@ pub struct MaintenanceCandidateFilter {
     pub rule_set_id: Option<String>,
     pub states: Vec<MaintenanceCandidateState>,
     pub library_id: Option<String>,
-    /// Shadow is dark by default (RFC C1). Candidates produced by a rule in
-    /// shadow mode are returned only when this is set.
-    pub include_shadow: bool,
+
     pub limit: Option<usize>,
 }
 
@@ -261,9 +267,6 @@ impl AppUseCase {
             result_display_enabled: self
                 .maintenance_gate(MAINTENANCE_GATE_RESULT_DISPLAY_KEY)
                 .await?,
-            presentation_effects_enabled: self
-                .maintenance_gate(MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY)
-                .await?,
             reversible_effects_enabled: self
                 .maintenance_gate(MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY)
                 .await?,
@@ -290,7 +293,7 @@ impl AppUseCase {
         self.load_maintenance_gates().await
     }
 
-    /// Arm or disarm gates. Omitted fields are left exactly as stored.
+    /// Flip either switch. An omitted switch leaves its gates exactly as stored.
     pub async fn set_maintenance_instance_gates(
         &self,
         actor: &User,
@@ -299,28 +302,26 @@ impl AppUseCase {
         self.require_app_permission(actor, AppPermission::ManageSystemSettings)
             .await?;
 
-        let values: Vec<_> = [
-            (MAINTENANCE_GATE_EVALUATION_KEY, update.evaluation_enabled),
-            (
+        let enabled = update.enabled.map(|enabled| {
+            [
+                MAINTENANCE_GATE_EVALUATION_KEY,
                 MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
-                update.result_display_enabled,
-            ),
-            (
-                MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
-                update.presentation_effects_enabled,
-            ),
-            (
+            ]
+            .map(|key| (key, enabled))
+        });
+        let effects = update.actions_paused.map(|paused| {
+            [
                 MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
-                update.reversible_effects_enabled,
-            ),
-            (
                 MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
-                update.destructive_effects_enabled,
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key.to_string(), value.to_string())))
-        .collect();
+            ]
+            .map(|key| (key, !paused))
+        });
+        let values: Vec<_> = enabled
+            .into_iter()
+            .chain(effects)
+            .flatten()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
         if !values.is_empty() {
             self.services
                 .config
@@ -335,41 +336,6 @@ impl AppUseCase {
         }
 
         self.load_maintenance_gates().await
-    }
-}
-
-// ── Rule mode ───────────────────────────────────────────────────────────────
-
-impl AppUseCase {
-    /// Move a rule set between evaluation modes.
-    ///
-    /// `enabled` is derived from the mode rather than accepted separately: an
-    /// enabled-but-disabled-mode row would be a state the evaluator has no
-    /// reading for. Creation is untouched and still always produces a disabled
-    /// rule, so arming is always a deliberate second step.
-    pub async fn set_maintenance_rule_evaluation_mode(
-        &self,
-        actor: &User,
-        rule_set_id: &str,
-        mode: MaintenanceEvaluationMode,
-    ) -> AppResult<MaintenanceRuleSetDetail> {
-        self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
-            .await?;
-
-        let mut rule_set = self.require_maintenance_rule_set(rule_set_id).await?;
-        let enabled = mode != MaintenanceEvaluationMode::Disabled;
-        let now = Utc::now();
-
-        self.services
-            .customization
-            .maintenance_rule_sets
-            .update_rule_set_evaluation_mode(&rule_set.id, mode, enabled, now)
-            .await?;
-
-        rule_set.evaluation_mode = mode;
-        rule_set.enabled = enabled;
-        rule_set.updated_at = now;
-        self.load_maintenance_rule_detail(rule_set).await
     }
 }
 
@@ -517,18 +483,7 @@ impl AppUseCase {
 
 impl AppUseCase {
     /// Candidates, with rule and title names resolved in two batched lookups.
-    ///
-    /// Two independent things hide rows here, and they are deliberately not the
-    /// same thing:
-    ///
-    /// * a rule in `shadow` mode is dark by definition (RFC C1), so its
-    ///   candidates appear only when the caller asks for them explicitly; and
-    /// * the instance `result_display` gate hides everything else.
-    ///
-    /// `include_shadow` overrides the gate as well as the mode filter. That is
-    /// deliberate: an operator deciding whether to arm `result_display` has to
-    /// be able to see what shadow evaluation actually found first, and the
-    /// query already requires catalog-settings management to reach at all.
+    /// The instance `result_display` gate hides every row.
     pub async fn list_maintenance_candidates(
         &self,
         actor: &User,
@@ -538,7 +493,7 @@ impl AppUseCase {
             .await?;
 
         let gates = self.load_maintenance_gates().await?;
-        if !gates.result_display_enabled && !filter.include_shadow {
+        if !gates.result_display_enabled {
             return Ok(Vec::new());
         }
 
@@ -567,16 +522,10 @@ impl AppUseCase {
 
         let visible: Vec<LifecycleCandidate> = candidates
             .into_iter()
-            .filter(|candidate| {
-                let Some(rule_set) = rules_by_id.get(&candidate.rule_set_id) else {
-                    // The FK cascades, so this is only reachable for a rule
-                    // deleted between the two reads. Hiding the row is the
-                    // conservative answer.
-                    return false;
-                };
-                filter.include_shadow
-                    || rule_set.evaluation_mode != MaintenanceEvaluationMode::Shadow
-            })
+            // The FK cascades, so a missing rule is only reachable for one
+            // deleted between the two reads. Hiding the row is the
+            // conservative answer.
+            .filter(|candidate| rules_by_id.contains_key(&candidate.rule_set_id))
             .collect();
 
         let names = self
@@ -1623,7 +1572,7 @@ impl AppUseCase {
             return Ok(());
         }
 
-        // Exclusions are honoured from the first shadow evaluation (RFC 11):
+        // Exclusions are honoured from the first evaluation:
         // an excluded subject is never evaluated, and an existing candidate for
         // it becomes terminal rather than lingering as live membership.
         if subject.excluded_by(&title.id, excluded) {

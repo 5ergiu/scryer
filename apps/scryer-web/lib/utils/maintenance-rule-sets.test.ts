@@ -8,32 +8,24 @@ import type {
   MaintenanceActionStepProgress,
   MaintenanceCandidateState,
   MaintenanceEffectArming,
-  MaintenanceInstanceGates,
   MaintenanceRuleSetDetail,
+  MaintenanceRuleState,
 } from "../types/maintenance-rule-sets.ts";
 import {
   MAINTENANCE_FILTER_ALL,
-  MAINTENANCE_GATE_ORDER,
   MAINTENANCE_PREVIEW_LIMIT_DEFAULT,
   MAINTENANCE_PREVIEW_LIMIT_MAX,
   MAINTENANCE_STARTER_SOURCE,
   actionKindLabelKey,
   actionRequiresTags,
   actionRequiresTargetQualityProfile,
-  armingOptionsFor,
   candidateStateBadgeTone,
   candidateStateLabelKey,
   clampMaintenancePreviewLimit,
   copyMaintenanceRuleDraft,
   createMaintenanceRuleSetInput,
-  destructiveArmingOfferable,
-  effectArmingBadgeTone,
   effectArmingLabelKey,
-  evaluationModeHelpKey,
-  evaluationModeLabelKey,
   excludeMaintenanceSubjectInput,
-  gateHelpKey,
-  gateLabelKey,
   initialMaintenanceRuleDraft,
   isNonTerminalCandidateState,
   maintenanceCountdown,
@@ -43,14 +35,16 @@ import {
   maintenancePreviewInput,
   maintenanceSearchHistoryState,
   maintenanceRuleDraftFromDetail,
-  maintenanceStatusBanner,
-  maintenanceStatusBannerKeys,
   nonTerminalCandidateCount,
   parseAcknowledgedCandidateCountMismatch,
   riskClassBadgeTone,
   runStatusBadgeTone,
+  ruleStateHelpKey,
+  ruleStateLabelKey,
+  ruleStateNeedsConfirmation,
+  ruleStateOptionsFor,
   runStatusLabelKey,
-  setMaintenanceRuleArmingInput,
+  setMaintenanceRuleStateVariables,
   titleScopedActionDescriptors,
   scopedActionDescriptors,
   storageScopedActionDescriptors,
@@ -114,10 +108,9 @@ const detail: MaintenanceRuleSetDetail = {
     id: "rule-1",
     name: "Stale unmonitored titles",
     description: "Unmonitored titles that still hold files.",
-    enabled: false,
-    evaluationMode: "DISABLED",
-    effectArming: "NONE",
-    destructiveRearmRequired: false,
+    state: "DISABLED",
+    enabledArming: "REVERSIBLE",
+    editedSinceEnabled: false,
     libraryIds: ["lib-movies", "lib-series"],
     subjectKind: "TITLE",
     currentRevisionNumber: 3,
@@ -583,178 +576,75 @@ test("the maintenance reference table documents bare facts and full envelopes", 
 
 // ── Operating a rule ──────────────────────────────────────────────────
 
-const allGatesOff: MaintenanceInstanceGates = {
-  evaluationEnabled: false,
-  resultDisplayEnabled: false,
-  presentationEffectsEnabled: false,
-  reversibleEffectsEnabled: false,
-  destructiveEffectsEnabled: false,
+const reviewedDeleteRule = {
+  id: "rule-1",
+  enabledArming: "DESTRUCTIVE" as MaintenanceEffectArming,
+  currentRevisionNumber: 3,
+  libraryIds: ["library-a"],
 };
 
-const activeRule = { evaluationMode: "OBSERVE" } as const;
-const disabledRule = { evaluationMode: "DISABLED" } as const;
-
-test("a reader who cannot see the gates is told so rather than told nothing runs", () => {
-  const banner = maintenanceStatusBanner(null, [activeRule]);
-
-  assert.equal(banner.variant, "gatesUnknown");
-  assert.equal(banner.tone, "info");
-});
-
-test("the evaluation gate outranks every other reason the page might be quiet", () => {
-  assert.equal(
-    maintenanceStatusBanner(allGatesOff, [activeRule]).variant,
-    "evaluationDisabled",
-  );
-});
-
-test("evaluation on with nothing but disabled rules reads as no active rules", () => {
-  const gates = { ...allGatesOff, evaluationEnabled: true };
-
-  assert.equal(
-    maintenanceStatusBanner(gates, [disabledRule]).variant,
-    "noActiveRules",
-  );
-  assert.equal(maintenanceStatusBanner(gates, []).variant, "noActiveRules");
-});
-
-test("an evaluating instance with every effect gate shut says so plainly", () => {
-  const banner = maintenanceStatusBanner(
-    { ...allGatesOff, evaluationEnabled: true },
-    [activeRule],
-  );
-
-  assert.equal(banner.variant, "effectsDisabled");
-  assert.equal(banner.tone, "info");
-});
-
-test("the destructive gate is the only banner that raises its voice", () => {
-  const reversible = maintenanceStatusBanner(
-    { ...allGatesOff, evaluationEnabled: true, reversibleEffectsEnabled: true },
-    [activeRule],
-  );
-  const destructive = maintenanceStatusBanner(
-    {
-      ...allGatesOff,
-      evaluationEnabled: true,
-      reversibleEffectsEnabled: true,
-      destructiveEffectsEnabled: true,
-    },
-    [activeRule],
-  );
-
-  assert.equal(reversible.variant, "reversibleArmed");
-  assert.equal(reversible.tone, "info");
-  assert.equal(destructive.variant, "destructiveArmed");
-  assert.equal(destructive.tone, "warning");
-});
-
-test("every banner variant and gate has real copy in the default locale", () => {
-  const variants = [
-    "gatesUnknown",
-    "evaluationDisabled",
-    "noActiveRules",
-    "effectsDisabled",
-    "reversibleArmed",
-    "destructiveArmed",
-  ] as const;
-
-  for (const variant of variants) {
-    const { titleKey, bodyKey } = maintenanceStatusBannerKeys(variant);
-    assert.equal(typeof en[titleKey], "string", `${titleKey} is missing`);
-    assert.equal(typeof en[bodyKey], "string", `${bodyKey} is missing`);
-  }
-
-  assert.equal(MAINTENANCE_GATE_ORDER.length, 5);
-  for (const gate of MAINTENANCE_GATE_ORDER) {
-    assert.equal(typeof en[gateLabelKey(gate)], "string", `${gate} has no label`);
-    assert.equal(typeof en[gateHelpKey(gate)], "string", `${gate} has no help`);
+test("enabled is offered only for a rule whose action changes something", () => {
+  assert.deepEqual(ruleStateOptionsFor({ enabledArming: "NONE" }), ["DISABLED", "DRY_RUN"]);
+  for (const enabledArming of ["REVERSIBLE", "DESTRUCTIVE"] as const) {
+    assert.deepEqual(ruleStateOptionsFor({ enabledArming }), ["DISABLED", "DRY_RUN", "ENABLED"]);
   }
 });
 
-test("destructive arming is only offered for an action that actually deletes", () => {
-  assert.equal(
-    destructiveArmingOfferable(descriptors, "DELETE_TITLE_AND_FILES"),
-    true,
-  );
-  assert.equal(
-    destructiveArmingOfferable(
-      descriptors,
-      "CHANGE_QUALITY_PROFILE_AND_SEARCH_IF_CHANGED",
-    ),
-    false,
-  );
-  assert.deepEqual(armingOptionsFor(descriptors, "DO_NOTHING"), [
-    "NONE",
-    "REVERSIBLE",
-  ]);
-  assert.deepEqual(armingOptionsFor(descriptors, "DELETE_TITLE_AND_FILES"), [
-    "NONE",
-    "REVERSIBLE",
-    "DESTRUCTIVE",
-  ]);
-  /// An action kind this build has no descriptor for never offers the
-  /// destructive rung.
-  assert.deepEqual(armingOptionsFor([], "DELETE_TITLE_AND_FILES"), [
-    "NONE",
-    "REVERSIBLE",
-  ]);
+test("only enabling a rule that deletes files asks for confirmation", () => {
+  const states: MaintenanceRuleState[] = ["DISABLED", "DRY_RUN", "ENABLED"];
+  for (const state of states) {
+    assert.equal(ruleStateNeedsConfirmation({ enabledArming: "REVERSIBLE" }, state), false);
+    assert.equal(
+      ruleStateNeedsConfirmation({ enabledArming: "DESTRUCTIVE" }, state),
+      state === "ENABLED",
+      state,
+    );
+  }
 });
 
-test("arming reads at a glance, with destructive the only destructive-toned rung", () => {
+test("a state change carries the reviewed revision, scope and count only when it confirms", () => {
+  assert.deepEqual(
+    setMaintenanceRuleStateVariables({ ...reviewedDeleteRule, enabledArming: "REVERSIBLE" }, "ENABLED", 7),
+    { ruleSetId: "rule-1", state: "ENABLED", confirmation: undefined },
+  );
+  assert.equal(setMaintenanceRuleStateVariables(reviewedDeleteRule, "DRY_RUN", 7).confirmation, undefined);
+  const variables = setMaintenanceRuleStateVariables(reviewedDeleteRule, "ENABLED", 7);
+  reviewedDeleteRule.libraryIds.push("library-b");
+  assert.deepEqual(variables, {
+    ruleSetId: "rule-1",
+    state: "ENABLED",
+    confirmation: { revisionNumber: 3, libraryIds: ["library-a"], candidateCount: 7 },
+  });
+  reviewedDeleteRule.libraryIds.pop();
+});
+
+test("a global delete rule confirms an explicit empty scope", () => {
+  const variables = setMaintenanceRuleStateVariables(
+    { ...reviewedDeleteRule, libraryIds: [] },
+    "ENABLED",
+    0,
+  );
+  assert.deepEqual(variables.confirmation, { revisionNumber: 3, libraryIds: [], candidateCount: 0 });
+});
+
+test("every rule state and effect has real copy in the default locale", () => {
+  for (const state of ["DISABLED", "DRY_RUN", "ENABLED"]) {
+    for (const key of [ruleStateLabelKey(state), ruleStateHelpKey(state)]) {
+      assert.ok(key, `${state} has no key`);
+      assert.equal(typeof en[key], "string", `${key} is missing`);
+    }
+  }
+  assert.equal(en["settings.maintenanceRuleStateDisabled"], "Disabled");
+  assert.equal(en["settings.maintenanceRuleStateDryRun"], "Dry run");
+  assert.equal(en["settings.maintenanceRuleStateEnabled"], "Enabled");
+  assert.equal(ruleStateLabelKey("SOME_FUTURE_STATE"), null);
   const armings: MaintenanceEffectArming[] = ["NONE", "REVERSIBLE", "DESTRUCTIVE"];
-
-  assert.equal(effectArmingBadgeTone("DESTRUCTIVE"), "negative");
-  assert.equal(effectArmingBadgeTone("REVERSIBLE"), "warning");
-  assert.equal(effectArmingBadgeTone("NONE"), "neutral");
   for (const arming of armings) {
     const key = effectArmingLabelKey(arming);
     assert.ok(key, `${arming} has no label key`);
     assert.equal(typeof en[key], "string", `${key} is not in the default locale`);
   }
   assert.equal(effectArmingLabelKey("SOME_FUTURE_ARMING"), null);
-});
-
-test("every evaluation mode carries a label and an explanation", () => {
-  for (const mode of ["DISABLED", "SHADOW", "OBSERVE"]) {
-    const labelKey = evaluationModeLabelKey(mode);
-    const helpKey = evaluationModeHelpKey(mode);
-    assert.ok(labelKey, `${mode} has no label key`);
-    assert.ok(helpKey, `${mode} has no help key`);
-    assert.equal(typeof en[labelKey], "string", `${labelKey} is missing`);
-    assert.equal(typeof en[helpKey], "string", `${helpKey} is missing`);
-  }
-  assert.equal(evaluationModeHelpKey("SOME_FUTURE_MODE"), null);
-});
-
-test("only a destructive arming carries an acknowledgement", () => {
-  const reviewed = { currentRevisionNumber: 3, libraryIds: ["library-a"] };
-  assert.deepEqual(setMaintenanceRuleArmingInput("rule-1", "REVERSIBLE", 7, reviewed), {
-    id: "rule-1",
-    arming: "REVERSIBLE",
-    acknowledgedCandidateCount: undefined,
-    acknowledgedRevisionNumber: undefined,
-    acknowledgedLibraryIds: undefined,
-  });
-  const input = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 7, reviewed);
-  reviewed.libraryIds.push("library-b");
-  assert.deepEqual(input, {
-    id: "rule-1",
-    arming: "DESTRUCTIVE",
-    acknowledgedCandidateCount: 7,
-    acknowledgedRevisionNumber: 3,
-    acknowledgedLibraryIds: ["library-a"],
-  });
-});
-
-test("destructive arming distinguishes reviewed global scope from missing confirmation", () => {
-  const global = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 0, {
-    currentRevisionNumber: 1, libraryIds: [],
-  });
-  assert.deepEqual(global.acknowledgedLibraryIds, []);
-  const missing = setMaintenanceRuleArmingInput("rule-1", "DESTRUCTIVE", 0);
-  assert.equal(missing.acknowledgedLibraryIds, undefined);
-  assert.equal(missing.acknowledgedRevisionNumber, undefined);
 });
 
 test("the count-mismatch message shape the dialog re-asks against is pinned", () => {

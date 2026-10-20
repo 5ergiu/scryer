@@ -1246,7 +1246,6 @@ impl ScopedMaintenanceFixture {
                     grace_days: grace,
                     storage_root_id: None,
                     library_ids: vec![],
-                    evaluation_mode: None,
                 },
             )
             .await
@@ -1256,24 +1255,15 @@ impl ScopedMaintenanceFixture {
             rule.rule_set.effect_arming,
             scryer_domain::MaintenanceEffectArming::None
         );
-        app.set_maintenance_rule_evaluation_mode(
+        super::maintenance_rules::set_rule_state(
+            app,
             actor,
             &rule.rule_set.id,
-            scryer_domain::MaintenanceEvaluationMode::Observe,
+            scryer_domain::MaintenanceRuleState::DryRun,
+            None,
         )
-        .await
-        .expect("observe");
-        app.set_maintenance_instance_gates(
-            actor,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
-                result_display_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("gates");
+        .await;
+        super::maintenance_rules::open_maintenance_gates(app, false, true).await;
         app.run_maintenance_rule_evaluation_job()
             .await
             .expect("evaluate");
@@ -1286,15 +1276,14 @@ impl ScopedMaintenanceFixture {
                 candidate.rule_set_id == rule.rule_set.id && !candidate.state.is_terminal()
             })
             .count();
-        app.set_maintenance_rule_arming(
+        super::maintenance_rules::arm_rule(
+            app,
             actor,
             &rule.rule_set.id,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(count as i64),
-            Some((&rule.rule_set).into()),
         )
-        .await
-        .expect("arm");
+        .await;
         rule.rule_set.id
     }
 }

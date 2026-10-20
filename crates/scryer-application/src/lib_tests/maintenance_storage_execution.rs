@@ -11,14 +11,12 @@ use crate::maintenance_rules::storage::{
     TestCapacityProbe, install_maintenance_storage_capacity_probe_for_test,
 };
 use crate::maintenance_rules::{
-    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceCandidateFilter,
-    MaintenanceGatesUpdate, MaintenanceRuleDraft,
+    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceCandidateFilter, MaintenanceRuleDraft,
 };
 use crate::ports::SubtitleDownloadRepository;
 use scryer_domain::{
     ExternalSubtitleSourceKind, LifecycleActionRunStatus, MaintenanceEffectArming,
-    MaintenanceEvaluationMode, MaintenanceRuleSubjectKind, SubtitleBlocklistEntry,
-    SubtitleDownload,
+    MaintenanceRuleSubjectKind, SubtitleBlocklistEntry, SubtitleDownload,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -233,35 +231,19 @@ async fn arm_storage_title_deletion_with_matcher(
                 grace_days: 0,
                 storage_root_id: Some(storage_root_id),
                 library_ids: vec![],
-                evaluation_mode: None,
             },
         )
         .await
         .expect("create storage rule");
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.execution.user,
-            &created.rule_set.id,
-            MaintenanceEvaluationMode::Observe,
-        )
-        .await
-        .expect("enable observation");
-    fixture
-        .execution
-        .app
-        .set_maintenance_instance_gates(
-            &fixture.execution.user,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                result_display_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("open maintenance gates");
+    super::maintenance_rules::set_rule_state(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &created.rule_set.id,
+        scryer_domain::MaintenanceRuleState::DryRun,
+        None,
+    )
+    .await;
+    super::maintenance_rules::open_maintenance_gates(&fixture.execution.app, false, true).await;
     fixture
         .execution
         .app
@@ -279,18 +261,14 @@ async fn arm_storage_title_deletion_with_matcher(
         })
         .count();
     assert_eq!(active_candidates, 1, "one selected movie candidate");
-    fixture
-        .execution
-        .app
-        .set_maintenance_rule_arming(
-            &fixture.execution.user,
-            &created.rule_set.id,
-            MaintenanceEffectArming::Destructive,
-            Some(active_candidates as i64),
-            Some((&created.rule_set).into()),
-        )
-        .await
-        .expect("arm storage rule");
+    super::maintenance_rules::arm_rule(
+        &fixture.execution.app,
+        &fixture.execution.user,
+        &created.rule_set.id,
+        MaintenanceEffectArming::Destructive,
+        Some(active_candidates as i64),
+    )
+    .await;
     created.rule_set.id
 }
 

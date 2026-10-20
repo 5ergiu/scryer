@@ -10,17 +10,17 @@ use scryer_application::{
     HISTORY_KEEP_FOREVER_KEY, HISTORY_RETENTION_DAYS_KEY, IMAGE_CACHE_MAX_SIZE_MB_KEY,
     IMPORT_MODE_KEY, INDEXER_ROUTING_SETTINGS_KEY, LEGACY_NZBGET_CATEGORY_SETTING_KEY,
     LEGACY_NZBGET_CLIENT_ROUTING_SETTINGS_KEY, MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
-    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
-    MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
-    METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY, MFA_REQUIRE_PASSWORD_LOGIN_KEY,
-    MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON, MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_ROOT_FOLDERS_KEY,
-    NZBGET_OLDER_PRIORITY_SETTING_KEY, NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY,
-    POST_PROCESSING_SCRIPT_ANIME_KEY, POST_PROCESSING_SCRIPT_MOVIE_KEY,
-    POST_PROCESSING_SCRIPT_SERIES_KEY, POST_PROCESSING_TIMEOUT_KEY, QUALITY_PROFILE_CATALOG_KEY,
-    QUALITY_PROFILE_ID_KEY, QUALITY_PROFILE_INHERIT_VALUE, QualityProfile,
-    QualityProfileRepository, RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY,
-    RECYCLE_BIN_RETENTION_DAYS_KEY, RENAME_COLLISION_POLICY_GLOBAL_KEY,
-    RENAME_COLLISION_POLICY_KEY, RENAME_COLLISION_POLICY_MOVIE_GLOBAL_KEY, RENAME_ENABLED_KEY,
+    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+    MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY, METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY,
+    MFA_REQUIRE_PASSWORD_LOGIN_KEY, MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON,
+    MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_ROOT_FOLDERS_KEY, NZBGET_OLDER_PRIORITY_SETTING_KEY,
+    NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY, POST_PROCESSING_SCRIPT_ANIME_KEY,
+    POST_PROCESSING_SCRIPT_MOVIE_KEY, POST_PROCESSING_SCRIPT_SERIES_KEY,
+    POST_PROCESSING_TIMEOUT_KEY, QUALITY_PROFILE_CATALOG_KEY, QUALITY_PROFILE_ID_KEY,
+    QUALITY_PROFILE_INHERIT_VALUE, QualityProfile, QualityProfileRepository,
+    RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY, RECYCLE_BIN_RETENTION_DAYS_KEY,
+    RENAME_COLLISION_POLICY_GLOBAL_KEY, RENAME_COLLISION_POLICY_KEY,
+    RENAME_COLLISION_POLICY_MOVIE_GLOBAL_KEY, RENAME_ENABLED_KEY,
     RENAME_MISSING_METADATA_POLICY_GLOBAL_KEY, RENAME_MISSING_METADATA_POLICY_KEY,
     RENAME_MISSING_METADATA_POLICY_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_ANIME_GLOBAL_KEY,
     RENAME_TEMPLATE_KEY, RENAME_TEMPLATE_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_SERIES_GLOBAL_KEY,
@@ -1381,9 +1381,9 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             default_value_json: "\"none\"",
             is_sensitive: false,
         },
-        // The five maintenance gates (RFC 137 section 10). Every default is
-        // false, and they are seeded separately rather than as one blob so a
-        // partial write can never arm a gate the operator did not ask for.
+        // The maintenance gates. Every default is false, and they are seeded
+        // separately rather than as one blob so a partial write can never arm
+        // a gate the operator did not ask for.
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_GENERAL,
             scope: SETTINGS_SCOPE_SYSTEM,
@@ -1396,14 +1396,6 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             category: SETTINGS_CATEGORY_GENERAL,
             scope: SETTINGS_SCOPE_SYSTEM,
             key_name: MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
-            data_type: "boolean",
-            default_value_json: "false",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_GENERAL,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
             data_type: "boolean",
             default_value_json: "false",
             is_sensitive: false,
@@ -1425,7 +1417,7 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             is_sensitive: false,
         },
         // The single request-rule gate (spec 0003 FR-013). One switch where
-        // maintenance has five: a request rule votes and executes nothing, so
+        // maintenance has several: a request rule votes and executes nothing, so
         // there is one blast radius. It ships disarmed for the same reason the
         // maintenance gates do.
         ServiceSettingSeed {
@@ -3080,7 +3072,6 @@ mod tests {
         for key_name in [
             MAINTENANCE_GATE_EVALUATION_KEY,
             MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
-            MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
             MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
             MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
         ] {
