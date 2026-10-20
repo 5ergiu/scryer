@@ -2341,6 +2341,10 @@ fn movie_metadata_from_item_for_release_market(
         theatrical_dates: m.release_dates.theatrical_dates,
         digital_dates: m.release_dates.digital_dates,
         physical_dates: m.release_dates.physical_dates,
+        any_market_theatrical_dates: m.release_dates.any_market_theatrical_dates,
+        any_market_digital_dates: m.release_dates.any_market_digital_dates,
+        any_market_physical_dates: m.release_dates.any_market_physical_dates,
+        any_market_home_dates_unusable: m.release_dates.any_market_home_dates_unusable,
     });
     MovieMetadata {
         target_key: None,
@@ -4973,7 +4977,11 @@ mod tests {
                 "fetched",
                 "theatrical_dates",
                 "digital_dates",
-                "physical_dates"
+                "physical_dates",
+                "any_market_theatrical_dates",
+                "any_market_digital_dates",
+                "any_market_physical_dates",
+                "any_market_home_dates_unusable"
             ]
         );
     }
@@ -4991,7 +4999,11 @@ mod tests {
                     "fetched": true,
                     "theatrical_dates": ["2028-03-10"],
                     "digital_dates": ["2028-05-02"],
-                    "physical_dates": []
+                    "physical_dates": [],
+                    "any_market_theatrical_dates": ["2028-02-14", "2028-03-10"],
+                    "any_market_digital_dates": ["2028-04-20"],
+                    "any_market_physical_dates": [],
+                    "any_market_home_dates_unusable": true
                 }
             }),
         );
@@ -5050,6 +5062,13 @@ mod tests {
         assert_eq!(dated.theatrical_dates, vec!["2028-03-10".to_string()]);
         assert_eq!(dated.digital_dates, vec!["2028-05-02".to_string()]);
         assert!(dated.physical_dates.is_empty());
+        assert_eq!(
+            dated.any_market_theatrical_dates,
+            vec!["2028-02-14".to_string(), "2028-03-10".to_string()]
+        );
+        assert_eq!(dated.any_market_digital_dates, vec!["2028-04-20".to_string()]);
+        assert!(dated.any_market_physical_dates.is_empty());
+        assert!(dated.any_market_home_dates_unusable);
 
         // A movie the gateway has not fetched dates for reads as unfetched,
         // never as "no release anywhere".
@@ -6205,6 +6224,14 @@ struct MovieReleaseDatesItem {
     digital_dates: Vec<String>,
     #[serde(default)]
     physical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_theatrical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_digital_dates: Vec<String>,
+    #[serde(default)]
+    any_market_physical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_home_dates_unusable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

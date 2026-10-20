@@ -7601,6 +7601,7 @@ mod tests {
             theatrical_dates: vec!["2025-01-10".to_string()],
             digital_dates: vec!["2025-03-15".to_string()],
             physical_dates: vec!["2025-04-02".to_string()],
+            ..Default::default()
         };
         let mut title = conflict_test_title(
             "release-dates-round-trip",
@@ -7621,6 +7622,10 @@ mod tests {
             theatrical_dates: vec!["2025-01-10".to_string()],
             digital_dates: vec!["2025-04-15".to_string()],
             physical_dates: vec!["2025-04-02".to_string()],
+            any_market_theatrical_dates: vec!["2024-12-20".to_string()],
+            any_market_digital_dates: vec!["2025-03-01".to_string()],
+            any_market_physical_dates: vec!["2025-03-20".to_string()],
+            any_market_home_dates_unusable: true,
         };
         TitleRepository::update_title_hydrated_metadata(
             &store,

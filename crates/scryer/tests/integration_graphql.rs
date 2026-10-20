@@ -1037,6 +1037,7 @@ async fn add_available_test_movie(ctx: &TestContext, name: &str) -> String {
         theatrical_dates: vec!["2020-01-01".to_string()],
         digital_dates: vec!["2020-04-01".to_string()],
         physical_dates: vec![],
+        ..Default::default()
     };
     sqlx::query(
         "UPDATE titles

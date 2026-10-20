@@ -2228,6 +2228,7 @@ mod numbering_bridge_replacement_tests {
                             theatrical_dates: vec!["2026-02-01".into()],
                             digital_dates: vec!["2026-11-01".into()],
                             physical_dates: vec!["2026-11-15".into()],
+                            ..Default::default()
                         }),
                         ..Default::default()
                     },

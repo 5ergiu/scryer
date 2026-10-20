@@ -166,7 +166,180 @@ fn release_dates(
             .collect(),
         digital_dates: digital_dates.iter().map(|date| date.to_string()).collect(),
         physical_dates: physical_dates.iter().map(|date| date.to_string()).collect(),
+        ..Default::default()
     }
+}
+
+fn owned_dates(dates: &[&str]) -> Vec<String> {
+    dates.iter().map(|date| date.to_string()).collect()
+}
+
+/// Fetched US dates with nothing in the US itself, only the worldwide lists.
+fn worldwide_release_dates(
+    theatrical_dates: &[&str],
+    digital_dates: &[&str],
+    physical_dates: &[&str],
+    home_dates_unusable: bool,
+) -> MovieReleaseDates {
+    MovieReleaseDates {
+        any_market_theatrical_dates: owned_dates(theatrical_dates),
+        any_market_digital_dates: owned_dates(digital_dates),
+        any_market_physical_dates: owned_dates(physical_dates),
+        any_market_home_dates_unusable: home_dates_unusable,
+        ..release_dates(&[], &[], &[])
+    }
+}
+
+fn decide_with_dates(
+    dates: &MovieReleaseDates,
+    availability: &str,
+    delay_days: i32,
+) -> crate::types::MovieAvailabilityDecision {
+    movie_availability_decision(
+        Some(dates),
+        true,
+        None,
+        None,
+        availability_policy(Some(availability), "US", delay_days),
+        &fixed_release_clock(),
+    )
+}
+
+#[test]
+fn released_falls_back_to_the_earliest_home_release_in_any_market() {
+    let dates = worldwide_release_dates(&["2024-12-01"], &["2025-03-25"], &["2025-03-20"], false);
+    let decision = decide_with_dates(&dates, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Available);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-03-20"));
+    assert!(decision.estimated);
+    assert_eq!(decision.reason, "home_release_date_estimated_worldwide");
+
+    // The rung keeps naming itself while it waits, and the delay still applies.
+    let delayed = decide_with_dates(&dates, "released", 30);
+    assert_eq!(delayed.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(delayed.effective_date.as_deref(), Some("2025-04-19"));
+    assert!(delayed.estimated);
+    assert_eq!(delayed.reason, "home_release_date_estimated_worldwide");
+}
+
+#[test]
+fn released_blocks_when_a_worldwide_home_date_is_unusable() {
+    let dates = worldwide_release_dates(&["2024-12-01"], &[], &[], true);
+    let decision = decide_with_dates(&dates, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Unknown);
+    assert_eq!(decision.reason, "home_release_date_unusable");
+    assert_eq!(decision.effective_date, None);
+}
+
+#[test]
+fn released_estimates_from_the_earliest_worldwide_theatrical_release() {
+    let dates = worldwide_release_dates(&["2025-02-01", "2025-01-10"], &[], &[], false);
+    let decision = decide_with_dates(&dates, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-04-10"));
+    assert!(decision.estimated);
+    assert_eq!(
+        decision.reason,
+        "home_release_date_estimated_from_worldwide_theatrical"
+    );
+
+    let opened = worldwide_release_dates(&["2025-01-01"], &[], &[], false);
+    let decision = decide_with_dates(&opened, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Available);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-04-01"));
+}
+
+#[test]
+fn in_cinemas_falls_back_to_the_earliest_worldwide_theatrical_release() {
+    let dates = worldwide_release_dates(&["2025-03-01", "2025-02-20"], &["2025-01-01"], &[], false);
+    let decision = decide_with_dates(&dates, "in_cinemas", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Available);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-02-20"));
+    assert!(decision.estimated);
+    assert_eq!(
+        decision.reason,
+        "theatrical_release_date_estimated_worldwide"
+    );
+}
+
+#[test]
+fn in_cinemas_falls_back_to_the_earliest_worldwide_home_release() {
+    let dates = worldwide_release_dates(&[], &["2025-05-15"], &["2025-05-01"], false);
+    let decision = decide_with_dates(&dates, "in_cinemas", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-05-01"));
+    assert!(decision.estimated);
+    assert_eq!(
+        decision.reason,
+        "theatrical_release_date_estimated_from_worldwide_home"
+    );
+}
+
+#[test]
+fn premiere_or_tv_only_movies_stay_unknown_under_both_thresholds() {
+    // Premiere and TV events feed no list, so every list arrives empty.
+    let dates = worldwide_release_dates(&[], &[], &[], false);
+    let released = decide_with_dates(&dates, "released", 0);
+    assert_eq!(released.status, crate::MovieAvailabilityStatus::Unknown);
+    assert_eq!(released.reason, "home_release_date_unknown");
+    assert!(!released.estimated);
+    let in_cinemas = decide_with_dates(&dates, "in_cinemas", 0);
+    assert_eq!(in_cinemas.status, crate::MovieAvailabilityStatus::Unknown);
+    assert_eq!(in_cinemas.reason, "theatrical_release_date_unknown");
+    assert!(!in_cinemas.estimated);
+}
+
+#[test]
+fn regional_dates_win_over_worldwide_dates() {
+    let worldwide = |regional: MovieReleaseDates| MovieReleaseDates {
+        any_market_theatrical_dates: owned_dates(&["2024-10-01"]),
+        any_market_digital_dates: owned_dates(&["2024-11-01"]),
+        ..regional
+    };
+
+    let regional_home = worldwide(release_dates(&[], &["2025-05-01"], &[]));
+    let decision = decide_with_dates(&regional_home, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-05-01"));
+    assert!(!decision.estimated);
+    assert_eq!(decision.reason, "waiting_for_release_date");
+
+    // Regional theatrical plus 90 still outranks an earlier worldwide home date.
+    let regional_theatrical = worldwide(release_dates(&["2025-01-20"], &[], &[]));
+    let decision = decide_with_dates(&regional_theatrical, "released", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-04-20"));
+    assert!(decision.estimated);
+    assert_eq!(decision.reason, "waiting_for_release_date");
+
+    // An unreadable regional home date keeps blocking; worldwide is not consulted.
+    let regional_unusable = worldwide(release_dates(&[], &["not-a-date"], &[]));
+    let decision = decide_with_dates(&regional_unusable, "released", 0);
+    assert_eq!(decision.reason, "home_release_date_unusable");
+
+    let regional_cinema = worldwide(release_dates(&["2025-05-01"], &[], &[]));
+    let decision = decide_with_dates(&regional_cinema, "in_cinemas", 0);
+    assert_eq!(decision.status, crate::MovieAvailabilityStatus::Waiting);
+    assert_eq!(decision.effective_date.as_deref(), Some("2025-05-01"));
+    assert!(!decision.estimated);
+}
+
+#[test]
+fn release_dates_persisted_before_the_worldwide_fields_take_the_ladder_empty() {
+    let persisted: MovieReleaseDates = serde_json::from_str(
+        r#"{"market":"US","fetched":true,"theatrical_dates":[],"digital_dates":[],"physical_dates":[]}"#,
+    )
+    .expect("a row written before the worldwide fields still reads");
+    assert!(persisted.any_market_theatrical_dates.is_empty());
+    assert!(persisted.any_market_digital_dates.is_empty());
+    assert!(persisted.any_market_physical_dates.is_empty());
+    assert!(!persisted.any_market_home_dates_unusable);
+
+    let released = decide_with_dates(&persisted, "released", 0);
+    assert_eq!(released.status, crate::MovieAvailabilityStatus::Unknown);
+    assert_eq!(released.reason, "home_release_date_unknown");
+    let in_cinemas = decide_with_dates(&persisted, "in_cinemas", 0);
+    assert_eq!(in_cinemas.reason, "theatrical_release_date_unknown");
 }
 
 fn availability_policy<'a>(

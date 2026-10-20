@@ -1505,6 +1505,15 @@ pub struct MovieReleaseDates {
     pub theatrical_dates: Vec<String>,
     pub digital_dates: Vec<String>,
     pub physical_dates: Vec<String>,
+    /// Theatrical dates from every country, earliest first. Rows written
+    /// before these worldwide fields existed read back empty.
+    pub any_market_theatrical_dates: Vec<String>,
+    /// Digital release dates from every country, earliest first.
+    pub any_market_digital_dates: Vec<String>,
+    /// Physical release dates from every country, earliest first.
+    pub any_market_physical_dates: Vec<String>,
+    /// Some country has a home release whose date could not be read.
+    pub any_market_home_dates_unusable: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

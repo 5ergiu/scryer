@@ -151,6 +151,9 @@ pub(crate) fn movie_availability_decision(
         );
     }
 
+    // A worldwide rung names itself in the reason, whatever the status, so the
+    // operator can see the date was not read from the selected market.
+    let mut rung_reason: Option<&'static str> = None;
     let (base_date, estimated) = if let Some(release_dates) = release_dates {
         if !release_dates.fetched {
             return movie_availability_result(
@@ -174,16 +177,24 @@ pub(crate) fn movie_availability_decision(
 
         match availability {
             "in_cinemas" => {
-                let Some(date) = earliest_movie_release_date(&release_dates.theatrical_dates)
-                else {
-                    return movie_availability_result(
-                        MovieAvailabilityStatus::Unknown,
-                        None,
-                        false,
-                        "theatrical_release_date_unknown",
-                    );
-                };
-                (date, false)
+                if let Some(date) = earliest_movie_release_date(&release_dates.theatrical_dates) {
+                    (date, false)
+                } else {
+                    match worldwide_theatrical_rung(release_dates) {
+                        Some(rung) => {
+                            rung_reason = Some(rung.reason);
+                            (rung.date, true)
+                        }
+                        None => {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                false,
+                                "theatrical_release_date_unknown",
+                            );
+                        }
+                    }
+                }
             }
             "released" => {
                 let home_dates_present = !release_dates.digital_dates.is_empty()
@@ -217,12 +228,36 @@ pub(crate) fn movie_availability_decision(
                         (estimated, true)
                     }
                 } else {
-                    return movie_availability_result(
-                        MovieAvailabilityStatus::Unknown,
-                        None,
-                        false,
-                        "home_release_date_unknown",
-                    );
+                    match worldwide_home_rung(release_dates) {
+                        WorldwideHomeRung::Dated(rung) => {
+                            rung_reason = Some(rung.reason);
+                            (rung.date, true)
+                        }
+                        WorldwideHomeRung::Unusable => {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                false,
+                                "home_release_date_unusable",
+                            );
+                        }
+                        WorldwideHomeRung::OutOfRange => {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                true,
+                                "effective_release_date_out_of_range",
+                            );
+                        }
+                        WorldwideHomeRung::Unknown => {
+                            return movie_availability_result(
+                                MovieAvailabilityStatus::Unknown,
+                                None,
+                                false,
+                                "home_release_date_unknown",
+                            );
+                        }
+                    }
                 }
             }
             _ => unreachable!("availability was checked above"),
@@ -299,12 +334,79 @@ pub(crate) fn movie_availability_decision(
     } else {
         MovieAvailabilityStatus::Waiting
     };
-    let reason = if status == MovieAvailabilityStatus::Waiting {
+    let reason = rung_reason.unwrap_or(if status == MovieAvailabilityStatus::Waiting {
         "waiting_for_release_date"
     } else {
         "available"
-    };
+    });
     movie_availability_result(status, Some(effective_date), estimated, reason)
+}
+
+/// The typical gap between a US theatrical release and its home release
+/// (measured median: 88 days).
+const THEATRICAL_TO_HOME_ESTIMATE_DAYS: i64 = 90;
+
+struct WorldwideRung {
+    date: NaiveDate,
+    reason: &'static str,
+}
+
+enum WorldwideHomeRung {
+    Dated(WorldwideRung),
+    Unusable,
+    OutOfRange,
+    Unknown,
+}
+
+fn earliest_worldwide_home_date(release_dates: &MovieReleaseDates) -> Option<NaiveDate> {
+    earliest_movie_release_date(&release_dates.any_market_digital_dates)
+        .into_iter()
+        .chain(earliest_movie_release_date(
+            &release_dates.any_market_physical_dates,
+        ))
+        .min()
+}
+
+/// `released` when the selected market has no home or theatrical date: the
+/// earliest home release in any country, else (when no country's home date is
+/// unreadable) the earliest theatrical release anywhere plus the estimate. A
+/// movie with only premiere or TV events stays unknown.
+fn worldwide_home_rung(release_dates: &MovieReleaseDates) -> WorldwideHomeRung {
+    if let Some(date) = earliest_worldwide_home_date(release_dates) {
+        return WorldwideHomeRung::Dated(WorldwideRung {
+            date,
+            reason: "home_release_date_estimated_worldwide",
+        });
+    }
+    if release_dates.any_market_home_dates_unusable {
+        return WorldwideHomeRung::Unusable;
+    }
+    let Some(theatrical) = earliest_movie_release_date(&release_dates.any_market_theatrical_dates)
+    else {
+        return WorldwideHomeRung::Unknown;
+    };
+    match theatrical.checked_add_signed(Duration::days(THEATRICAL_TO_HOME_ESTIMATE_DAYS)) {
+        Some(date) => WorldwideHomeRung::Dated(WorldwideRung {
+            date,
+            reason: "home_release_date_estimated_from_worldwide_theatrical",
+        }),
+        None => WorldwideHomeRung::OutOfRange,
+    }
+}
+
+/// `in_cinemas` when the selected market has no theatrical date: the earliest
+/// theatrical release in any country, else the earliest home release anywhere.
+fn worldwide_theatrical_rung(release_dates: &MovieReleaseDates) -> Option<WorldwideRung> {
+    if let Some(date) = earliest_movie_release_date(&release_dates.any_market_theatrical_dates) {
+        return Some(WorldwideRung {
+            date,
+            reason: "theatrical_release_date_estimated_worldwide",
+        });
+    }
+    earliest_worldwide_home_date(release_dates).map(|date| WorldwideRung {
+        date,
+        reason: "theatrical_release_date_estimated_from_worldwide_home",
+    })
 }
 
 fn earliest_movie_release_date(dates: &[String]) -> Option<NaiveDate> {
