@@ -2054,10 +2054,44 @@ fn strategy_retry_after(
 
 /// What one RSS poll of an indexer returned, gathered from every response
 /// before the results are filtered or handed to scoring.
+/// The RSS hand-off slot a poll holds from before its fetch until the
+/// aggregator has handed its page to scoring. Without it a cycle's finished
+/// polls pile up in the join set, each with a full feed in memory, while the
+/// aggregator waits on the scoring pipeline. Shared by reference so a summary
+/// copied for scheduler feedback cannot free the slot early; summaries
+/// compare equal regardless of the slot.
+#[derive(Clone)]
+struct RssHandOffSlot {
+    /// Held, never read: dropping the last clone frees the slot.
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+impl RssHandOffSlot {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            _permit: Arc::new(permit),
+        }
+    }
+}
+
+impl std::fmt::Debug for RssHandOffSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RssHandOffSlot")
+    }
+}
+
+impl PartialEq for RssHandOffSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct RssFeedSummary {
     /// The marker the poll was asked to read back to, if any.
     catch_up: Option<IndexerRssCatchUp>,
+    /// The hand-off slot the poll holds until its page reaches scoring.
+    hand_off: Option<RssHandOffSlot>,
     /// Every release identity the poll returned, in feed order.
     seen_identities: Vec<String>,
     /// The parsed publish time of each entry in `seen_identities`.
@@ -3401,6 +3435,10 @@ pub struct MultiIndexerSearchClient {
     /// The RSS lane, separate from the interactive one so a cycle can never
     /// starve a search someone is waiting on (or the reverse).
     rss_search_limit: Arc<Semaphore>,
+    /// Bounds the RSS polls alive at once, from before the fetch until the
+    /// page is handed to scoring, so a cycle never holds more feeds in memory
+    /// than the lane admits. Sized like the lane.
+    rss_hand_off: Arc<Semaphore>,
     /// Provider pages one RSS poll may hand on.
     rss_poll_page_budget: u32,
 }
@@ -3433,6 +3471,7 @@ impl MultiIndexerSearchClient {
                 INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT,
             )),
             rss_search_limit: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
+            rss_hand_off: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
             rss_poll_page_budget: *RSS_POLL_PAGE_BUDGET,
         }
     }
@@ -5710,7 +5749,12 @@ impl IndexerClient for MultiIndexerSearchClient {
                     .clone()
                     .try_lock_owned()
                     .ok();
-                let initial_permit = if initialization_guard.is_some()
+                // An RSS poll takes its hand-off slot inside the task, before
+                // the lane permit; pre-acquiring the permit here would hold it
+                // while the task waits for a slot the aggregator only frees
+                // once it is joining, which it does after this loop.
+                let initial_permit = if !is_rss_request
+                    && initialization_guard.is_some()
                     && cache_entry.cell.get().is_none()
                 {
                     match acquire_search_permit(search_limit.clone(), &cancel_token, deadline_at)
@@ -5771,6 +5815,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let rss_feed_cache = self.rss_feed_cache.clone();
                 let rss_poll_page_budget = is_rss_request.then_some(self.rss_poll_page_budget);
                 let rss_poll_item_cap = rss_poll_page_budget.map(rss_poll_item_cap);
+                let rss_hand_off = is_rss_request.then(|| self.rss_hand_off.clone());
 
                 set.spawn(async move {
                         let _initialization_guard = tokio::select! {
@@ -5793,6 +5838,46 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         .await,
                                 }
                             } => guard,
+                        };
+                        let hand_off = match acquire_search_permit(
+                            rss_hand_off,
+                            &task_cancel_token,
+                            deadline_at,
+                        )
+                        .await
+                        {
+                            Ok(permit) => permit.map(RssHandOffSlot::new),
+                            Err(SearchPermitError::Cancelled) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::canceled("RSS indexer search canceled")),
+                                    false,
+                                );
+                            }
+                            Err(SearchPermitError::DeadlineExpired) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::Repository(
+                                        "RSS indexer search timed out before dispatch".to_string(),
+                                    )),
+                                    false,
+                                );
+                            }
+                            Err(SearchPermitError::Closed(error)) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::Repository(format!(
+                                        "RSS hand-off limiter closed: {error}"
+                                    ))),
+                                    false,
+                                );
+                            }
                         };
                         let cached_results = tokio::select! {
                             _ = task_cancel_token.cancelled() => {
@@ -6060,6 +6145,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         };
 
                         let mut rss_summary = RssFeedSummary::new(rss_catch_up);
+                        rss_summary.hand_off = hand_off;
                         rss_summary.observe(&results);
                         rss_summary.note_completion(&feed_completion);
                         let response = IndexerSearchResponse { next_cursor: None,
@@ -6273,6 +6359,7 @@ impl IndexerClient for MultiIndexerSearchClient {
             let live_search_admitted = scheduler_lease_for_task.is_some();
             let page_sink = Some(page_sink.clone());
             let rss_poll_page_budget = is_rss_request.then_some(self.rss_poll_page_budget);
+            let rss_hand_off = is_rss_request.then(|| self.rss_hand_off.clone());
 
             set.spawn(async move {
                 if task_cancel_token.is_cancelled() {
@@ -6284,10 +6371,55 @@ impl IndexerClient for MultiIndexerSearchClient {
                         false,
                     );
                 }
+                // Taken before any lane permit (those are per plan, below) so
+                // a poll cannot hold the lane while waiting for a slot.
+                let hand_off = match acquire_search_permit(
+                    rss_hand_off,
+                    &task_cancel_token,
+                    deadline_at,
+                )
+                .await
+                {
+                    Ok(permit) => permit.map(RssHandOffSlot::new),
+                    Err(SearchPermitError::Cancelled) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::canceled("indexer search canceled")),
+                            false,
+                        );
+                    }
+                    Err(SearchPermitError::DeadlineExpired) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::Repository(
+                                "RSS indexer search timed out before dispatch".to_string(),
+                            )),
+                            false,
+                        );
+                    }
+                    Err(SearchPermitError::Closed(error)) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::Repository(format!(
+                                "RSS hand-off limiter closed: {error}"
+                            ))),
+                            false,
+                        );
+                    }
+                };
                 let rss_poll_item_cap = rss_poll_page_budget.map(rss_poll_item_cap);
                 let mut collected_results = Vec::new();
-                let mut rss_summary =
-                    is_rss_request.then(|| RssFeedSummary::new(rss_catch_up.clone()));
+                let mut rss_summary = is_rss_request.then(|| {
+                    let mut summary = RssFeedSummary::new(rss_catch_up.clone());
+                    summary.hand_off = hand_off;
+                    summary
+                });
                 let mut reusable_strategies = reusable_strategies;
                 let mut contained = ContainedStrategyTracker::new(
                     search_diagnostics
@@ -7265,6 +7397,9 @@ response.next_cursor.is_some(),
                             self.rss_feed_cache.lock().await.clear();
                             return Err(AppError::canceled("indexer scoring pipeline closed"));
                         }
+                        // The page is scoring's now: free the poll's hand-off
+                        // slot so the next poll of the cycle may fetch.
+                        drop(rss_summary);
                     } else {
                         all_results.append(&mut response.results);
                     }
@@ -9900,6 +10035,18 @@ mod tests {
 
     struct BlockingIndexerClient {
         probe: StdArc<SearchConcurrencyProbe>,
+        /// Results each poll returns once released. Zero keeps the client
+        /// silent, so a page is never handed on.
+        results_per_search: usize,
+    }
+
+    impl BlockingIndexerClient {
+        fn silent(probe: StdArc<SearchConcurrencyProbe>) -> Self {
+            Self {
+                probe,
+                results_per_search: 0,
+            }
+        }
     }
 
     #[async_trait]
@@ -9932,11 +10079,19 @@ mod tests {
                 _ = self.probe.wait_until_released() => {}
             }
             self.probe.mark_finished();
+            let results = (0..self.results_per_search)
+                .map(|index| {
+                    let mut result = search_result(&format!("Blocking.Feed.{index}.1080p.WEB-DL"));
+                    result.guid = Some(format!("blocking-{index}"));
+                    result.download_url = Some(format!("https://example.test/{index}"));
+                    result
+                })
+                .collect();
             Ok(IndexerSearchResponse {
                 next_cursor: None,
                 completion: IndexerSearchCompletion::Complete,
                 indexer_outcomes: Vec::new(),
-                results: vec![],
+                results,
 
                 api_current: None,
                 api_max: None,
@@ -9996,9 +10151,7 @@ mod tests {
     async fn assert_leaf_search_limit_shared_across_clones(mode: SearchMode, limit: usize) {
         let config_count = limit + 4;
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(config_count),
@@ -10091,9 +10244,7 @@ mod tests {
     #[tokio::test]
     async fn interactive_search_cancellation_returns_promptly() {
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(3),
@@ -11228,9 +11379,7 @@ mod tests {
             }),
             Arc::new(MockIndexerStatsTracker),
             Arc::new(ScriptedIndexerPluginProvider {
-                client: Arc::new(BlockingIndexerClient {
-                    probe: probe.clone(),
-                }),
+                client: Arc::new(BlockingIndexerClient::silent(probe.clone())),
                 caps: rss_only_caps(),
             }),
         )
@@ -11441,9 +11590,7 @@ mod tests {
     async fn background_passes_fan_out_to_every_indexer_at_once() {
         let config_count = INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT + 4;
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(config_count),
@@ -13840,9 +13987,7 @@ mod tests {
     async fn rss_polls_are_bounded_by_their_own_lane() {
         let config_count = 6;
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let mut multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(config_count),
@@ -13908,6 +14053,97 @@ mod tests {
             .expect("interactive search should succeed");
         assert_eq!(probe.started.load(Ordering::SeqCst), 2 * config_count);
         assert_eq!(probe.max_active.load(Ordering::SeqCst), 2 + config_count);
+    }
+
+    /// A poll keeps its hand-off slot until the aggregator has given its page
+    /// to scoring, so a cycle whose consumer is slow holds at most the lane's
+    /// worth of feeds plus the page in flight, never every finished poll.
+    #[tokio::test(start_paused = true)]
+    async fn rss_polls_wait_for_the_hand_off_of_earlier_pages() {
+        let config_count = 6;
+        let concurrency = 2;
+        let probe = StdArc::new(SearchConcurrencyProbe::default());
+        let client = Arc::new(BlockingIndexerClient {
+            probe: probe.clone(),
+            results_per_search: 3,
+        });
+        let mut multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: indexed_mock_configs(config_count),
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: IndexerProviderCapabilities {
+                    rss: true,
+                    ..movie_caps()
+                },
+            }),
+        );
+        multi.rss_search_limit = Arc::new(Semaphore::new(concurrency));
+        multi.rss_hand_off = Arc::new(Semaphore::new(concurrency));
+        multi.rss_poll_page_budget = 2;
+        let multi = multi.with_upstream_scheduler(Arc::new(RecordingScheduler::default()));
+
+        // A consumer that accepts one page and then stalls: the first page
+        // sits unread in the channel, so the second hand-off cannot complete.
+        let (page_tx, mut page_rx) = tokio::sync::mpsc::channel(1);
+        let page_sink = IndexerSearchPageSink::new(page_tx, 1);
+        let rss_client = multi.clone();
+        let rss_cycle = tokio::spawn(async move {
+            rss_client
+                .search_stream(
+                    String::new(),
+                    HashMap::new(),
+                    None,
+                    None,
+                    None,
+                    Some(vec!["2000".to_string()]),
+                    None,
+                    SearchMode::Auto,
+                    IndexerErrorOperation::RssSync,
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    CancellationToken::new(),
+                    page_sink,
+                )
+                .await
+        });
+
+        wait_for_started(&probe, concurrency).await;
+        run_until_idle().await;
+        assert_eq!(probe.started.load(Ordering::SeqCst), concurrency);
+
+        // Every poll returns as soon as it starts from here on. Only the slots
+        // the aggregator frees by handing a page on admit further polls: one
+        // page goes through, the next blocks on the stalled consumer.
+        probe.release_all();
+        run_until_idle().await;
+        assert_eq!(
+            probe.started.load(Ordering::SeqCst),
+            concurrency + 1,
+            "finished polls must not pile up behind a stalled hand-off"
+        );
+        assert!(probe.max_active.load(Ordering::SeqCst) <= concurrency);
+
+        // Draining the consumer lets the cycle finish with every poll made.
+        let mut pages = 0;
+        while let Some(page) = page_rx.recv().await {
+            pages += 1;
+            drop(page);
+        }
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rss_cycle)
+            .await
+            .expect("rss cycle should finish")
+            .expect("rss cycle task should join")
+            .expect("rss cycle should succeed");
+        assert_eq!(pages, config_count);
+        assert_eq!(probe.started.load(Ordering::SeqCst), config_count);
+        assert!(response.results.is_empty());
     }
 
     #[tokio::test]
