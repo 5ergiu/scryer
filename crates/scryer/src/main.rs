@@ -136,7 +136,7 @@ use scryer_infrastructure_acquisition::{
         staged_nzb_store::FileSystemStagedNzbStore,
     },
     indexers::{
-        caps::DirectNabCapsSnapshotRefresher, error_store::BlockingIndexerErrorRecorder,
+        caps::DirectNabCapsSnapshotRefresher, error_store::QueuedIndexerErrorRecorder,
         providers::prowlarr::NativeProwlarrIndexerProvider,
         search_client::MultiIndexerSearchClient,
     },
@@ -1464,8 +1464,7 @@ async fn bootstrap_application(
     }
     let indexer_learning = datastore.indexer_search_learning_repository();
     let indexer_errors = datastore.indexer_errors();
-    let indexer_error_recorder =
-        Arc::new(BlockingIndexerErrorRecorder::new(indexer_errors.clone()));
+    let indexer_error_recorder = Arc::new(QueuedIndexerErrorRecorder::new(indexer_errors.clone()));
 
     // The indexer plugin provider is built before the artifact resolver and
     // the download router because the resolver consults it for indexer-owned
