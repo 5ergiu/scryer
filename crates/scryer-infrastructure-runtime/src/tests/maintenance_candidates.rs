@@ -40,6 +40,7 @@ async fn seed_rule_set(services: &SqliteServices, id: &str) {
                 destructive_rearm_required: false,
                 library_ids: Vec::new(),
                 subject_kind: MaintenanceRuleSubjectKind::Title,
+                system_owned: false,
                 current_revision_number: 1,
                 created_at: now,
                 updated_at: now,

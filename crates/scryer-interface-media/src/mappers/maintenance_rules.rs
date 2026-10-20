@@ -300,6 +300,7 @@ pub fn from_maintenance_rule_set(detail: &AppRuleSetDetail) -> MaintenanceRuleSe
             &detail.action_definition,
         )),
         edited_since_enabled: rule_set.destructive_rearm_required,
+        system_owned: rule_set.system_owned,
         library_ids: rule_set.library_ids.clone(),
         subject_kind: maintenance_rule_subject_kind_value(rule_set.subject_kind),
         current_revision_number: to_graphql_int(rule_set.current_revision_number),

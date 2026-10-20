@@ -4314,6 +4314,8 @@ const en: LocaleDictionary = {
   "settings.maintenanceRuleStateEnabled": "Enabled",
   "settings.maintenanceRuleStateEnabledHelp": "Acts on candidates when their grace period elapses.",
   "settings.maintenanceRuleEditedSinceEnabled": "Edited since it was enabled. Review the candidates and enable it again.",
+  "settings.maintenanceRuleSystemOwned": "Built in",
+  "settings.expiredRequestLeasesHelp": "Deletes a requested title and its files once its request lease has expired and the grace period has passed, unless someone keeps it. Changing the grace period sets the rule to Dry run until you enable it again. Like every maintenance rule, it only runs while Maintenance is on.",
   "settings.maintenanceSwitchEnabled": "Maintenance",
   "settings.maintenanceSwitchEnabledHelp": "Evaluate rules and show their candidates on this instance.",
   "settings.maintenanceSwitchActionsPaused": "Pause all actions",

@@ -15315,6 +15315,11 @@ type MaintenanceRuleSet {
 	"""
 	editedSinceEnabled: Boolean!
 	"""
+	Shipped with Scryer: name, matcher and action are fixed and the rule
+	cannot be deleted.
+	"""
+	systemOwned: Boolean!
+	"""
 	Libraries the rule is confined to. Empty means every library.
 	"""
 	libraryIds: [String!]!

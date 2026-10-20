@@ -169,6 +169,9 @@ pub struct MaintenanceRuleSet {
     /// The rule was enabled when its matcher, action, or scope last changed, so
     /// it fell back to dry run. Review its candidates and enable it again.
     pub edited_since_enabled: bool,
+    /// Shipped with Scryer: name, matcher and action are fixed and the rule
+    /// cannot be deleted.
+    pub system_owned: bool,
     /// Libraries the rule is confined to. Empty means every library.
     pub library_ids: Vec<String>,
     /// Granularity the rule is scoped to.

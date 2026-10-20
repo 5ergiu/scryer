@@ -750,6 +750,9 @@ export function SettingsMaintenanceRulesSection({
   ...previewProps
 }: SettingsMaintenanceRulesSectionProps) {
   const t = useTranslate();
+  const editingSystemOwned = ruleSetRecords.some(
+    (record) => record.id === editingRuleSetId && record.systemOwned,
+  );
 
   // Candidates and history are one pane each. They keep the instance switches,
   // because what the instance is allowed to do explains every row they show,
@@ -824,6 +827,11 @@ export function SettingsMaintenanceRulesSection({
                             >
                               {record.name}
                             </span>
+                            {record.systemOwned ? (
+                              <Badge tone="neutral" className="ml-2 text-[10px]">
+                                {t("settings.maintenanceRuleSystemOwned")}
+                              </Badge>
+                            ) : null}
                             {record.subjectKind !== "TITLE" && <div className="text-xs text-muted-foreground">{t(record.subjectKind === "SEASON" ? "settings.maintenanceScopeSeason" : "settings.maintenanceScopeEpisode")}</div>}
                           </TableCell>
                           <TableCell className="max-w-[200px] truncate text-muted-foreground">
@@ -901,18 +909,20 @@ export function SettingsMaintenanceRulesSection({
                               >
                                 <Edit className="h-4 w-4" />
                               </IconButton>
-                              <IconButton
-                                id={selectorId(
-                                  "settings-maintenance-rule-delete",
-                                  record.id,
-                                )}
-                                label={t("label.delete")}
-                                tone="delete"
-                                onClick={() => void deleteRuleSet(record)}
-                                disabled={mutatingRuleSetId === record.id}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </IconButton>
+                              {record.systemOwned ? null : (
+                                <IconButton
+                                  id={selectorId(
+                                    "settings-maintenance-rule-delete",
+                                    record.id,
+                                  )}
+                                  label={t("label.delete")}
+                                  tone="delete"
+                                  onClick={() => void deleteRuleSet(record)}
+                                  disabled={mutatingRuleSetId === record.id}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </IconButton>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -954,6 +964,7 @@ export function SettingsMaintenanceRulesSection({
                         <Input
                           id="settings-maintenance-rule-name"
                           value={ruleSetDraft.name}
+                          readOnly={editingSystemOwned}
                           onChange={(event) =>
                             setRuleSetDraft((prev) => ({
                               ...prev,
@@ -1004,6 +1015,7 @@ export function SettingsMaintenanceRulesSection({
                         {t("settings.maintenanceSequenceCatalogUnavailable")}
                       </p>
                     ) : null}
+                    <fieldset disabled={editingSystemOwned}>
                     <MaintenanceActionSequenceEditor
                       sequence={ruleSetDraft.actionSequence}
                       descriptors={actionStepDescriptors}
@@ -1014,6 +1026,7 @@ export function SettingsMaintenanceRulesSection({
                         setRuleSetDraft((prev) => ({ ...prev, actionSequence }))
                       }
                     />
+                    </fieldset>
 
                     <label className="block md:max-w-[50%]">
                       <Label className="mb-2 block">
@@ -1086,6 +1099,7 @@ export function SettingsMaintenanceRulesSection({
                         ruleFamily="maintenance"
                         id="settings-maintenance-rule-rego-source"
                         value={ruleSetDraft.regoSource}
+                        readOnly={editingSystemOwned}
                         onChange={(value) =>
                           setRuleSetDraft((prev) => ({
                             ...prev,

@@ -761,3 +761,215 @@ async fn deleting_a_title_releases_its_live_claims() {
     assert_eq!(claim.state, LifecycleClaimState::Released);
     assert_eq!(claim.released_reason.as_deref(), Some("title_deleted"));
 }
+
+// ── The shipped expired-request-leases rule ─────────────────────────────────
+
+impl ClaimFixture {
+    async fn shipped_rule(&self) -> crate::maintenance_rules::MaintenanceRuleSetDetail {
+        let rules = self
+            .app
+            .list_maintenance_rule_set_details(&self.user)
+            .await
+            .expect("list rule sets");
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        rules[0].clone()
+    }
+}
+
+#[tokio::test]
+async fn the_shipped_rule_is_created_once_and_starts_enabled() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("a second startup leaves the rule alone");
+
+    let detail = fixture.shipped_rule().await;
+    let rule = &detail.rule_set;
+    assert_eq!(rule.name, "Expired request leases");
+    assert!(rule.system_owned && rule.enabled);
+    assert!(rule.library_ids.is_empty(), "every library");
+    assert_eq!(
+        rule.subject_kind,
+        scryer_domain::MaintenanceRuleSubjectKind::Title
+    );
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&detail),
+        MaintenanceRuleState::Enabled
+    );
+    assert_eq!(rule.effect_arming, MaintenanceEffectArming::Destructive);
+    assert_eq!(detail.revision.grace_days, 7);
+    assert_eq!(detail.revision.created_by, None);
+    assert_eq!(
+        detail.revision.action_spec_json,
+        r#"{"schema_version":2,"steps":[{"id":"legacy-delete-title","kind":"delete_title_and_files"}]}"#
+    );
+    assert_eq!(
+        scryer_rules::strip_editor_source(&detail.revision.rego_source),
+        EXPIRED_LEASE_MATCHER
+    );
+}
+
+#[test]
+fn the_shipped_rule_matches_the_web_template() {
+    let template =
+        include_str!("../../../../apps/scryer-web/lib/constants/maintenance-rule-templates.ts");
+    let escaped = crate::maintenance_rules::EXPIRED_REQUEST_LEASES_REGO
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t");
+    assert!(
+        template.contains(&format!("\"{escaped}\"")),
+        "the expired-request-leases template and the shipped rule must carry the same source"
+    );
+}
+
+#[tokio::test]
+async fn the_shipped_rule_keeps_its_matcher_and_name_but_not_its_grace_or_scope() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    let detail = fixture.shipped_rule().await;
+    let id = detail.rule_set.id.clone();
+    let stored_source = scryer_rules::strip_editor_source(&detail.revision.rego_source);
+    let matcher = |rego_source: &str, action_definition, grace_days| {
+        crate::maintenance_rules::MaintenanceMatcherDraft {
+            rego_source: rego_source.to_string(),
+            action_definition,
+            grace_days,
+            storage_root_id: None,
+        }
+    };
+    let refused = |result: AppResult<_>| matches!(result, Err(AppError::Validation(_)));
+
+    assert!(refused(
+        fixture
+            .app
+            .delete_maintenance_rule_set(&fixture.user, &id)
+            .await
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_metadata(
+                &fixture.user,
+                &id,
+                "Renamed".into(),
+                String::new(),
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_matcher(
+                &fixture.user,
+                &id,
+                matcher(ALWAYS_MATCHER, detail.action_definition.clone(), 7),
+            )
+            .await
+            .map(|_| ())
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_matcher(
+                &fixture.user,
+                &id,
+                matcher(
+                    &stored_source,
+                    crate::maintenance_rules::MaintenanceActionDefinition::Legacy(
+                        MaintenanceActionSpec::new(MaintenanceActionKind::UnmonitorScopeKeepFiles),
+                    ),
+                    7,
+                ),
+            )
+            .await
+            .map(|_| ())
+    ));
+    let unchanged = fixture.shipped_rule().await;
+    assert_eq!(
+        unchanged.rule_set, detail.rule_set,
+        "a refused edit writes nothing"
+    );
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&unchanged),
+        MaintenanceRuleState::Enabled
+    );
+
+    // Grace and libraries are edited exactly as on any rule, including the
+    // drop to Dry run that every matcher or scope edit of an enabled rule has.
+    let regraced = fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &id,
+            matcher(&stored_source, detail.action_definition.clone(), 14),
+        )
+        .await
+        .expect("grace period is editable");
+    assert_eq!(regraced.revision.grace_days, 14);
+    let rescoped = fixture
+        .app
+        .update_maintenance_rule_metadata(
+            &fixture.user,
+            &id,
+            detail.rule_set.name.clone(),
+            detail.rule_set.description.clone(),
+            vec!["library-1".into()],
+        )
+        .await
+        .expect("libraries are editable");
+    assert_eq!(rescoped.library_ids, vec!["library-1".to_string()]);
+    let edited = fixture.shipped_rule().await;
+    assert!(edited.rule_set.system_owned);
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&edited),
+        MaintenanceRuleState::DryRun
+    );
+    assert!(edited.rule_set.destructive_rearm_required);
+}
+
+#[tokio::test]
+async fn the_shipped_rule_matches_only_titles_whose_lease_expired_unkept() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    fixture.open_gates(false, false).await;
+
+    let lapsed = seed_title(&fixture.app, &fixture.user, "Lapsed").await;
+    fixture
+        .claims
+        .seed(lease("claim-1", &lapsed.id, LifecycleClaimState::Expired))
+        .await;
+    let kept = seed_title(&fixture.app, &fixture.user, "Kept").await;
+    fixture
+        .claims
+        .seed(lease("claim-2", &kept.id, LifecycleClaimState::Expired))
+        .await;
+    let mut operator_keep = keep("claim-3", &kept.id);
+    operator_keep.producer = LifecycleClaimProducer::OperatorKeep;
+    operator_keep.producer_ref = None;
+    fixture.claims.seed(operator_keep).await;
+    let forever = seed_title(&fixture.app, &fixture.user, "Forever").await;
+    fixture.claims.seed(keep("claim-4", &forever.id)).await;
+    seed_title(&fixture.app, &fixture.user, "Unrequested").await;
+
+    let report = fixture.evaluate().await;
+    assert_eq!(report.candidates_created, 1, "{report:?}");
+    assert_eq!(fixture.only_candidate().await.title_id, lapsed.id);
+}

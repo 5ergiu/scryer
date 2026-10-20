@@ -1764,6 +1764,9 @@ async fn bootstrap_application(
         .map_err(|error| {
             format!("failed to rebuild persisted request rules at startup: {error}")
         })?;
+    if let Err(error) = app_use_case.ensure_expired_request_leases_rule().await {
+        tracing::warn!(error = %error, "failed to create the expired request leases rule");
+    }
     if let Err(error) = app_use_case
         .refresh_download_client_category_admission()
         .await

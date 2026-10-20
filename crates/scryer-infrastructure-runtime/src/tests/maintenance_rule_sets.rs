@@ -490,6 +490,7 @@ fn rule_set(id: &str, library_ids: Vec<String>) -> MaintenanceRuleSet {
         destructive_rearm_required: false,
         library_ids,
         subject_kind: MaintenanceRuleSubjectKind::Title,
+        system_owned: false,
         current_revision_number: 1,
         created_at: now,
         updated_at: now,
@@ -533,6 +534,22 @@ async fn rule_sets_and_revisions_round_trip() {
     assert_eq!(loaded.subject_kind, MaintenanceRuleSubjectKind::Title);
     assert_eq!(loaded.library_ids, vec!["library-1".to_string()]);
     assert_eq!(loaded.current_revision_number, 1);
+    assert!(!loaded.system_owned);
+
+    let mut shipped = rule_set("rule-shipped", Vec::new());
+    shipped.system_owned = true;
+    store
+        .create_rule_set(&shipped, &revision("rule-shipped", 1))
+        .await
+        .expect("create system-owned rule set");
+    assert!(
+        store
+            .get_rule_set("rule-shipped")
+            .await
+            .expect("read rule set")
+            .expect("rule set exists")
+            .system_owned
+    );
 
     let stored_revision = store
         .get_revision("rule-a", 1)

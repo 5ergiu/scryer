@@ -95,6 +95,8 @@ const PREVIEW_MONITOR_TYPES = [
 ];
 
 type SettingsRequestRulesSectionProps = {
+  /// The shipped expired-request-leases maintenance rule, shown first.
+  leaseRuleControl?: React.ReactNode;
   isEditorOpen: boolean;
   editingRuleSetId: string | null;
   ruleSetDraft: RequestRuleSetDraft;
@@ -1060,6 +1062,7 @@ export function SettingsRequestRulesSection({
   decisionOutcomeFilter,
   setDecisionOutcomeFilter,
   refreshDecisions,
+  leaseRuleControl,
   ...previewProps
 }: SettingsRequestRulesSectionProps) {
   const t = useTranslate();
@@ -1069,6 +1072,7 @@ export function SettingsRequestRulesSection({
       <div className="mx-auto flex w-full max-w-[2176px] flex-col gap-4 xl:flex-row xl:items-start">
         <div className="min-w-0 flex-1">
           <div className="mx-auto w-full max-w-[1280px] space-y-4">
+            {leaseRuleControl}
             <p
               id="settings-request-rules-default"
               className="text-[13px] leading-5 text-muted-foreground"
