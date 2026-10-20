@@ -2259,6 +2259,31 @@ pub struct IndexerSearchResult {
     pub release_listing_json: Option<String>,
 }
 
+impl IndexerSearchResult {
+    /// A rough size of this result's variable-length payload: its strings,
+    /// the frozen listing JSON, and the serialized `extra` map. Diagnostic
+    /// only, for logging how much a batch of results holds.
+    pub fn approximate_size_bytes(&self) -> usize {
+        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+        let extra = self
+            .extra
+            .iter()
+            .map(|(key, value)| {
+                key.len() + serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+            })
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            + self.title.len()
+            + self.source.len()
+            + optional(&self.link)
+            + optional(&self.download_url)
+            + optional(&self.guid)
+            + optional(&self.info_url)
+            + optional(&self.release_listing_json)
+            + extra
+    }
+}
+
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
 /// identifier. Keeping this validation in the application layer prevents an
 /// HTTP download URL from being mislabeled as a magnet merely because a
