@@ -263,6 +263,66 @@
           "descKey": "settings.refMaintFactsListsLastListName"
         },
         {
+          "field": "lists_enabled_ids",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsEnabledIds"
+        },
+        {
+          "field": "lists_public_count",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsPublicCount"
+        },
+        {
+          "field": "lists_personal_count",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsPersonalCount"
+        },
+        {
+          "field": "lists_first_seen_at",
+          "type": "string",
+          "descKey": "settings.refMaintFactsListsFirstSeenAt"
+        },
+        {
+          "field": "lists_last_seen_at",
+          "type": "string",
+          "descKey": "settings.refMaintFactsListsLastSeenAt"
+        },
+        {
+          "field": "lists_days_on_list",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsDaysOnList"
+        },
+        {
+          "field": "lists_best_rank",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsBestRank"
+        },
+        {
+          "field": "lists_on_leave",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsOnLeave"
+        },
+        {
+          "field": "lists_left_handled",
+          "type": "bool",
+          "descKey": "settings.refMaintFactsListsLeftHandled"
+        },
+        {
+          "field": "lists_membership_states",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsMembershipStates"
+        },
+        {
+          "field": "request_origin",
+          "type": "string",
+          "descKey": "settings.refMaintFactsRequestOrigin"
+        },
+        {
+          "field": "request_list_name",
+          "type": "string",
+          "descKey": "settings.refMaintFactsRequestListName"
+        },
+        {
           "field": "series_movies",
           "type": "object[]",
           "descKey": "settings.refMaintFactsSeriesMovies"
@@ -554,6 +614,66 @@
           "field": "lists_last_list_name",
           "type": "object",
           "descKey": "settings.refMaintFactsListsLastListName"
+        },
+        {
+          "field": "lists_enabled_ids",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsEnabledIds"
+        },
+        {
+          "field": "lists_public_count",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsPublicCount"
+        },
+        {
+          "field": "lists_personal_count",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsPersonalCount"
+        },
+        {
+          "field": "lists_first_seen_at",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsFirstSeenAt"
+        },
+        {
+          "field": "lists_last_seen_at",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsLastSeenAt"
+        },
+        {
+          "field": "lists_days_on_list",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsDaysOnList"
+        },
+        {
+          "field": "lists_best_rank",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsBestRank"
+        },
+        {
+          "field": "lists_on_leave",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsOnLeave"
+        },
+        {
+          "field": "lists_left_handled",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsLeftHandled"
+        },
+        {
+          "field": "lists_membership_states",
+          "type": "object",
+          "descKey": "settings.refMaintFactsListsMembershipStates"
+        },
+        {
+          "field": "request_origin",
+          "type": "object",
+          "descKey": "settings.refMaintFactsRequestOrigin"
+        },
+        {
+          "field": "request_list_name",
+          "type": "object",
+          "descKey": "settings.refMaintFactsRequestListName"
         },
         {
           "field": "series_movies",
@@ -1479,6 +1599,318 @@
           "field": "value",
           "type": "string",
           "descKey": "settings.refMaintFactsListsLastListNameValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsEnabledIds",
+      "path": "input.observations.lists_enabled_ids",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsEnabledIdsValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsPublicCount",
+      "path": "input.observations.lists_public_count",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsPublicCountValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsPersonalCount",
+      "path": "input.observations.lists_personal_count",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsPersonalCountValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsFirstSeenAt",
+      "path": "input.observations.lists_first_seen_at",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string",
+          "descKey": "settings.refMaintFactsListsFirstSeenAtValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsLastSeenAt",
+      "path": "input.observations.lists_last_seen_at",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string",
+          "descKey": "settings.refMaintFactsListsLastSeenAtValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsDaysOnList",
+      "path": "input.observations.lists_days_on_list",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsDaysOnListValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsBestRank",
+      "path": "input.observations.lists_best_rank",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "number",
+          "descKey": "settings.refMaintFactsListsBestRankValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsOnLeave",
+      "path": "input.observations.lists_on_leave",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsOnLeaveValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsLeftHandled",
+      "path": "input.observations.lists_left_handled",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "bool",
+          "descKey": "settings.refMaintFactsListsLeftHandledValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsListsMembershipStates",
+      "path": "input.observations.lists_membership_states",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string[]",
+          "descKey": "settings.refMaintFactsListsMembershipStatesValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsRequestOrigin",
+      "path": "input.observations.request_origin",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string",
+          "descKey": "settings.refMaintFactsRequestOriginValue"
+        },
+        {
+          "field": "observed_at",
+          "type": "string?",
+          "descKey": "settings.refMaintObsObservedAt"
+        },
+        {
+          "field": "reason",
+          "type": "string?",
+          "descKey": "settings.refMaintObsReason"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refMaintFactsRequestListName",
+      "path": "input.observations.request_list_name",
+      "fields": [
+        {
+          "field": "status",
+          "type": "string",
+          "descKey": "settings.refMaintObsStatus"
+        },
+        {
+          "field": "value",
+          "type": "string",
+          "descKey": "settings.refMaintFactsRequestListNameValue"
         },
         {
           "field": "observed_at",

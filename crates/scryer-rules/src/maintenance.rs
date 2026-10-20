@@ -211,6 +211,29 @@ pub struct MaintenanceFactsDoc {
     pub lists_left_all: Observation<bool>,
     pub lists_left_at: Observation<String>,
     pub lists_last_list_name: Observation<String>,
+    /// `lists_enabled_ids` are the ids, never the names, of the enabled lists
+    /// of either scope that hold the title, and the counts split every list
+    /// that holds it by scope. The sightings, days on a list and best rank are
+    /// taken over the lists that hold the title now and are absent when none
+    /// does. `lists_left_handled` says every departure has had its on-leave
+    /// action applied, and is absent when no list ever dropped the title.
+    pub lists_enabled_ids: Observation<Vec<String>>,
+    pub lists_public_count: Observation<i64>,
+    pub lists_personal_count: Observation<i64>,
+    /// RFC3339 timestamps.
+    pub lists_first_seen_at: Observation<String>,
+    pub lists_last_seen_at: Observation<String>,
+    pub lists_days_on_list: Observation<i64>,
+    pub lists_best_rank: Observation<i64>,
+    pub lists_on_leave: Observation<Vec<String>>,
+    pub lists_left_handled: Observation<bool>,
+    pub lists_membership_states: Observation<Vec<String>>,
+    /// Where the request that created the title came from: `manual`,
+    /// `public_list` or `personal_list`, and the public list's name. Both are
+    /// absent for a title no request created, and the name is absent for
+    /// every origin but a public list.
+    pub request_origin: Observation<String>,
+    pub request_list_name: Observation<String>,
     /// The series movies linked to a show subject: one entry per
     /// `series_movie_links` row, each with its own tags.
     ///
@@ -624,6 +647,18 @@ pub(crate) fn synthetic_maintenance_input() -> MaintenanceInput {
             lists_left_all: Observation::known(true),
             lists_left_at: Observation::known("2024-04-01T00:00:00Z".to_string()),
             lists_last_list_name: Observation::known("Fixture Picks".to_string()),
+            lists_enabled_ids: Observation::known(Vec::new()),
+            lists_public_count: Observation::known(0),
+            lists_personal_count: Observation::known(0),
+            lists_first_seen_at: Observation::known("2024-01-01T00:00:00Z".to_string()),
+            lists_last_seen_at: Observation::known("2024-03-31T00:00:00Z".to_string()),
+            lists_days_on_list: Observation::known(120),
+            lists_best_rank: Observation::known(1),
+            lists_on_leave: Observation::known(Vec::new()),
+            lists_left_handled: Observation::known(true),
+            lists_membership_states: Observation::known(vec!["in_library".to_string()]),
+            request_origin: Observation::known("public_list".to_string()),
+            request_list_name: Observation::known("Fixture Picks".to_string()),
             // A movie subject: series movies do not apply to it at all.
             series_movies: Observation::absent(),
             storage_root_id: Observation::absent(),

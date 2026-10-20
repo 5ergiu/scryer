@@ -2706,6 +2706,36 @@ pub trait MediaRequestRepository: Send + Sync {
         title_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<String>>>;
 
+    /// The origin of the oldest request that created each of `title_ids`,
+    /// over the same requests [`Self::requester_user_ids_by_title_ids`] reads.
+    /// A title is a key exactly when it is a key there.
+    async fn request_origins_by_title_ids(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<HashMap<String, scryer_domain::MediaRequestOrigin>> {
+        let mut requests: Vec<MediaRequest> = self
+            .list(MediaRequestQuery::default())
+            .await?
+            .into_iter()
+            .filter(|request| {
+                !request.identity_fingerprint.starts_with("list-movie:")
+                    && request
+                        .created_title_id
+                        .as_ref()
+                        .is_some_and(|title_id| title_ids.contains(title_id))
+            })
+            .collect();
+        requests
+            .sort_by(|left, right| (left.created_at, &left.id).cmp(&(right.created_at, &right.id)));
+        let mut by_title = HashMap::new();
+        for request in requests {
+            if let Some(title_id) = request.created_title_id {
+                by_title.entry(title_id).or_insert(request.origin);
+            }
+        }
+        Ok(by_title)
+    }
+
     /// Commit the title, monitoring selection, approval, claim and events as
     /// one unit. The caller holds the mutation guard for title.id.
     async fn approve_with_title(

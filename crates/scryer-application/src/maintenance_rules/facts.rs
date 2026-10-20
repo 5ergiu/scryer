@@ -155,6 +155,26 @@ pub mod unknown_reason {
     /// No public list has dropped the title, so there is no list name to
     /// report. An *absence* reason; personal list names are never reported.
     pub const NO_PUBLIC_LIST_LEFT: &str = "no_public_list_left";
+
+    /// No list holds the title now, so there is no first or last sighting
+    /// and no time on a list to report. An *absence* reason.
+    pub const NOT_ON_A_LIST: &str = "not_on_a_list";
+
+    /// No list that holds the title ranks it. An *absence* reason.
+    pub const NO_LIST_RANK: &str = "no_list_rank";
+
+    /// No list has dropped the title, so there is no departure to have been
+    /// handled. An *absence* reason.
+    pub const NO_LIST_LEFT: &str = "no_list_left";
+
+    /// The media-request store could not be read for this pass, so where the
+    /// title's request came from is unknown.
+    pub const REQUEST_STORE_UNREADABLE: &str = "request_store_unreadable";
+
+    /// The title's request did not come from a public list the store still
+    /// holds, so there is no list name to report. An *absence* reason;
+    /// personal list names are never reported.
+    pub const NO_PUBLIC_REQUEST_LIST: &str = "no_public_request_list";
 }
 
 /// The four values `request_lease_state` can take. Part of the authoring
@@ -434,6 +454,18 @@ fn build_facts(
         lists_left_all: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
         lists_left_at: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
         lists_last_list_name: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_enabled_ids: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_public_count: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_personal_count: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_first_seen_at: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_last_seen_at: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_days_on_list: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_best_rank: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_on_leave: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_left_handled: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        lists_membership_states: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        request_origin: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
+        request_list_name: Observation::unknown(unknown_reason::NOT_YET_COLLECTED),
         series_movies: series_movies_observation(&title.facet, series_movies),
         // Storage facts are populated only when a rule selected one configured
         // root. Until that storage context is applied they are confirmed absent

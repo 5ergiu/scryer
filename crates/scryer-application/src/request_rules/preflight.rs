@@ -121,6 +121,8 @@ impl AppUseCase {
             monitor_type: input.requested_monitor_type.clone(),
             monitor_selection: input.requested_monitor_selection.clone(),
             requested_lease_days,
+            origin: scryer_domain::MediaRequestOrigin::Manual,
+            list_rank: None,
         };
 
         let evaluation = self

@@ -435,6 +435,8 @@ impl AppUseCase {
             monitor_type: sample.monitor_type.clone(),
             monitor_selection: None,
             requested_lease_days: sample.lease_days.flatten(),
+            origin: scryer_domain::MediaRequestOrigin::Manual,
+            list_rank: None,
         };
 
         let evaluated_at = Utc::now();

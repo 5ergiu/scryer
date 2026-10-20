@@ -5375,6 +5375,12 @@ const ru: LocaleDictionary = {
     "settings.maintenanceTemplateNewestEpisodesDescription": "Caution: this episode-scoped template unmonitors and deletes downloaded episodes ranked older than the newest three by air date. Specials, future episodes, missing files, and unresolved dates receive no rank, so they do not match. Protected episodes still occupy the newest-three slots.",
     "settings.maintenanceTemplateNewestSeasonsTitle": "Оставить 2 новейших загруженных сезона",
     "settings.maintenanceTemplateNewestSeasonsDescription": "Caution: this season-scoped template unmonitors and deletes files from seasons ranked older than the newest two by each season's newest eligible downloaded episode. Specials, future episodes, missing files, and unresolved dates receive no rank; protected seasons still occupy slots.",
+    "settings.maintenanceTemplateLeftEveryListTitle": "Выбыло из всех публичных списков",
+    "settings.maintenanceTemplateLeftEveryListDescription":
+      "Тайтлы, из которых выбыли все списки, публичные и личные, когда каждое выбытие обработано и последнее произошло более 30 дней назад. Область снимается с отслеживания, а файлы остаются на месте.",
+    "settings.maintenanceTemplateListAddedUnwatchedTitle": "Добавлено списком и ни разу не просмотрено",
+    "settings.maintenanceTemplateListAddedUnwatchedDescription":
+      "Добавляет тег needs-review к тайтлам, которые список добавил более 90 дней назад и которые никто не смотрел. Удерживается, пока картина просмотров неполная. Ничего не удаляется.",
 
   // ── Правила запросов ────────────────────────────────────────────────
   "settings.requestRules": "Правила запросов",
@@ -5510,6 +5516,12 @@ const ru: LocaleDictionary = {
   "settings.requestTemplateMonthlyQuotaTitle": "Месячная квота одобрений",
   "settings.requestTemplateMonthlyQuotaDescription":
     "Отправляет запрос на рассмотрение, когда у запросившего уже пять одобрений за последние тридцать дней. Никогда не отклоняет — просит человека посмотреть.",
+  "settings.requestTemplateHoldApprovalListsTitle": "Удерживать запросы из списков участников с политикой «Одобрение»",
+  "settings.requestTemplateHoldApprovalListsDescription":
+    "Отправляет запрос из списка на рассмотрение, когда у владельца списка политика списков «Одобрение». Ручные запросы не затрагиваются.",
+  "settings.requestTemplateDenyPersonalListAbove1080pTitle": "Отклонять запросы из личных списков выше 1080p",
+  "settings.requestTemplateDenyPersonalListAbove1080pDescription":
+    "Отклоняет запрос из личного списка участника, когда его профиль качества выше 1080p. Публичные списки и ручные запросы не затрагиваются.",
 
   "settings.refReqTitle": "Справочник входных данных запросов",
   "settings.refReqSubtitle": "Все значения, которые может прочитать сопоставитель запроса, и что каждое из них означает.",

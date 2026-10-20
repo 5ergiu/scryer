@@ -2524,7 +2524,7 @@ mod tests {
     /// have to be changed together deliberately.
     #[test]
     fn every_pinned_maintenance_template_validates() {
-        let templates: [(&str, &str); 13] = [
+        let templates: [(&str, &str); 15] = [
             (
                 "dead-wanted",
                 "package rules\nimport rego.v1\n\nmatch if {\n\tinput.facts.monitored\n\tnot input.facts.has_file\n}\n",
@@ -2576,6 +2576,14 @@ mod tests {
             (
                 "flag-for-review",
                 "package rules\nimport rego.v1\n\nday_ns := (24 * 60 * 60) * 1000000000\n\nmatch if {\n\tinput.facts.has_file\n\tage := time.parse_rfc3339_ns(input.evaluation_time) - time.parse_rfc3339_ns(input.facts.first_imported_at)\n\tage > 365 * day_ns\n}\n",
+            ),
+            (
+                "left-every-public-list",
+                "package rules\nimport rego.v1\n\nday_ns := (24 * 60 * 60) * 1000000000\n\nmatch if {\n\tinput.facts.lists_left_all\n\tinput.facts.lists_left_handled\n\tgone := time.parse_rfc3339_ns(input.evaluation_time) - time.parse_rfc3339_ns(input.facts.lists_left_at)\n\tgone > 30 * day_ns\n}\n",
+            ),
+            (
+                "list-added-never-watched",
+                "package rules\nimport rego.v1\n\nmatch if {\n\tinput.facts.lists_added_by_list\n\tinput.facts.lists_days_on_list > 90\n\tcount(input.facts.watched_by_user_ids) == 0\n}\n",
             ),
         ];
 

@@ -551,6 +551,7 @@ pub fn submit_media_request_input_into_application(
             .collect(),
         // A person's submission is always manual and always evaluated.
         origin: scryer_domain::MediaRequestOrigin::Manual,
+        list_rank: None,
         admission: scryer_application::MediaRequestAdmission::Evaluate,
     }
 }

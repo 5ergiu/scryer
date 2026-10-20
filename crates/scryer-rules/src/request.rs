@@ -191,11 +191,11 @@ pub struct RequestLibraryDoc {
     pub is_default: bool,
 }
 
-/// The draft request itself — what the requester chose in the dialog.
+/// The draft request itself — what the requester chose in the dialog, or what
+/// a list submitted for them.
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestDoc {
-    /// Fixed to `"manual"` today. The field exists so a watchlist-sourced
-    /// request can slot in later without a schema bump.
+    /// `manual`, `public_list` or `personal_list`.
     pub origin: String,
     pub title: String,
     pub year: Option<i32>,
@@ -209,6 +209,26 @@ pub struct RequestDoc {
     /// has to say `not input.request.lease_forever` first.
     pub lease_forever: bool,
     pub lease_days: Option<i64>,
+    /// The list that submitted the request. Absent, not null, for a manual
+    /// request, and for a list request whose list could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<RequestListDoc>,
+}
+
+/// The list behind a list-sourced request. A personal list is never named.
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestListDoc {
+    pub subscription_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub scope: String,
+    pub mode: String,
+    pub provider: String,
+    pub owner_is_requester: bool,
+    /// The list owner's list policy: `auto`, `approval` or `none`.
+    pub owner_list_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i64>,
 }
 
 /// One content-rating certification as the metadata source reported it.
@@ -677,13 +697,20 @@ pub const EXAMPLE_DENY_ADULT_CONTENT: &str = "package rules\nimport rego.v1\n\nd
 pub const EXAMPLE_MONTHLY_QUOTA: &str =
     "package rules\nimport rego.v1\n\nmanual if {\n\tinput.facts.approved_last_30d >= 5\n}\n";
 
+/// Hold every list request whose owner is on the Approval list policy for a
+/// person to look at.
+pub const EXAMPLE_HOLD_APPROVAL_POLICY_LISTS: &str = "package rules\nimport rego.v1\n\nmanual if {\n\tinput.request.list.owner_list_policy == \"approval\"\n}\n";
+
+/// Deny personal-list requests for a quality profile above 1080p.
+pub const EXAMPLE_DENY_PERSONAL_LIST_ABOVE_1080P: &str = "package rules\nimport rego.v1\n\ndeny if {\n\tinput.request.list.scope == \"personal\"\n\tinput.facts.quality_profile_max_resolution > 1080\n}\n";
+
 /// The shipped worked examples, keyed by the template ID the web gallery offers
 /// them under.
 ///
 /// Pinned here rather than only in the gallery so the validator and the gallery
 /// have to change together: a template that needs editing before it saves is not
 /// a template, and the test that proves it validates reads this array.
-pub const REQUEST_RULE_EXAMPLES: [(&str, &str); 5] = [
+pub const REQUEST_RULE_EXAMPLES: [(&str, &str); 7] = [
     (
         "named-requesters-family-rated",
         EXAMPLE_NAMED_REQUESTERS_FAMILY_RATED,
@@ -692,6 +719,14 @@ pub const REQUEST_RULE_EXAMPLES: [(&str, &str); 5] = [
     ("low-resolution-approval", EXAMPLE_LOW_RESOLUTION),
     ("deny-adult-content", EXAMPLE_DENY_ADULT_CONTENT),
     ("monthly-approval-quota", EXAMPLE_MONTHLY_QUOTA),
+    (
+        "hold-approval-policy-list-requests",
+        EXAMPLE_HOLD_APPROVAL_POLICY_LISTS,
+    ),
+    (
+        "deny-personal-list-above-1080p",
+        EXAMPLE_DENY_PERSONAL_LIST_ABOVE_1080P,
+    ),
 ];
 
 // ── Synthetic input ─────────────────────────────────────────────────────────
@@ -725,7 +760,7 @@ pub(crate) fn synthetic_request_input() -> RequestInput {
             is_default: true,
         },
         request: RequestDoc {
-            origin: "manual".to_string(),
+            origin: "public_list".to_string(),
             title: "Test Movie".to_string(),
             year: Some(2024),
             external_ids: BTreeMap::from([
@@ -738,6 +773,16 @@ pub(crate) fn synthetic_request_input() -> RequestInput {
             monitor_selection_season_count: Some(2),
             lease_forever: false,
             lease_days: Some(14),
+            list: Some(RequestListDoc {
+                subscription_id: "subscription-1".to_string(),
+                name: Some("Fixture Picks".to_string()),
+                scope: "public".to_string(),
+                mode: "request".to_string(),
+                provider: "fixture".to_string(),
+                owner_is_requester: true,
+                owner_list_policy: "approval".to_string(),
+                rank: Some(1),
+            }),
         },
         facts: RequestFactsDoc {
             age_rating: Observation::known(13),
@@ -1615,6 +1660,47 @@ mod tests {
         let decision = only_decision(&held);
         assert_eq!(decision.vote, RequestVote::Manual);
         assert!(!decision.held, "the author declared manual");
+
+        // 6. A list request whose owner is on the Approval policy waits for a
+        //    person; a manual request has no list section and is left alone.
+        let held = evaluate(&[policy("example_6", EXAMPLE_HOLD_APPROVAL_POLICY_LISTS)]);
+        assert_eq!(only_decision(&held).vote, RequestVote::Manual);
+        let mut manual = synthetic_request_input();
+        manual.request.origin = "manual".to_string();
+        manual.request.list = None;
+        assert_eq!(
+            only_decision(&evaluate_against(
+                &[policy("example_6", EXAMPLE_HOLD_APPROVAL_POLICY_LISTS)],
+                manual
+            ))
+            .vote,
+            RequestVote::Abstain
+        );
+
+        // 7. A personal list asking above 1080p is denied; the synthetic
+        //    public list at 1080p is not.
+        assert_eq!(
+            only_decision(&evaluate(&[policy(
+                "example_7",
+                EXAMPLE_DENY_PERSONAL_LIST_ABOVE_1080P
+            )]))
+            .vote,
+            RequestVote::Abstain
+        );
+        let mut personal = synthetic_request_input();
+        if let Some(list) = personal.request.list.as_mut() {
+            list.scope = "personal".to_string();
+            list.name = None;
+        }
+        personal.facts.quality_profile_max_resolution = Observation::known(2160);
+        assert_eq!(
+            only_decision(&evaluate_against(
+                &[policy("example_7", EXAMPLE_DENY_PERSONAL_LIST_ABOVE_1080P)],
+                personal
+            ))
+            .vote,
+            RequestVote::Deny
+        );
     }
 
     #[test]

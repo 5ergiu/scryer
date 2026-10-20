@@ -448,6 +448,7 @@ pub(super) fn media_request_input(
             ExternalId::new("imdb".to_string(), "tt1234567".to_string()),
         ],
         origin: Default::default(),
+        list_rank: None,
         admission: Default::default(),
     }
 }

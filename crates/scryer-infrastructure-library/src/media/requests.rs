@@ -166,6 +166,42 @@ impl MediaRequestRepository for MediaRequestStore {
         Ok(by_title)
     }
 
+    async fn request_origins_by_title_ids(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<std::collections::HashMap<String, MediaRequestOrigin>> {
+        let mut by_title = std::collections::HashMap::new();
+        if title_ids.is_empty() {
+            return Ok(by_title);
+        }
+        let placeholders = std::iter::repeat_n("{}", title_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args: Vec<SqlArg> = title_ids.iter().cloned().map(SqlArg::Text).collect();
+        let rows = SqlRuntime::fetch_all(
+            self.datastore.read_exec(),
+            &format!(
+                "SELECT created_title_id, origin_kind, origin_subscription_id
+                   FROM media_requests
+                  WHERE created_title_id IN ({placeholders})
+                    AND identity_fingerprint NOT LIKE 'list-movie:%'
+                  ORDER BY created_at ASC, id ASC"
+            ),
+            &args,
+        )
+        .await?;
+        for row in &rows {
+            let origin = MediaRequestOrigin::from_parts(
+                &row.text("origin_kind")?,
+                row.opt_text("origin_subscription_id")?,
+            );
+            by_title
+                .entry(row.text("created_title_id")?)
+                .or_insert(origin);
+        }
+        Ok(by_title)
+    }
+
     async fn get(&self, request_id: &str) -> AppResult<Option<MediaRequest>> {
         let row = SqlRuntime::fetch_optional(
             self.datastore.read_exec(),
