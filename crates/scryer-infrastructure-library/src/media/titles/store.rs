@@ -1884,8 +1884,12 @@ impl TitleRepository for TitleStore {
         &self,
         lookups: &[(String, String)],
     ) -> AppResult<Vec<Vec<Title>>> {
-        // SQL `LOWER` folds ASCII only on sqlite and `TRIM` strips spaces
-        // only, so the pairing below folds and trims the same way.
+        // Writers store the source lowercased and the id trimmed, so the
+        // sources bind as plain equality and only the id folds case, through
+        // `idx_title_external_ids_source_value_nocase`; its `LOWER(external_id)`
+        // spelling must stay identical or the lookup scans the table. SQL
+        // `LOWER` folds ASCII only on sqlite, so the pairing below folds and
+        // trims the same way.
         let pair_key = |source: &str, value: &str| {
             (
                 source.to_ascii_lowercase(),
@@ -1913,7 +1917,7 @@ impl TitleRepository for TitleStore {
                 .collect::<BTreeSet<_>>();
             let sql = format!(
                 "SELECT DISTINCT title_id, source, external_id FROM title_external_ids \
-                 WHERE LOWER(source) IN ({}) AND LOWER(TRIM(external_id)) IN ({})",
+                 WHERE source IN ({}) AND LOWER(external_id) IN ({})",
                 sql_placeholders(sources.len()),
                 sql_placeholders(values.len())
             );
