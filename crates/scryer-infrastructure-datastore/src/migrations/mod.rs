@@ -41,6 +41,8 @@ pub mod synthetic_root_ids;
 #[path = "synthetic_root_ids_upgrade_tests.rs"]
 mod synthetic_root_ids_upgrade_tests;
 pub mod title_catalog_sort_keys;
+#[cfg(test)]
+mod title_external_id_value_lookup_upgrade_tests;
 pub mod title_folder_ownership;
 pub mod title_folder_ownership_safe;
 pub mod title_image_blobs;
