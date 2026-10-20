@@ -97,6 +97,8 @@ const en: LocaleDictionary = {
   "label.autoSearch": "Auto Search",
   "label.interactiveSearch": "Interactive Search",
   "label.interactive": "Interactive",
+  "label.keep": "Keep",
+  "label.kept": "Kept",
   "label.searching": "Searching",
   "help.autoSearchTooltip":
     "Auto search and queue the latest matching release for this item.",
@@ -4444,6 +4446,8 @@ const en: LocaleDictionary = {
   "settings.maintenancePreviewSubject": "Test subject",
   "settings.maintenancePreviewSample": "Library sample",
   "settings.maintenanceRuleScope": "Rule scope",
+  "settings.maintenanceRuleTemplate": "Template",
+  "settings.maintenanceRuleTemplatePlaceholder": "Start from a template",
   "settings.maintenanceScopeSeason": "Season",
   "settings.maintenanceScopeEpisode": "Episode",
   "settings.maintenanceFileDeleted": "Deleted",
@@ -4871,6 +4875,7 @@ const en: LocaleDictionary = {
   "status.claimExtended": "Hold extended.",
   "status.claimMadePermanent": "The title is now held permanently.",
   "status.claimReleased": "Hold released.",
+  "status.titleKept": "Kept. Maintenance will not delete this title.",
 
   // ── Request rules context reference ─────────────────────────────────
   "settings.refReqSectionInput": "— The request being decided",

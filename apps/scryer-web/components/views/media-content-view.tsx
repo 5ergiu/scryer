@@ -1535,6 +1535,7 @@ function TitleContextPanel({
         {canManageThisTitle ? (
           <TitleOverviewActions
             key={title.id}
+            titleId={title.id}
             monitored={title.monitored}
             monitoredUpdating={isTogglingMonitored}
             onToggleMonitoring={

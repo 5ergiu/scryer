@@ -5,6 +5,7 @@ import type {
   RequestRuleSetDetail,
   RequestRuleSetDraft,
   RequestVote,
+  TitleClaimRecord,
 } from "@/lib/types/request-rule-sets";
 
 /// How many stored decisions the recent-decisions table asks for. The API
@@ -261,6 +262,20 @@ export function titleClaimStateBadgeTone(
     default:
       return "neutral";
   }
+}
+
+/// The live operator keep among a title's claims: what Keep placed, and what
+/// its release control withdraws.
+export function liveOperatorKeep(
+  claims: TitleClaimRecord[] | undefined,
+): TitleClaimRecord | null {
+  return (
+    claims?.find(
+      (claim) =>
+        claim.producer === "OPERATOR_KEEP" &&
+        (claim.state === "ACTIVE" || claim.state === "DORMANT"),
+    ) ?? null
+  );
 }
 
 // ── Lease badges ─────────────────────────────────────────────────────────

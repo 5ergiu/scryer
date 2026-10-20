@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 
+import { TitleKeepAction } from "@/components/common/title-keep-control";
 import {
   TitleWorkspaceActionButton,
   TitleWorkspaceActionGrid,
@@ -36,6 +37,7 @@ export type TitleOverviewInteractiveSearchAction = {
  * when the overview moves to another title.
  */
 export function TitleOverviewActions({
+  titleId,
   monitored,
   monitoredUpdating,
   onToggleMonitoring,
@@ -52,6 +54,7 @@ export function TitleOverviewActions({
   onDelete,
   busy = false,
 }: {
+  titleId: string;
   monitored: boolean;
   monitoredUpdating: boolean;
   onToggleMonitoring?: () => void;
@@ -146,6 +149,7 @@ export function TitleOverviewActions({
           onClick={() => onDelete?.()}
         />
       </TitleWorkspaceActionGrid>
+      <TitleKeepAction titleId={titleId} />
 
       {searchNotice && !interactiveOpen ? (
         <div id="title-overview-search-notice" className="mb-3">

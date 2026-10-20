@@ -668,6 +668,7 @@ pub fn from_maintenance_candidate(
         total_size_bytes,
         storage_root_file_count,
         storage_root_total_size_bytes,
+        operator_keep_claim_id,
         candidate,
         rule_name,
         title_name,
@@ -683,6 +684,7 @@ pub fn from_maintenance_candidate(
         total_size_bytes,
         storage_root_file_count: storage_root_file_count.map(to_graphql_int),
         storage_root_total_size_bytes,
+        operator_keep_claim_id: operator_keep_claim_id.map(ID::from),
         subject_label,
         subject_kind: candidate.subject_kind,
         subject_id: ID::from(candidate.subject_id),
@@ -1366,6 +1368,7 @@ mod tests {
             total_size_bytes: Some(42),
             storage_root_file_count: Some(1),
             storage_root_total_size_bytes: Some(42),
+            operator_keep_claim_id: Some("keep-1".into()),
             candidate: candidate.clone(),
             rule_name: "Rule".into(),
             title_name: "Example".into(),
@@ -1379,6 +1382,7 @@ mod tests {
         assert_eq!(projected.action_kind, MaintenanceActionKind::ActionSequence);
         assert_eq!(projected.storage_root_file_count, Some(1));
         assert_eq!(projected.storage_root_total_size_bytes, Some(42));
+        assert_eq!(projected.operator_keep_claim_id, Some(ID::from("keep-1")));
         assert!(projected.action_sequence.is_some());
         assert!(projected.sequence_steps.is_empty());
 
@@ -1392,6 +1396,7 @@ mod tests {
             total_size_bytes: None,
             storage_root_file_count: None,
             storage_root_total_size_bytes: None,
+            operator_keep_claim_id: None,
             rule_name: "Rule".into(),
             title_name: "Example".into(),
             action_definition: Some(AppActionDefinition::Legacy(AppActionSpec::new(

@@ -197,9 +197,16 @@ fn keep(id: &str, title_id: &str) -> LifecycleClaim {
 
 // ── The executor's hold (FR-042) ────────────────────────────────────────────
 
+/// What sits on the title when the destructive action comes due.
+enum Claim {
+    Lease(LifecycleClaimState),
+    /// Placed through the same entry point the Keep button calls.
+    OperatorKeep,
+}
+
 /// The table this covers: which claim states hold a destructive action, and
 /// which risk classes the hold applies to at all.
-async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Option<&str>) {
+async fn assert_destructive_hold(claim: Claim, expected_hold: Option<&str>) {
     let fixture = claims_app();
     let rule_id = fixture
         .rule(
@@ -249,10 +256,21 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
     fixture
         .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(1))
         .await;
-    fixture
-        .claims
-        .seed(lease("claim-1", &title.id, state))
-        .await;
+    match claim {
+        Claim::Lease(state) => {
+            fixture
+                .claims
+                .seed(lease("claim-1", &title.id, state))
+                .await;
+        }
+        Claim::OperatorKeep => {
+            fixture
+                .app
+                .create_operator_keep_claim(&fixture.user, &title.id)
+                .await
+                .expect("keep the title");
+        }
+    }
 
     let report = fixture.handle().await;
     match expected_hold {
@@ -356,7 +374,7 @@ async fn destructive_execution_reads_claims_under_the_approval_guard() {
 #[tokio::test]
 async fn an_active_lease_holds_a_destructive_action() {
     assert_destructive_hold(
-        LifecycleClaimState::Active,
+        Claim::Lease(LifecycleClaimState::Active),
         Some(execution_reason::RETENTION_CLAIM_HOLD),
     )
     .await;
@@ -367,20 +385,72 @@ async fn an_active_lease_holds_a_destructive_action() {
 #[tokio::test]
 async fn a_dormant_lease_holds_a_destructive_action() {
     assert_destructive_hold(
-        LifecycleClaimState::Dormant,
+        Claim::Lease(LifecycleClaimState::Dormant),
         Some(execution_reason::RETENTION_CLAIM_HOLD),
     )
     .await;
 }
 
 #[tokio::test]
+async fn an_operator_keep_holds_a_destructive_action() {
+    assert_destructive_hold(
+        Claim::OperatorKeep,
+        Some(execution_reason::RETENTION_CLAIM_HOLD),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_candidate_row_carries_its_titles_operator_keep() {
+    let fixture = claims_app();
+    fixture
+        .rule(
+            draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
+            MaintenanceRuleState::DryRun,
+        )
+        .await;
+    fixture.open_gates(false, false).await;
+    let kept = seed_title(&fixture.app, &fixture.user, "Kept subject").await;
+    let unkept = seed_title(&fixture.app, &fixture.user, "Unkept subject").await;
+    fixture.claims.seed(keep("request-keep", &unkept.id)).await;
+    fixture.evaluate().await;
+    let keep = fixture
+        .app
+        .create_operator_keep_claim(&fixture.user, &kept.id)
+        .await
+        .expect("keep the title");
+
+    let rows = fixture
+        .app
+        .list_maintenance_candidates(
+            &fixture.user,
+            crate::maintenance_rules::MaintenanceCandidateFilter::default(),
+        )
+        .await
+        .expect("list candidates");
+    let keep_for = |title_id: &str| {
+        rows.iter()
+            .find(|row| row.candidate.title_id == title_id)
+            .expect("both titles are candidates")
+            .operator_keep_claim_id
+            .clone()
+    };
+    assert_eq!(keep_for(&kept.id), Some(keep.id));
+    assert_eq!(
+        keep_for(&unkept.id),
+        None,
+        "a request's keep is not the operator's, so it offers Keep"
+    );
+}
+
+#[tokio::test]
 async fn a_released_lease_no_longer_holds_a_destructive_action() {
-    assert_destructive_hold(LifecycleClaimState::Released, None).await;
+    assert_destructive_hold(Claim::Lease(LifecycleClaimState::Released), None).await;
 }
 
 #[tokio::test]
 async fn an_expired_lease_no_longer_holds_a_destructive_action() {
-    assert_destructive_hold(LifecycleClaimState::Expired, None).await;
+    assert_destructive_hold(Claim::Lease(LifecycleClaimState::Expired), None).await;
 }
 
 #[tokio::test]

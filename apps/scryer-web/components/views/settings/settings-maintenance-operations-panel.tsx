@@ -47,6 +47,7 @@ import { formatUiDateTime } from "@/lib/utils/date-format";
 import { selectorId } from "@/lib/utils/dom-ids";
 import { parseMaintenanceFileResults } from "@/lib/utils/maintenance-file-results";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { TitleKeepControl } from "@/components/common/title-keep-control";
 
 export type MaintenanceLibraryOption = { id: string; name: string };
 
@@ -538,7 +539,13 @@ export function MaintenanceCandidatesPanel({
                     >
                       <CandidateDueCell dueAt={candidate.dueAt} />
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="space-x-2 whitespace-nowrap text-right">
+                      <TitleKeepControl
+                        id={selectorId("settings-maintenance-candidate-keep", candidate.id)}
+                        titleId={candidate.titleId}
+                        keepClaimId={candidate.operatorKeepClaimId}
+                        onChanged={refreshCandidates}
+                      />
                       <IconButton
                         id={selectorId(
                           "settings-maintenance-candidate-exclude",
