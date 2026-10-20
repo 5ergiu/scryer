@@ -26,6 +26,8 @@ pub mod known_bad;
 #[cfg(test)]
 mod legacy_monitor_snapshot_upgrade_tests;
 #[cfg(test)]
+mod lifecycle_claims_one_operator_keep_upgrade_tests;
+#[cfg(test)]
 mod list_search_mode_upgrade_tests;
 #[cfg(test)]
 #[path = "migration_progress_tests.rs"]

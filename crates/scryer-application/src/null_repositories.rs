@@ -3650,7 +3650,7 @@ impl crate::ports::LifecycleClaimRepository for NullLifecycleClaimRepository {
         _id: &str,
         _replacement: &scryer_domain::LifecycleClaim,
         _now: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<String> {
         Err(AppError::Repository(
             LIFECYCLE_CLAIM_NOT_CONFIGURED.to_string(),
         ))
