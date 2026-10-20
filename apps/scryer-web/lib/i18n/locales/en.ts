@@ -4660,15 +4660,11 @@ const en: LocaleDictionary = {
   // ── Request rules ───────────────────────────────────────────────────
   "settings.requestRules": "Request Rules",
   "settings.noRequestRulesFound": "No request rules yet.",
-  "settings.requestRuleMode": "Mode",
-  "settings.requestRuleModeDisabled": "Disabled",
-  "settings.requestRuleModeShadow": "Shadow",
-  "settings.requestRuleModeEnforce": "Enforce",
-  "settings.requestRuleModeDisabledHelp": "Never runs.",
-  "settings.requestRuleModeShadowHelp": "Records what it would decide. Nothing happens to the request.",
-  "settings.requestRuleModeEnforceHelp": "Its verdict resolves the request: approved, denied, or sent for review.",
-  "settings.requestRuleModeHelp":
-    "A rule only acts when three things agree: this mode says Enforce, the instance gate below is on, and the requester has permission to request from the library. Anything less and the rule still records what it would have done.",
+  "settings.requestRulesDefault":
+    "With no enabled rule, requests from members with Auto-approve are approved and every other request waits for review.",
+  "settings.requestRuleEnabledUpdated": "Updated {{name}}.",
+  "settings.requestRuleRequesterFieldsHint":
+    "This rule reads requester fields and needs Manage permissions to save.",
   "settings.requestRuleLibraries": "Libraries",
   "settings.requestRuleLibrariesAll": "All libraries",
   "settings.requestRuleLibrariesHelp": "Leave every box unticked to apply this rule to requests in every library.",
@@ -4678,14 +4674,13 @@ const en: LocaleDictionary = {
   "settings.requestRuleCreate": "Create rule",
   "settings.requestRuleUpdate": "Update rule",
   "settings.requestRuleCreateNew": "New request rule",
-  "settings.requestRuleCreated": "Request rule created. It is disabled until you arm it.",
+  "settings.requestRuleCreated": "Request rule created. It stays disabled until you enable it.",
   "settings.requestRuleUpdated": "Request rule updated.",
   "settings.requestRuleDeleted": "Deleted request rule {{name}}.",
   "settings.requestRuleDeleting": "Delete the request rule {{name}}? Its recorded decisions are kept.",
-  "settings.requestRuleModeUpdated": "Changed the mode of {{name}}.",
   "settings.requestRuleValidationRequired": "A request rule needs a name and a matcher.",
   "settings.requestRuleSaveDisabledNote":
-    "Saving stores the rule disabled. Arming it is a separate step, and the instance gate has to be on as well.",
+    "A new rule is saved disabled. Tick Enabled in the table to let it decide requests.",
   "settings.requestRuleConfirmDiscardTitle": "Discard unsaved changes?",
   "settings.requestRuleConfirmDiscardDescription":
     "The matcher in the editor has not been saved. Continuing replaces it.",
@@ -4697,29 +4692,6 @@ const en: LocaleDictionary = {
     "Listing accounts needs permission this page does not carry, so names have to be typed into the matcher by hand.",
   "settings.requestRuleRequestersNoTarget":
     "This matcher does not name anybody, so there is nowhere to write the accounts you picked. Add a requesters set or a username comparison first.",
-
-  "settings.requestRulesStatusGateClosedTitle": "Nothing is being decided automatically",
-  "settings.requestRulesStatusGateClosedBody":
-    "The instance gate is off, so every request still waits for a person. Rules you arm here will record what they would have decided.",
-  "settings.requestRulesStatusIdleTitle": "The gate is open and no rule is armed",
-  "settings.requestRulesStatusIdleBody":
-    "Requests take the ordinary path until at least one rule is set to Shadow or Enforce.",
-  "settings.requestRulesStatusShadowingTitle": "Rules are recording, not acting",
-  "settings.requestRulesStatusShadowingBody":
-    "Every armed rule is in Shadow, so their verdicts are written to the decision trace and nothing happens to the request.",
-  "settings.requestRulesStatusEnforcingTitle": "Requests are being resolved automatically",
-  "settings.requestRulesStatusEnforcingBody":
-    "At least one rule is enforcing, so requests it matches are approved or denied without a person seeing them.",
-
-  "settings.requestGateTitle": "Instance gate",
-  "settings.requestGateSubtitle":
-    "The instance-wide switch that lets any request rule act. It is separate from each rule's mode, and it is kept behind a different permission.",
-  "settings.requestGateEvaluation": "Evaluate request rules",
-  "settings.requestGateEvaluationHelp":
-    "With this off, no rule resolves a request, however it is armed. Rules still record what they would have decided.",
-  "settings.requestGateLocked":
-    "Changing the instance gate needs system-settings management, which this account does not have. Rule modes above are yours to set.",
-  "settings.requestGateUpdated": "Instance gate updated.",
 
   "settings.requestPreviewTitle": "Try this rule against a request",
   "settings.requestPreviewSubtitle":
@@ -4753,12 +4725,11 @@ const en: LocaleDictionary = {
 
   "settings.requestDecisionsTitle": "Recent decisions",
   "settings.requestDecisionsSubtitle":
-    "What request rules have decided lately, including the verdicts shadow rules only recorded.",
+    "What request rules have decided lately.",
   "settings.requestDecisionsOutcomeFilter": "Outcome",
   "settings.requestDecisionsOutcomeAll": "Any outcome",
   "settings.requestDecisionsColTime": "Evaluated",
   "settings.requestDecisionsColOutcome": "Outcome",
-  "settings.requestDecisionsColMode": "Mode",
   "settings.requestDecisionsColVotes": "Votes",
   "settings.requestDecisionsColReasons": "Reasons",
   "settings.requestDecisionsEmpty": "No decisions recorded yet.",
@@ -4820,7 +4791,6 @@ const en: LocaleDictionary = {
   "requests.preflightReason": "Reason: {{reason}}.",
   "requests.preflightMetadataPartial":
     "Scryer could not read everything about this title, so a person will decide.",
-  "requests.preflightPreviewOnly": "preview only",
 
   "requests.leaseForever": "Kept forever",
   "requests.leaseRequested": "Asked for {{count}} days",
@@ -4830,7 +4800,6 @@ const en: LocaleDictionary = {
   "requests.leaseReleased": "Lease released",
 
   "requests.decisionTitle": "How this was decided",
-  "requests.decisionShadow": "recorded only",
   "requests.decisionPolicySaid": "The rules said {{outcome}}; something else decided the request.",
   "requests.decisionVotes": "Rule votes",
   "requests.decisionNothingToShow": "No rule had anything to say about this request.",

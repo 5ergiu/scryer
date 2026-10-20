@@ -47,8 +47,8 @@ pub struct RequestRuleDecisionView {
 #[derive(Clone, Debug, Default)]
 pub struct MediaRequestPolicyFacts {
     /// The latest decision recorded for the request, or `None` when it was
-    /// never evaluated — which is every request submitted before the gate was
-    /// armed.
+    /// never evaluated — which is every request submitted while no enabled
+    /// rule covered its library.
     pub decision: Option<RequestRuleDecisionRecord>,
     /// See [`RequestRuleDecisionView::redacted`].
     pub decision_redacted: bool,

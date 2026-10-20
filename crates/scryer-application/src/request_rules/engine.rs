@@ -90,25 +90,6 @@ impl RequestRulesEngineCache {
             .filter(|(_, scope)| scope.covers(library_id))
             .collect()
     }
-
-    /// The strictest mode among the rules that were consulted, or `Disabled`
-    /// when none were. Recorded on the trace so a mixed shadow/enforce
-    /// evaluation reads honestly: one enforcing rule makes the evaluation an
-    /// enforcing one.
-    pub fn strictest_mode(&self, library_id: &str) -> RequestRuleEvaluationMode {
-        let mut mode = RequestRuleEvaluationMode::Disabled;
-        for (_, scope) in self.scopes_for_library(library_id) {
-            mode = match (mode, scope.mode) {
-                (RequestRuleEvaluationMode::Enforce, _)
-                | (_, RequestRuleEvaluationMode::Enforce) => RequestRuleEvaluationMode::Enforce,
-                (RequestRuleEvaluationMode::Shadow, _) | (_, RequestRuleEvaluationMode::Shadow) => {
-                    RequestRuleEvaluationMode::Shadow
-                }
-                _ => RequestRuleEvaluationMode::Disabled,
-            };
-        }
-        mode
-    }
 }
 
 /// Shared handle the service bundle hangs on to.
@@ -118,8 +99,8 @@ impl AppUseCase {
     /// Read the current engine generation.
     ///
     /// A poisoned lock produces an unavailable generation. Request evaluation
-    /// holds while the instance gate is armed rather than deciding against an
-    /// empty engine that might omit persisted enforcing rules.
+    /// holds rather than deciding against an empty engine that might omit
+    /// persisted enabled rules.
     pub(crate) fn request_rules_engine_snapshot(&self) -> RequestRulesEngineCache {
         self.services
             .customization
@@ -157,14 +138,14 @@ impl AppUseCase {
         Ok(guard.generation)
     }
 
-    /// Rebuild the engine from every rule set in `shadow` or `enforce`.
+    /// Rebuild the engine from every enabled rule set.
     ///
     /// Disabled rule sets are not loaded at all: a disabled rule must cost
     /// nothing, not even a compile, and it must not be able to fail the rebuild
     /// of the rules that *are* live.
     ///
     /// A rule whose stored source no longer compiles remains a scoped error.
-    /// Healthy rules still run, while a failed enforcing policy holds requests
+    /// Healthy rules still run, while a failed enabled policy holds requests
     /// in its libraries instead of silently falling back to auto-approval.
     pub async fn rebuild_request_rules_engine(&self) -> AppResult<()> {
         let generation = self.begin_request_rules_engine_rebuild()?;

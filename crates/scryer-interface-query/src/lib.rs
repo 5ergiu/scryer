@@ -3954,21 +3954,6 @@ impl AcquisitionQueries {
             .collect())
     }
 
-    /// Read the instance-wide request-rule gate; requires system-settings management permission.
-    async fn request_rule_instance_gates(
-        &self,
-        ctx: &Context<'_>,
-    ) -> GqlResult<RequestRuleInstanceGates> {
-        let app = app_from_ctx(ctx)?;
-        let actor = actor_from_ctx(ctx)?;
-
-        let gates = app
-            .request_rule_instance_gates(&actor)
-            .await
-            .map_err(to_gql_error)?;
-        Ok(crate::mappers::from_request_rule_instance_gates(gates))
-    }
-
     /// Read the decision recorded for one media request, or null when it was never evaluated.
     ///
     /// Two audiences reach this. A manager of the request's library sees the

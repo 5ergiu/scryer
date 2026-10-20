@@ -5379,16 +5379,6 @@ const ru: LocaleDictionary = {
   // ── Правила запросов ────────────────────────────────────────────────
   "settings.requestRules": "Правила запросов",
   "settings.noRequestRulesFound": "Правил запросов пока нет.",
-  "settings.requestRuleMode": "Режим",
-  "settings.requestRuleModeDisabled": "Отключено",
-  "settings.requestRuleModeShadow": "Теневой",
-  "settings.requestRuleModeEnforce": "Применять",
-  "settings.requestRuleModeDisabledHelp": "Никогда не выполняется.",
-  "settings.requestRuleModeShadowHelp": "Записывает своё решение. С запросом ничего не происходит.",
-  "settings.requestRuleModeEnforceHelp":
-    "Его вердикт решает судьбу запроса: одобрен, отклонён или отправлен на рассмотрение.",
-  "settings.requestRuleModeHelp":
-    "Правило действует, только когда совпадают три вещи: здесь выбран режим «Применять», включён общий переключатель ниже, и у запросившего есть право запрашивать из этой библиотеки. Во всех остальных случаях правило всё равно записывает, что оно сделало бы.",
   "settings.requestRuleLibraries": "Библиотеки",
   "settings.requestRuleLibrariesAll": "Все библиотеки",
   "settings.requestRuleLibrariesHelp":
@@ -5403,10 +5393,7 @@ const ru: LocaleDictionary = {
   "settings.requestRuleUpdated": "Правило запросов обновлено.",
   "settings.requestRuleDeleted": "Правило запросов {{name}} удалено.",
   "settings.requestRuleDeleting": "Удалить правило запросов {{name}}? Записанные им решения сохранятся.",
-  "settings.requestRuleModeUpdated": "Режим правила {{name}} изменён.",
   "settings.requestRuleValidationRequired": "Правилу запросов нужны имя и сопоставитель.",
-  "settings.requestRuleSaveDisabledNote":
-    "При сохранении правило остаётся отключённым. Включение — отдельный шаг, и общий переключатель тоже должен быть включён.",
   "settings.requestRuleConfirmDiscardTitle": "Отменить несохранённые изменения?",
   "settings.requestRuleConfirmDiscardDescription":
     "Сопоставитель в редакторе не сохранён. Продолжение заменит его.",
@@ -5418,29 +5405,6 @@ const ru: LocaleDictionary = {
     "Для списка учётных записей нужны права, которых у этой страницы нет, поэтому имена придётся вписать в сопоставитель вручную.",
   "settings.requestRuleRequestersNoTarget":
     "Этот сопоставитель никого не называет, поэтому выбранные учётные записи некуда вписать. Сначала добавьте набор requesters или сравнение по имени пользователя.",
-
-  "settings.requestRulesStatusGateClosedTitle": "Ничего не решается автоматически",
-  "settings.requestRulesStatusGateClosedBody":
-    "Общий переключатель выключен, поэтому каждый запрос по-прежнему ждёт человека. Включённые здесь правила будут записывать, что они решили бы.",
-  "settings.requestRulesStatusIdleTitle": "Переключатель включён, но ни одно правило не активно",
-  "settings.requestRulesStatusIdleBody":
-    "Запросы идут обычным путём, пока хотя бы одно правило не переведено в режим «Теневой» или «Применять».",
-  "settings.requestRulesStatusShadowingTitle": "Правила записывают, но не действуют",
-  "settings.requestRulesStatusShadowingBody":
-    "Все включённые правила работают в теневом режиме: их вердикты попадают в журнал решений, а с запросом ничего не происходит.",
-  "settings.requestRulesStatusEnforcingTitle": "Запросы решаются автоматически",
-  "settings.requestRulesStatusEnforcingBody":
-    "Хотя бы одно правило применяется, поэтому подходящие запросы одобряются или отклоняются без участия человека.",
-
-  "settings.requestGateTitle": "Общий переключатель",
-  "settings.requestGateSubtitle":
-    "Переключатель уровня экземпляра, который позволяет правилам запросов действовать. Он не зависит от режима каждого правила и защищён другим правом доступа.",
-  "settings.requestGateEvaluation": "Выполнять правила запросов",
-  "settings.requestGateEvaluationHelp":
-    "Пока он выключен, ни одно правило не решает судьбу запроса, как бы оно ни было включено. Правила всё равно записывают свои решения.",
-  "settings.requestGateLocked":
-    "Для изменения общего переключателя нужны права управления системными настройками, которых у этой учётной записи нет. Режимы правил выше вам доступны.",
-  "settings.requestGateUpdated": "Общий переключатель обновлён.",
 
   "settings.requestPreviewTitle": "Проверить правило на запросе",
   "settings.requestPreviewSubtitle":
@@ -5474,13 +5438,10 @@ const ru: LocaleDictionary = {
     "Определите их в «Настройки › Теги», прежде чем их можно будет применить.",
 
   "settings.requestDecisionsTitle": "Недавние решения",
-  "settings.requestDecisionsSubtitle":
-    "Что правила запросов решили в последнее время, включая вердикты, которые теневые правила только записали.",
   "settings.requestDecisionsOutcomeFilter": "Итог",
   "settings.requestDecisionsOutcomeAll": "Любой итог",
   "settings.requestDecisionsColTime": "Оценено",
   "settings.requestDecisionsColOutcome": "Итог",
-  "settings.requestDecisionsColMode": "Режим",
   "settings.requestDecisionsColVotes": "Голоса",
   "settings.requestDecisionsColReasons": "Причины",
   "settings.requestDecisionsEmpty": "Решений пока не записано.",
@@ -5542,7 +5503,6 @@ const ru: LocaleDictionary = {
   "requests.preflightReason": "Причина: {{reason}}.",
   "requests.preflightMetadataPartial":
     "Scryer не смог прочитать всё об этом тайтле, поэтому решение примет человек.",
-  "requests.preflightPreviewOnly": "только предпросмотр",
 
   "requests.leaseForever": "Хранится вечно",
   "requests.leaseRequested": "Запрошено {{count}} дней",
@@ -5552,7 +5512,6 @@ const ru: LocaleDictionary = {
   "requests.leaseReleased": "Хранение снято",
 
   "requests.decisionTitle": "Как это было решено",
-  "requests.decisionShadow": "только записано",
   "requests.decisionPolicySaid": "Правила сказали {{outcome}}; запрос решило что-то другое.",
   "requests.decisionVotes": "Голоса правил",
   "requests.decisionNothingToShow": "Ни одно правило ничего не сказало об этом запросе.",

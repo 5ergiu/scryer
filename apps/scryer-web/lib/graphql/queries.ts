@@ -4073,16 +4073,14 @@ export const maintenanceExclusionsQuery = `query MaintenanceExclusions($ruleSetI
 
 // ── Request Rules ─────────────────────────────────────────────────────
 //
-// Request rules are saved DISABLED and nothing evaluates until three separate
-// controls agree: the instance gate (system-settings), the rule's own mode
-// (catalog settings), and the requester's library permission.
+// Request rules are saved disabled. An enabled rule covering the library
+// decides a request; with none, the requester's library permission does.
 
 export const REQUEST_RULE_SET_FIELDS = `
     id
     name
     description
     enabled
-    evaluationMode
     libraryIds
     currentRevisionNumber
     decisionCount
@@ -4148,12 +4146,6 @@ export const requestRuleSetQuery = `query RequestRuleSet($id: ID!) {
 
 export const requestRuleRevisionsQuery = `query RequestRuleRevisions($ruleSetId: ID!) {
   requestRuleRevisions(ruleSetId: $ruleSetId) {${requestRuleRevisionFieldSelection}
-  }
-}`;
-
-export const requestRuleInstanceGatesQuery = `query RequestRuleInstanceGates {
-  requestRuleInstanceGates {
-    evaluationEnabled
   }
 }`;
 

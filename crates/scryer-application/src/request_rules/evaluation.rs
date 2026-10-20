@@ -8,9 +8,9 @@
 //! # Nothing here may fail the caller
 //!
 //! A request rule is a convenience layered over a flow that worked without it.
-//! Unreadable gates and unavailable shared facts use the library's existing
-//! Auto-Approve permission. Uncertainty in an armed enforcing rule holds the
-//! request for a human. Trace persistence is best effort: a failed trace write
+//! With no enabled rule covering the library, and whenever shared facts are
+//! unavailable, the library's existing Auto-Approve permission decides.
+//! Uncertainty in an enabled rule holds the request for a human. Trace persistence is best effort: a failed trace write
 //! must not change the verdict already reached by policy.
 
 use chrono::Utc;
@@ -24,8 +24,7 @@ use serde::Serialize;
 use crate::helpers::{HashDomain, blake3_identity_hex};
 use crate::media_requests::snapshot::MediaRequestMetadataSnapshot;
 use crate::request_rules::arbitration::{
-    Arbitration, FALLBACK_ERROR, LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
-    legacy_outcome,
+    Arbitration, FALLBACK_ERROR, ScopedError, ScopedVote, arbitrate, legacy_outcome,
 };
 use crate::request_rules::facts::{RequestDraft, build_request_input};
 use crate::{AppResult, AppUseCase};
@@ -73,7 +72,7 @@ pub struct RequestDecisionReason {
 pub struct RequestEvaluation {
     /// The recorded trace's id, when one was written.
     pub decision_id: Option<String>,
-    /// What the rules concluded, whether or not they were allowed to act.
+    /// What the rules concluded.
     pub policy_outcome: RequestDecisionOutcome,
     /// What actually happens.
     pub effective_outcome: RequestDecisionOutcome,
@@ -92,12 +91,11 @@ pub struct RequestEvaluation {
     /// that is the only way to find out why a rule's tag never appeared.
     pub emitted_tags: Vec<String>,
     pub reasons: Vec<RequestDecisionReason>,
-    /// Strictest mode among the rules consulted, or `Disabled` when none were.
+    /// `Enforce` when an enabled rule was consulted, `Disabled` when none was.
     pub evaluation_mode: RequestRuleEvaluationMode,
     /// True when the metadata snapshot could not be fully established, so some
     /// facts were unknown.
     pub metadata_partial: bool,
-    pub gate_enabled: bool,
 }
 
 impl RequestEvaluation {
@@ -105,7 +103,6 @@ impl RequestEvaluation {
     /// reached a rule.
     fn legacy(
         permission_grants_auto_approve: bool,
-        gate_enabled: bool,
         metadata_partial: bool,
         fallback_reason: Option<&str>,
     ) -> Self {
@@ -121,7 +118,6 @@ impl RequestEvaluation {
             reasons: Vec::new(),
             evaluation_mode: RequestRuleEvaluationMode::Disabled,
             metadata_partial,
-            gate_enabled,
         }
     }
 }
@@ -132,7 +128,7 @@ impl RequestEvaluation {
 ///
 /// `vote` is `null` exactly when `error` is set: a rule that failed produced no
 /// vote, and rendering that as an abstain would tell an approver the rule looked
-/// and had no opinion. `mode` rides along so a mixed shadow/enforce trace can be
+/// and had no opinion. `mode` rides along so the trace can be
 /// read without joining back to the rule sets, which may have been edited or
 /// deleted since (FR-016 — the trace outlives the rule).
 #[derive(Clone, Debug, Serialize)]
@@ -212,17 +208,6 @@ impl AppUseCase {
             .has_library_permission(actor, &library.id, LibraryPermission::AutoApproveRequests)
             .await
             .unwrap_or(false);
-        // An unreadable gate is a closed gate: losing the settings table must
-        // disarm policy, never arm it.
-        let gate_enabled = self
-            .load_request_rule_gates()
-            .await
-            .map(|gates| gates.evaluation_enabled)
-            .unwrap_or_else(|error| {
-                tracing::warn!(error = %error, "could not read the request rules gate; treating it as off");
-                false
-            });
-
         let cache = self.request_rules_engine_snapshot();
         if cache.unavailable {
             tracing::warn!(
@@ -230,12 +215,7 @@ impl AppUseCase {
                 "request rules engine generation is unavailable; holding the request"
             );
             return Ok(self
-                .record_unavailable_engine_fallback(
-                    &purpose,
-                    permission,
-                    gate_enabled,
-                    metadata_partial,
-                )
+                .record_unavailable_engine_fallback(&purpose, permission, metadata_partial)
                 .await);
         }
         let consulted: Vec<(String, crate::request_rules::engine::RequestRuleScope)> = cache
@@ -246,12 +226,11 @@ impl AppUseCase {
 
         // No rule can speak about this library. Arbitration would reach the
         // same verdict the legacy check does, and building the fact document
-        // would cost a dozen repository reads to prove it — so short-circuit,
-        // and record a trace only on an instance that has actually armed the
-        // gate and would therefore expect one.
+        // would cost a dozen repository reads to prove it — so short-circuit
+        // without a trace: no rule took part.
         if consulted.is_empty() {
             let arbitration = arbitrate(&[], &[], permission);
-            let mut evaluation = RequestEvaluation {
+            return Ok(RequestEvaluation {
                 decision_id: None,
                 policy_outcome: arbitration.policy_outcome,
                 effective_outcome: legacy_outcome(permission),
@@ -262,14 +241,7 @@ impl AppUseCase {
                 reasons: Vec::new(),
                 evaluation_mode: RequestRuleEvaluationMode::Disabled,
                 metadata_partial,
-                gate_enabled,
-            };
-            if gate_enabled {
-                evaluation.decision_id = self
-                    .record_request_decision(&purpose, &evaluation, &[], &[], "")
-                    .await;
-            }
-            return Ok(evaluation);
+            });
         }
 
         let evaluation_time = Utc::now();
@@ -295,13 +267,7 @@ impl AppUseCase {
                     "could not assemble request rule facts; falling back to the permission check"
                 );
                 return Ok(self
-                    .record_error_fallback(
-                        &purpose,
-                        permission,
-                        gate_enabled,
-                        metadata_partial,
-                        cache.strictest_mode(&library.id),
-                    )
+                    .record_error_fallback(&purpose, permission, metadata_partial)
                     .await);
             }
         };
@@ -321,13 +287,7 @@ impl AppUseCase {
                     "request rule evaluation failed; falling back to the permission check"
                 );
                 return Ok(self
-                    .record_error_fallback(
-                        &purpose,
-                        permission,
-                        gate_enabled,
-                        metadata_partial,
-                        cache.strictest_mode(&library.id),
-                    )
+                    .record_error_fallback(&purpose, permission, metadata_partial)
                     .await);
             }
         };
@@ -382,52 +342,19 @@ impl AppUseCase {
         }
 
         let arbitration = arbitrate(&votes, &errors, permission);
-        // Shadow votes remain in the trace but cannot veto enforcing votes or
-        // attach tags to a request approved by another rule or permission.
-        let enforcing_votes: Vec<_> = votes
-            .iter()
-            .filter(|vote| vote.mode == RequestRuleEvaluationMode::Enforce)
-            .cloned()
-            .collect();
-        let enforcing_errors: Vec<_> = errors
-            .iter()
-            .filter(|error| error.mode == RequestRuleEvaluationMode::Enforce)
-            .cloned()
-            .collect();
-        let effective = arbitrate(&enforcing_votes, &enforcing_errors, permission);
-        let mut effective_outcome = effective.effective_outcome(gate_enabled, true, permission);
-
-        let emitted_tags = arbitration.tags.clone();
-        let arbitration = if enforcing_votes.is_empty() && enforcing_errors.is_empty() {
-            arbitration
-        } else {
-            effective.clone()
-        };
-        // An approval that no enforcing rule reached is the permission's, even
-        // when a shadow rule or a rule behind a closed gate had its own verdict.
-        // The row, the resolution event and the trace name the permission as
-        // the decider; the rules' verdict stays in `policy_outcome` and the
-        // recorded votes.
-        let approved_by_permission = effective_outcome == RequestDecisionOutcome::AutoApprove
-            && (!gate_enabled || effective.deciding_rule_set_ids == [LIBRARY_PERMISSION_DECIDER]);
-        let provenance = if approved_by_permission {
-            arbitrate(&[], &[], true)
-        } else {
-            arbitration.clone()
-        };
-        let mut fallback_reason = provenance.fallback_reason.map(str::to_string);
-        let applicable_tags = if gate_enabled {
-            match self.applicable_policy_tags(&purpose, &effective.tags).await {
-                Ok(tags) => tags,
-                Err(error) => {
-                    tracing::warn!(%error, "request rule tag registry unavailable; holding request");
-                    effective_outcome = RequestDecisionOutcome::ManualReview;
-                    fallback_reason = Some(FALLBACK_ERROR.to_string());
-                    Vec::new()
-                }
+        let mut effective_outcome = arbitration.policy_outcome;
+        let mut fallback_reason = arbitration.fallback_reason.map(str::to_string);
+        let applicable_tags = match self
+            .applicable_policy_tags(&purpose, &arbitration.tags)
+            .await
+        {
+            Ok(tags) => tags,
+            Err(error) => {
+                tracing::warn!(%error, "request rule tag registry unavailable; holding request");
+                effective_outcome = RequestDecisionOutcome::ManualReview;
+                fallback_reason = Some(FALLBACK_ERROR.to_string());
+                Vec::new()
             }
-        } else {
-            Vec::new()
         };
 
         let mut evaluation = RequestEvaluation {
@@ -435,13 +362,12 @@ impl AppUseCase {
             policy_outcome: arbitration.policy_outcome,
             effective_outcome,
             fallback_reason,
-            deciding_rule_set_ids: provenance.deciding_rule_set_ids.clone(),
+            deciding_rule_set_ids: arbitration.deciding_rule_set_ids.clone(),
             tags: applicable_tags,
-            emitted_tags,
-            reasons: reason_views(&provenance),
-            evaluation_mode: cache.strictest_mode(&library.id),
+            emitted_tags: arbitration.tags.clone(),
+            reasons: reason_views(&arbitration),
+            evaluation_mode: RequestRuleEvaluationMode::Enforce,
             metadata_partial,
-            gate_enabled,
         };
         evaluation.decision_id = self
             .record_request_decision(&purpose, &evaluation, &votes, &errors, &input_hash)
@@ -556,20 +482,14 @@ impl AppUseCase {
         &self,
         purpose: &RequestEvaluationPurpose,
         permission: bool,
-        gate_enabled: bool,
         metadata_partial: bool,
-        mode: RequestRuleEvaluationMode,
     ) -> RequestEvaluation {
-        let mut evaluation = RequestEvaluation::legacy(
-            permission,
-            gate_enabled,
-            metadata_partial,
-            Some(FALLBACK_ERROR),
-        );
+        let mut evaluation =
+            RequestEvaluation::legacy(permission, metadata_partial, Some(FALLBACK_ERROR));
         // The policy reached no verdict at all, and an unevaluable policy is
         // never an approval (FR-012).
         evaluation.policy_outcome = RequestDecisionOutcome::ManualReview;
-        evaluation.evaluation_mode = mode;
+        evaluation.evaluation_mode = RequestRuleEvaluationMode::Enforce;
         evaluation.decision_id = self
             .record_request_decision(purpose, &evaluation, &[], &[], "")
             .await;
@@ -578,25 +498,18 @@ impl AppUseCase {
 
     /// A rule mutation committed but its replacement generation could not be
     /// built. The prior cache might still contain a rule that was just
-    /// disarmed, so this is stricter than an ordinary fact-read failure: while
-    /// the gate is armed, never fall back to Auto-Approve.
+    /// disabled, so this is stricter than an ordinary fact-read failure: never
+    /// fall back to Auto-Approve.
     async fn record_unavailable_engine_fallback(
         &self,
         purpose: &RequestEvaluationPurpose,
         permission: bool,
-        gate_enabled: bool,
         metadata_partial: bool,
     ) -> RequestEvaluation {
-        let mut evaluation = RequestEvaluation::legacy(
-            permission,
-            gate_enabled,
-            metadata_partial,
-            Some(FALLBACK_ERROR),
-        );
+        let mut evaluation =
+            RequestEvaluation::legacy(permission, metadata_partial, Some(FALLBACK_ERROR));
         evaluation.policy_outcome = RequestDecisionOutcome::ManualReview;
-        if gate_enabled {
-            evaluation.effective_outcome = RequestDecisionOutcome::ManualReview;
-        }
+        evaluation.effective_outcome = RequestDecisionOutcome::ManualReview;
         evaluation.evaluation_mode = RequestRuleEvaluationMode::Enforce;
         evaluation.decision_id = self
             .record_request_decision(purpose, &evaluation, &[], &[], "")

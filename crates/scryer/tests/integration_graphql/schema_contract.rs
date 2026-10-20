@@ -777,8 +777,9 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // census (installed plugin settings, download password retry, and others)
     // brings query fields to 195. Scheduled scripts as jobs add no root field;
     // they ride `jobs`, `jobRuns`, and `triggerJob` with a `customJobId`.
+    // Request rules drop the instance gate and its read: 195->194.
     assert_eq!(
-        query_field_count, 195,
+        query_field_count, 194,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -816,8 +817,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // `linkListAccountWithKey`: 271->272.
     // Abandoning an account link the member walked away from adds
     // `cancelListAccountLink`: 272->273.
+    // Request rules drop the instance gate; enabling a rule replaces the mode
+    // setter one for one: 275->274.
     assert_eq!(
-        mutation_field_count, 275,
+        mutation_field_count, 274,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1153,9 +1156,11 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     }
     assert!(mutation_field_names.contains(&"refreshFileScores"));
     assert!(mutation_field_names.contains(&"cancelFileScoreRefresh"));
-    assert_eq!(public_types.len(), 971);
-    assert_eq!(kind_count("OBJECT"), 524);
-    assert_eq!(kind_count("INPUT_OBJECT"), 240);
+    // Request rules drop the instance-gate object, its input, and the mode
+    // input: public types 971->968, OBJECT 524->523, INPUT_OBJECT 240->238.
+    assert_eq!(public_types.len(), 968);
+    assert_eq!(kind_count("OBJECT"), 523);
+    assert_eq!(kind_count("INPUT_OBJECT"), 238);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
