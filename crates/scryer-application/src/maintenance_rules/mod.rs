@@ -65,10 +65,10 @@ pub use evaluation::{
     MaintenanceGates, MaintenanceGatesUpdate, candidate_reason,
 };
 pub use service::{
-    MAINTENANCE_MAX_GRACE_DAYS, MAINTENANCE_PREVIEW_DEFAULT_TITLES, MAINTENANCE_PREVIEW_MAX_TITLES,
-    MaintenanceMatcherDraft, MaintenancePreviewMatcher, MaintenancePreviewRequest,
-    MaintenancePreviewResult, MaintenancePreviewSelection, MaintenancePreviewTitleResult,
-    MaintenanceRuleDraft, MaintenanceRuleSetDetail,
+    EXPIRED_REQUEST_LEASES_REGO, MAINTENANCE_MAX_GRACE_DAYS, MAINTENANCE_PREVIEW_DEFAULT_TITLES,
+    MAINTENANCE_PREVIEW_MAX_TITLES, MaintenanceMatcherDraft, MaintenancePreviewMatcher,
+    MaintenancePreviewRequest, MaintenancePreviewResult, MaintenancePreviewSelection,
+    MaintenancePreviewTitleResult, MaintenanceRuleDraft, MaintenanceRuleSetDetail,
 };
 // ── Safety preconditions (RFC 137 §9.10, WP-G) ──────────────────────────────
 pub use safety::{MaintenanceActivityCheck, MaintenancePlaybackHold, fold_playback_hold};

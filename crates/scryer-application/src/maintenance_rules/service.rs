@@ -33,8 +33,9 @@ use crate::maintenance_rules::facts::{
 };
 use crate::maintenance_rules::storage::{MaintenanceRootFileSummary, MaintenanceStorageFactCache};
 use crate::maintenance_rules::{
-    MaintenanceActionDefinition, MaintenanceActionSpec,
-    MaintenanceSubjectKind as ActionSubjectKind, action_definition_from_persisted_json,
+    MaintenanceActionDefinition, MaintenanceActionSequence, MaintenanceActionSpec,
+    MaintenanceActionStep, MaintenanceActionStepKind, MaintenanceSubjectKind as ActionSubjectKind,
+    action_definition_from_persisted_json,
 };
 use crate::{AppError, AppResult, AppUseCase};
 
@@ -66,6 +67,13 @@ const STORAGE_MAINTENANCE_FACTS: [&str; 4] = [
 ];
 
 const STORAGE_ROOT_MEMBERSHIP_UNAVAILABLE: &str = "storage_root_membership_unavailable";
+
+/// Name of the maintenance rule every instance ships with.
+const EXPIRED_REQUEST_LEASES_RULE_NAME: &str = "Expired request leases";
+
+/// Matcher of that rule. The web editor's `expired-request-leases` template
+/// carries the same source; keep the two identical.
+pub const EXPIRED_REQUEST_LEASES_REGO: &str = "package rules\nimport rego.v1\n\nmatch if {\n\tinput.facts.request_lease_state == \"expired\"\n\tnot input.facts.keep_claim_active\n}\n";
 
 // ── Request models ──────────────────────────────────────────────────────────
 
@@ -297,6 +305,7 @@ impl AppUseCase {
             destructive_rearm_required: false,
             library_ids: draft.library_ids,
             subject_kind: draft.subject_kind,
+            system_owned: false,
             current_revision_number: 1,
             created_at: now,
             updated_at: now,
@@ -307,7 +316,7 @@ impl AppUseCase {
             &prepared,
             draft.grace_days,
             storage_root_id,
-            actor,
+            Some(actor.id.clone()),
             now,
         );
 
@@ -375,6 +384,17 @@ impl AppUseCase {
             &draft.action_definition,
             draft.grace_days,
         )?;
+        if rule_set.system_owned
+            && (prepared.action_spec_json != current_revision.action_spec_json
+                || scryer_rules::strip_editor_source(&prepared.rego_source)
+                    != scryer_rules::strip_editor_source(&current_revision.rego_source))
+        {
+            return Err(AppError::Validation(
+                "This rule ships with Scryer: its matcher and actions cannot be changed. Its grace \
+                 period, libraries and state can."
+                    .into(),
+            ));
+        }
         self.require_registered_action_tags(&draft.action_definition)
             .await?;
         self.require_person_fact_authority(actor, &prepared.rego_source, &rule_set.id)
@@ -396,7 +416,7 @@ impl AppUseCase {
             &prepared,
             draft.grace_days,
             storage_root_id,
-            actor,
+            Some(actor.id.clone()),
             now,
         );
 
@@ -448,6 +468,11 @@ impl AppUseCase {
 
         let mut rule_set = self.require_maintenance_rule_set(rule_set_id).await?;
         let name = require_non_empty(&name, "name")?;
+        if rule_set.system_owned && name != rule_set.name {
+            return Err(AppError::Validation(
+                "This rule ships with Scryer and cannot be renamed.".into(),
+            ));
+        }
         let now = Utc::now();
         let scope_changed = library_scope_changed(&rule_set.library_ids, &library_ids);
 
@@ -498,6 +523,12 @@ impl AppUseCase {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
         let rule_set = self.require_maintenance_rule_set(rule_set_id).await?;
+        if rule_set.system_owned {
+            return Err(AppError::Validation(
+                "This rule ships with Scryer and cannot be deleted. Set it to Disabled instead."
+                    .into(),
+            ));
+        }
 
         // Bounded existence reads: one row is enough to answer both questions.
         let has_history = !self
@@ -533,6 +564,59 @@ impl AppUseCase {
             .maintenance_rule_sets
             .delete_rule_set_if_unused(rule_set_id)
             .await
+    }
+
+    /// Create the rule every instance ships with: titles whose request lease
+    /// expired are deleted with their files after a seven-day grace period,
+    /// unless someone keeps them. It starts Enabled. Startup calls this on
+    /// every boot, so it does nothing once the rule exists.
+    pub async fn ensure_expired_request_leases_rule(&self) -> AppResult<()> {
+        let rules = &self.services.customization.maintenance_rule_sets;
+        if rules
+            .list_rule_sets()
+            .await?
+            .iter()
+            .any(|rule| rule.system_owned && rule.name == EXPIRED_REQUEST_LEASES_RULE_NAME)
+        {
+            return Ok(());
+        }
+        let id = Id::new_rego_safe().0;
+        let action_definition =
+            MaintenanceActionDefinition::Sequence(MaintenanceActionSequence::new(vec![
+                MaintenanceActionStep {
+                    id: "legacy-delete-title".into(),
+                    kind: MaintenanceActionStepKind::DeleteTitleAndFiles,
+                    parameters: Default::default(),
+                },
+            ]));
+        let grace_days = 7;
+        let prepared = prepare_matcher(
+            &id,
+            MaintenanceRuleSubjectKind::Title,
+            EXPIRED_REQUEST_LEASES_REGO,
+            &action_definition,
+            grace_days,
+        )?;
+        let now = Utc::now();
+        let revision = build_revision(&id, 1, &prepared, grace_days, None, None, now);
+        let rule_set = MaintenanceRuleSet {
+            id,
+            name: EXPIRED_REQUEST_LEASES_RULE_NAME.into(),
+            description: "Deletes a requested title and its files once its request lease has \
+                          expired, unless someone keeps it."
+                .into(),
+            enabled: true,
+            evaluation_mode: MaintenanceEvaluationMode::Observe,
+            effect_arming: scryer_domain::MaintenanceEffectArming::Destructive,
+            destructive_rearm_required: false,
+            library_ids: Vec::new(),
+            subject_kind: MaintenanceRuleSubjectKind::Title,
+            system_owned: true,
+            current_revision_number: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        rules.create_rule_set(&rule_set, &revision).await
     }
 
     /// Editor support: compile and check a draft without storing it. The
@@ -1320,7 +1404,7 @@ fn build_revision(
     prepared: &PreparedMatcher,
     grace_days: i64,
     storage_root_id: Option<String>,
-    actor: &User,
+    created_by: Option<String>,
     created_at: chrono::DateTime<Utc>,
 ) -> MaintenanceRuleRevision {
     MaintenanceRuleRevision {
@@ -1332,7 +1416,7 @@ fn build_revision(
         grace_days,
         storage_root_id,
         matcher_content_hash: prepared.content_hash.clone(),
-        created_by: Some(actor.id.clone()),
+        created_by,
         created_at,
     }
 }

@@ -3763,6 +3763,7 @@ export const MAINTENANCE_RULE_SET_FIELDS = `
     state
     enabledArming
     editedSinceEnabled
+    systemOwned
     libraryIds
     subjectKind
     currentRevisionNumber

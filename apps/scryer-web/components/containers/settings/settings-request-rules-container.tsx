@@ -2,6 +2,7 @@ import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import { ExpiredRequestLeasesControl } from "@/components/containers/settings/expired-request-leases-control";
 import {
   SettingsRequestRulesSection,
   type RequestQualityProfileOption,
@@ -589,6 +590,7 @@ export function SettingsRequestRulesContainer() {
   return (
     <>
       <SettingsRequestRulesSection
+        leaseRuleControl={<ExpiredRequestLeasesControl />}
         isEditorOpen={isEditorOpen}
         editingRuleSetId={editingRuleSetId}
         ruleSetDraft={ruleSetDraft}

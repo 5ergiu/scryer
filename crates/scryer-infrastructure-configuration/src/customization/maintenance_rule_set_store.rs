@@ -325,7 +325,7 @@ fn disarm_args() -> [SqlArg; 3] {
 
 // Fetch metadata and scope in one snapshot, including global rules with no scope rows.
 const RULE_SET_SELECT: &str = "SELECT id, name, description, enabled, evaluation_mode, effect_arming, destructive_rearm_required,
-    subject_kind, current_revision_number, created_at, updated_at, scope.library_id AS scope_library_id
+    subject_kind, system_owned, current_revision_number, created_at, updated_at, scope.library_id AS scope_library_id
     FROM maintenance_rule_sets
     LEFT JOIN maintenance_rule_set_libraries scope ON scope.rule_set_id = maintenance_rule_sets.id";
 
@@ -334,8 +334,8 @@ const REVISION_COLUMNS: &str = "id, rule_set_id, revision_number, rego_source, a
 
 const INSERT_RULE_SET_SQL: &str = "INSERT INTO maintenance_rule_sets
         (id, name, description, enabled, evaluation_mode, effect_arming, destructive_rearm_required, subject_kind,
-         current_revision_number, created_at, updated_at)
-     VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
+         system_owned, current_revision_number, created_at, updated_at)
+     VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
 
 const INSERT_REVISION_SQL: &str = "INSERT INTO maintenance_rule_revisions
         (id, rule_set_id, revision_number, rego_source, action_spec,
@@ -368,6 +368,7 @@ fn rule_set_args(rule_set: &MaintenanceRuleSet) -> Vec<SqlArg> {
         SqlArg::Text(rule_set.effect_arming.as_storage_str().to_string()),
         SqlArg::Bool(rule_set.destructive_rearm_required),
         SqlArg::Text(rule_set.subject_kind.as_storage_str().to_string()),
+        SqlArg::Bool(rule_set.system_owned),
         SqlArg::I64(rule_set.current_revision_number),
         SqlArg::Timestamp(rule_set.created_at),
         SqlArg::Timestamp(rule_set.updated_at),
@@ -408,6 +409,7 @@ fn row_to_rule_set(row: &SqlRow) -> AppResult<MaintenanceRuleSet> {
         library_ids: row.opt_text("scope_library_id")?.into_iter().collect(),
         subject_kind: MaintenanceRuleSubjectKind::parse_storage(&row.text("subject_kind")?)
             .unwrap_or_default(),
+        system_owned: row.bool("system_owned")?,
         current_revision_number: row.i64("current_revision_number")?,
         created_at: timestamp_or_now(row, "created_at")?,
         updated_at: timestamp_or_now(row, "updated_at")?,

@@ -111,6 +111,7 @@ const detail: MaintenanceRuleSetDetail = {
     state: "DISABLED",
     enabledArming: "REVERSIBLE",
     editedSinceEnabled: false,
+    systemOwned: false,
     libraryIds: ["lib-movies", "lib-series"],
     subjectKind: "TITLE",
     currentRevisionNumber: 3,

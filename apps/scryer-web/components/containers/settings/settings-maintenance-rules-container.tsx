@@ -2,6 +2,10 @@ import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import {
+  MAINTENANCE_CANDIDATE_LIMIT,
+  useMaintenanceRuleState,
+} from "@/components/containers/settings/use-maintenance-rule-state";
 import type { MaintenanceRulesSection } from "@/components/root/types";
 import {
   MaintenanceCandidatesPanel,
@@ -16,7 +20,6 @@ import {
   type MaintenanceStorageRootOption,
 } from "@/components/views/settings/settings-maintenance-rules-section";
 import { sequenceHasUnresolvedSteps } from "@/components/views/settings/maintenance-action-sequence-editor";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SingleSelectField } from "@/components/ui/select";
@@ -38,7 +41,6 @@ import type {
   MaintenanceRuleSetDetail,
   MaintenanceRuleSetDraft,
   MaintenanceRuleSetRecord,
-  MaintenanceRuleState,
   MaintenanceTriggerResult,
 } from "@/lib/types/maintenance-rule-sets";
 import {
@@ -49,14 +51,10 @@ import {
   createMaintenanceRuleSetInput,
   excludeMaintenanceSubjectInput,
   initialMaintenanceRuleDraft,
-  isNonTerminalCandidateState,
   maintenanceFilterArgument,
   maintenanceActionSequenceFromLegacySpec,
   maintenancePreviewInput,
   maintenanceRuleDraftFromDetail,
-  parseAcknowledgedCandidateCountMismatch,
-  ruleStateNeedsConfirmation,
-  setMaintenanceRuleStateVariables,
   updateMaintenanceRuleMatcherInput,
   updateMaintenanceRuleMetadataInput,
 } from "@/lib/utils/maintenance-rule-sets";
@@ -82,7 +80,6 @@ import {
   runMaintenanceActionHandlerNowMutation,
   runMaintenanceEvaluationNowMutation,
   setMaintenanceInstanceGatesMutation,
-  setMaintenanceRuleStateMutation,
   updateMaintenanceRuleMatcherMutation,
   updateMaintenanceRuleMetadataMutation,
 } from "@/lib/graphql/mutations";
@@ -90,22 +87,6 @@ import {
 /// How many recent runs each history table shows. The API clamps its own
 /// maximum; this is only how much of it the panel asks for.
 const MAINTENANCE_RUN_HISTORY_LIMIT = 25;
-const MAINTENANCE_CANDIDATE_LIMIT = 200;
-/// Enabling a Destructive rule in flight. The count is the number the dialog actually
-/// showed, and the same number it sends as the acknowledgement, so the server's
-/// check compares against what the operator saw rather than a fresher count
-/// they never read.
-type PendingArming = {
-  record: MaintenanceRuleSetRecord;
-  candidateCount: number;
-  titles: string[];
-  acknowledged: boolean;
-  loading: boolean;
-  /// Set after the server refused the acknowledgement and the dialog re-asked
-  /// against the count the server reported.
-  countChanged: boolean;
-};
-
 type PendingExclusion = {
   subjectKind: string;
   subjectId: string;
@@ -207,8 +188,6 @@ export function SettingsMaintenanceRulesContainer({
     null,
   );
   const [excluding, setExcluding] = useState(false);
-
-  const [pendingArming, setPendingArming] = useState<PendingArming | null>(null);
 
   const isDraftDirty =
     JSON.stringify(ruleSetDraft) !== JSON.stringify(ruleSetDraftBaseline);
@@ -817,135 +796,14 @@ export function SettingsMaintenanceRulesContainer({
 
   // ── Rule state ──────────────────────────────────────────────────────
 
-  const applyRuleState = useCallback(
-    async (
-      record: MaintenanceRuleSetRecord,
-      state: MaintenanceRuleState,
-      candidateCount?: number,
-    ): Promise<{ ok: true } | { ok: false; message: string }> => {
-      const { error } = await client
-        .mutation(
-          setMaintenanceRuleStateMutation,
-          setMaintenanceRuleStateVariables(record, state, candidateCount),
-        )
-        .toPromise();
-      if (error) {
-        return { ok: false, message: error.message };
-      }
-      await refreshRuleSets();
-      await refreshCandidates();
-      return { ok: true };
-    },
-    [client, refreshCandidates, refreshRuleSets],
-  );
-
-  /// List what the rule could act on once enabled. The dialog shows every
-  /// title and sends the count it showed.
-  const openDestructiveArming = useCallback(
-    async (record: MaintenanceRuleSetRecord) => {
-      setPendingArming({
-        record,
-        candidateCount: 0,
-        titles: [],
-        acknowledged: false,
-        loading: true,
-        countChanged: false,
-      });
-      try {
-        const { data, error } = await client
-          .query(
-            maintenanceCandidatesQuery,
-            { ruleSetId: record.id, limit: MAINTENANCE_CANDIDATE_LIMIT },
-            { requestPolicy: "network-only" },
-          )
-          .toPromise();
-        if (error) throw error;
-        const actionable = (
-          (data?.maintenanceCandidates as MaintenanceCandidate[]) ?? []
-        ).filter((candidate) => isNonTerminalCandidateState(candidate.state));
-        setPendingArming((prev) =>
-          prev && prev.record.id === record.id
-            ? {
-                ...prev,
-                candidateCount: actionable.length,
-                titles: actionable.map((candidate) =>
-                  candidate.subjectKind === "title"
-                    ? candidate.titleName
-                    : `${candidate.titleName} · ${candidate.subjectLabel}`,
-                ),
-                loading: false,
-              }
-            : prev,
-        );
-      } catch (error) {
-        setPendingArming(null);
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToLoad"),
-          { level: "ERROR" },
-        );
-      }
-    },
-    [client, setGlobalStatus, t],
-  );
-
-  const setRuleState = useCallback(
-    (record: MaintenanceRuleSetRecord, state: MaintenanceRuleState) => {
-      if (state === record.state) return;
-      if (ruleStateNeedsConfirmation(record, state)) {
-        void openDestructiveArming(record);
-        return;
-      }
-      void (async () => {
-        setMutatingRuleSetId(record.id);
-        const result = await applyRuleState(record, state);
-        setMutatingRuleSetId(null);
-        setGlobalStatus(
-          result.ok
-            ? t("settings.maintenanceRuleStateUpdated", { name: record.name })
-            : result.message,
-          { level: result.ok ? "SUCCESS" : "ERROR" },
-        );
-      })();
-    },
-    [applyRuleState, openDestructiveArming, setGlobalStatus, t],
-  );
-
-  /// The server rejects a stale acknowledgement and reports the count it holds.
-  /// Rather than dropping the operator back to the table, the dialog adopts
-  /// that count, clears the acknowledgement, and asks again against the real
-  /// number.
-  const confirmDestructiveArming = useCallback(async () => {
-    if (!pendingArming || !pendingArming.acknowledged) return;
-    const { record, candidateCount } = pendingArming;
-    setPendingArming((prev) => (prev ? { ...prev, loading: true } : prev));
-    const result = await applyRuleState(record, "ENABLED", candidateCount);
-    if (result.ok) {
-      setPendingArming(null);
-      setGlobalStatus(
-        t("settings.maintenanceRuleStateUpdated", { name: record.name }),
-        { level: "SUCCESS" },
-      );
-      return;
-    }
-    const serverCount = parseAcknowledgedCandidateCountMismatch(result.message);
-    if (serverCount === null) {
-      setPendingArming(null);
-      setGlobalStatus(result.message, { level: "ERROR" });
-      await refreshRuleSets();
-      return;
-    }
-    setPendingArming((prev) =>
-      prev
-        ? {
-            ...prev,
-            candidateCount: serverCount,
-            acknowledged: false,
-            loading: false,
-            countChanged: true,
-          }
-        : prev,
-    );
-  }, [applyRuleState, pendingArming, refreshRuleSets, setGlobalStatus, t]);
+  const refreshAfterRuleState = useCallback(async () => {
+    await refreshRuleSets();
+    await refreshCandidates();
+  }, [refreshCandidates, refreshRuleSets]);
+  const { setRuleState, armingDialog } = useMaintenanceRuleState({
+    onChanged: refreshAfterRuleState,
+    setBusyRuleSetId: setMutatingRuleSetId,
+  });
 
   // ── Run now ─────────────────────────────────────────────────────────
 
@@ -1215,80 +1073,7 @@ export function SettingsMaintenanceRulesContainer({
         }}
         onCancel={() => setPendingUnpause(false)}
       />
-      <ConfirmDialog
-        open={pendingArming !== null}
-        contentId="settings-maintenance-arming-confirm"
-        title={t("settings.maintenanceArmDestructiveTitle")}
-        description={
-          pendingArming
-            ? t("settings.maintenanceArmDestructiveIntro", {
-                name: pendingArming.record.name,
-              })
-            : ""
-        }
-        confirmLabel={t("settings.maintenanceArmDestructiveConfirm")}
-        cancelLabel={t("label.cancel")}
-        isBusy={pendingArming?.loading ?? false}
-        confirmDisabled={!pendingArming?.acknowledged}
-        onConfirm={() => void confirmDestructiveArming()}
-        onCancel={() => setPendingArming(null)}
-      >
-        {pendingArming ? (
-          <div className="space-y-2 text-xs">
-            {pendingArming.loading && pendingArming.candidateCount === 0 ? (
-              <p className="text-muted-foreground">
-                {t("settings.maintenanceArmDestructiveLoading")}
-              </p>
-            ) : (
-              <>
-                {pendingArming.countChanged ? (
-                  <p
-                    id="settings-maintenance-arming-count-changed"
-                    className="rounded border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-2 py-1.5 text-[var(--scry-warning-text)]"
-                  >
-                    {t("settings.maintenanceArmDestructiveCountChanged", {
-                      count: pendingArming.candidateCount,
-                    })}
-                  </p>
-                ) : null}
-                <p id="settings-maintenance-arming-count" className="font-semibold">
-                  {pendingArming.candidateCount === 0
-                    ? t("settings.maintenanceArmDestructiveNoCandidates")
-                    : t("settings.maintenanceArmDestructiveCount", {
-                        count: pendingArming.candidateCount,
-                      })}
-                </p>
-                {pendingArming.titles.length > 0 ? (
-                  <ul
-                    id="settings-maintenance-arming-candidates"
-                    className="max-h-48 list-disc space-y-0.5 overflow-y-auto pl-5 text-muted-foreground"
-                  >
-                    {pendingArming.titles.map((title, index) => (
-                      <li key={`${index}-${title}`}>{title}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                <label className="flex items-start gap-2 pt-1">
-                  <Checkbox
-                    id="settings-maintenance-arming-acknowledge"
-                    checked={pendingArming.acknowledged}
-                    onCheckedChange={(value) =>
-                      setPendingArming((prev) =>
-                        prev ? { ...prev, acknowledged: value === true } : prev,
-                      )
-                    }
-                  />
-                  <span>
-                    {t("settings.maintenanceArmDestructiveAcknowledge", {
-                      count: pendingArming.candidateCount,
-                    })}
-                  </span>
-                </label>
-              </>
-            )}
-          </div>
-        ) : null}
-      </ConfirmDialog>
+      {armingDialog}
       <ConfirmDialog
         open={pendingExclusion !== null}
         contentId="settings-maintenance-exclude-confirm"

@@ -76,6 +76,9 @@ export type MaintenanceRuleSetRecord = {
   /// The rule was enabled, then its matcher, action or scope changed, so it
   /// dropped back to a dry run until it is enabled again.
   editedSinceEnabled: boolean;
+  /// Shipped with Scryer: name, matcher and action are fixed and it cannot be
+  /// deleted. State, grace period and libraries stay editable.
+  systemOwned: boolean;
   libraryIds: string[];
   /// Immutable granularity, separate from an action's supported subjects.
   subjectKind: MaintenanceRuleScope;

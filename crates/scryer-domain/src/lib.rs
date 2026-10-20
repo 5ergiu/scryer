@@ -5650,6 +5650,10 @@ pub struct MaintenanceRuleSet {
     /// Libraries this rule is confined to. Empty means every library.
     pub library_ids: Vec<String>,
     pub subject_kind: MaintenanceRuleSubjectKind,
+    /// Shipped with Scryer: its name, matcher and action are fixed and it
+    /// cannot be deleted. Its state, grace period and libraries stay editable.
+    #[serde(default)]
+    pub system_owned: bool,
     /// Revision number of the matcher currently in force.
     pub current_revision_number: i64,
     pub created_at: DateTime<Utc>,
