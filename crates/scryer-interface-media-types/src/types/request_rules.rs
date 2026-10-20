@@ -17,17 +17,13 @@ use super::{DiscoveryContentRatingPayload, ExternalIdInput, MonitorTypeValue};
 
 // ── Enums ──────────────────────────────────────────────────────────────────
 
-/// How a request rule set is evaluated.
+/// Whether an evaluation consulted an enabled request rule.
 #[derive(Enum, Copy, Clone, Debug, Eq, PartialEq)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
 pub enum RequestRuleEvaluationModeValue {
-    /// Stored but never evaluated, and the mode every new rule set is created
-    /// in.
+    /// No enabled rule took part.
     Disabled,
-    /// Evaluated and recorded; the effective decision stays whatever the
-    /// library permission would have produced on its own.
-    Shadow,
-    /// Evaluated, recorded, and acted on.
+    /// An enabled rule was evaluated, recorded, and acted on.
     Enforce,
 }
 
@@ -110,11 +106,8 @@ pub struct RequestRuleSet {
     pub name: String,
     /// Rule-set description; empty when the author supplied none.
     pub description: String,
-    /// Whether the rule set is enabled. Derived from `evaluationMode` rather
-    /// than set independently: false for `DISABLED`, true otherwise.
+    /// Whether the rule set takes part in deciding requests.
     pub enabled: bool,
-    /// Evaluation mode currently stored for the rule set.
-    pub evaluation_mode: RequestRuleEvaluationModeValue,
     /// Libraries the rule is confined to. Empty means every library.
     pub library_ids: Vec<String>,
     /// Revision number of the matcher currently in force.
@@ -216,8 +209,8 @@ pub struct RequestRuleVote {
 /// The durable trace of one request evaluation (FR-016).
 ///
 /// `policyOutcome` is what the rules concluded and `effectiveOutcome` is what
-/// the instance acted on. They disagree on purpose whenever the instance gate is
-/// off or every deciding rule is in shadow.
+/// the instance acted on. They disagree only when a request was held because
+/// its tags could not be checked.
 #[derive(SimpleObject, Clone)]
 pub struct RequestRuleDecision {
     /// Trace ID, or null for a preview, which persists nothing.
@@ -226,11 +219,11 @@ pub struct RequestRuleDecision {
     pub request_id: Option<ID>,
     /// UTC time the evaluation ran.
     pub evaluated_at: DateTime<Utc>,
-    /// Strictest mode among the rules that were consulted.
+    /// `ENFORCE` when an enabled rule was consulted, `DISABLED` when none was.
     pub mode: RequestRuleEvaluationModeValue,
     /// What actually happened to the request.
     pub effective_outcome: RequestDecisionOutcomeValue,
-    /// What the rules concluded, whether or not they were allowed to act.
+    /// What the rules concluded.
     pub policy_outcome: RequestDecisionOutcomeValue,
     /// Why the decision fell back rather than following a rule vote
     /// (`no_rule_matched`, `held`, `error`, `rule_manual`), or null when a rule
@@ -264,8 +257,7 @@ pub struct RequestRulePreviewPayload {
     pub matcher_content_hash: String,
     /// The single rule's verdict, shaped as a decision so the authoring UI and
     /// the decision browser render the same component. `effectiveOutcome`
-    /// equals `policyOutcome` here because a preview is never subject to the
-    /// instance gate.
+    /// equals `policyOutcome` here.
     pub decision: RequestRuleDecision,
     /// True when the sample's metadata could not be fully established, so some
     /// facts were unknown.
@@ -295,23 +287,13 @@ pub struct RequestPreflightPayload {
     /// True when the metadata could not be fully established, so the verdict
     /// rests on incomplete facts. An unevaluable policy never approves.
     pub metadata_partial: bool,
-    /// Strictest mode among the rules that were consulted.
+    /// `ENFORCE` when an enabled rule was consulted, `DISABLED` when none was.
     pub evaluation_mode: RequestRuleEvaluationModeValue,
     /// Why the verdict fell back to needing approval, when it did. One of the
     /// arbitration vocabulary's codes (`rule_manual`, `held`, `error`,
     /// `no_rule_matched`), or null when a rule decided outright. It carries no
     /// rule internals: it names the shape of the fallback, never a vote.
     pub fallback_reason: Option<String>,
-}
-
-/// The instance-wide request-rule gate. One switch, defaulting off: a request
-/// rule votes and executes nothing, so there is one blast radius.
-#[derive(SimpleObject, Clone, Copy)]
-pub struct RequestRuleInstanceGates {
-    /// Whether stored request rules are allowed to decide anything. While this
-    /// is off every evaluation still runs and is recorded, but the effective
-    /// outcome stays whatever the library permission would have produced.
-    pub evaluation_enabled: bool,
 }
 
 /// One hold on one title.
@@ -404,7 +386,7 @@ pub struct MediaRequestMetadataPayload {
 // ── Inputs ─────────────────────────────────────────────────────────────────
 
 /// Creates a request rule set together with its first matcher revision. The
-/// rule set is always created disabled; arming it is a second, deliberate call.
+/// rule set is always created disabled; enabling it is a second, deliberate call.
 #[derive(InputObject)]
 pub struct CreateRequestRuleSetInput {
     /// Rule-set name.
@@ -439,15 +421,6 @@ pub struct UpdateRequestRuleMetadataInput {
     pub description: Option<String>,
     /// Replacement library scope. Omitted or empty means every library.
     pub library_ids: Option<Vec<String>>,
-}
-
-/// Moves a rule set between evaluation modes.
-#[derive(InputObject)]
-pub struct SetRequestRuleModeInput {
-    /// Rule-set ID.
-    pub rule_set_id: ID,
-    /// Mode to store. Anything other than `DISABLED` also enables the rule.
-    pub mode: RequestRuleEvaluationModeValue,
 }
 
 /// Validates request rule source without saving it.
@@ -497,14 +470,6 @@ pub struct PreviewRequestRuleInput {
     pub rego_source: Option<String>,
     /// The request to evaluate the matcher against.
     pub sample: RequestRuleSampleInput,
-}
-
-/// Arms or disarms the instance-wide request-rule gate. An omitted field leaves
-/// the gate exactly as stored.
-#[derive(InputObject)]
-pub struct SetRequestRuleInstanceGatesInput {
-    /// Whether stored request rules may decide anything.
-    pub evaluation_enabled: Option<bool>,
 }
 
 /// Pushes a live claim's window out.

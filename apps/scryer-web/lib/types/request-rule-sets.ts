@@ -1,12 +1,11 @@
 /// Request rules decide what happens to a media request the moment it is
-/// submitted. Three independent controls have to agree before one acts: the
-/// instance-wide evaluation gate, the rule set's own evaluation mode, and the
-/// requester's library permission. A rule is created `DISABLED`, so arming one
-/// is always a deliberate second step.
+/// submitted. An enabled rule covering the library decides; with none, the
+/// requester's library permission does. A rule is created disabled, so
+/// enabling one is always a deliberate second step.
 
-/// Lifecycle mode of a stored request rule set. `SHADOW` records a verdict
-/// without acting on it; `ENFORCE` lets the verdict resolve the request.
-export type RequestEvaluationMode = "DISABLED" | "SHADOW" | "ENFORCE";
+/// Whether an evaluation consulted an enabled rule (`ENFORCE`) or fell back
+/// to the requester's permission (`DISABLED`).
+export type RequestEvaluationMode = "DISABLED" | "ENFORCE";
 
 /// What a decision came to. `MANUAL_REVIEW` is the domain default, so an
 /// unreadable verdict never reads back as an approval or a denial.
@@ -41,7 +40,6 @@ export type RequestRuleSetRecord = {
   name: string;
   description: string;
   enabled: boolean;
-  evaluationMode: RequestEvaluationMode;
   libraryIds: string[];
   currentRevisionNumber: number;
   /// How many stored decisions name this rule set. Read per rule set rather
@@ -102,9 +100,8 @@ export type RequestRuleDecisionRecord = {
   requestId: string | null;
   evaluatedAt: string;
   mode: RequestEvaluationMode;
-  /// What actually happened, once the gate and the requester's permission were
-  /// taken into account. `policyOutcome` is what the rules alone came to, which
-  /// is the interesting half while a rule is still in shadow.
+  /// What actually happened. `policyOutcome` is what the rules alone came to;
+  /// the two differ only when the decision fell back.
   effectiveOutcome: RequestDecisionOutcome;
   policyOutcome: RequestDecisionOutcome;
   fallbackReason: string | null;
@@ -141,12 +138,6 @@ export type RequestPreflightResult = {
   /// shape of the fallback (`rule_manual`, `held`, `error`, `no_rule_matched`)
   /// and never a rule, so it is safe on the requester's surface.
   fallbackReason: string | null;
-};
-
-/// The single instance-wide gate, kept behind system-settings management rather
-/// than the catalog permission the authoring page needs.
-export type RequestRuleInstanceGates = {
-  evaluationEnabled: boolean;
 };
 
 export type TitleClaimRecord = {

@@ -2686,8 +2686,7 @@ export const runMaintenanceActionHandlerNowMutation = `mutation RunMaintenanceAc
 
 // ── Request Rules ─────────────────────────────────────────────────────
 //
-// A rule is created DISABLED; `setRequestRuleMode` arms it, and the instance
-// gate is a third switch under a different permission entirely.
+// A rule is created disabled; `setRequestRuleEnabled` turns it on or off.
 
 export const createRequestRuleSetMutation = `mutation CreateRequestRuleSet($input: CreateRequestRuleSetInput!) {
   createRequestRuleSet(input: $input) {${REQUEST_RULE_SET_DETAIL_FIELDS}
@@ -2704,8 +2703,8 @@ export const updateRequestRuleMetadataMutation = `mutation UpdateRequestRuleMeta
   }
 }`;
 
-export const setRequestRuleModeMutation = `mutation SetRequestRuleMode($input: SetRequestRuleModeInput!) {
-  setRequestRuleMode(input: $input) {${REQUEST_RULE_SET_DETAIL_FIELDS}
+export const setRequestRuleEnabledMutation = `mutation SetRequestRuleEnabled($ruleSetId: ID!, $enabled: Boolean!) {
+  setRequestRuleEnabled(ruleSetId: $ruleSetId, enabled: $enabled) {${REQUEST_RULE_SET_FIELDS}
   }
 }`;
 
@@ -2735,12 +2734,6 @@ export const previewRequestRuleMutation = `mutation PreviewRequestRule($input: P
     inputDocument
     decision {${REQUEST_RULE_DECISION_FIELDS}
     }
-  }
-}`;
-
-export const setRequestRuleInstanceGatesMutation = `mutation SetRequestRuleInstanceGates($input: SetRequestRuleInstanceGatesInput!) {
-  setRequestRuleInstanceGates(input: $input) {
-    evaluationEnabled
   }
 }`;
 

@@ -5,12 +5,10 @@ use crate::lib_tests::request_rules_support::InMemoryRequestRuleRepo;
 async fn unbuildable_persisted_rules_hold_only_their_enforcing_scope() {
     use crate::ports::RequestRuleSetRepository;
     for include_healthy_rule in [false, true] {
-        for (mode, in_scope, gate_enabled, should_hold) in [
-            (RequestRuleEvaluationMode::Enforce, true, true, true),
-            (RequestRuleEvaluationMode::Enforce, false, true, false),
-            (RequestRuleEvaluationMode::Shadow, true, true, false),
-            (RequestRuleEvaluationMode::Disabled, true, true, false),
-            (RequestRuleEvaluationMode::Enforce, true, false, false),
+        for (enabled, in_scope, should_hold) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
         ] {
             let mut harness = bootstrap_media_request_app();
             harness.user.authorization.default_library =
@@ -21,15 +19,12 @@ async fn unbuildable_persisted_rules_hold_only_their_enforcing_scope() {
             let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
             if include_healthy_rule {
                 let healthy = create_rule(&harness, "Healthy approval", APPROVE_EVERYTHING).await;
-                arm(
-                    &harness,
-                    &healthy.rule_set.id,
-                    RequestRuleEvaluationMode::Enforce,
-                )
-                .await;
+                enable(&harness, &healthy.rule_set.id).await;
             }
             let broken = create_rule(&harness, "Broken policy", DENY_EVERYTHING).await;
-            arm(&harness, &broken.rule_set.id, mode).await;
+            if enabled {
+                enable(&harness, &broken.rule_set.id).await;
+            }
             if !in_scope {
                 harness
                     .request_rules
@@ -54,15 +49,9 @@ async fn unbuildable_persisted_rules_hold_only_their_enforcing_scope() {
                 .await
                 .unwrap();
             harness.app.rebuild_request_rules_engine().await.unwrap();
-            if gate_enabled {
-                enable_gate(&harness).await;
-            }
             let cache = harness.app.request_rules_engine_snapshot();
             assert!(!cache.unavailable);
-            assert_eq!(
-                cache.load_errors.contains_key(&broken.rule_set.id),
-                mode != RequestRuleEvaluationMode::Disabled
-            );
+            assert_eq!(cache.load_errors.contains_key(&broken.rule_set.id), enabled);
             let id = submit(&harness, &library_id, 9047, None).await;
             let requests = harness.media_requests.requests.lock().await;
             let request = requests.iter().find(|request| request.id == id).unwrap();
@@ -89,13 +78,7 @@ async fn unbuildable_persisted_rules_hold_only_their_enforcing_scope() {
 async fn unreadable_request_rule_tag_registry_holds_the_persisted_request() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve with tags", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness.titles.fail_tag_reads.store(true, Ordering::SeqCst);
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let request_id = submit(&harness, &library_id, 9047, Some(30)).await;
@@ -122,13 +105,7 @@ async fn request_rule_timeout_holds_an_armed_request_and_records_the_error() {
     // Create an accepted rule, then inject an expensive cached engine to
     // exercise submission-time limits independently of authoring validation.
     let detail = create_rule(&harness, "Bounded evaluation", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     let mut limits = scryer_rules::runtime::RuntimeLimits::request_defaults();
     limits.max_execution_time = std::time::Duration::from_millis(1);
     limits.timer_check_interval = std::num::NonZeroU32::new(1).unwrap();
@@ -163,85 +140,11 @@ async fn request_rule_timeout_holds_an_armed_request_and_records_the_error() {
     assert!(harness.titles.store.lock().await.is_empty());
 }
 
-struct UnreadableRuleGate(Arc<dyn SettingsRepository>);
-
-#[async_trait::async_trait]
-impl SettingsRepository for UnreadableRuleGate {
-    async fn get_setting_json(
-        &self,
-        scope: &str,
-        key: &str,
-        scope_id: Option<String>,
-    ) -> AppResult<Option<String>> {
-        if key == crate::settings::keys::REQUEST_RULE_GATE_EVALUATION_KEY {
-            return Err(AppError::Repository("synthetic gate read failure".into()));
-        }
-        self.0.get_setting_json(scope, key, scope_id).await
-    }
-    async fn upsert_setting_json(
-        &self,
-        scope: &str,
-        key: &str,
-        scope_id: Option<String>,
-        value: String,
-        source: &str,
-        actor: Option<String>,
-    ) -> AppResult<()> {
-        self.0
-            .upsert_setting_json(scope, key, scope_id, value, source, actor)
-            .await
-    }
-    async fn delete_setting_value(
-        &self,
-        scope: &str,
-        key: &str,
-        scope_id: Option<String>,
-    ) -> AppResult<()> {
-        self.0.delete_setting_value(scope, key, scope_id).await
-    }
-    async fn delete_values_for_scope_id(&self, scope_id: &str) -> AppResult<u32> {
-        self.0.delete_values_for_scope_id(scope_id).await
-    }
-}
-
-#[tokio::test]
-async fn unreadable_request_rule_gate_uses_existing_library_permissions() {
-    let mut harness = bootstrap_media_request_app();
-    let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
-    let settings = Arc::new(UnreadableRuleGate(
-        harness.app.services.config.settings.clone(),
-    ));
-    harness.app = harness
-        .app
-        .clone()
-        .with_test_overrides(|services| services.with_settings(settings));
-    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
-    submit(&harness, &library_id, 9047, None).await;
-    assert_eq!(
-        harness.media_requests.requests.lock().await[0].status,
-        MediaRequestStatus::Pending
-    );
-    assert!(harness.titles.store.lock().await.is_empty());
-}
-
 #[tokio::test]
 async fn hiding_experimental_ui_does_not_disarm_existing_request_rules() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness
         .app
         .services
@@ -264,14 +167,6 @@ async fn hiding_experimental_ui_does_not_disarm_existing_request_rules() {
         MediaRequestStatus::Rejected
     );
     assert!(harness.titles.store.lock().await.is_empty());
-    assert!(
-        harness
-            .app
-            .load_request_rule_gates()
-            .await
-            .unwrap()
-            .evaluation_enabled
-    );
 }
 
 const APPROVE_WITH_NO_PREVIOUS_REQUEST: &str = r#"package rules
@@ -308,13 +203,7 @@ async fn submission_rules_read_history_before_the_new_request_is_persisted() {
         APPROVE_WITH_NO_PREVIOUS_REQUEST,
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     submit(&harness, &library_id, 9047, None).await;
@@ -344,13 +233,7 @@ approve if {
 "#,
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     let updated = harness
         .app
         .update_my_media_request(
@@ -377,13 +260,7 @@ async fn catalog_fact_collects_every_library_with_a_matching_title() {
         DENY_RESTRICTED_LIBRARY_COPY,
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let mut unrestricted = make_due_hydration_title("unrestricted", MediaFacet::Movie, 9047);
     unrestricted.library_id = "unrestricted-library".to_string();
@@ -509,13 +386,7 @@ async fn unreadable_linked_accounts_hold_an_enforcing_request() {
         APPROVE_WITHOUT_LINKED_PROVIDER,
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness.app = harness.app.clone().with_test_overrides(|services| {
         services.with_external_account_store(Arc::new(UnreadableExternalAccounts))
     });
@@ -631,13 +502,7 @@ impl crate::ports::RequestRuleSetRepository for ReadFailingRequestRuleStore {
 async fn failed_mode_refresh_holds_requests_instead_of_using_the_stale_engine() {
     let mut harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let rules = Arc::new(ReadFailingRequestRuleStore {
         inner: harness.request_rules.clone(),
@@ -654,11 +519,7 @@ async fn failed_mode_refresh_holds_requests_instead_of_using_the_stale_engine() 
 
     let error = harness
         .app
-        .set_request_rule_mode(
-            &harness.manager,
-            &detail.rule_set.id,
-            RequestRuleEvaluationMode::Disabled,
-        )
+        .set_request_rule_enabled(&harness.manager, &detail.rule_set.id, false)
         .await
         .expect_err("the refresh read should fail after persisting the disarm");
     assert!(matches!(error, AppError::Repository(_)));
@@ -683,13 +544,7 @@ async fn failed_mode_refresh_holds_requests_instead_of_using_the_stale_engine() 
 async fn an_older_rebuild_cannot_replace_a_failed_newer_disarm_refresh() {
     let mut harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let rules = Arc::new(ReadFailingRequestRuleStore {
         inner: harness.request_rules.clone(),
@@ -715,11 +570,7 @@ async fn an_older_rebuild_cannot_replace_a_failed_newer_disarm_refresh() {
     rules.fail_list.store(true, Ordering::SeqCst);
     let error = harness
         .app
-        .set_request_rule_mode(
-            &harness.manager,
-            &detail.rule_set.id,
-            RequestRuleEvaluationMode::Disabled,
-        )
+        .set_request_rule_enabled(&harness.manager, &detail.rule_set.id, false)
         .await
         .expect_err("the newer disarm refresh should fail after persisting the mode");
     assert!(matches!(error, AppError::Repository(_)));

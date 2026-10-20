@@ -33,8 +33,7 @@ pub(crate) struct RequestRuleMutations;
 impl RequestRuleMutations {
     /// Create a request rule set together with its first matcher revision.
     ///
-    /// The rule is created disabled. Arming it is a second, deliberate call, and
-    /// the instance gate is a third.
+    /// The rule is created disabled. Enabling it is a second, deliberate call.
     async fn create_request_rule_set(
         &self,
         ctx: &Context<'_>,
@@ -115,29 +114,25 @@ impl RequestRuleMutations {
         Ok(crate::mappers::from_request_rule_set(&rule_set, count))
     }
 
-    /// Move a request rule set between evaluation modes.
-    async fn set_request_rule_mode(
+    /// Enable or disable a request rule set.
+    async fn set_request_rule_enabled(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Rule-set identity and the evaluation mode to store.")]
-        input: SetRequestRuleModeInput,
-    ) -> GqlResult<RequestRuleSetDetail> {
+        #[graphql(desc = "Request rule-set identity.")] rule_set_id: ID,
+        #[graphql(desc = "Whether the rule set takes part in deciding requests.")] enabled: bool,
+    ) -> GqlResult<RequestRuleSet> {
         let app = app_from_ctx(ctx)?;
         let actor =
             require_config_app_permission(ctx, AppPermission::ManageCatalogSettings).await?;
 
-        let rule_set_id = String::from(input.rule_set_id);
-        let detail = app
-            .set_request_rule_mode(
-                &actor,
-                &rule_set_id,
-                crate::mappers::request_rule_evaluation_mode_into_application(input.mode),
-            )
+        let rule_set_id = String::from(rule_set_id);
+        let rule_set = app
+            .set_request_rule_enabled(&actor, &rule_set_id, enabled)
             .await
             .map_err(to_gql_error)?;
         let count = decision_count(&app, &actor, &rule_set_id).await?;
 
-        Ok(crate::mappers::from_request_rule_set_detail(detail, count))
+        Ok(crate::mappers::from_request_rule_set(&rule_set, count))
     }
 
     /// Delete a request rule set and every revision it owns.
@@ -217,7 +212,7 @@ impl RequestRuleMutations {
             .map_err(to_gql_error)?;
 
         // An unsaved draft has no stored name and no stored mode: it is not
-        // armed, because it is not stored.
+        // enabled, because it is not stored.
         let (rule_set_name, mode) = match stored_rule_set_id {
             Some(rule_set_id) => app
                 .get_request_rule_set(&actor, &rule_set_id)
@@ -236,33 +231,6 @@ impl RequestRuleMutations {
             rule_set_name,
             mode,
         ))
-    }
-
-    /// Arm or disarm the instance-wide request-rule gate. Omitted fields keep their stored value.
-    ///
-    /// While the gate is off every rule is still evaluated and every decision is
-    /// still recorded; only the *effect* is suspended, so an operator can read
-    /// what policy would have done before letting it do it.
-    async fn set_request_rule_instance_gates(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(desc = "The gate to change; omit the field to leave it alone.")]
-        input: SetRequestRuleInstanceGatesInput,
-    ) -> GqlResult<RequestRuleInstanceGates> {
-        let app = app_from_ctx(ctx)?;
-        let actor = require_config_app_permission(ctx, AppPermission::ManageSystemSettings).await?;
-
-        let gates = app
-            .set_request_rule_instance_gates(
-                &actor,
-                scryer_application::RequestRuleGatesUpdate {
-                    evaluation_enabled: input.evaluation_enabled,
-                },
-            )
-            .await
-            .map_err(to_gql_error)?;
-
-        Ok(crate::mappers::from_request_rule_instance_gates(gates))
     }
 
     /// Push a live claim's window out. Requires title management on the claim's own library.

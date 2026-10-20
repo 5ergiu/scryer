@@ -2,7 +2,6 @@ import type {
   LifecycleClaimState,
   MediaRequestLeaseRecord,
   RequestDecisionOutcome,
-  RequestEvaluationMode,
   RequestRuleSetDetail,
   RequestRuleSetDraft,
   RequestVote,
@@ -158,45 +157,6 @@ export function applyRequestersToSource(
 }
 
 // ── Labels and tones ─────────────────────────────────────────────────────
-
-export const REQUEST_EVALUATION_MODES: RequestEvaluationMode[] = [
-  "DISABLED",
-  "SHADOW",
-  "ENFORCE",
-];
-
-const EVALUATION_MODE_LABEL_KEYS: Record<RequestEvaluationMode, string> = {
-  DISABLED: "settings.requestRuleModeDisabled",
-  SHADOW: "settings.requestRuleModeShadow",
-  ENFORCE: "settings.requestRuleModeEnforce",
-};
-
-export function requestEvaluationModeLabelKey(mode: string): string | null {
-  return EVALUATION_MODE_LABEL_KEYS[mode as RequestEvaluationMode] ?? null;
-}
-
-const EVALUATION_MODE_HELP_KEYS: Record<RequestEvaluationMode, string> = {
-  DISABLED: "settings.requestRuleModeDisabledHelp",
-  SHADOW: "settings.requestRuleModeShadowHelp",
-  ENFORCE: "settings.requestRuleModeEnforceHelp",
-};
-
-export function requestEvaluationModeHelpKey(mode: string): string | null {
-  return EVALUATION_MODE_HELP_KEYS[mode as RequestEvaluationMode] ?? null;
-}
-
-export function requestEvaluationModeBadgeTone(
-  mode: string,
-): "neutral" | "info" | "warning" | "positive" {
-  switch (mode) {
-    case "ENFORCE":
-      return "positive";
-    case "SHADOW":
-      return "info";
-    default:
-      return "neutral";
-  }
-}
 
 const DECISION_OUTCOME_LABEL_KEYS: Record<RequestDecisionOutcome, string> = {
   AUTO_APPROVE: "requests.decisionOutcomeAutoApprove",
@@ -392,4 +352,16 @@ export function requestFilterArgument(value: string): string | undefined {
 /// verbatim, so this only recognises it well enough to mark the banner.
 export function isPersonTargetingRefusal(message: string): boolean {
   return message.toLowerCase().includes("input.requester");
+}
+
+const REQUESTER_REFERENCE_PATTERN =
+  /\binput\s*(?:\.\s*requester\b|\[\s*"requester"\s*\])/;
+
+/// Whether a matcher reads requester fields, which the API only saves for an
+/// author who can manage permissions. Comments are ignored so a note about the
+/// requester does not raise the hint; the server's check stays authoritative.
+export function requestRuleReadsRequester(source: string): boolean {
+  return source
+    .split("\n")
+    .some((line) => REQUESTER_REFERENCE_PATTERN.test(line.replace(/#.*$/, "")));
 }

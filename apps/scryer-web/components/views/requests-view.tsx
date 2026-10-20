@@ -512,9 +512,6 @@ function RequestDecisionChip({
           >
             <ScrollText className="h-3 w-3" />
             {outcomeKey ? t(outcomeKey) : decision.effectiveOutcome}
-            {decision.mode === "SHADOW"
-              ? ` · ${t("requests.decisionShadow")}`
-              : ""}
           </Badge>
         </button>
       </PopoverTrigger>

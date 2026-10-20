@@ -45,18 +45,7 @@ pub fn request_rule_evaluation_mode_value(
 ) -> RequestRuleEvaluationModeValue {
     match mode {
         RequestRuleEvaluationMode::Disabled => RequestRuleEvaluationModeValue::Disabled,
-        RequestRuleEvaluationMode::Shadow => RequestRuleEvaluationModeValue::Shadow,
         RequestRuleEvaluationMode::Enforce => RequestRuleEvaluationModeValue::Enforce,
-    }
-}
-
-pub fn request_rule_evaluation_mode_into_application(
-    mode: RequestRuleEvaluationModeValue,
-) -> RequestRuleEvaluationMode {
-    match mode {
-        RequestRuleEvaluationModeValue::Disabled => RequestRuleEvaluationMode::Disabled,
-        RequestRuleEvaluationModeValue::Shadow => RequestRuleEvaluationMode::Shadow,
-        RequestRuleEvaluationModeValue::Enforce => RequestRuleEvaluationMode::Enforce,
     }
 }
 
@@ -127,7 +116,6 @@ pub fn from_request_rule_set(
         name: rule_set.name.clone(),
         description: rule_set.description.clone(),
         enabled: rule_set.enabled,
-        evaluation_mode: request_rule_evaluation_mode_value(rule_set.evaluation_mode),
         library_ids: rule_set.library_ids.clone(),
         current_revision_number: to_graphql_int(rule_set.current_revision_number),
         decision_count: to_graphql_int(i64::try_from(decision_count).unwrap_or(i64::MAX)),
@@ -266,8 +254,8 @@ pub fn from_request_rule_decision_view(view: RequestRuleDecisionView) -> Request
 
 /// The outcome one rule's vote contributes, on its own.
 ///
-/// A preview runs a single matcher, so there is no arbitration across rules and
-/// no instance gate: an approve previews as an auto-approval, a deny as a
+/// A preview runs a single matcher, so there is no arbitration across rules: an
+/// approve previews as an auto-approval, a deny as a
 /// denial, and everything uncertain — a manual, an abstain, a hold, a failure —
 /// as manual review, which is the direction the real arbitration also takes.
 fn preview_outcome(vote: Option<RequestVote>) -> RequestDecisionOutcome {
@@ -297,7 +285,7 @@ fn preview_fallback_reason(result: &AppPreviewResult) -> Option<String> {
 }
 
 /// `mode` is the stored rule set's mode, or `DISABLED` for an unsaved draft —
-/// an unsaved matcher is not armed, because it is not stored.
+/// an unsaved matcher is not enabled, because it is not stored.
 pub fn from_request_rule_preview_result(
     result: AppPreviewResult,
     rule_set_name: String,
@@ -375,15 +363,7 @@ pub fn from_request_preflight(preflight: RequestPreflight) -> RequestPreflightPa
     }
 }
 
-// ── Gates and claims ────────────────────────────────────────────────────────
-
-pub fn from_request_rule_instance_gates(
-    gates: scryer_application::RequestRuleGates,
-) -> RequestRuleInstanceGates {
-    RequestRuleInstanceGates {
-        evaluation_enabled: gates.evaluation_enabled,
-    }
-}
+// ── Claims ──────────────────────────────────────────────────────────────────
 
 pub fn from_title_claim(claim: LifecycleClaim) -> TitleClaim {
     TitleClaim {

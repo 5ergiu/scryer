@@ -1,4 +1,4 @@
-//! Authoring, previewing, and arming request rule sets (spec 0003 FR-010,
+//! Authoring, previewing, and enabling request rule sets (spec 0003 FR-010,
 //! FR-013, FR-014, FR-015).
 //!
 //! Every call here needs [`AppPermission::ManageCatalogSettings`]. Authoring or
@@ -8,9 +8,8 @@
 //! administration, writing one about a named person is a use of the instance's
 //! identity records.
 //!
-//! Rule sets are created disabled. Arming is always a deliberate second call
-//! ([`AppUseCase::set_request_rule_mode`]), and the instance gate is a third
-//! switch on top of that.
+//! Rule sets are created disabled. Enabling one is always a deliberate second
+//! call ([`AppUseCase::set_request_rule_enabled`]).
 
 use chrono::Utc;
 use scryer_domain::{
@@ -204,8 +203,7 @@ impl AppUseCase {
             id: id.clone(),
             name,
             description: draft.description,
-            // Created disabled: arming is a second, deliberate call, and the
-            // instance gate is a third.
+            // Created disabled: enabling is a second, deliberate call.
             enabled: false,
             evaluation_mode: RequestRuleEvaluationMode::Disabled,
             library_ids: draft.library_ids,
@@ -289,22 +287,25 @@ impl AppUseCase {
         Ok(rule_set)
     }
 
-    /// Move a rule set between disabled, shadow, and enforce.
+    /// Enable or disable a rule set.
     ///
-    /// `enabled` is derived from the mode rather than accepted separately: an
-    /// enabled-but-disabled-mode row would be a state the evaluator has no
-    /// reading for.
-    pub async fn set_request_rule_mode(
+    /// The stored evaluation mode follows `enabled`, so the two columns never
+    /// disagree.
+    pub async fn set_request_rule_enabled(
         &self,
         actor: &User,
         rule_set_id: &str,
-        mode: RequestRuleEvaluationMode,
-    ) -> AppResult<RequestRuleSetDetail> {
+        enabled: bool,
+    ) -> AppResult<RequestRuleSet> {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
 
         let mut rule_set = self.require_request_rule_set(rule_set_id).await?;
-        let enabled = mode != RequestRuleEvaluationMode::Disabled;
+        let mode = if enabled {
+            RequestRuleEvaluationMode::Enforce
+        } else {
+            RequestRuleEvaluationMode::Disabled
+        };
         let now = Utc::now();
 
         self.services
@@ -317,7 +318,7 @@ impl AppUseCase {
         rule_set.enabled = enabled;
         rule_set.updated_at = now;
         self.rebuild_request_rules_engine().await?;
-        self.load_request_rule_detail(rule_set).await
+        Ok(rule_set)
     }
 
     /// Delete a rule set.
@@ -525,7 +526,7 @@ impl AppUseCase {
     ///
     /// The bar is on reaching the facts, not on running: a stored revision keeps
     /// evaluating under the system principal, because revoking an author's
-    /// permission must not silently stop a rule an operator armed.
+    /// permission must not silently stop a rule an operator enabled.
     ///
     /// The path list comes from the same static extraction the engine holds
     /// rules on. A source it cannot resolve is **refused**, not treated as

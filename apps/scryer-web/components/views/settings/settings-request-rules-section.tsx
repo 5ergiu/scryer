@@ -1,12 +1,10 @@
 import { regoDiagnostics } from "@/lib/utils/rego-diagnostics";
 import * as React from "react";
 import {
-  AlertTriangle,
   BookOpen,
   ChevronDown,
   Copy,
   Edit,
-  Info,
   Plus,
   Sparkles,
   Trash2,
@@ -14,7 +12,6 @@ import {
 } from "lucide-react";
 import { AddNewButton } from "@/components/common/add-new-button";
 import { RegoAiPromptDialog } from "@/components/common/rego-ai-prompt-dialog";
-import { SettingsToggleSwitch } from "@/components/common/settings-toggle-switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,9 +39,7 @@ import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import type { LibraryRecord } from "@/lib/types";
 import type {
   RequestDecisionOutcome,
-  RequestEvaluationMode,
   RequestRuleDecisionRecord,
-  RequestRuleInstanceGates,
   RequestRulePreviewResult,
   RequestRulePreviewSample,
   RequestRulePreviewSource,
@@ -54,17 +49,14 @@ import type {
   RequestRuleValidationResult,
 } from "@/lib/types/request-rule-sets";
 import {
-  REQUEST_EVALUATION_MODES,
   REQUEST_FILTER_ALL,
   REQUEST_LEASE_DAYS_MAX,
   requestDecisionOutcomeBadgeTone,
   requestDecisionOutcomeLabelKey,
-  requestEvaluationModeBadgeTone,
-  requestEvaluationModeHelpKey,
-  requestEvaluationModeLabelKey,
   requestFallbackReasonLabelKey,
   isPersonTargetingRefusal,
   requestRuleNamesRequesters,
+  requestRuleReadsRequester,
   requestVoteBadgeTone,
   requestVoteLabelKey,
 } from "@/lib/utils/request-rule-sets";
@@ -74,14 +66,13 @@ import {
   settingsRequestRuleCopyId,
   settingsRequestRuleDeleteId,
   settingsRequestRuleEditId,
+  settingsRequestRuleEnabledId,
   settingsRequestRuleLibraryId,
-  settingsRequestRuleModeId,
   settingsRequestRuleNameId,
   settingsRequestRuleRowId,
   settingsRequestTemplateId,
   settingsRequestUserId,
 } from "@/lib/utils/dom-ids";
-import { LoadingMark } from "@/components/common/loading-mark";
 
 export type RequestQualityProfileOption = { id: string; name: string };
 
@@ -129,13 +120,10 @@ type SettingsRequestRulesSectionProps = {
   validationResult: RequestRuleValidationResult | null;
   /// Rewrite whichever way the draft names people with these usernames.
   applyRequesters: (usernames: string[]) => void;
-  setRuleMode: (record: RequestRuleSetRecord, mode: RequestEvaluationMode) => void;
-  /// Null when the gate query was refused, which on this page means the reader
-  /// is not a system administrator and cannot see the instance state at all.
-  gates: RequestRuleInstanceGates | null;
-  gatesLocked: boolean;
-  savingGate: boolean;
-  setGate: (enabled: boolean) => void;
+  setRuleEnabled: (record: RequestRuleSetRecord, enabled: boolean) => void;
+  /// Saving a rule that reads requester fields needs Manage permissions; the
+  /// editor warns before save rather than after the API refuses.
+  canManagePermissions: boolean;
   previewSource: RequestRulePreviewSource;
   setPreviewSource: (source: RequestRulePreviewSource) => void;
   previewRuleSetId: string;
@@ -161,73 +149,6 @@ type SettingsRequestRulesSectionProps = {
 type RefField = { field: string; type: string; descKey: string };
 type RefSectionDef = { titleKey: string; path: string; fields: RefField[] };
 const REF_SECTIONS = requestInputContract.sections as RefSectionDef[];
-
-/// What this instance will actually do with these rules right now. Three
-/// controls have to agree before a request rule resolves anything, and this
-/// line is derived from two of them: the instance gate and the rules' own
-/// modes. It stays above the list where it cannot be scrolled past.
-function RequestRulesStatusBanner({
-  gates,
-  ruleSetRecords,
-}: {
-  gates: RequestRuleInstanceGates | null;
-  ruleSetRecords: RequestRuleSetRecord[];
-}) {
-  const t = useTranslate();
-  const enforcing = ruleSetRecords.some(
-    (record) => record.evaluationMode === "ENFORCE",
-  );
-  const shadowing = ruleSetRecords.some(
-    (record) => record.evaluationMode === "SHADOW",
-  );
-  const gateOpen = gates?.evaluationEnabled === true;
-
-  const variant = !gateOpen
-    ? "gateClosed"
-    : enforcing
-      ? "enforcing"
-      : shadowing
-        ? "shadowing"
-        : "idle";
-  const warning = variant === "enforcing";
-  const Icon = warning ? AlertTriangle : Info;
-
-  return (
-    <div
-      id="settings-request-rules-status-notice"
-      data-request-rules-status={variant}
-      className={`flex items-start gap-2.5 rounded border px-3 py-2.5 ${
-        warning
-          ? "border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] text-[var(--scry-warning-text)]"
-          : "border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] text-[var(--scry-info-text)]"
-      }`}
-    >
-      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="space-y-1">
-        <p className="font-semibold">
-          {t(`settings.requestRulesStatus${capitalize(variant)}Title`)}
-        </p>
-        <p className="text-[13px] leading-5">
-          {t(`settings.requestRulesStatus${capitalize(variant)}Body`)}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function ModeBadge({ mode }: { mode: string }) {
-  const t = useTranslate();
-  const labelKey = requestEvaluationModeLabelKey(mode);
-  return (
-    <Badge tone={requestEvaluationModeBadgeTone(mode)}>
-      {labelKey ? t(labelKey) : mode}
-    </Badge>
-  );
-}
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const t = useTranslate();
@@ -856,7 +777,6 @@ function RequestPreviewPanel({
           <div id="settings-request-preview-result" className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               <OutcomeBadge outcome={decision.policyOutcome} />
-              <ModeBadge mode={decision.mode} />
               {decision.votes[0]?.held ? (
                 <Badge tone="warning">{t("settings.requestDecisionHeld")}</Badge>
               ) : null}
@@ -1031,9 +951,6 @@ function RequestDecisionsPanel({
                 <TableHead className="w-[150px]">
                   {t("settings.requestDecisionsColOutcome")}
                 </TableHead>
-                <TableHead className="w-[120px]">
-                  {t("settings.requestDecisionsColMode")}
-                </TableHead>
                 <TableHead>{t("settings.requestDecisionsColVotes")}</TableHead>
                 <TableHead>{t("settings.requestDecisionsColReasons")}</TableHead>
               </TableRow>
@@ -1064,9 +981,6 @@ function RequestDecisionsPanel({
                           </p>
                         ) : null}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <ModeBadge mode={decision.mode} />
                     </TableCell>
                     <TableCell>
                       <DecisionVotes decision={decision} />
@@ -1117,66 +1031,6 @@ function RequestDecisionsPanel({
   );
 }
 
-/// The instance gate. It lives under system-settings management rather than the
-/// catalog permission the rest of this page needs, so a catalog administrator
-/// sees the switch locked and is told who can move it.
-function RequestGatePanel({
-  gates,
-  gatesLocked,
-  savingGate,
-  setGate,
-}: Pick<
-  SettingsRequestRulesSectionProps,
-  "gates" | "gatesLocked" | "savingGate" | "setGate"
->) {
-  const t = useTranslate();
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">
-          {t("settings.requestGateTitle")}
-        </CardTitle>
-        <p className="text-xs text-muted-foreground">
-          {t("settings.requestGateSubtitle")}
-        </p>
-      </CardHeader>
-      <CardContent id="settings-request-rule-gate-panel">
-        {gatesLocked || !gates ? (
-          <p
-            id="settings-request-rule-gate-locked"
-            className="rounded border border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] px-3 py-2 text-xs text-[var(--scry-info-text)]"
-          >
-            {t("settings.requestGateLocked")}
-          </p>
-        ) : (
-          <div className="flex flex-col gap-2 rounded border border-border bg-muted/30 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <Label htmlFor="settings-request-rule-gate">
-                {t("settings.requestGateEvaluation")}
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                {t("settings.requestGateEvaluationHelp")}
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {savingGate ? (
-                <LoadingMark className="h-4 w-4 text-muted-foreground" />
-              ) : null}
-              <SettingsToggleSwitch
-                id="settings-request-rule-gate"
-                checked={gates.evaluationEnabled}
-                disabled={savingGate}
-                ariaLabel={t("settings.requestGateEvaluation")}
-                onChange={setGate}
-              />
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 export function SettingsRequestRulesSection({
   isEditorOpen,
   editingRuleSetId,
@@ -1198,11 +1052,8 @@ export function SettingsRequestRulesSection({
   validating,
   validationResult,
   applyRequesters,
-  setRuleMode,
-  gates,
-  gatesLocked,
-  savingGate,
-  setGate,
+  setRuleEnabled,
+  canManagePermissions,
   decisions,
   decisionsLoading,
   decisionsError,
@@ -1218,10 +1069,12 @@ export function SettingsRequestRulesSection({
       <div className="mx-auto flex w-full max-w-[2176px] flex-col gap-4 xl:flex-row xl:items-start">
         <div className="min-w-0 flex-1">
           <div className="mx-auto w-full max-w-[1280px] space-y-4">
-            <RequestRulesStatusBanner
-              gates={gates}
-              ruleSetRecords={ruleSetRecords}
-            />
+            <p
+              id="settings-request-rules-default"
+              className="text-[13px] leading-5 text-muted-foreground"
+            >
+              {t("settings.requestRulesDefault")}
+            </p>
 
             <div className="overflow-hidden rounded border border-border bg-card">
               <div className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -1241,8 +1094,8 @@ export function SettingsRequestRulesSection({
                     <TableRow>
                       <TableHead>{t("label.name")}</TableHead>
                       <TableHead>{t("settings.ruleDescription")}</TableHead>
-                      <TableHead className="w-[200px]">
-                        {t("settings.requestRuleMode")}
+                      <TableHead className="w-[1%] text-center">
+                        {t("label.enabled")}
                       </TableHead>
                       <TableHead>
                         {t("settings.requestRuleLibraries")}
@@ -1260,9 +1113,6 @@ export function SettingsRequestRulesSection({
                   </TableHeader>
                   <TableBody>
                     {ruleSetRecords.map((record) => {
-                      const modeHelpKey = requestEvaluationModeHelpKey(
-                        record.evaluationMode,
-                      );
                       const libraryNames =
                         record.libraryIds.length === 0
                           ? t("settings.requestRuleLibrariesAll")
@@ -1279,7 +1129,7 @@ export function SettingsRequestRulesSection({
                           data-ui="settings-table-row"
                           key={record.id}
                           id={settingsRequestRuleRowId(record.id)}
-                          data-request-rule-mode={record.evaluationMode}
+                          data-request-rule-enabled={record.enabled ? "true" : "false"}
                         >
                           <TableCell className="font-medium">
                             <span id={settingsRequestRuleNameId(record.name)}>
@@ -1289,34 +1139,17 @@ export function SettingsRequestRulesSection({
                           <TableCell className="max-w-[220px] truncate text-muted-foreground">
                             {record.description || "—"}
                           </TableCell>
-                          <TableCell>
-                            <div className="space-y-1">
-                              <SingleSelectField
-                                id={settingsRequestRuleModeId(record.id)}
-                                size="sm"
-                                value={record.evaluationMode}
-                                onValueChange={(value) =>
-                                  setRuleMode(
-                                    record,
-                                    value as RequestEvaluationMode,
-                                  )
-                                }
-                                options={REQUEST_EVALUATION_MODES.map((mode) => {
-                                  const key = requestEvaluationModeLabelKey(mode);
-                                  return {
-                                    value: mode,
-                                    ariaLabel: mode,
-                                    label: key ? t(key) : mode,
-                                  };
-                                })}
-                              />
-                              <ModeBadge mode={record.evaluationMode} />
-                              {modeHelpKey ? (
-                                <p className="text-xs text-muted-foreground">
-                                  {t(modeHelpKey)}
-                                </p>
-                              ) : null}
-                            </div>
+                          <TableCell className="text-center">
+                            <Checkbox
+                              id={settingsRequestRuleEnabledId(record.id)}
+                              size="large"
+                              checked={record.enabled}
+                              disabled={mutatingRuleSetId === record.id}
+                              aria-label={`${t("label.enabled")}: ${record.name}`}
+                              onCheckedChange={(checked) =>
+                                setRuleEnabled(record, checked === true)
+                              }
+                            />
                           </TableCell>
                           <TableCell className="max-w-[220px] truncate text-muted-foreground">
                             {libraryNames}
@@ -1369,9 +1202,6 @@ export function SettingsRequestRulesSection({
                   </TableBody>
                 </Table>
               </div>
-              <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-                {t("settings.requestRuleModeHelp")}
-              </p>
             </div>
 
             {isEditorOpen ? (
@@ -1535,6 +1365,16 @@ export function SettingsRequestRulesSection({
                       {t("settings.requestRuleSaveDisabledNote")}
                     </p>
 
+                    {!canManagePermissions &&
+                    requestRuleReadsRequester(ruleSetDraft.regoSource) ? (
+                      <p
+                        id="settings-request-rule-requester-hint"
+                        className="rounded border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-3 py-2 text-xs text-[var(--scry-warning-text)]"
+                      >
+                        {t("settings.requestRuleRequesterFieldsHint")}
+                      </p>
+                    ) : null}
+
                     <div className="flex gap-2">
                       <Button
                         id="settings-request-rule-save"
@@ -1590,13 +1430,6 @@ export function SettingsRequestRulesSection({
               qualityProfiles={qualityProfiles}
               users={users}
               {...previewProps}
-            />
-
-            <RequestGatePanel
-              gates={gates}
-              gatesLocked={gatesLocked}
-              savingGate={savingGate}
-              setGate={setGate}
             />
 
             <RequestDecisionsPanel

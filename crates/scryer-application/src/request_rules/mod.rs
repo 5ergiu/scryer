@@ -5,8 +5,9 @@
 //! claim".
 //!
 //! [`service`] is authoring: rule sets and immutable matcher revisions can be
-//! created, edited, previewed against a real requester and title, armed, and
-//! deleted. [`gates`] holds the one instance-wide switch, off by default.
+//! created, edited, previewed against a real requester and title, enabled, and
+//! deleted. A rule set is either disabled or enabled; there is no
+//! instance-wide switch above it.
 //!
 //! [`engine`] caches the compiled engine and the per-rule library scope, and is
 //! rebuilt by every mutating authoring call. [`facts`] builds the input document
@@ -26,14 +27,13 @@
 //!    to manual review, above approve ([`arbitration`], FR-012).
 //! 2. **Nothing fails the requester.** Every failure inside this module degrades
 //!    to the behaviour Scryer had before rules existed ([`evaluation`]).
-//! 3. **Every evaluation is explainable.** Preview, shadow, enforce, and the
+//! 3. **Every evaluation is explainable.** Preview, enabled rules, and the
 //!    error fallback all record what they concluded and why (FR-016).
 
 pub mod arbitration;
 pub mod engine;
 pub mod evaluation;
 pub mod facts;
-pub mod gates;
 pub mod preflight;
 pub mod read_model;
 pub mod service;
@@ -53,7 +53,6 @@ pub use facts::{
     RequestRequesterHistoryContext, build_request_input, snapshot_age_rating,
     us_certification_label,
 };
-pub use gates::{RequestRuleGates, RequestRuleGatesUpdate};
 pub use preflight::RequestPreflight;
 pub use read_model::{MediaRequestPolicyFacts, RequestRuleDecisionView};
 pub use service::{

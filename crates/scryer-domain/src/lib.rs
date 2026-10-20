@@ -6336,19 +6336,13 @@ pub struct MaintenanceSequenceTerminalMembership {
     pub released_at: Option<DateTime<Utc>>,
 }
 
-/// How far a request rule set is allowed to act (spec 0003 FR-013).
-///
-/// The whole enum is pinned here, storage strings included, even though the
-/// persistence wave only ever writes [`Self::Disabled`]: the column ships now
-/// and must not need a migration when the evaluator lands.
+/// Whether a request rule set takes part in deciding requests. Operators see
+/// these as Disabled and Enabled.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRuleEvaluationMode {
     #[default]
     Disabled,
-    /// Evaluate and record the trace; the effective decision stays whatever
-    /// today's permission check would have produced.
-    Shadow,
     /// Evaluate, record, and act on the decision.
     Enforce,
 }
@@ -6357,7 +6351,6 @@ impl RequestRuleEvaluationMode {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::Shadow => "shadow",
             Self::Enforce => "enforce",
         }
     }
@@ -6365,7 +6358,6 @@ impl RequestRuleEvaluationMode {
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "disabled" => Some(Self::Disabled),
-            "shadow" => Some(Self::Shadow),
             "enforce" => Some(Self::Enforce),
             _ => None,
         }
@@ -6444,9 +6436,9 @@ impl RequestDecisionOutcome {
 
 /// The durable trace of one request evaluation (spec 0003 FR-016).
 ///
-/// Written for every evaluation, shadow and enforce alike, which is why
 /// `policy_outcome` (what the rules said) and `effective_outcome` (what the
-/// instance acted on) are separate columns: in shadow they disagree on purpose.
+/// instance acted on) are separate columns because a fallback can make them
+/// disagree.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestRuleDecisionRecord {
     pub id: String,

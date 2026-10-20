@@ -80,7 +80,6 @@ function RequestPreflightBanner({
     return null;
   }
 
-  const shadow = preflight.evaluationMode === "SHADOW";
   const reasonCodes = preflight.reasons.map((reason) => reason.code).join(", ");
   // The server's own word for why the verdict fell back to needing approval.
   // The first reason code is only an approximation of it, kept for a server
@@ -141,7 +140,6 @@ function RequestPreflightBanner({
       <div className="space-y-1">
         <p className="font-semibold">
           {title}
-          {shadow ? ` · ${t("requests.preflightPreviewOnly")}` : ""}
         </p>
         {body ? <p className="text-[13px] leading-5">{body}</p> : null}
       </div>

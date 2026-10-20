@@ -2564,7 +2564,7 @@ input CreateProxyConfigInput {
 
 """
 Creates a request rule set together with its first matcher revision. The
-rule set is always created disabled; arming it is a second, deliberate call.
+rule set is always created disabled; enabling it is a second, deliberate call.
 """
 input CreateRequestRuleSetInput {
 	"""
@@ -20245,8 +20245,7 @@ type MutationRoot {
 	"""
 	Create a request rule set together with its first matcher revision.
 	
-	The rule is created disabled. Arming it is a second, deliberate call, and
-	the instance gate is a third.
+	The rule is created disabled. Enabling it is a second, deliberate call.
 	"""
 	createRequestRuleSet(
 		"""
@@ -20276,14 +20275,18 @@ type MutationRoot {
 		input: UpdateRequestRuleMetadataInput!
 	): RequestRuleSet!
 	"""
-	Move a request rule set between evaluation modes.
+	Enable or disable a request rule set.
 	"""
-	setRequestRuleMode(
+	setRequestRuleEnabled(
 		"""
-		Rule-set identity and the evaluation mode to store.
+		Request rule-set identity.
 		"""
-		input: SetRequestRuleModeInput!
-	): RequestRuleSetDetail!
+		ruleSetId: ID!,
+		"""
+		Whether the rule set takes part in deciding requests.
+		"""
+		enabled: Boolean!
+	): RequestRuleSet!
 	"""
 	Delete a request rule set and every revision it owns.
 	
@@ -20319,19 +20322,6 @@ type MutationRoot {
 		"""
 		input: PreviewRequestRuleInput!
 	): RequestRulePreviewPayload!
-	"""
-	Arm or disarm the instance-wide request-rule gate. Omitted fields keep their stored value.
-	
-	While the gate is off every rule is still evaluated and every decision is
-	still recorded; only the *effect* is suspended, so an operator can read
-	what policy would have done before letting it do it.
-	"""
-	setRequestRuleInstanceGates(
-		"""
-		The gate to change; omit the field to leave it alone.
-		"""
-		input: SetRequestRuleInstanceGatesInput!
-	): RequestRuleInstanceGates!
 	"""
 	Push a live claim's window out. Requires title management on the claim's own library.
 	"""
@@ -24751,10 +24741,6 @@ type QueryRoot {
 		ruleSetId: ID!
 	): [RequestRuleRevision!]!
 	"""
-	Read the instance-wide request-rule gate; requires system-settings management permission.
-	"""
-	requestRuleInstanceGates: RequestRuleInstanceGates!
-	"""
 	Read the decision recorded for one media request, or null when it was never evaluated.
 	
 	Two audiences reach this. A manager of the request's library sees the
@@ -26103,7 +26089,7 @@ type RequestPreflightPayload {
 	"""
 	metadataPartial: Boolean!
 	"""
-	Strictest mode among the rules that were consulted.
+	`ENFORCE` when an enabled rule was consulted, `DISABLED` when none was.
 	"""
 	evaluationMode: RequestRuleEvaluationModeValue!
 	"""
@@ -26135,8 +26121,8 @@ type RequestPreflightReason {
 The durable trace of one request evaluation (FR-016).
 
 `policyOutcome` is what the rules concluded and `effectiveOutcome` is what
-the instance acted on. They disagree on purpose whenever the instance gate is
-off or every deciding rule is in shadow.
+the instance acted on. They disagree only when a request was held because
+its tags could not be checked.
 """
 type RequestRuleDecision {
 	"""
@@ -26152,7 +26138,7 @@ type RequestRuleDecision {
 	"""
 	evaluatedAt: DateTime!
 	"""
-	Strictest mode among the rules that were consulted.
+	`ENFORCE` when an enabled rule was consulted, `DISABLED` when none was.
 	"""
 	mode: RequestRuleEvaluationModeValue!
 	"""
@@ -26160,7 +26146,7 @@ type RequestRuleDecision {
 	"""
 	effectiveOutcome: RequestDecisionOutcomeValue!
 	"""
-	What the rules concluded, whether or not they were allowed to act.
+	What the rules concluded.
 	"""
 	policyOutcome: RequestDecisionOutcomeValue!
 	"""
@@ -26192,36 +26178,17 @@ type RequestRuleDecision {
 }
 
 """
-How a request rule set is evaluated.
+Whether an evaluation consulted an enabled request rule.
 """
 enum RequestRuleEvaluationModeValue {
 	"""
-	Stored but never evaluated, and the mode every new rule set is created
-	in.
+	No enabled rule took part.
 	"""
 	DISABLED
 	"""
-	Evaluated and recorded; the effective decision stays whatever the
-	library permission would have produced on its own.
-	"""
-	SHADOW
-	"""
-	Evaluated, recorded, and acted on.
+	An enabled rule was evaluated, recorded, and acted on.
 	"""
 	ENFORCE
-}
-
-"""
-The instance-wide request-rule gate. One switch, defaulting off: a request
-rule votes and executes nothing, so there is one blast radius.
-"""
-type RequestRuleInstanceGates {
-	"""
-	Whether stored request rules are allowed to decide anything. While this
-	is off every evaluation still runs and is recorded, but the effective
-	outcome stays whatever the library permission would have produced.
-	"""
-	evaluationEnabled: Boolean!
 }
 
 """
@@ -26244,8 +26211,7 @@ type RequestRulePreviewPayload {
 	"""
 	The single rule's verdict, shaped as a decision so the authoring UI and
 	the decision browser render the same component. `effectiveOutcome`
-	equals `policyOutcome` here because a preview is never subject to the
-	instance gate.
+	equals `policyOutcome` here.
 	"""
 	decision: RequestRuleDecision!
 	"""
@@ -26362,14 +26328,9 @@ type RequestRuleSet {
 	"""
 	description: String!
 	"""
-	Whether the rule set is enabled. Derived from `evaluationMode` rather
-	than set independently: false for `DISABLED`, true otherwise.
+	Whether the rule set takes part in deciding requests.
 	"""
 	enabled: Boolean!
-	"""
-	Evaluation mode currently stored for the rule set.
-	"""
-	evaluationMode: RequestRuleEvaluationModeValue!
 	"""
 	Libraries the rule is confined to. Empty means every library.
 	"""
@@ -28286,31 +28247,6 @@ input SetPrimaryMovieFileInput {
 	Media-file identity to make primary.
 	"""
 	fileId: ID!
-}
-
-"""
-Arms or disarms the instance-wide request-rule gate. An omitted field leaves
-the gate exactly as stored.
-"""
-input SetRequestRuleInstanceGatesInput {
-	"""
-	Whether stored request rules may decide anything.
-	"""
-	evaluationEnabled: Boolean
-}
-
-"""
-Moves a rule set between evaluation modes.
-"""
-input SetRequestRuleModeInput {
-	"""
-	Rule-set ID.
-	"""
-	ruleSetId: ID!
-	"""
-	Mode to store. Anything other than `DISABLED` also enables the rule.
-	"""
-	mode: RequestRuleEvaluationModeValue!
 }
 
 """
