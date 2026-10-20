@@ -1037,6 +1037,11 @@ pub struct AppRuntimeAcquisitionState {
     /// tried on the next poll tick, as they were before the walk had a cadence
     /// of its own. Cleared when a walk starts.
     pub(crate) scope_reopened_since_walk: Arc<std::sync::atomic::AtomicBool>,
+    /// When this process built its runtime. A grab intent submitted before it
+    /// was recorded by a process that no longer exists, so no submit is still
+    /// in flight for it: the unconfirmed-grab release does not wait out its
+    /// grace period for such an intent.
+    pub(crate) process_started_at: chrono::DateTime<chrono::Utc>,
     pub download_submission_guards: DownloadSubmissionGuardTable,
     pub download_failure_guards: DownloadFailureGuardTable,
     /// Per-title exclusion between the background convergence walk and an
@@ -2572,6 +2577,7 @@ impl AppRuntimeState {
             acquisition: AppRuntimeAcquisitionState {
                 acquisition_wake: Arc::new(tokio::sync::Notify::new()),
                 scope_reopened_since_walk: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                process_started_at: chrono::Utc::now(),
                 download_submission_guards: DownloadSubmissionGuardTable::default(),
                 download_failure_guards: DownloadFailureGuardTable::default(),
                 title_walk_locks: AcquisitionTitleWalkLocks::default(),

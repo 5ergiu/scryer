@@ -341,6 +341,14 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     /// Downloads whose `reassign_download_to_title` fails with an error.
     pub(super) failing_reassignments:
         Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
+    /// When each unbound intent was submitted, as the real store's
+    /// `submitted_at`. An unbound row with no entry reads as submitted just
+    /// now, so it is never old enough to release.
+    pub(super) unbound_submitted_at:
+        Arc<Mutex<HashMap<scryer_domain::download_identity::DownloadId, chrono::DateTime<Utc>>>>,
+    /// Every unconfirmed intent `release_unconfirmed_submission` released, in
+    /// order.
+    pub(super) released_unconfirmed: Arc<Mutex<Vec<scryer_domain::download_identity::DownloadId>>>,
     /// Release password candidates persisted per download, as the real store
     /// keeps them for archive extraction and password retry.
     pub(super) password_candidates: Arc<
@@ -1339,6 +1347,41 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             })
             .cloned()
             .collect())
+    }
+
+    async fn list_active_unbound_submitted_before(
+        &self,
+        submitted_before: chrono::DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        let submitted_at = self.unbound_submitted_at.lock().await.clone();
+        let entries = self.store.lock().await;
+        Ok(entries
+            .iter()
+            .filter(|entry| {
+                entry.download_client_item_id.trim().is_empty()
+                    && submitted_at
+                        .get(&entry.download_id)
+                        .is_some_and(|at| *at < submitted_before)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn release_unconfirmed_submission(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<bool> {
+        let mut entries = self.store.lock().await;
+        let before = entries.len();
+        entries.retain(|entry| {
+            entry.download_id != *download_id || !entry.download_client_item_id.trim().is_empty()
+        });
+        let released = entries.len() != before;
+        drop(entries);
+        if released {
+            self.released_unconfirmed.lock().await.push(*download_id);
+        }
+        Ok(released)
     }
 
     async fn find_by_title_and_request_signature(
