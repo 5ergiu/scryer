@@ -42,7 +42,6 @@ import type {
 } from "@/components/root/types";
 import type { LocaleCode, LanguageOption } from "@/lib/i18n";
 import { useTranslate } from "@/lib/context/translate-context";
-import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { cn } from "@/lib/utils";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
@@ -53,7 +52,6 @@ import {
   indexerSettingsTabs as allIndexerSettingsTabs,
   maintenanceRulesSectionFromPath,
   rulesSectionFromPath,
-  rulesSectionsFor,
 } from "@/lib/utils/routing";
 import {
   type ProviderCatalogFamily,
@@ -241,14 +239,15 @@ function IndexerSettingsSubnav({
   );
 }
 
-const RULES_SECTION_ITEMS: Record<
-  RulesSection,
-  { labelKey: string; icon: LucideIcon }
-> = {
-  scoring: { labelKey: "settings.rulesScoring", icon: SlidersHorizontal },
-  maintenance: { labelKey: "settings.maintenanceRules", icon: Wrench },
-  request: { labelKey: "settings.requestRules", icon: Inbox },
-};
+const RULES_SECTION_ITEMS: {
+  section: RulesSection;
+  labelKey: string;
+  icon: LucideIcon;
+}[] = [
+  { section: "scoring", labelKey: "settings.rulesScoring", icon: SlidersHorizontal },
+  { section: "maintenance", labelKey: "settings.maintenanceRules", icon: Wrench },
+  { section: "request", labelKey: "settings.requestRules", icon: Inbox },
+];
 
 const MAINTENANCE_RULES_SECTIONS: {
   section: MaintenanceRulesSection;
@@ -270,19 +269,12 @@ const MAINTENANCE_RULES_SECTIONS: {
 function RulesSubnav({
   activeSection,
   maintenanceRulesSection,
-  sections,
   t,
 }: {
   activeSection: RulesSection;
   maintenanceRulesSection: MaintenanceRulesSection;
-  sections: RulesSection[];
   t: ReturnType<typeof useTranslate>;
 }) {
-  // With only one kind on offer there is nothing to switch between, so the rail
-  // is a column of dead space rather than navigation.
-  if (sections.length < 2) {
-    return null;
-  }
   return (
     <aside className="w-full shrink-0 border-b border-[var(--scry-border3)] bg-[var(--scry-surfF)] p-3 2xl:h-full 2xl:w-[218px] 2xl:overflow-y-auto 2xl:border-b-0 2xl:border-r 2xl:p-[22px_14px]">
       <nav
@@ -290,8 +282,8 @@ function RulesSubnav({
         className="flex gap-2 overflow-x-auto pb-1 2xl:flex-col 2xl:overflow-visible 2xl:pb-0"
         aria-label={t("nav.rules")}
       >
-        {sections.map((section) => {
-          const item = RULES_SECTION_ITEMS[section];
+        {RULES_SECTION_ITEMS.map((item) => {
+          const { section } = item;
           const Icon = item.icon;
           const active = activeSection === section;
           return (
@@ -394,17 +386,6 @@ export const SettingsContainer = memo(function SettingsContainer({
   // the settings section, but the maintenance pane exists only in the path.
   const rulesSection = rulesSectionFromPath(pathname);
   const maintenanceRulesSection = maintenanceRulesSectionFromPath(pathname);
-  // Maintenance rules are still being finished. With the switch off the Rules
-  // page keeps only its scoring kind, and a held maintenance link resolves to
-  // scoring rather than 404ing or bouncing.
-  const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
-  const rulesSections = rulesSectionsFor(experimentalFeaturesEnabled);
-  const maintenanceRulesHidden =
-    settingsSection === "maintenanceRules" && !experimentalFeaturesEnabled;
-  const requestRulesHidden =
-    settingsSection === "requestRules" && !experimentalFeaturesEnabled;
-  const effectiveRulesSection =
-    maintenanceRulesHidden || requestRulesHidden ? "scoring" : rulesSection;
   // Indexer search is in beta rather than experimental: the pane is always
   // offered, and the page header carries the notice.
   const indexerSettingsTabs = allIndexerSettingsTabs();
@@ -589,13 +570,9 @@ export const SettingsContainer = memo(function SettingsContainer({
                     : settingsSection === "rules"
                       ? t("settings.rulesScoring")
                       : settingsSection === "maintenanceRules"
-                        ? maintenanceRulesHidden
-                          ? t("settings.rulesScoring")
-                          : t("settings.maintenanceRules")
+                        ? t("settings.maintenanceRules")
                       : settingsSection === "requestRules"
-                        ? requestRulesHidden
-                          ? t("settings.rulesScoring")
-                          : t("settings.requestRules")
+                        ? t("settings.requestRules")
                       : settingsSection === "plugins"
                         ? t("settings.plugins")
                         : settingsSection === "scripts"
@@ -683,9 +660,9 @@ export const SettingsContainer = memo(function SettingsContainer({
       case "rules":
         return SlidersHorizontal;
       case "maintenanceRules":
-        return maintenanceRulesHidden ? SlidersHorizontal : Wrench;
+        return Wrench;
       case "requestRules":
-        return requestRulesHidden ? SlidersHorizontal : Inbox;
+        return Inbox;
       case "post-processing":
         return FolderCog;
       case "subtitles":
@@ -725,7 +702,6 @@ export const SettingsContainer = memo(function SettingsContainer({
   // rather than a pane of it, so it adds no crumb and keeps the page's icon.
   const activeMaintenancePane =
     settingsSection === "maintenanceRules" &&
-    !maintenanceRulesHidden &&
     maintenanceRulesSection !== "rules"
       ? MAINTENANCE_RULES_SECTIONS.find(
           (item) => item.section === maintenanceRulesSection,
@@ -765,7 +741,7 @@ export const SettingsContainer = memo(function SettingsContainer({
   // they are a full-width strip, so the row has to stack or the strip takes
   // the whole row and leaves the page content zero wide.
   const showSectionSubnav =
-    settingsSection === "indexers" || (isRulesSection && rulesSections.length >= 2);
+    settingsSection === "indexers" || isRulesSection;
 
   return (
     <div
@@ -834,9 +810,8 @@ export const SettingsContainer = memo(function SettingsContainer({
       ) : null}
       {isRulesSection ? (
         <RulesSubnav
-          activeSection={effectiveRulesSection}
+          activeSection={rulesSection}
           maintenanceRulesSection={maintenanceRulesSection}
-          sections={rulesSections}
           t={t}
         />
       ) : null}
@@ -1024,17 +999,9 @@ export const SettingsContainer = memo(function SettingsContainer({
           ) : settingsSection === "rules" ? (
             <SettingsRulesContainer canManageCatalogSettings={canManageCatalogSettings} canManageSystemSettings={canManageSystemSettings} />
           ) : settingsSection === "maintenanceRules" ? (
-            maintenanceRulesHidden ? (
-              <SettingsRulesContainer canManageCatalogSettings={canManageCatalogSettings} canManageSystemSettings={canManageSystemSettings} />
-            ) : (
-              <SettingsMaintenanceRulesContainer section={maintenanceRulesSection} />
-            )
+            <SettingsMaintenanceRulesContainer section={maintenanceRulesSection} />
           ) : settingsSection === "requestRules" ? (
-            requestRulesHidden ? (
-              <SettingsRulesContainer canManageCatalogSettings={canManageCatalogSettings} canManageSystemSettings={canManageSystemSettings} />
-            ) : (
-              <SettingsRequestRulesContainer />
-            )
+            <SettingsRequestRulesContainer />
           ) : settingsSection === "plugins" ? (
             <SettingsPluginsContainer />
           ) : settingsSection === "scripts" ? (

@@ -166,8 +166,7 @@ pub struct AppCustomizationServices {
     pub(crate) rule_sets: Arc<dyn RuleSetRepository>,
     pub(crate) maintenance_rule_sets: Arc<dyn MaintenanceRuleSetRepository>,
     pub(crate) maintenance_evaluation: Arc<dyn crate::ports::MaintenanceEvaluationRepository>,
-    /// User-authored request rules (spec 0003). Ships dark behind the same
-    /// experimental gate as maintenance.
+    /// User-authored request rules.
     pub(crate) request_rule_sets: Arc<dyn crate::ports::RequestRuleSetRepository>,
     /// Append-only traces of every request evaluation (spec 0003 FR-016).
     pub(crate) request_rule_decisions: Arc<dyn crate::ports::RequestRuleDecisionRepository>,
