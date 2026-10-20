@@ -544,6 +544,9 @@ function librarySettingsInput(
     fileChmod: settings.fileChmod,
     folderChmod: settings.folderChmod,
     chownGroup: settings.chownGroup,
+    defaultMovieAvailability: settings.defaultMovieAvailability ?? null,
+    movieReleaseMarket: settings.movieReleaseMarket ?? null,
+    movieAvailabilityDelayDays: settings.movieAvailabilityDelayDays ?? null,
     indexerRouting: settings.indexerRouting,
     downloadClientRouting: settings.downloadClientRouting,
   };
@@ -3557,8 +3560,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           scope: releaseQueueScopeInput(release, { title: true }),
           candidateToken: release.candidateToken,
           sizeBytes: release.sizeBytes ?? null,
-          overrideMovieAvailability:
-            release.manualAvailabilityOverrideConfirmed ?? false,
         };
         const replacesPrimary = hasPrimaryMediaFile(title.mediaFiles);
         const mutation = replacesPrimary
@@ -3611,8 +3612,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               scope: releaseQueueScopeInput(release, { title: true }),
               candidateToken: release.candidateToken,
               sizeBytes: release.sizeBytes ?? null,
-              overrideMovieAvailability:
-                release.manualAvailabilityOverrideConfirmed ?? false,
               purpose: "ADDITIONAL_FILE",
             },
           })

@@ -1820,6 +1820,7 @@ pub(super) fn empty_update_media_settings_with_roots(
         file_chmod: None,
         folder_chmod: None,
         chown_group: None,
+        movie_availability: Default::default(),
     }
 }
 
@@ -1848,6 +1849,7 @@ pub(super) fn empty_update_media_settings() -> UpdateMediaSettings {
         file_chmod: None,
         folder_chmod: None,
         chown_group: None,
+        movie_availability: Default::default(),
     }
 }
 
@@ -1874,6 +1876,7 @@ pub(super) fn empty_library_settings_override() -> LibrarySettingsOverrideDraft 
         chown_group: None,
         indexer_routing: None,
         download_client_routing: None,
+        movie_availability: Default::default(),
     }
 }
 

@@ -395,7 +395,7 @@ impl LifecycleClaimRepository for LifecycleClaimStore {
         id: &str,
         replacement: &LifecycleClaim,
         now: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<String> {
         let state_placeholders = std::iter::repeat_n("{}", LIFECYCLE_CLAIM_LIVE_STATES.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -412,6 +412,9 @@ impl LifecycleClaimRepository for LifecycleClaimStore {
               WHERE id = {{}} AND state IN ({state_placeholders})"
         );
         let insert_args = claim_args(replacement);
+        let (existing_keep_sql, existing_keep_args) =
+            live_operator_keep_query(&replacement.title_id);
+        let replacement_id = replacement.id.clone();
 
         SqlRuntime::run_in_transaction(
             &self.datastore,
@@ -420,6 +423,9 @@ impl LifecycleClaimRepository for LifecycleClaimStore {
                 let convert_sql = convert_sql.clone();
                 let convert_args = convert_args.clone();
                 let insert_args = insert_args.clone();
+                let existing_keep_sql = existing_keep_sql.clone();
+                let existing_keep_args = existing_keep_args.clone();
+                let replacement_id = replacement_id.clone();
                 Box::pin(async move {
                     let updated =
                         SqlRuntime::execute(SqlExec::Tx(tx), &convert_sql, &convert_args).await?;
@@ -428,8 +434,17 @@ impl LifecycleClaimRepository for LifecycleClaimStore {
                             "lifecycle claim is no longer live".to_string(),
                         ));
                     }
+                    let existing = SqlRuntime::fetch_optional(
+                        SqlExec::Tx(tx),
+                        &existing_keep_sql,
+                        &existing_keep_args,
+                    )
+                    .await?;
+                    if let Some(row) = existing {
+                        return row.text("id");
+                    }
                     SqlRuntime::execute(SqlExec::Tx(tx), INSERT_CLAIM_SQL, &insert_args).await?;
-                    Ok(())
+                    Ok(replacement_id)
                 })
             },
         )
@@ -468,6 +483,28 @@ const INSERT_CLAIM_SQL: &str = "INSERT INTO lifecycle_claims
         (id, title_id, library_id, producer, producer_ref, kind, state, duration_days,
          starts_at, expires_at, created_by, created_at, updated_at, released_reason)
      VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
+
+/// The live operator keep on a title, which the unique index allows only one of.
+fn live_operator_keep_query(title_id: &str) -> (String, Vec<SqlArg>) {
+    let state_placeholders = std::iter::repeat_n("{}", LIFECYCLE_CLAIM_LIVE_STATES.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut args = vec![
+        SqlArg::Text(title_id.to_string()),
+        SqlArg::Text(
+            LifecycleClaimProducer::OperatorKeep
+                .as_storage_str()
+                .to_string(),
+        ),
+    ];
+    args.extend(live_state_args());
+    let sql = format!(
+        "SELECT id FROM lifecycle_claims
+          WHERE title_id = {{}} AND producer = {{}} AND state IN ({state_placeholders})
+          LIMIT 1"
+    );
+    (sql, args)
+}
 
 fn live_state_args() -> Vec<SqlArg> {
     LIFECYCLE_CLAIM_LIVE_STATES

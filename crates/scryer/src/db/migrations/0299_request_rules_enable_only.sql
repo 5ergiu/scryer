@@ -6,6 +6,22 @@ SET evaluation_mode = 'disabled',
     enabled = 0
 WHERE evaluation_mode = 'shadow';
 
+-- The switch defaulted to off, and while it was off no rule acted. An
+-- enforcing rule on an instance that never turned the switch on would
+-- otherwise start deciding requests on upgrade, so it comes back disabled too.
+UPDATE request_rule_sets
+SET evaluation_mode = 'disabled',
+    enabled = 0
+WHERE evaluation_mode = 'enforce'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM settings_values v
+      JOIN settings_definitions d ON d.id = v.setting_definition_id
+      WHERE d.key_name = 'request_rules.evaluation_enabled'
+        AND v.scope_id IS NULL
+        AND lower(trim(v.value_json, '" ')) IN ('true', '1', 'yes', 'on')
+  );
+
 DELETE FROM settings_values
 WHERE setting_definition_id IN (
     SELECT id

@@ -141,18 +141,20 @@ type AcquisitionSettingsPayload {
 	"""
 	longTailReconvergeDays: Int!
 	"""
-	Default threshold applied to newly added movies only: `released` unless
-	changed. Existing movies keep their own setting.
+	Deprecated: the Movie facet's default availability threshold, now
+	read from `mediaSettings(scope: MOVIE)`. Removed in the next minor.
 	"""
-	defaultMovieAvailability: String!
+	defaultMovieAvailability: String! @deprecated(reason: "Moved to MediaSettings.defaultMovieAvailability on the Movie facet; returns that value. Removed in the next minor.")
 	"""
-	ISO-3166-1 alpha-2 market used for movie release dates.
+	Deprecated: the Movie facet's release market, now read from
+	`mediaSettings(scope: MOVIE)`. Removed in the next minor.
 	"""
-	movieReleaseMarket: String!
+	movieReleaseMarket: String! @deprecated(reason: "Moved to MediaSettings.movieReleaseMarket on the Movie facet; returns that value. Removed in the next minor.")
 	"""
-	Signed offset in days from the applicable movie release date.
+	Deprecated: the Movie facet's availability delay, now read from
+	`mediaSettings(scope: MOVIE)`. Removed in the next minor.
 	"""
-	movieAvailabilityDelayDays: Int!
+	movieAvailabilityDelayDays: Int! @deprecated(reason: "Moved to MediaSettings.movieAvailabilityDelayDays on the Movie facet; returns that value. Removed in the next minor.")
 }
 
 """
@@ -10020,6 +10022,21 @@ input LibrarySettingsInput {
 	Download-client routing rules for this library.
 	"""
 	downloadClientRouting: [DownloadClientRoutingEntryInput!]
+	"""
+	Movie availability threshold override: `announced`, `in_cinemas` or
+	`released`; null inherits the Movie facet. Movie libraries only.
+	"""
+	defaultMovieAvailability: String
+	"""
+	ISO-3166-1 alpha-2 release market override; null inherits the Movie
+	facet. Movie libraries only.
+	"""
+	movieReleaseMarket: String
+	"""
+	Availability delay override in signed days; null inherits the Movie
+	facet. Movie libraries only.
+	"""
+	movieAvailabilityDelayDays: Int
 }
 
 """
@@ -10186,6 +10203,30 @@ type LibrarySettingsPayload {
 	Library override download-client routing entries; null means inherit.
 	"""
 	downloadClientRoutingOverride: [DownloadClientRoutingEntryPayload!]
+	"""
+	Library override movie availability threshold; null means inherit.
+	"""
+	defaultMovieAvailabilityOverride: String
+	"""
+	Effective movie availability threshold; null for non-Movie libraries.
+	"""
+	defaultMovieAvailability: String
+	"""
+	Library override movie release market; null means inherit.
+	"""
+	movieReleaseMarketOverride: String
+	"""
+	Effective movie release market; null for non-Movie libraries.
+	"""
+	movieReleaseMarket: String
+	"""
+	Library override movie availability delay in days; null means inherit.
+	"""
+	movieAvailabilityDelayDaysOverride: Int
+	"""
+	Effective movie availability delay in days; null for non-Movie libraries.
+	"""
+	movieAvailabilityDelayDays: Int
 }
 
 """
@@ -17438,6 +17479,21 @@ type MediaSettingsPayload {
 	Chown group, or null when unset.
 	"""
 	chownGroup: String
+	"""
+	Availability threshold for movies without their own: `announced`,
+	`in_cinemas` or `released`. Null for facets other than Movie.
+	"""
+	defaultMovieAvailability: String
+	"""
+	ISO-3166-1 alpha-2 market whose release dates are read first. Null for
+	facets other than Movie.
+	"""
+	movieReleaseMarket: String
+	"""
+	Signed offset in days from the applicable release date. Null for
+	facets other than Movie.
+	"""
+	movieAvailabilityDelayDays: Int
 }
 
 """
@@ -25326,9 +25382,10 @@ input QueueDownloadInput {
 	"""
 	purpose: QueueDownloadPurposeValue
 	"""
-	Explicit confirmation to queue a movie before its configured availability date.
+	Deprecated and ignored. Manual queueing is never gated by movie
+	availability; kept for one release so older web bundles still parse.
 	"""
-	overrideMovieAvailability: Boolean
+	overrideMovieAvailability: Boolean @deprecated(reason: "Manual queueing is never gated by availability; ignored.")
 }
 
 """
@@ -30575,7 +30632,7 @@ Optional title settings used when creating or updating a title.
 """
 input TitleOptionsInput {
 	"""
-	Movie minimum availability override; omission preserves it, null clears it to legacy Announced behavior, and a value replaces it. Other facets reject this field.
+	Movie minimum availability override; omission preserves it, null clears it so the movie inherits its library's threshold and then the Movie facet's, and a value replaces it. Only the threshold is set per title: the release market and delay come from the library or the Movie facet. Other facets reject this field.
 	"""
 	minAvailability: String
 	"""
@@ -31895,17 +31952,20 @@ input UpdateAcquisitionSettingsInput {
 	"""
 	longTailReconvergeDays: Int!
 	"""
-	Default threshold for newly added movies. Omitted by older clients.
+	Deprecated and ignored: set `defaultMovieAvailability` through
+	`updateMediaSettings` for the Movie facet. Removed in the next minor.
 	"""
-	defaultMovieAvailability: String
+	defaultMovieAvailability: String @deprecated(reason: "Ignored: set defaultMovieAvailability through updateMediaSettings for the Movie facet. Removed in the next minor.")
 	"""
-	ISO-3166-1 alpha-2 market for movie release dates. Omitted by older clients.
+	Deprecated and ignored: set `movieReleaseMarket` through
+	`updateMediaSettings` for the Movie facet. Removed in the next minor.
 	"""
-	movieReleaseMarket: String
+	movieReleaseMarket: String @deprecated(reason: "Ignored: set movieReleaseMarket through updateMediaSettings for the Movie facet. Removed in the next minor.")
 	"""
-	Signed offset in days from the applicable release date. Omitted by older clients.
+	Deprecated and ignored: set `movieAvailabilityDelayDays` through
+	`updateMediaSettings` for the Movie facet. Removed in the next minor.
 	"""
-	movieAvailabilityDelayDays: Int
+	movieAvailabilityDelayDays: Int @deprecated(reason: "Ignored: set movieAvailabilityDelayDays through updateMediaSettings for the Movie facet. Removed in the next minor.")
 }
 
 """
@@ -32476,6 +32536,20 @@ input UpdateMediaSettingsInput {
 	Optional Unix group name for imported paths.
 	"""
 	chownGroup: String
+	"""
+	Availability threshold for movies without their own: `announced`,
+	`in_cinemas` or `released`. Movie scope only.
+	"""
+	defaultMovieAvailability: String
+	"""
+	ISO-3166-1 alpha-2 market whose release dates are read first. Movie
+	scope only.
+	"""
+	movieReleaseMarket: String
+	"""
+	Signed offset in days from the applicable release date. Movie scope only.
+	"""
+	movieAvailabilityDelayDays: Int
 }
 
 """

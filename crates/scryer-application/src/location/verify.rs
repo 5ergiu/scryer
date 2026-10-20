@@ -8,7 +8,7 @@
 //!
 //! # Chosen CRC algorithm: CRC-64/NVME
 //!
-//! [`MOVE_CRC_ALGORITHM`] is `crc_fast::CrcAlgorithm::Crc64Nvme`, persisted under
+//! [`MOVE_CRC_ALGORITHM`] is `crc_turbo::CrcAlgorithm::Crc64Nvme`, persisted under
 //! the tag [`MoveCrcAlgorithm::Crc64Nvme`] so a future default change can never
 //! be mistaken for corruption.
 //!
@@ -93,7 +93,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use crc_fast::CrcAlgorithm;
+use crc_turbo::CrcAlgorithm;
 
 use crate::location::model::{
     AppliedVerificationDepth, FileVerificationOutcome, FileVerificationRecord, MoveCrcAlgorithm,
@@ -101,7 +101,7 @@ use crate::location::model::{
 };
 use crate::{AppError, AppResult};
 
-/// The `crc-fast` algorithm used for the streaming move-corruption check.
+/// The `crc-turbo` algorithm used for the streaming move-corruption check.
 pub const MOVE_CRC_ALGORITHM: CrcAlgorithm = CrcAlgorithm::Crc64Nvme;
 
 /// The persisted tag written alongside every CRC produced by
@@ -113,7 +113,7 @@ pub const MOVE_CRC_ALGORITHM_TAG: MoveCrcAlgorithm = MoveCrcAlgorithm::Crc64Nvme
 /// read-back (FR-040); the BLAKE3 is the dedup identity persisted with the media
 /// file (FR-041, D4).
 pub struct StreamedContentHasher {
-    crc: crc_fast::Digest,
+    crc: crc_turbo::Digest,
     blake3: blake3::Hasher,
     size_bytes: u64,
 }
@@ -121,7 +121,7 @@ pub struct StreamedContentHasher {
 impl StreamedContentHasher {
     pub fn new() -> Self {
         Self {
-            crc: crc_fast::Digest::new(MOVE_CRC_ALGORITHM),
+            crc: crc_turbo::Digest::new(MOVE_CRC_ALGORITHM),
             blake3: blake3::Hasher::new(),
             size_bytes: 0,
         }
@@ -156,7 +156,7 @@ impl Default for StreamedContentHasher {
     }
 }
 
-/// The `crc-fast` algorithm a persisted tag names, so a stored CRC stays
+/// The `crc-turbo` algorithm a persisted tag names, so a stored CRC stays
 /// comparable after the default moves.
 pub fn crc_algorithm_for(tag: MoveCrcAlgorithm) -> CrcAlgorithm {
     match tag {
@@ -997,7 +997,7 @@ fn full_read_back(
     hashes: &StreamedContentHashes,
     progress: &CopyProgress,
 ) -> Result<(FileVerificationOutcome, Option<String>), String> {
-    let mut digest = crc_fast::Digest::new(crc_algorithm_for(hashes.crc_algorithm));
+    let mut digest = crc_turbo::Digest::new(crc_algorithm_for(hashes.crc_algorithm));
     let mut read_bytes: u64 = 0;
     let mut buffer = vec![0u8; READ_BACK_CHUNK_BYTES];
     loop {
@@ -1316,7 +1316,7 @@ mod tests {
         assert_eq!(hashes.crc_algorithm, MoveCrcAlgorithm::Crc64Nvme);
         assert_eq!(
             hashes.move_crc,
-            crc_fast::checksum(MOVE_CRC_ALGORITHM, &data)
+            crc_turbo::checksum(MOVE_CRC_ALGORITHM, &data)
         );
         assert_eq!(hashes.full_blake3, blake3::hash(&data).to_hex().to_string());
     }
@@ -1424,7 +1424,7 @@ mod tests {
         assert_eq!(hashes.crc_algorithm, MOVE_CRC_ALGORITHM_TAG);
         assert_eq!(
             hashes.move_crc,
-            crc_fast::checksum(MOVE_CRC_ALGORITHM, &data)
+            crc_turbo::checksum(MOVE_CRC_ALGORITHM, &data)
         );
         assert_eq!(hashes.full_blake3, blake3::hash(&data).to_hex().to_string());
         assert_eq!(

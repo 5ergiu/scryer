@@ -409,6 +409,12 @@ export type LibrarySettingsRecord = {
   folderChmod: string | null;
   chownGroupOverride: string | null;
   chownGroup: string | null;
+  defaultMovieAvailabilityOverride?: string | null;
+  defaultMovieAvailability?: string | null;
+  movieReleaseMarketOverride?: string | null;
+  movieReleaseMarket?: string | null;
+  movieAvailabilityDelayDaysOverride?: number | null;
+  movieAvailabilityDelayDays?: number | null;
   indexerRoutingOverride: unknown[] | null;
   downloadClientRoutingOverride: DownloadClientRoutingEntry[] | null;
 };
@@ -433,6 +439,9 @@ export type LibrarySettingsDraft = {
   fileChmod: string | null;
   folderChmod: string | null;
   chownGroup: string | null;
+  defaultMovieAvailability?: string | null;
+  movieReleaseMarket?: string | null;
+  movieAvailabilityDelayDays?: number | null;
   indexerRouting?: unknown[] | null;
   downloadClientRouting?: DownloadClientRoutingEntry[] | null;
 };

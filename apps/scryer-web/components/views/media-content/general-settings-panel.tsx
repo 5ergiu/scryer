@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from "react";
-import { FileText, Import as ImportIcon, SlidersVertical } from "lucide-react";
+import { CalendarClock, FileText, Import as ImportIcon, SlidersVertical } from "lucide-react";
 import { useTranslate } from "@/lib/context/translate-context";
 import { SettingsToggleSwitch } from "@/components/common/settings-toggle-switch";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import {
 import type { ImportMode } from "@/lib/types/settings";
 import type { LocalPathStyle } from "@/lib/utils/local-path-style";
 import type { ViewCategoryId } from "./indexer-category-picker";
+import { MovieAvailabilitySettingsFields } from "./movie-availability-settings";
 
 const FILLER_POLICY_OPTIONS = [
   { value: "DOWNLOAD_ALL", label: "settings.fillerPolicyDownloadAll" },
@@ -351,6 +352,16 @@ export function GeneralSettingsPanel({
           ) : null}
         </div>
       </GeneralSettingsSection>
+
+      {activeQualityScopeId === "MOVIE" ? (
+        <GeneralSettingsSection
+          icon={CalendarClock}
+          title={t("settings.movieAvailability")}
+          description={t("settings.movieAvailabilityFacetDescription")}
+        >
+          <MovieAvailabilitySettingsFields />
+        </GeneralSettingsSection>
+      ) : null}
 
       {showAnimePolicies ? (
         <GeneralSettingsSection

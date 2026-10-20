@@ -364,7 +364,7 @@ impl AppUseCase {
             });
         }
         let now = Utc::now();
-        let availability_settings = self.acquisition_settings().await?;
+        let availability_settings = self.movie_availability_policies().await?;
         let has_episodes = self
             .facet_registry
             .get(&title.facet)

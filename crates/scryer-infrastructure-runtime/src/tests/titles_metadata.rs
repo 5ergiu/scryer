@@ -3032,6 +3032,7 @@ async fn movie_release_dates_text_round_trip_postgres() -> AppResult<()> {
                 market: "US".into(), fetched: true,
                 theatrical_dates: vec!["2025-01-01".into()],
                 digital_dates, physical_dates: vec![],
+                ..Default::default()
             };
             let hydrated = TitleRepository::update_title_hydrated_metadata(
                 &catalog, &created.id, TitleMetadataUpdate {

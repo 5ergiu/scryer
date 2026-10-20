@@ -5,35 +5,13 @@ use crate::acquisition::convergence::{
 
 const ACQUISITION_ENABLED_KEY: &str = "acquisition.enabled";
 
-/// Assigned ISO 3166-1 alpha-2 country codes used for regional release dates.
-fn is_movie_release_market(market: &str) -> bool {
-    const COUNTRIES: &str = "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ \
-        BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ \
-        CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ \
-        DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR \
-        GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY \
-        HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP \
-        KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY \
-        MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ \
-        NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY \
-        QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ \
-        TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ \
-        VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW";
-    COUNTRIES.split_ascii_whitespace().any(|code| code == market)
-}
 const ACQUISITION_SAME_TIER_MIN_DELTA_KEY: &str = "acquisition.same_tier_min_delta";
 const ACQUISITION_POLL_INTERVAL_SECONDS_KEY: &str = "acquisition.poll_interval_seconds";
-const ACQUISITION_DEFAULT_MOVIE_AVAILABILITY_KEY: &str = "acquisition.default_movie_availability";
-const ACQUISITION_MOVIE_RELEASE_MARKET_KEY: &str = "acquisition.movie_release_market";
-const ACQUISITION_MOVIE_AVAILABILITY_DELAY_DAYS_KEY: &str =
-    "acquisition.movie_availability_delay_days";
 pub(crate) const ACQUISITION_WALK_INTERVAL_SECONDS_KEY: &str = "acquisition.walk_interval_seconds";
 /// Download-client failure check cadence when nothing is stored.
 pub(crate) const DEFAULT_ACQUISITION_POLL_INTERVAL_SECONDS: i32 = 60;
 /// Catalog walk cadence when nothing is stored.
 pub(crate) const DEFAULT_ACQUISITION_WALK_INTERVAL_SECONDS: i32 = 300;
-pub const DEFAULT_MOVIE_AVAILABILITY: &str = "released";
-pub const DEFAULT_MOVIE_RELEASE_MARKET: &str = "US";
 
 #[derive(Debug, Clone)]
 pub struct AcquisitionSettings {
@@ -49,12 +27,6 @@ pub struct AcquisitionSettings {
     /// Dormant slow re-converge backstop: coverage older than
     /// this many days re-converges. `0` = off, the intended steady state.
     pub long_tail_reconverge_days: i32,
-    /// Default minimum movie availability applied only when creating new movies.
-    pub default_movie_availability: String,
-    /// ISO-3166-1 alpha-2 market used for movie release-date availability.
-    pub movie_release_market: String,
-    /// Signed whole-day offset from the selected movie release date.
-    pub movie_availability_delay_days: i32,
 }
 impl AcquisitionSettings {
     /// The subset of these settings the acquisition gates read.
@@ -103,18 +75,6 @@ impl AppUseCase {
                 .read_setting_i64_value(ACQUISITION_LONG_TAIL_RECONVERGE_DAYS_KEY, None)
                 .await?
                 .unwrap_or(0) as i32,
-            default_movie_availability: self
-                .read_setting_string_value(ACQUISITION_DEFAULT_MOVIE_AVAILABILITY_KEY, None)
-                .await?
-                .unwrap_or_else(|| DEFAULT_MOVIE_AVAILABILITY.to_string()),
-            movie_release_market: self
-                .read_setting_string_value(ACQUISITION_MOVIE_RELEASE_MARKET_KEY, None)
-                .await?
-                .unwrap_or_else(|| DEFAULT_MOVIE_RELEASE_MARKET.to_string()),
-            movie_availability_delay_days: self
-                .read_setting_i64_value(ACQUISITION_MOVIE_AVAILABILITY_DELAY_DAYS_KEY, None)
-                .await?
-                .unwrap_or(0) as i32,
         })
     }
 }
@@ -134,11 +94,10 @@ impl AppUseCase {
     pub async fn update_acquisition_settings(
         &self,
         actor: &User,
-        mut settings: AcquisitionSettings,
+        settings: AcquisitionSettings,
     ) -> AppResult<AcquisitionSettings> {
         self.require_app_permission(actor, scryer_domain::AppPermission::ManageCatalogSettings)
             .await?;
-        let previous_settings = self.load_acquisition_settings().await?;
 
         if settings.same_tier_min_delta < 0 {
             return Err(AppError::Validation(
@@ -165,21 +124,6 @@ impl AppUseCase {
                 "re-converge backstop cannot be negative".to_string(),
             ));
         }
-        if !matches!(
-            settings.default_movie_availability.as_str(),
-            "announced" | "in_cinemas" | "released"
-        ) {
-            return Err(AppError::Validation(
-                "default movie availability must be announced, in_cinemas, or released".into(),
-            ));
-        }
-        let release_market = settings.movie_release_market.trim().to_ascii_uppercase();
-        if !is_movie_release_market(&release_market) {
-            return Err(AppError::Validation(
-                "movie release market must be a two-letter ISO-3166 country code".into(),
-            ));
-        }
-        settings.movie_release_market = release_market;
 
         self.upsert_system_setting_json(
             ACQUISITION_ENABLED_KEY,
@@ -217,24 +161,6 @@ impl AppUseCase {
             Some(actor.id.clone()),
         )
         .await?;
-        self.upsert_system_setting_json(
-            ACQUISITION_DEFAULT_MOVIE_AVAILABILITY_KEY,
-            &settings.default_movie_availability,
-            Some(actor.id.clone()),
-        )
-        .await?;
-        self.upsert_system_setting_json(
-            ACQUISITION_MOVIE_RELEASE_MARKET_KEY,
-            &settings.movie_release_market,
-            Some(actor.id.clone()),
-        )
-        .await?;
-        self.upsert_system_setting_json(
-            ACQUISITION_MOVIE_AVAILABILITY_DELAY_DAYS_KEY,
-            &settings.movie_availability_delay_days,
-            Some(actor.id.clone()),
-        )
-        .await?;
 
         self.emit_configuration_changed_event(
             actor,
@@ -243,9 +169,6 @@ impl AppUseCase {
             scryer_domain::ConfigurationChangeAction::Updated,
         )
         .await;
-        if previous_settings.movie_release_market != settings.movie_release_market {
-            self.queue_movie_release_market_refresh().await?;
-        }
         let _ = self.runtime.events.settings_changed_broadcast.send(vec![
             ACQUISITION_ENABLED_KEY.to_string(),
             ACQUISITION_SAME_TIER_MIN_DELTA_KEY.to_string(),
@@ -253,9 +176,6 @@ impl AppUseCase {
             ACQUISITION_WALK_INTERVAL_SECONDS_KEY.to_string(),
             ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY.to_string(),
             ACQUISITION_LONG_TAIL_RECONVERGE_DAYS_KEY.to_string(),
-            ACQUISITION_DEFAULT_MOVIE_AVAILABILITY_KEY.to_string(),
-            ACQUISITION_MOVIE_RELEASE_MARKET_KEY.to_string(),
-            ACQUISITION_MOVIE_AVAILABILITY_DELAY_DAYS_KEY.to_string(),
         ]);
         self.runtime.acquisition.acquisition_wake.notify_one();
 

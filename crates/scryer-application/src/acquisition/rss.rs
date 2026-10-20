@@ -1433,7 +1433,7 @@ impl AppUseCase {
 
         debug!("starting RSS sync cycle");
 
-        let availability_settings = self.acquisition_settings().await?;
+        let availability_settings = self.movie_availability_policies().await?;
 
         // The scopes that hold monitored titles, as one grouped read. This
         // used to be every title row in the catalog, kept for the whole cycle

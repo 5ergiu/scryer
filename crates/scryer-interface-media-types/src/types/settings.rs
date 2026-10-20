@@ -136,12 +136,23 @@ pub struct AcquisitionSettingsPayload {
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Number of days before long-tail scopes are reconverged.
     pub long_tail_reconverge_days: i32,
-    /// Default threshold applied to newly added movies only: `released` unless
-    /// changed. Existing movies keep their own setting.
+    /// Deprecated: the Movie facet's default availability threshold, now
+    /// read from `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.defaultMovieAvailability on the Movie facet; returns that value. Removed in the next minor."
+    )]
     pub default_movie_availability: String,
-    /// ISO-3166-1 alpha-2 market used for movie release dates.
+    /// Deprecated: the Movie facet's release market, now read from
+    /// `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.movieReleaseMarket on the Movie facet; returns that value. Removed in the next minor."
+    )]
     pub movie_release_market: String,
-    /// Signed offset in days from the applicable movie release date.
+    /// Deprecated: the Movie facet's availability delay, now read from
+    /// `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.movieAvailabilityDelayDays on the Movie facet; returns that value. Removed in the next minor."
+    )]
     pub movie_availability_delay_days: i32,
 }
 
@@ -892,6 +903,15 @@ pub struct MediaSettingsPayload {
     pub folder_chmod: Option<String>,
     /// Chown group, or null when unset.
     pub chown_group: Option<String>,
+    /// Availability threshold for movies without their own: `announced`,
+    /// `in_cinemas` or `released`. Null for facets other than Movie.
+    pub default_movie_availability: Option<String>,
+    /// ISO-3166-1 alpha-2 market whose release dates are read first. Null for
+    /// facets other than Movie.
+    pub movie_release_market: Option<String>,
+    /// Signed offset in days from the applicable release date. Null for
+    /// facets other than Movie.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -1196,6 +1216,14 @@ pub struct UpdateMediaSettingsInput {
     pub folder_chmod: Option<String>,
     /// Optional Unix group name for imported paths.
     pub chown_group: Option<String>,
+    /// Availability threshold for movies without their own: `announced`,
+    /// `in_cinemas` or `released`. Movie scope only.
+    pub default_movie_availability: Option<String>,
+    /// ISO-3166-1 alpha-2 market whose release dates are read first. Movie
+    /// scope only.
+    pub movie_release_market: Option<String>,
+    /// Signed offset in days from the applicable release date. Movie scope only.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(InputObject, Clone)]
@@ -1414,11 +1442,23 @@ pub struct UpdateAcquisitionSettingsInput {
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Days between long-tail reconvergence passes.
     pub long_tail_reconverge_days: i32,
-    /// Default threshold for newly added movies. Omitted by older clients.
+    /// Deprecated and ignored: set `defaultMovieAvailability` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set defaultMovieAvailability through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
     pub default_movie_availability: Option<String>,
-    /// ISO-3166-1 alpha-2 market for movie release dates. Omitted by older clients.
+    /// Deprecated and ignored: set `movieReleaseMarket` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set movieReleaseMarket through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
     pub movie_release_market: Option<String>,
-    /// Signed offset in days from the applicable release date. Omitted by older clients.
+    /// Deprecated and ignored: set `movieAvailabilityDelayDays` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set movieAvailabilityDelayDays through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
     pub movie_availability_delay_days: Option<i32>,
 }
 

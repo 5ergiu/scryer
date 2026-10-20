@@ -9272,13 +9272,15 @@ pub trait LifecycleClaimRepository: Send + Sync {
     ) -> AppResult<()>;
 
     /// Mark `id` converted and insert `replacement` (a keep) in one transaction,
-    /// so there is no instant in which the title carries neither.
+    /// so there is no instant in which the title carries neither. A title holds
+    /// at most one live operator keep, so when it already has one that keep
+    /// stands in for `replacement`. Returns the id of the keep now in force.
     async fn convert_to_permanent(
         &self,
         id: &str,
         replacement: &scryer_domain::LifecycleClaim,
         now: DateTime<Utc>,
-    ) -> AppResult<()>;
+    ) -> AppResult<String>;
 
     /// Live claims produced by requests this user submitted, for the
     /// `active_lease_count` fact.

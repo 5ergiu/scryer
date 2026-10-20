@@ -984,31 +984,32 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             default_value_json: "\"true\"",
             is_sensitive: false,
         },
-        // Acquisition settings
+        // Movie availability gate, set on the Movie facet and per library
         ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
+            category: SETTINGS_CATEGORY_MEDIA,
             scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.default_movie_availability",
+            key_name: "movie.default_availability",
             data_type: "string",
             default_value_json: "\"released\"",
             is_sensitive: false,
         },
         ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
+            category: SETTINGS_CATEGORY_MEDIA,
             scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.movie_release_market",
+            key_name: "movie.release_market",
             data_type: "string",
             default_value_json: "\"US\"",
             is_sensitive: false,
         },
         ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
+            category: SETTINGS_CATEGORY_MEDIA,
             scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.movie_availability_delay_days",
+            key_name: "movie.availability_delay_days",
             data_type: "number",
             default_value_json: "0",
             is_sensitive: false,
         },
+        // Acquisition settings
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
             scope: SETTINGS_SCOPE_SYSTEM,
@@ -3078,17 +3079,13 @@ mod tests {
     #[test]
     fn service_setting_seeds_include_movie_availability_defaults() {
         for (key, data_type, default_value) in [
-            (
-                "acquisition.default_movie_availability",
-                "string",
-                "\"released\"",
-            ),
-            ("acquisition.movie_release_market", "string", "\"US\""),
-            ("acquisition.movie_availability_delay_days", "number", "0"),
+            ("movie.default_availability", "string", "\"released\""),
+            ("movie.release_market", "string", "\"US\""),
+            ("movie.availability_delay_days", "number", "0"),
         ] {
             assert!(
                 service_setting_seeds().iter().any(|seed| {
-                    seed.category == SETTINGS_CATEGORY_ACQUISITION
+                    seed.category == SETTINGS_CATEGORY_MEDIA
                         && seed.scope == SETTINGS_SCOPE_SYSTEM
                         && seed.key_name == key
                         && seed.data_type == data_type
@@ -3098,6 +3095,13 @@ mod tests {
                 "missing movie availability definition: {key}"
             );
         }
+        assert!(
+            !service_setting_seeds()
+                .iter()
+                .any(|seed| seed.key_name.starts_with("acquisition.")
+                    && seed.key_name.contains("movie")),
+            "the acquisition movie availability keys are retired"
+        );
     }
 
     #[test]

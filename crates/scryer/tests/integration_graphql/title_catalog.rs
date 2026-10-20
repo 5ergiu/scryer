@@ -5609,85 +5609,7 @@ async fn graphql_tmdb_primary_series_is_added_hydrated_and_searched_by_smg_id() 
 async fn graphql_library_search_languages_round_trip_in_order() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
-    // Saving library settings also touches the import, permission and routing
-    // keys, which the shared typed-settings seed does not cover.
-    ctx.settings_store
-        .batch_ensure_setting_definitions(vec![
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "import.mode".into(),
-                data_type: "string".into(),
-                default_value_json: "\"hardlink_or_copy\"".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.set_linux".into(),
-                data_type: "boolean".into(),
-                default_value_json: "false".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.file_chmod".into(),
-                data_type: "string".into(),
-                default_value_json: "null".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.folder_chmod".into(),
-                data_type: "string".into(),
-                default_value_json: "\"755\"".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.chown_group".into(),
-                data_type: "string".into(),
-                default_value_json: "null".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "download_client.routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "nzbget.client_routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "indexer.routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-        ])
-        .await
-        .expect("seed library import settings definitions");
+    seed_library_settings_definitions(&ctx).await;
     let library_id =
         scryer_domain::default_library_id_for_facet(&scryer_domain::MediaFacet::Series);
     let update = gql(
@@ -5933,11 +5855,9 @@ async fn graphql_added_movie_inherits_default_availability_and_reads_it_back() {
     let changed_default = gql(
         &ctx,
         r#"mutation {
-        updateAcquisitionSettings(input: {
-            enabled: true, sameTierMinDelta: 0, pollIntervalSeconds: 60,
-            walkIntervalSeconds: 60, longTailBackfillMaxScopesPerCycle: 25,
-            longTailReconvergeDays: 0, defaultMovieAvailability: "announced"
-        }) { defaultMovieAvailability }
+        updateMediaSettings(input: { scope: MOVIE, defaultMovieAvailability: "announced" }) {
+            defaultMovieAvailability
+        }
     }"#,
         json!({}),
     )

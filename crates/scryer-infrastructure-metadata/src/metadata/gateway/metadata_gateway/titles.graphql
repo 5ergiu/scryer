@@ -54,6 +54,10 @@ query Titles($ids: [Int!]!, $language: String!, $includeEpisodes: Boolean! = fal
         theatrical_dates
         digital_dates
         physical_dates
+        any_market_theatrical_dates
+        any_market_digital_dates
+        any_market_physical_dates
+        any_market_home_dates_unusable
       }
       rating
       rating_sources

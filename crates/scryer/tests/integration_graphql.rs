@@ -1037,6 +1037,7 @@ async fn add_available_test_movie(ctx: &TestContext, name: &str) -> String {
         theatrical_dates: vec!["2020-01-01".to_string()],
         digital_dates: vec!["2020-04-01".to_string()],
         physical_dates: vec![],
+        ..Default::default()
     };
     sqlx::query(
         "UPDATE titles
@@ -1202,6 +1203,88 @@ async fn title_catalog_sort_names(ctx: &TestContext, key: &str, direction: &str)
         .iter()
         .map(|item| item["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+/// Saving library settings also touches the import, permission and routing
+/// keys, which the shared typed-settings seed does not cover.
+async fn seed_library_settings_definitions(ctx: &TestContext) {
+    ctx.settings_store
+        .batch_ensure_setting_definitions(vec![
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "import.mode".into(),
+                data_type: "string".into(),
+                default_value_json: "\"hardlink_or_copy\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.set_linux".into(),
+                data_type: "boolean".into(),
+                default_value_json: "false".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.file_chmod".into(),
+                data_type: "string".into(),
+                default_value_json: "null".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.folder_chmod".into(),
+                data_type: "string".into(),
+                default_value_json: "\"755\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.chown_group".into(),
+                data_type: "string".into(),
+                default_value_json: "null".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "download_client.routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "nzbget.client_routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "indexer.routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+        ])
+        .await
+        .expect("seed library import settings definitions");
 }
 
 async fn seed_typed_settings_definitions(ctx: &TestContext) {
@@ -1397,27 +1480,27 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 validation_json: None,
             },
             SettingDefinitionSeed {
-                category: "acquisition".into(),
+                category: "media".into(),
                 scope: "system".into(),
-                key_name: "acquisition.default_movie_availability".into(),
+                key_name: "movie.default_availability".into(),
                 data_type: "string".into(),
                 default_value_json: "\"released\"".into(),
                 is_sensitive: false,
                 validation_json: None,
             },
             SettingDefinitionSeed {
-                category: "acquisition".into(),
+                category: "media".into(),
                 scope: "system".into(),
-                key_name: "acquisition.movie_release_market".into(),
+                key_name: "movie.release_market".into(),
                 data_type: "string".into(),
                 default_value_json: "\"US\"".into(),
                 is_sensitive: false,
                 validation_json: None,
             },
             SettingDefinitionSeed {
-                category: "acquisition".into(),
+                category: "media".into(),
                 scope: "system".into(),
-                key_name: "acquisition.movie_availability_delay_days".into(),
+                key_name: "movie.availability_delay_days".into(),
                 data_type: "number".into(),
                 default_value_json: "0".into(),
                 is_sensitive: false,

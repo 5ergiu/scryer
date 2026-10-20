@@ -2609,10 +2609,10 @@ impl AppUseCase {
         let delay_profiles = self.load_delay_profiles().await;
         let now = Utc::now();
         let movie_availability = if title.facet == MediaFacet::Movie {
-            let settings = self.acquisition_settings().await?;
+            let policies = self.movie_availability_policies().await?;
             Some(
                 crate::acquisition::targets::movie_availability_decision_for_title(
-                    title, &settings, &now,
+                    title, &policies, &now,
                 ),
             )
         } else {

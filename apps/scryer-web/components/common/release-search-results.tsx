@@ -17,7 +17,7 @@ import {
   Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import { MovieAvailabilityBadge } from "@/components/common/movie-availability-badge";
 import { useTranslate } from "@/lib/context/translate-context";
 import { cn } from "@/lib/utils";
 import { ScoreLog, scoreToneClassName } from "@/components/common/score-log";
@@ -36,8 +36,6 @@ export type { ReleaseSearchSortKey, ReleaseSearchSortDirection } from "@/lib/uti
 type SortKey = ReleaseSearchSortKey;
 type SortDirection = ReleaseSearchSortDirection;
 type SearchResultPresentation = "default" | "selected-title";
-const MOVIE_AVAILABILITY_REASON_CODE_PATTERN = /: ([a-z_]+)(?: \(|$)/;
-const MOVIE_AVAILABILITY_DATE_PATTERN = /\((\d{4}-\d{2}-\d{2})\)/;
 
 const selectedTitleTagClassNames = [
   "bg-[var(--scry-facet-series-bg)] text-[var(--scry-facet-series-text)]",
@@ -110,8 +108,6 @@ function SearchResultRow({
   const [queueRequested, setQueueRequested] = React.useState(false);
   const [additionalQueueRequested, setAdditionalQueueRequested] =
     React.useState(false);
-  const [availabilityConfirmationAction, setAvailabilityConfirmationAction] =
-    React.useState<"queue" | "additional" | null>(null);
   const decision = result.qualityProfileDecision;
   const hasLog = decision && decision.scoringLog.length > 0;
   const blockReason =
@@ -199,17 +195,6 @@ function SearchResultRow({
   // the grab cannot finish. The row still shows the release and its seeder
   // count so the operator can see why, rather than the release vanishing.
   const belowMinimumSeeders = result.autoDecisionCode === "minimum_seeders";
-  const movieAvailabilityBlocked =
-    result.autoDecisionCode === "movie_availability_blocked";
-  const movieAvailabilityReasonCode = movieAvailabilityBlocked
-    ? result.autoDecisionSummary?.match(MOVIE_AVAILABILITY_REASON_CODE_PATTERN)?.[1]
-    : undefined;
-  const movieAvailabilityDate = movieAvailabilityBlocked
-    ? result.autoDecisionSummary?.match(MOVIE_AVAILABILITY_DATE_PATTERN)?.[1]
-    : undefined;
-  const movieAvailabilityReason = movieAvailabilityReasonCode
-    ? `${t(`settings.movieAvailability.reason.${movieAvailabilityReasonCode}`)}${movieAvailabilityDate ? ` (${movieAvailabilityDate})` : ""}`
-    : (result.autoDecisionSummary ?? "");
   // The code travels with the text so a reader (or a check) can tell the two
   // reasons apart without parsing the localized sentence.
   const queueUnavailableCode =
@@ -240,24 +225,15 @@ function SearchResultRow({
     idVariant,
   );
 
-  const handleQueueClick = React.useCallback((
-    confirmedOverride: boolean | React.MouseEvent<HTMLButtonElement> = false,
-  ) => {
+  const handleQueueClick = React.useCallback(() => {
     if (queueDisabled) {
-      return;
-    }
-    if (movieAvailabilityBlocked && confirmedOverride !== true) {
-      setAvailabilityConfirmationAction("queue");
       return;
     }
 
     setQueueRequested(true);
-    const queuedResult = confirmedOverride === true
-      ? { ...result, manualAvailabilityOverrideConfirmed: true }
-      : result;
 
     try {
-      const maybePromise = onQueue(queuedResult);
+      const maybePromise = onQueue(result);
       if (
         maybePromise &&
         typeof (maybePromise as Promise<void>).then === "function"
@@ -269,26 +245,17 @@ function SearchResultRow({
     } catch {
       setQueueRequested(false);
     }
-  }, [movieAvailabilityBlocked, onQueue, queueDisabled, result]);
+  }, [onQueue, queueDisabled, result]);
 
-  const handleQueueAdditionalClick = React.useCallback((
-    confirmedOverride: boolean | React.MouseEvent<HTMLButtonElement> = false,
-  ) => {
+  const handleQueueAdditionalClick = React.useCallback(() => {
     if (additionalQueueDisabled || !onQueueAdditional) {
-      return;
-    }
-    if (movieAvailabilityBlocked && confirmedOverride !== true) {
-      setAvailabilityConfirmationAction("additional");
       return;
     }
 
     setAdditionalQueueRequested(true);
-    const queuedResult = confirmedOverride === true
-      ? { ...result, manualAvailabilityOverrideConfirmed: true }
-      : result;
 
     try {
-      const maybePromise = onQueueAdditional(queuedResult);
+      const maybePromise = onQueueAdditional(result);
       if (
         maybePromise &&
         typeof (maybePromise as Promise<void>).then === "function"
@@ -300,26 +267,8 @@ function SearchResultRow({
     } catch {
       setAdditionalQueueRequested(false);
     }
-  }, [additionalQueueDisabled, movieAvailabilityBlocked, onQueueAdditional, result]);
+  }, [additionalQueueDisabled, onQueueAdditional, result]);
 
-  const availabilityConfirmation = (
-    <ConfirmDialog
-      open={availabilityConfirmationAction !== null}
-      title={t("nzb.movieAvailabilityConfirmTitle")}
-      description={t("nzb.movieAvailabilityConfirmDescription", {
-        reason: movieAvailabilityReason,
-      })}
-      confirmLabel={t("nzb.movieAvailabilityConfirm")}
-      cancelLabel={t("nzb.movieAvailabilityCancel")}
-      onConfirm={() => {
-        const action = availabilityConfirmationAction;
-        setAvailabilityConfirmationAction(null);
-        if (action === "queue") handleQueueClick(true);
-        if (action === "additional") handleQueueAdditionalClick(true);
-      }}
-      onCancel={() => setAvailabilityConfirmationAction(null)}
-    />
-  );
 
   if (presentation === "selected-title") {
     const scoreClassName = scoreToneClassName(decision?.releaseScore);
@@ -381,13 +330,7 @@ function SearchResultRow({
               ))}
             </div>
           ) : null}
-          {movieAvailabilityBlocked ? (
-            <p className="mt-2 text-[11px] text-(--scry-warning-text)">
-              {t("nzb.movieAvailabilityWarning", {
-                reason: movieAvailabilityReason,
-              })}
-            </p>
-          ) : null}
+          <MovieAvailabilityBadge result={result} className="mt-2" />
           {queueUnavailableReason ? (
             <p
               id={queueReasonId}
@@ -491,7 +434,6 @@ function SearchResultRow({
         </div>
       </div>
       {expanded && hasLog ? <ScoringLogPanel decision={decision} /> : null}
-      {availabilityConfirmation}
       </div>
     );
   }
@@ -583,13 +525,7 @@ function SearchResultRow({
               ))}
             </div>
           ) : null}
-          {movieAvailabilityBlocked ? (
-            <p className="text-xs text-(--scry-warning-text)">
-              {t("nzb.movieAvailabilityWarning", {
-                reason: movieAvailabilityReason,
-              })}
-            </p>
-          ) : null}
+          <MovieAvailabilityBadge result={result} className="self-start" />
           {queueUnavailableReason ? (
             <p
               id={queueReasonId}
@@ -660,7 +596,6 @@ function SearchResultRow({
             ) : null}
           </div>
         </div>
-        {availabilityConfirmation}
       </div>
     );
   }
@@ -716,13 +651,7 @@ function SearchResultRow({
                 ))}
               </div>
             ) : null}
-            {movieAvailabilityBlocked ? (
-              <p className="mt-1 text-xs text-(--scry-warning-text)">
-                {t("nzb.movieAvailabilityWarning", {
-                  reason: movieAvailabilityReason,
-                })}
-              </p>
-            ) : null}
+            <MovieAvailabilityBadge result={result} className="mt-1" />
             {queueUnavailableReason ? (
               <p
                 id={queueReasonId}
@@ -831,7 +760,6 @@ function SearchResultRow({
           </td>
         </tr>
       ) : null}
-      {availabilityConfirmation}
     </>
   );
 }

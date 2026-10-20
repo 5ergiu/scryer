@@ -91,7 +91,7 @@ fixedbitset = "0.5"
 # SIMD-accelerated CRC used as the streaming move-corruption check during
 # location-operation copies. `ffi`/`panic-handler` (default) are for the crate's
 # C shared library and are deliberately off.
-crc-fast = { version = "1.10", default-features = false, features = ["std"] }
+crc-turbo = { version = "1.11", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "fat"
@@ -173,7 +173,7 @@ opt-level = 3
 [profile.release-lean.package.brotli-decompressor]
 opt-level = 3
 
-[profile.release-lean.package.crc-fast]
+[profile.release-lean.package.crc-turbo]
 opt-level = 3
 
 [profile.release-lean.package.fast_image_resize]
@@ -258,7 +258,7 @@ opt-level = 3
 [profile.rc.package.brotli-decompressor]
 opt-level = 3
 
-[profile.rc.package.crc-fast]
+[profile.rc.package.crc-turbo]
 opt-level = 3
 
 [profile.rc.package.fast_image_resize]

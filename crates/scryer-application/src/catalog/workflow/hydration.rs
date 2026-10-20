@@ -977,9 +977,17 @@ impl AppUseCase {
                         .iter()
                         .map(|(_, movie_ref)| movie_ref.clone())
                         .collect::<Vec<_>>();
+                    let library_ids = movie_targets
+                        .iter()
+                        .map(|(target, _)| target.title.library_id.as_str())
+                        .collect::<Vec<_>>();
                     let movie_result = await_cancellable(
                         cancel_token,
-                        self.get_movie_titles_for_current_release_market(&refs, &language),
+                        self.get_movie_titles_for_library_release_markets(
+                            &refs,
+                            &library_ids,
+                            &language,
+                        ),
                     )
                     .await;
                     let Some(movie_result) = movie_result else {
@@ -1162,8 +1170,9 @@ impl AppUseCase {
                         AppError::Repository("no movie external id found".to_string())
                     })?;
                 let result = self
-                    .get_movie_titles_for_current_release_market(
+                    .get_movie_titles_for_library_release_markets(
                         std::slice::from_ref(&movie_ref),
+                        &[target.title.library_id.as_str()],
                         language,
                     )
                     .await?;
@@ -1542,7 +1551,10 @@ impl AppUseCase {
                 if updated.facet == MediaFacet::Movie
                     && let Some(dates) = updated.movie_release_dates.as_ref()
                     && !dates.market.eq_ignore_ascii_case(
-                        &self.acquisition_settings().await?.movie_release_market,
+                        &self
+                            .movie_availability_settings_for_library(&updated.library_id)
+                            .await?
+                            .release_market,
                     )
                 {
                     self.services.catalog.titles
@@ -2228,6 +2240,7 @@ mod numbering_bridge_replacement_tests {
                             theatrical_dates: vec!["2026-02-01".into()],
                             digital_dates: vec!["2026-11-01".into()],
                             physical_dates: vec!["2026-11-15".into()],
+                            ..Default::default()
                         }),
                         ..Default::default()
                     },

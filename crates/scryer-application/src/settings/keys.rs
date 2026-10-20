@@ -182,6 +182,12 @@ pub const ANIME_MONITOR_SPECIALS_KEY: &str = "anime.monitor_specials";
 pub const ANIME_INTER_SEASON_MOVIES_KEY: &str = "anime.inter_season_movies";
 pub const ANIME_MONITOR_FILLER_MOVIES_KEY: &str = "anime.monitor_filler_movies";
 
+// Movie availability gate, read from the Movie facet (`scope_id = "movie"`)
+// and overridable per library (`scope_id = <library id>`).
+pub const MOVIE_DEFAULT_AVAILABILITY_KEY: &str = "movie.default_availability";
+pub const MOVIE_RELEASE_MARKET_KEY: &str = "movie.release_market";
+pub const MOVIE_AVAILABILITY_DELAY_DAYS_KEY: &str = "movie.availability_delay_days";
+
 pub const NFO_WRITE_ON_IMPORT_MOVIE_KEY: &str = "nfo.write_on_import.movie";
 pub const NFO_WRITE_ON_IMPORT_SERIES_KEY: &str = "nfo.write_on_import.series";
 pub const NFO_WRITE_ON_IMPORT_ANIME_KEY: &str = "nfo.write_on_import.anime";

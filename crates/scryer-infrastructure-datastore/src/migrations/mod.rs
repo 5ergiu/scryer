@@ -26,15 +26,21 @@ pub mod known_bad;
 #[cfg(test)]
 mod legacy_monitor_snapshot_upgrade_tests;
 #[cfg(test)]
+mod lifecycle_claims_one_operator_keep_upgrade_tests;
+#[cfg(test)]
 mod list_search_mode_upgrade_tests;
 #[cfg(test)]
 #[path = "migration_progress_tests.rs"]
 mod migration_progress_tests;
+#[cfg(test)]
+mod movie_availability_facet_settings_upgrade_tests;
 pub mod notification_targets;
 pub mod post_0_16_6_prerelease;
 pub mod post_processing_output;
 pub mod release_url_scrub;
 pub mod repair_root_title_folders;
+#[cfg(test)]
+mod request_rules_enable_only_upgrade_tests;
 pub mod rule_set_runtime_wrapper;
 pub mod synthetic_root_ids;
 #[cfg(test)]

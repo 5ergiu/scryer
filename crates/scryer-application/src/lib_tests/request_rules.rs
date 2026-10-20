@@ -1190,6 +1190,7 @@ async fn a_disabled_denial_leaves_the_permission_approval_credited_to_the_permis
     let request_id = submit_as(&harness, &requester, &library_id, 9962).await;
 
     let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].id, request_id);
     assert_eq!(requests[0].status, MediaRequestStatus::Approved);
     assert_eq!(
         requests[0].decided_by_rule_set_ids,

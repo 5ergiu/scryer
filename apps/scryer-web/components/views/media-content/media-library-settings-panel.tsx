@@ -2,6 +2,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { useBeforeUnload, useBlocker } from "react-router";
 import {
+  CalendarClock,
   FileText,
   Folder,
   FolderOpen,
@@ -62,7 +63,7 @@ import type {
   RootFolderOption,
   ScoringPersonaId,
 } from "@/lib/types";
-import type { ImportMode } from "@/lib/types/settings";
+import { MOVIE_AVAILABILITY_VALUES, type ImportMode } from "@/lib/types/settings";
 import type {
   DownloadClientRoutingSettings,
   DownloadClientRoutingSettingsByClient,
@@ -244,6 +245,16 @@ function booleanOverrideFromSelectValue(value: string): boolean | null {
   return value === BOOLEAN_TRUE_VALUE;
 }
 
+/** Whole days typed into an override field; blank or unreadable inherits. */
+function parseDelayDays(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function fillerPolicyLabelKey(value: string | null | undefined): string {
   return value === "SKIP_FILLER"
     ? "settings.fillerPolicySkipFiller"
@@ -325,6 +336,10 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   const [draftPlexmatchWriteOnImport, setDraftPlexmatchWriteOnImport] = React.useState(INHERIT_VALUE);
   const [draftImportMode, setDraftImportMode] = React.useState(INHERIT_VALUE);
   const [draftSetPermissionsLinux, setDraftSetPermissionsLinux] = React.useState(INHERIT_VALUE);
+  const [draftMovieAvailability, setDraftMovieAvailability] = React.useState(INHERIT_VALUE);
+  const [draftMovieReleaseMarket, setDraftMovieReleaseMarket] = React.useState("");
+  const [draftMovieAvailabilityDelayDays, setDraftMovieAvailabilityDelayDays] =
+    React.useState("");
   const [draftFileChmod, setDraftFileChmod] = React.useState("");
   const [draftFolderChmod, setDraftFolderChmod] = React.useState("");
   const [draftChownGroup, setDraftChownGroup] = React.useState("");
@@ -375,6 +390,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   }, [canCreateLibrary, libraries, mode]);
   const currentFacet = activeLibrary?.facet ?? facet;
   const isAnimeFacet = currentFacet === "ANIME";
+  const isMovieFacet = currentFacet === "MOVIE";
   const isEpisodicFacet = currentFacet === "SERIES" || currentFacet === "ANIME";
   const showPlexmatch = currentFacet === "SERIES" || currentFacet === "ANIME";
   const savedDownloadClientRoutingEntries =
@@ -423,6 +439,13 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod(settings?.fileChmodOverride ?? "");
       setDraftFolderChmod(settings?.folderChmodOverride ?? "");
       setDraftChownGroup(settings?.chownGroupOverride ?? "");
+      setDraftMovieAvailability(settings?.defaultMovieAvailabilityOverride ?? INHERIT_VALUE);
+      setDraftMovieReleaseMarket(settings?.movieReleaseMarketOverride ?? "");
+      setDraftMovieAvailabilityDelayDays(
+        settings?.movieAvailabilityDelayDaysOverride == null
+          ? ""
+          : String(settings.movieAvailabilityDelayDaysOverride),
+      );
     },
     [],
   );
@@ -471,6 +494,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod("");
       setDraftFolderChmod("");
       setDraftChownGroup("");
+      setDraftMovieAvailability(INHERIT_VALUE);
+      setDraftMovieReleaseMarket("");
+      setDraftMovieAvailabilityDelayDays("");
       setDraftDownloadClientRoutingMode("inherit");
       setDraftDownloadClientRouting({});
       setDraftDownloadClientRoutingOrder([]);
@@ -682,6 +708,17 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
         folderChmod: draftFolderChmod.trim() === "" ? null : draftFolderChmod.trim(),
         chownGroup: draftChownGroup.trim() === "" ? null : draftChownGroup.trim(),
         indexerRouting: savedSettings?.indexerRoutingOverride ?? null,
+        defaultMovieAvailability:
+          isMovieFacet && draftMovieAvailability !== INHERIT_VALUE
+            ? draftMovieAvailability
+            : null,
+        movieReleaseMarket:
+          isMovieFacet && draftMovieReleaseMarket.trim() !== ""
+            ? draftMovieReleaseMarket.trim().toUpperCase()
+            : null,
+        movieAvailabilityDelayDays: isMovieFacet
+          ? parseDelayDays(draftMovieAvailabilityDelayDays)
+          : null,
       };
       if (canManageDownloadClientRouting) {
         draft.downloadClientRouting = draftDownloadClientRoutingEntries;
@@ -693,6 +730,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       draftDownloadClientRoutingEntries,
       draftFillerPolicy,
       draftMetadataLanguage,
+      draftMovieAvailability,
+      draftMovieAvailabilityDelayDays,
+      draftMovieReleaseMarket,
       draftSearchLanguages,
       draftChownGroup,
       draftFileChmod,
@@ -712,6 +752,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       draftUseSeasonFolders,
       isAnimeFacet,
       isEpisodicFacet,
+      isMovieFacet,
       savedSettings,
       showPlexmatch,
     ],
@@ -742,6 +783,11 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
         settingsDraft.fileChmod !== savedSettings.fileChmodOverride ||
         settingsDraft.folderChmod !== savedSettings.folderChmodOverride ||
         settingsDraft.chownGroup !== savedSettings.chownGroupOverride ||
+        settingsDraft.defaultMovieAvailability !==
+          (savedSettings.defaultMovieAvailabilityOverride ?? null) ||
+        settingsDraft.movieReleaseMarket !== (savedSettings.movieReleaseMarketOverride ?? null) ||
+        settingsDraft.movieAvailabilityDelayDays !==
+          (savedSettings.movieAvailabilityDelayDaysOverride ?? null) ||
         (canManageDownloadClientRouting &&
           ((draftDownloadClientRoutingMode === "custom") !==
             Boolean(savedDownloadClientRoutingEntries) ||
@@ -824,6 +870,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod("");
       setDraftFolderChmod("");
       setDraftChownGroup("");
+      setDraftMovieAvailability(INHERIT_VALUE);
+      setDraftMovieReleaseMarket("");
+      setDraftMovieAvailabilityDelayDays("");
       setDraftDownloadClientRoutingMode("inherit");
       setDraftDownloadClientRouting({});
       setDraftDownloadClientRoutingOrder([]);
@@ -1591,6 +1640,94 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
                 </p>
               </div>
               </LibrarySettingsSection>
+
+              {isMovieFacet ? (
+                <LibrarySettingsSection
+                  icon={CalendarClock}
+                  title={t("settings.movieAvailability")}
+                  description={t("settings.libraryMovieAvailabilityDescription")}
+                >
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-default-availability">
+                        {t("settings.movieDefaultAvailability")}
+                      </Label>
+                      <Select
+                        value={draftMovieAvailability}
+                        onValueChange={setDraftMovieAvailability}
+                        disabled={settingsBusy}
+                      >
+                        <SelectTrigger id="library-movie-default-availability">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={INHERIT_VALUE}>
+                            {t("settings.libraryInheritFacet")}
+                          </SelectItem>
+                          {MOVIE_AVAILABILITY_VALUES.map((value) => (
+                            <SelectItem key={value} value={value}>
+                              {t(`settings.minAvailability.${value}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {savedSettings?.defaultMovieAvailability ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: t(
+                              `settings.minAvailability.${savedSettings.defaultMovieAvailability}`,
+                            ),
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-release-market">
+                        {t("settings.movieReleaseMarket")}
+                      </Label>
+                      <Input
+                        id="library-movie-release-market"
+                        value={draftMovieReleaseMarket}
+                        maxLength={2}
+                        placeholder={t("settings.libraryInheritFacet")}
+                        disabled={settingsBusy}
+                        onChange={(event) =>
+                          setDraftMovieReleaseMarket(event.target.value.toUpperCase())
+                        }
+                      />
+                      {savedSettings?.movieReleaseMarket ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: savedSettings.movieReleaseMarket,
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-availability-delay-days">
+                        {t("settings.movieAvailabilityDelay")}
+                      </Label>
+                      <Input
+                        id="library-movie-availability-delay-days"
+                        type="number"
+                        value={draftMovieAvailabilityDelayDays}
+                        placeholder={t("settings.libraryInheritFacet")}
+                        disabled={settingsBusy}
+                        onChange={(event) =>
+                          setDraftMovieAvailabilityDelayDays(event.target.value)
+                        }
+                      />
+                      {savedSettings?.movieAvailabilityDelayDays != null ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: String(savedSettings.movieAvailabilityDelayDays),
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                  </div>
+                </LibrarySettingsSection>
+              ) : null}
 
               <LibrarySettingsSection
                 icon={ImportIcon}

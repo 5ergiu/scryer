@@ -377,6 +377,7 @@ async fn set_folder_template(ctx: &TestContext, facet: MediaFacet, template: &st
                 file_chmod: None,
                 folder_chmod: None,
                 chown_group: None,
+                movie_availability: Default::default(),
             },
         )
         .await

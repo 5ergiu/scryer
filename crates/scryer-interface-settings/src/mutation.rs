@@ -91,6 +91,7 @@ fn from_subtitle_settings(
 
 fn from_acquisition_settings(
     settings: scryer_application::AcquisitionSettings,
+    movie_availability: scryer_application::MovieAvailabilitySettings,
 ) -> AcquisitionSettingsPayload {
     AcquisitionSettingsPayload {
         enabled: settings.enabled,
@@ -103,9 +104,10 @@ fn from_acquisition_settings(
         walk_interval_seconds: settings.walk_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,
-        default_movie_availability: settings.default_movie_availability,
-        movie_release_market: settings.movie_release_market,
-        movie_availability_delay_days: settings.movie_availability_delay_days,
+        // Deprecated: these report the Movie facet values they moved to.
+        default_movie_availability: movie_availability.default_availability,
+        movie_release_market: movie_availability.release_market,
+        movie_availability_delay_days: movie_availability.delay_days,
     }
 }
 
@@ -893,21 +895,18 @@ impl SettingsMutations {
                     long_tail_backfill_max_scopes_per_cycle: input
                         .long_tail_backfill_max_scopes_per_cycle,
                     long_tail_reconverge_days: input.long_tail_reconverge_days,
-                    default_movie_availability: input
-                        .default_movie_availability
-                        .unwrap_or(current.default_movie_availability),
-                    movie_release_market: input
-                        .movie_release_market
-                        .unwrap_or(current.movie_release_market),
-                    movie_availability_delay_days: input
-                        .movie_availability_delay_days
-                        .unwrap_or(current.movie_availability_delay_days),
                 },
             )
             .await
             .map_err(to_gql_error)?;
+        // The deprecated movie availability fields are ignored here; they are
+        // set on the Movie facet through updateMediaSettings.
+        let movie_availability = app
+            .get_movie_availability_facet_settings(&actor)
+            .await
+            .map_err(to_gql_error)?;
 
-        Ok(from_acquisition_settings(settings))
+        Ok(from_acquisition_settings(settings, movie_availability))
     }
 
     /// Saves general system settings after checking the system-settings permission.
@@ -1654,6 +1653,11 @@ impl SettingsMutations {
                 file_chmod: input.file_chmod,
                 folder_chmod: input.folder_chmod,
                 chown_group: input.chown_group,
+                movie_availability: scryer_application::MovieAvailabilityOverrides {
+                    default_availability: input.default_movie_availability,
+                    release_market: input.movie_release_market,
+                    delay_days: input.movie_availability_delay_days,
+                },
             },
         )
         .await

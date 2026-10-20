@@ -494,6 +494,20 @@ pub fn from_library_settings(settings: LibrarySettings) -> LibrarySettingsPayloa
                     .collect()
             },
         ),
+        default_movie_availability_override: settings
+            .movie_availability_override
+            .default_availability,
+        default_movie_availability: settings
+            .movie_availability
+            .as_ref()
+            .map(|movie| movie.default_availability.clone()),
+        movie_release_market_override: settings.movie_availability_override.release_market,
+        movie_release_market: settings
+            .movie_availability
+            .as_ref()
+            .map(|movie| movie.release_market.clone()),
+        movie_availability_delay_days_override: settings.movie_availability_override.delay_days,
+        movie_availability_delay_days: settings.movie_availability.map(|movie| movie.delay_days),
     }
 }
 
@@ -579,6 +593,15 @@ pub fn from_media_settings(
         file_chmod: settings.file_chmod,
         folder_chmod: settings.folder_chmod,
         chown_group: settings.chown_group,
+        default_movie_availability: settings
+            .movie_availability
+            .as_ref()
+            .map(|movie| movie.default_availability.clone()),
+        movie_release_market: settings
+            .movie_availability
+            .as_ref()
+            .map(|movie| movie.release_market.clone()),
+        movie_availability_delay_days: settings.movie_availability.map(|movie| movie.delay_days),
     }
 }
 
