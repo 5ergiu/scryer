@@ -55,8 +55,8 @@ pub(crate) fn analyze_inputs(inputs: AnalysisInputs<'_>) -> ReleaseParseAnalysis
     // series-ish facet: on movie and unknown targets `EP##` is far more often an
     // installment shorthand than an episode label. The rewrite is also held back
     // unless the canonical shape actually resolves to a standard episode, so a
-    // trailing-garbage label (`EP01V2`) is left exactly as the lexer produced it
-    // rather than reaching the title as `E01V2`.
+    // trailing-garbage label (`EP01oops`) is left exactly as the lexer produced it
+    // rather than reaching the title as `E01oops`.
     let mut rewrote_fused_label = false;
     if fused_episode_labels_enabled(inputs.target.facet_hint) {
         for token in &mut lexed.tokens {
@@ -3727,6 +3727,24 @@ fn parse_identity_at(
     if family != ParseFamily::Movie && is_audio_channel_layout_digit(tokens, index) {
         return None;
     }
+    // An episode-shaped revision inside an exact known title remains title text.
+    if split_episode_revision(&tokens.get(index)?.normalized).is_some()
+        && context.aliases.iter().any(|alias| {
+            !alias.tokens.is_empty()
+                && tokens
+                    .windows(alias.tokens.len())
+                    .enumerate()
+                    .any(|(start, window)| {
+                        (start..start + window.len()).contains(&index)
+                            && window
+                                .iter()
+                                .zip(&alias.tokens)
+                                .all(|(token, expected)| token.normalized == *expected)
+                    })
+        })
+    {
+        return None;
+    }
     match family {
         ParseFamily::Movie => None,
         ParseFamily::StandardEpisode => {
@@ -4790,7 +4808,14 @@ fn build_candidate(
         edition: (!is_remux)
             .then(|| state.metadata.edition.as_deref().map(canonical_edition))
             .flatten(),
-        anime_version: anime_version_from_identity(&state.identity),
+        anime_version: anime_version_from_identity(&state.identity).or_else(|| {
+            state
+                .identity_token_mask
+                .ones()
+                .next_back()
+                .and_then(|index| split_episode_revision(&tokens[index].normalized))
+                .map(|(_, version)| version)
+        }),
         episode,
         parser_version,
         scoring_model_version: SCORING_MODEL_VERSION,
@@ -6444,15 +6469,21 @@ fn defused_episode_label(token: &str) -> Option<String> {
     None
 }
 
+fn split_episode_revision(token: &str) -> Option<(&str, u32)> {
+    let (episode, version) = token.rsplit_once('V')?;
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let version = version.parse::<u32>().ok().filter(|version| *version > 0)?;
+    Some((episode, version))
+}
+
 fn parse_standard_episode_token(token: &str) -> Option<(Option<u32>, Vec<u32>)> {
-    let token = token
-        .rsplit_once('V')
-        .filter(|(_, version)| {
-            !version.is_empty()
-                && version.bytes().all(|byte| byte.is_ascii_digit())
-                && version.parse::<u32>().is_ok_and(|version| version > 0)
-        })
-        .map_or(token, |(episode, _)| episode);
+    let revision = split_episode_revision(token);
+    let token = revision.map_or(token, |(episode, _)| episode);
+    if revision.is_some() && is_resolution_dimension(token) {
+        return None;
+    }
     if token.starts_with('S') && token.contains('E') {
         let e_index = token.find('E')?;
         let season = token.get(1..e_index)?.parse::<u32>().ok();
@@ -6734,14 +6765,20 @@ fn parse_hyphenated_standard_episode_range_at(
         // season-sized pack that nothing downstream can place.
         return Some((season, episode_numbers, index));
     }
-    let range_end = parse_episode_component(next.normalized.as_str()).or_else(|| {
-        let (end_season, end_episodes) = parse_standard_episode_token(next.normalized.as_str())?;
-        let range_end = *end_episodes.first()?;
-        // Split episode ranges already limit their endpoint to three digits.
-        // Apply the same bound to the newly accepted repeated-standard form
-        // before materializing the inclusive range.
-        (end_season == season && end_episodes.len() == 1 && range_end <= 999).then_some(range_end)
-    })?;
+    let endpoint = split_episode_revision(&next.normalized)
+        .map_or(next.normalized.as_str(), |(episode, _)| episode);
+    let range_end = parse_episode_component(endpoint)
+        .filter(|end| endpoint == next.normalized || *end <= 999)
+        .or_else(|| {
+            let (end_season, end_episodes) =
+                parse_standard_episode_token(next.normalized.as_str())?;
+            let range_end = *end_episodes.first()?;
+            // Split episode ranges already limit their endpoint to three digits.
+            // Apply the same bound to the newly accepted repeated-standard form
+            // before materializing the inclusive range.
+            (end_season == season && end_episodes.len() == 1 && range_end <= 999)
+                .then_some(range_end)
+        })?;
     let range_start = *episode_numbers.first()?;
     if range_end < range_start {
         return Some((season, episode_numbers, index));

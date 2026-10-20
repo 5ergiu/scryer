@@ -350,10 +350,16 @@ pub(crate) fn enrich_candidate(
 
     if let Some(version) = candidate
         .projected
-        .episode
-        .as_ref()
-        .and_then(|episode| episode.raw.as_deref())
-        .and_then(extract_trailing_version)
+        .anime_version
+        .filter(|version| *version > 1)
+        .or_else(|| {
+            candidate
+                .projected
+                .episode
+                .as_ref()
+                .and_then(|episode| episode.raw.as_deref())
+                .and_then(extract_trailing_version)
+        })
     {
         enrichment.anime_version.get_or_insert(version);
         enrichment.is_proper_upload = true;
