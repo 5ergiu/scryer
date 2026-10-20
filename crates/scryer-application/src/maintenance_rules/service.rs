@@ -763,11 +763,7 @@ impl AppUseCase {
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
                 );
-                super::list_facts::apply_list_facts(
-                    &mut input.facts,
-                    lists_by_title.as_ref(),
-                    &title.id,
-                );
+                super::list_facts::apply_list_facts(&mut input, &lists_by_title, &title.id);
                 self.populate_maintenance_storage_facts_from_cache(
                     &mut input,
                     storage_root_id.as_deref(),

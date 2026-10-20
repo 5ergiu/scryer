@@ -229,6 +229,29 @@ export const MAINTENANCE_RULE_TEMPLATES: MaintenanceRuleTemplate[] = [
     regoSource:
       "package rules\nimport rego.v1\n\nmatch if input.facts.season_position_by_air_date > 2\n",
   },
+  {
+    id: "left-every-public-list",
+    name: "left_every_public_list",
+    titleKey: "settings.maintenanceTemplateLeftEveryListTitle",
+    descriptionKey: "settings.maintenanceTemplateLeftEveryListDescription",
+    actionKind: "UNMONITOR_SCOPE_KEEP_FILES",
+    graceDays: 0,
+    subjectFacets: ["movie", "show"],
+    regoSource:
+      "package rules\nimport rego.v1\n\nday_ns := (24 * 60 * 60) * 1000000000\n\nmatch if {\n\tinput.facts.lists_left_all\n\tinput.facts.lists_left_handled\n\tgone := time.parse_rfc3339_ns(input.evaluation_time) - time.parse_rfc3339_ns(input.facts.lists_left_at)\n\tgone > 30 * day_ns\n}\n",
+  },
+  {
+    id: "list-added-never-watched",
+    name: "list_added_never_watched",
+    titleKey: "settings.maintenanceTemplateListAddedUnwatchedTitle",
+    descriptionKey: "settings.maintenanceTemplateListAddedUnwatchedDescription",
+    actionKind: "ADD_TAGS",
+    tags: ["needs-review"],
+    graceDays: 0,
+    subjectFacets: ["movie", "show"],
+    regoSource:
+      "package rules\nimport rego.v1\n\nmatch if {\n\tinput.facts.lists_added_by_list\n\tinput.facts.lists_days_on_list > 90\n\tcount(input.facts.watched_by_user_ids) == 0\n}\n",
+  },
 ];
 
 const FACET_LABEL_KEYS: Record<MaintenanceTemplateFacet, string> = {

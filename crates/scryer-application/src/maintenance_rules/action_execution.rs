@@ -2067,7 +2067,7 @@ impl AppUseCase {
         let lists_by_title = self
             .maintenance_list_facts_or_unknown(std::slice::from_ref(&title))
             .await;
-        super::list_facts::apply_list_facts(&mut input.facts, lists_by_title.as_ref(), &title.id);
+        super::list_facts::apply_list_facts(&mut input, &lists_by_title, &title.id);
         // The capacity snapshot must be fresh for this lease. Baseline restore
         // below deliberately excludes storage facts, so a resumed deletion
         // cannot match against the capacity it observed before deleting.

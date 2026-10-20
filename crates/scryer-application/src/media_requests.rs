@@ -102,6 +102,8 @@ pub struct SubmitMediaRequestInput {
     /// Where the request came from. Only the list engine sets anything other
     /// than `Manual`; GraphQL submissions are always manual.
     pub origin: MediaRequestOrigin,
+    /// The item's rank on the list that submitted it, when the list ranks it.
+    pub list_rank: Option<i64>,
     pub admission: MediaRequestAdmission,
 }
 
@@ -394,7 +396,7 @@ impl AppUseCase {
             .evaluate_request_draft(
                 actor,
                 &library,
-                &request_draft_from_new_media_request(&request),
+                &request_draft_from_new_media_request(&request, input.list_rank),
                 &metadata_snapshot,
                 crate::request_rules::RequestEvaluationPurpose::Submit {
                     request_id: request_id.clone(),
@@ -1919,6 +1921,8 @@ pub(crate) fn request_draft_from_media_request(
         monitor_type: request.requested_monitor_type.clone(),
         monitor_selection: request.requested_monitor_selection.clone(),
         requested_lease_days: request.requested_lease_days,
+        origin: request.origin.clone(),
+        list_rank: None,
     }
 }
 
@@ -1928,6 +1932,7 @@ pub(crate) fn request_draft_from_media_request(
 /// for its decision trace.
 fn request_draft_from_new_media_request(
     request: &crate::ports::NewMediaRequest,
+    list_rank: Option<i64>,
 ) -> crate::request_rules::RequestDraft {
     crate::request_rules::RequestDraft {
         facet: request.facet.clone(),
@@ -1940,6 +1945,8 @@ fn request_draft_from_new_media_request(
         monitor_type: request.requested_monitor_type.clone(),
         monitor_selection: request.requested_monitor_selection.clone(),
         requested_lease_days: request.requested_lease_days,
+        origin: request.origin.clone(),
+        list_rank,
     }
 }
 

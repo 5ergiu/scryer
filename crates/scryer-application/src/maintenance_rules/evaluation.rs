@@ -1229,7 +1229,7 @@ impl AppUseCase {
                             people,
                             watch,
                             claims,
-                            lists_by_title.as_ref(),
+                            &lists_by_title,
                             series_movies_by_title
                                 .get(&title.id)
                                 .map(Vec::as_slice)
@@ -1585,7 +1585,7 @@ impl AppUseCase {
         people: MaintenanceTitlePeople<'_>,
         watch: MaintenanceTitleWatch<'_>,
         claims: MaintenanceTitleClaims<'_>,
-        lists: Option<&super::list_facts::ListFactsByTitle>,
+        lists: &super::list_facts::MaintenanceListFacts,
         series_movies: &[MaintenanceSeriesMovieDoc],
         libraries: &HashMap<String, MaintenanceLibraryRef>,
         excluded: &[MaintenanceRuleExclusion],
@@ -1701,7 +1701,7 @@ impl AppUseCase {
             series_movies,
             completed_retention_episode_ids.as_ref(),
         );
-        super::list_facts::apply_list_facts(&mut input.facts, lists, &title.id);
+        super::list_facts::apply_list_facts(&mut input, lists, &title.id);
         // An evaluation pass samples each configured root once. A deletion
         // checkpoint may restore the action's own monitoring/file facts below,
         // but it must never restore or overwrite the root capacity snapshot.

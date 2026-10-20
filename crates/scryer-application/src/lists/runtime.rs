@@ -410,6 +410,7 @@ impl ListActions for AppListActions<'_> {
                         .map(series_movie_parent_ids)
                         .unwrap_or_else(|| item.external_ids.clone()),
                     origin: MediaRequestOrigin::for_subscription(subscription),
+                    list_rank: item.item.rank.map(i64::from),
                     // Hold waits for review whatever the owner's grants and
                     // the request rules would allow.
                     admission: if hold {

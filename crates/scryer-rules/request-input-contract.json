@@ -152,6 +152,11 @@
           "field": "lease_days",
           "type": "number?",
           "descKey": "settings.refReqRequestLeaseDays"
+        },
+        {
+          "field": "list",
+          "type": "object?",
+          "descKey": "settings.refReqRequestList"
         }
       ]
     },
@@ -173,6 +178,52 @@
           "field": "tvdb",
           "type": "string?",
           "descKey": "settings.refReqExternalIdsTvdb"
+        }
+      ]
+    },
+    {
+      "titleKey": "settings.refReqSectionRequestList",
+      "path": "input.request.list",
+      "fields": [
+        {
+          "field": "subscription_id",
+          "type": "string",
+          "descKey": "settings.refReqRequestListSubscriptionId"
+        },
+        {
+          "field": "name",
+          "type": "string?",
+          "descKey": "settings.refReqRequestListName"
+        },
+        {
+          "field": "scope",
+          "type": "string",
+          "descKey": "settings.refReqRequestListScope"
+        },
+        {
+          "field": "mode",
+          "type": "string",
+          "descKey": "settings.refReqRequestListMode"
+        },
+        {
+          "field": "provider",
+          "type": "string",
+          "descKey": "settings.refReqRequestListProvider"
+        },
+        {
+          "field": "owner_is_requester",
+          "type": "bool",
+          "descKey": "settings.refReqRequestListOwnerIsRequester"
+        },
+        {
+          "field": "owner_list_policy",
+          "type": "string",
+          "descKey": "settings.refReqRequestListOwnerListPolicy"
+        },
+        {
+          "field": "rank",
+          "type": "number?",
+          "descKey": "settings.refReqRequestListRank"
         }
       ]
     },

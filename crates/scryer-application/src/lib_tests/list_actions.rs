@@ -368,8 +368,9 @@ async fn maintenance_reads_list_facts_for_a_batch_of_titles() {
 
     let facts = harness
         .app
-        .maintenance_list_facts_for_titles(&titles)
+        .maintenance_list_facts_or_unknown(&titles)
         .await
+        .lists
         .expect("list facts load");
 
     let alpha = facts.get("title-alpha").expect("listed title has facts");
@@ -383,6 +384,35 @@ async fn maintenance_reads_list_facts_for_a_batch_of_titles() {
         !facts.contains_key("title-beta"),
         "a title no list holds has no entry, which reads as known-empty"
     );
+}
+
+#[tokio::test]
+async fn maintenance_list_facts_name_the_public_list_a_request_came_from() {
+    let harness = bootstrap_media_request_app();
+    *harness.lists.subscriptions.lock().unwrap() = vec![subscription("public-list-one")];
+    let mut listed = crate::lists::rejection::tests::rejected_request(
+        "request-listed",
+        scryer_domain::MediaRequestOrigin::PublicList {
+            subscription_id: "public-list-one".to_string(),
+        },
+    );
+    listed.created_title_id = Some("title-alpha".to_string());
+    harness.media_requests.requests.lock().await.push(listed);
+    let titles = vec![
+        make_due_hydration_title("title-alpha", MediaFacet::Movie, 9058),
+        make_due_hydration_title("title-beta", MediaFacet::Movie, 9059),
+    ];
+
+    let loaded = harness.app.maintenance_list_facts_or_unknown(&titles).await;
+
+    let origins = loaded.origins.expect("request origins load");
+    assert_eq!(
+        origins["title-alpha"].list_name.as_deref(),
+        Some("Fixture list public-list-one"),
+        "a public-list origin is named even when no membership row holds the title"
+    );
+    assert!(!origins.contains_key("title-beta"));
+    assert!(loaded.lists.expect("list facts load").is_empty());
 }
 
 #[tokio::test]
