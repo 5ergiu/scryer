@@ -1189,14 +1189,12 @@ impl DatastoreAssembly {
     }
 
     /// Built on demand for the same reason as the maintenance stores: request
-    /// rules ship dark behind the experimental gate, so nothing constructs the
-    /// store eagerly (spec 0003 FR-013).
+    /// rules start with none enabled, so nothing constructs the store eagerly.
     pub fn request_rule_set_store(&self) -> Arc<RequestRuleSetStore> {
         Arc::new(RequestRuleSetStore::new(self.datastore()))
     }
 
-    /// Traces are written only when a rule set evaluates, which the gate keeps
-    /// off by default.
+    /// Traces are written only when an enabled rule set evaluates.
     pub fn request_rule_decision_store(&self) -> Arc<RequestRuleDecisionStore> {
         Arc::new(RequestRuleDecisionStore::new(self.datastore()))
     }

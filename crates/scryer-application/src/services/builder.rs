@@ -272,9 +272,8 @@ impl AppServicesBuilder {
         self
     }
 
-    /// Not a required service: request rules ship dark behind the experimental
-    /// gate, and an assembly that never configures the store simply has no
-    /// rules to read (spec 0003 FR-013).
+    /// Not a required service: an assembly that never configures the store
+    /// simply has no request rules to read.
     pub fn with_request_rule_set_store<T>(mut self, store: Arc<T>) -> Self
     where
         T: crate::ports::RequestRuleSetRepository + Send + Sync + 'static,
