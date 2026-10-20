@@ -1483,10 +1483,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
-name = "crc-fast"
-version = "1.10.0"
+name = "crc-turbo"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+checksum = "fe9845f8267cd17ae1edacec5cd2bc0f8b891d1946db64d929209170fcf7e9b8"
 dependencies = [
  "digest 0.10.7",
  "spin 0.10.1",
@@ -5585,7 +5585,7 @@ dependencies = [
  "chardetng",
  "chrono",
  "chrono-tz",
- "crc-fast",
+ "crc-turbo",
  "croner",
  "encoding_rs",
  "flate2",
@@ -6221,7 +6221,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
- "crc-fast",
+ "crc-turbo",
  "glob",
  "libc",
  "postcard",

@@ -144,16 +144,16 @@ impl crypto_v1_1::Host for ArchiveComponentCtx {
             // Unreachable through `catalog_algorithm`, which names only
             // catalog variants; trap rather than panic the host if it drifts.
             Err(crypto_host::CrcError::UnsupportedAlgorithm) => Err(wasmtime::Error::msg(
-                "archive crc algorithm has no crc-fast catalog entry",
+                "archive crc algorithm has no crc-turbo catalog entry",
             )),
         }
     }
 }
 
-/// The WIT `crc-algorithm` case for each `crc-fast` catalog variant of the
+/// The WIT `crc-algorithm` case for each `crc-turbo` catalog variant of the
 /// same name.
-const fn catalog_algorithm(algorithm: crypto_v1_1::CrcAlgorithm) -> crc_fast::CrcAlgorithm {
-    use crc_fast::CrcAlgorithm as Fast;
+const fn catalog_algorithm(algorithm: crypto_v1_1::CrcAlgorithm) -> crc_turbo::CrcAlgorithm {
+    use crc_turbo::CrcAlgorithm as Fast;
     use crypto_v1_1::CrcAlgorithm as Wit;
     match algorithm {
         Wit::Crc16Arc => Fast::Crc16Arc,
