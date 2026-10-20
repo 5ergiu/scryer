@@ -1419,6 +1419,37 @@ impl AppUseCase {
             .await
     }
 
+    /// Keep a title: place an operator keep on it, or return the one already
+    /// live, so a second click never stacks a second hold to release.
+    pub async fn create_operator_keep_claim(
+        &self,
+        actor: &User,
+        title_id: &str,
+    ) -> AppResult<LifecycleClaim> {
+        let title = self
+            .services
+            .catalog
+            .titles
+            .get_by_id_without_external_ids(title_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("title not found".into()))?;
+        self.require_library_permission(actor, &title.library_id, LibraryPermission::ManageTitles)
+            .await?;
+        let claims = &self.services.catalog.lifecycle_claims;
+        if let Some(existing) = claims
+            .list_for_title(title_id)
+            .await?
+            .into_iter()
+            .find(|claim| claim.producer == LifecycleClaimProducer::OperatorKeep && claim.is_live())
+        {
+            return Ok(existing);
+        }
+        let now = chrono::Utc::now();
+        let keep = operator_keep(title.id, title.library_id, &actor.id, now);
+        claims.create(&keep).await?;
+        self.reload_claim(&keep.id).await
+    }
+
     /// Push a live claim's window out to `expires_at`.
     ///
     /// The repository refuses this for a claim that is not live — an expired
@@ -1463,25 +1494,7 @@ impl AppUseCase {
     ) -> AppResult<LifecycleClaim> {
         let claim = self.require_manageable_claim(actor, claim_id).await?;
         let now = chrono::Utc::now();
-        let replacement = LifecycleClaim {
-            id: Id::new().0,
-            title_id: claim.title_id.clone(),
-            library_id: claim.library_id.clone(),
-            producer: LifecycleClaimProducer::OperatorKeep,
-            // No `producer_ref`: an operator pin has nothing upstream to release
-            // against, and it is what keeps two pins on one title from
-            // colliding on the live-claim unique index.
-            producer_ref: None,
-            kind: LifecycleClaimKind::Keep,
-            state: LifecycleClaimState::Active,
-            duration_days: None,
-            starts_at: Some(now),
-            expires_at: None,
-            created_by: Some(actor.id.clone()),
-            created_at: now,
-            updated_at: now,
-            released_reason: None,
-        };
+        let replacement = operator_keep(claim.title_id, claim.library_id, &actor.id, now);
         self.services
             .catalog
             .lifecycle_claims
@@ -1986,6 +1999,33 @@ fn new_request_lifecycle_claim(
         state,
         duration_days: lease_days,
         starts_at,
+        expires_at: None,
+        created_by: Some(created_by.to_string()),
+        created_at: now,
+        updated_at: now,
+        released_reason: None,
+    }
+}
+
+/// A live operator keep. No `producer_ref`: an operator keep has nothing
+/// upstream to release against, and it is what keeps two keeps on one title
+/// from colliding on the live-claim unique index.
+fn operator_keep(
+    title_id: String,
+    library_id: String,
+    created_by: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> LifecycleClaim {
+    LifecycleClaim {
+        id: Id::new().0,
+        title_id,
+        library_id,
+        producer: LifecycleClaimProducer::OperatorKeep,
+        producer_ref: None,
+        kind: LifecycleClaimKind::Keep,
+        state: LifecycleClaimState::Active,
+        duration_days: None,
+        starts_at: Some(now),
         expires_at: None,
         created_by: Some(created_by.to_string()),
         created_at: now,

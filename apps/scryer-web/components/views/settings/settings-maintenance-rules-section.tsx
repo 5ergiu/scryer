@@ -5,6 +5,7 @@ import { MaintenanceSubjectPicker } from "@/components/common/maintenance-subjec
 import {
   BookOpen,
   ChevronDown,
+  ChevronRight,
   Copy,
   Edit,
   Plus,
@@ -17,6 +18,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input, integerInputProps, sanitizeDigits } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -65,6 +71,7 @@ import {
   ruleStateOptionsFor,
 } from "@/lib/utils/maintenance-rule-sets";
 import { selectorId } from "@/lib/utils/dom-ids";
+import { cn } from "@/lib/utils";
 
 export type MaintenanceLibraryOption = { id: string; name: string };
 export type MaintenanceQualityProfileOption = { id: string; name: string };
@@ -721,6 +728,42 @@ function MaintenancePreviewPanel({
   );
 }
 
+/// Rule scope and storage root. Templates set the scope, so this starts
+/// collapsed, and opens by itself whenever either field holds a non-default
+/// value so a rule never hides what it is scoped to.
+function MaintenanceRuleAdvanced({
+  hasNonDefault,
+  children,
+}: {
+  hasNonDefault: boolean;
+  children: React.ReactNode;
+}) {
+  const t = useTranslate();
+  const [open, setOpen] = React.useState(hasNonDefault);
+  const [seenNonDefault, setSeenNonDefault] = React.useState(hasNonDefault);
+  if (hasNonDefault !== seenNonDefault) {
+    setSeenNonDefault(hasNonDefault);
+    if (hasNonDefault) setOpen(true);
+  }
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          id="settings-maintenance-rule-advanced-toggle"
+          type="button"
+          className="flex items-center gap-1.5 rounded-[8px] py-1 text-sm font-medium text-[var(--scry-muted)] transition-colors hover:text-[var(--scry-ink2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronRight className={cn("h-4 w-4 transition-transform", open && "rotate-90")} />
+          {t("settings.advancedConfig")}
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent id="settings-maintenance-rule-advanced" className="space-y-3 pt-3">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 export function SettingsMaintenanceRulesSection({
   isEditorOpen,
   editingRuleSetId,
@@ -981,21 +1024,45 @@ export function SettingsMaintenanceRulesSection({
                       </label>
                     </div>
 
-                    <SingleSelectField
-                      id="settings-maintenance-rule-scope"
-                      label={t("settings.maintenanceRuleScope")}
-                      value={ruleSetDraft.subjectKind}
-                      disabled={Boolean(editingRuleSetId)}
-                      onValueChange={(value) => setRuleSetDraft((prev) => ({
-                        ...prev,
-                        subjectKind: value as MaintenanceRuleSetDraft["subjectKind"],
-                      }))}
-                      options={[
-                        { value: "TITLE", label: t("label.title") },
-                        { value: "SEASON", label: t("settings.maintenanceScopeSeason") },
-                        { value: "EPISODE", label: t("settings.maintenanceScopeEpisode") },
-                      ]}
-                    />
+                    {!editingRuleSetId ? (
+                      <SingleSelectField
+                        id="settings-maintenance-rule-template"
+                        label={t("settings.maintenanceRuleTemplate")}
+                        placeholder={t("settings.maintenanceRuleTemplatePlaceholder")}
+                        value=""
+                        onValueChange={(id) => {
+                          const template = MAINTENANCE_RULE_TEMPLATES.find(
+                            (candidate) => candidate.id === id,
+                          );
+                          if (template) applyTemplate(template);
+                        }}
+                        options={MAINTENANCE_RULE_TEMPLATES.map((template) => ({
+                          value: template.id,
+                          label: t(template.titleKey),
+                        }))}
+                      />
+                    ) : null}
+
+                    <div>
+                      <Label className="mb-2 block">
+                        {t("settings.ruleRegoSource")}
+                      </Label>
+                      <LazyRegoEditor
+                        ruleFamily="maintenance"
+                        id="settings-maintenance-rule-rego-source"
+                        value={ruleSetDraft.regoSource}
+                        onChange={(value) =>
+                          setRuleSetDraft((prev) => ({
+                            ...prev,
+                            regoSource: value,
+                          }))
+                        }
+                        diagnostics={regoDiagnostics(ruleSetDraft.regoSource, validationResult)}
+                        minLines={12}
+                        maxLines={35}
+                      />
+                    </div>
+
                     {!actionStepDescriptorsLoaded ? (
                       <p
                         id="settings-maintenance-sequence-catalog-unavailable"
@@ -1039,66 +1106,6 @@ export function SettingsMaintenanceRulesSection({
                     </label>
 
                     <div>
-                      <SingleSelectField
-                        id="settings-maintenance-rule-storage-root"
-                        label={t("settings.maintenanceRuleStorageRoot")}
-                        placeholder={t("settings.maintenanceRuleStorageRootNone")}
-                        value={ruleSetDraft.storageRootId}
-                        onValueChange={(storageRootId) =>
-                          setRuleSetDraft((prev) => ({ ...prev, storageRootId }))
-                        }
-                        options={storageRoots.map((root) => ({
-                          value: root.id,
-                          label: `${root.libraryName} · ${root.path}`,
-                        }))}
-                      />
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {t("settings.maintenanceRuleStorageRootHelp")}
-                      </p>
-                      {ruleSetDraft.storageRootId ? (
-                        <div className="mt-1 space-y-1">
-                          <p
-                            id="settings-maintenance-rule-storage-root-retention"
-                            className="text-xs text-[var(--scry-warning-text)]"
-                          >
-                            {t("settings.maintenanceRuleStorageRootUnmonitorHelp")}
-                          </p>
-                          <Button
-                            id="settings-maintenance-rule-storage-root-clear"
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            onClick={() =>
-                              setRuleSetDraft((prev) => ({ ...prev, storageRootId: "" }))
-                            }
-                          >
-                            {t("settings.maintenanceRuleStorageRootClear")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    <div>
-                      <Label className="mb-2 block">
-                        {t("settings.ruleRegoSource")}
-                      </Label>
-                      <LazyRegoEditor
-                        ruleFamily="maintenance"
-                        id="settings-maintenance-rule-rego-source"
-                        value={ruleSetDraft.regoSource}
-                        onChange={(value) =>
-                          setRuleSetDraft((prev) => ({
-                            ...prev,
-                            regoSource: value,
-                          }))
-                        }
-                        diagnostics={regoDiagnostics(ruleSetDraft.regoSource, validationResult)}
-                        minLines={12}
-                        maxLines={35}
-                      />
-                    </div>
-
-                    <div>
                       <Label className="mb-2 block">
                         {t("settings.maintenanceRuleLibraries")}
                       </Label>
@@ -1139,6 +1146,69 @@ export function SettingsMaintenanceRulesSection({
                         ))}
                       </div>
                     </div>
+
+                    <MaintenanceRuleAdvanced
+                      key={editingRuleSetId ?? "new"}
+                      hasNonDefault={
+                        ruleSetDraft.subjectKind !== "TITLE" ||
+                        Boolean(ruleSetDraft.storageRootId)
+                      }
+                    >
+                      <SingleSelectField
+                        id="settings-maintenance-rule-scope"
+                        label={t("settings.maintenanceRuleScope")}
+                        value={ruleSetDraft.subjectKind}
+                        disabled={Boolean(editingRuleSetId)}
+                        onValueChange={(value) => setRuleSetDraft((prev) => ({
+                          ...prev,
+                          subjectKind: value as MaintenanceRuleSetDraft["subjectKind"],
+                        }))}
+                        options={[
+                          { value: "TITLE", label: t("label.title") },
+                          { value: "SEASON", label: t("settings.maintenanceScopeSeason") },
+                          { value: "EPISODE", label: t("settings.maintenanceScopeEpisode") },
+                        ]}
+                      />
+                      <div>
+                        <SingleSelectField
+                          id="settings-maintenance-rule-storage-root"
+                          label={t("settings.maintenanceRuleStorageRoot")}
+                          placeholder={t("settings.maintenanceRuleStorageRootNone")}
+                          value={ruleSetDraft.storageRootId}
+                          onValueChange={(storageRootId) =>
+                            setRuleSetDraft((prev) => ({ ...prev, storageRootId }))
+                          }
+                          options={storageRoots.map((root) => ({
+                            value: root.id,
+                            label: `${root.libraryName} · ${root.path}`,
+                          }))}
+                        />
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t("settings.maintenanceRuleStorageRootHelp")}
+                        </p>
+                        {ruleSetDraft.storageRootId ? (
+                          <div className="mt-1 space-y-1">
+                            <p
+                              id="settings-maintenance-rule-storage-root-retention"
+                              className="text-xs text-[var(--scry-warning-text)]"
+                            >
+                              {t("settings.maintenanceRuleStorageRootUnmonitorHelp")}
+                            </p>
+                            <Button
+                              id="settings-maintenance-rule-storage-root-clear"
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              onClick={() =>
+                                setRuleSetDraft((prev) => ({ ...prev, storageRootId: "" }))
+                              }
+                            >
+                              {t("settings.maintenanceRuleStorageRootClear")}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </MaintenanceRuleAdvanced>
 
                     {validationResult ? (
                       <div

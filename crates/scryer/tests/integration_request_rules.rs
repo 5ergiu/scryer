@@ -1236,6 +1236,46 @@ async fn administrators_extend_convert_and_release_a_claim_and_requesters_cannot
     );
 }
 
+#[tokio::test]
+async fn keeping_a_title_is_one_operator_keep_however_often_it_is_asked() {
+    let ctx = TestContext::new().await;
+    let requester = requester(&ctx, "keep-requester").await;
+    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, Some(30)).await;
+    let title_id = request["createdTitleId"].as_str().expect("title id");
+    let keep = format!(
+        "mutation($titleId: ID!) {{ createOperatorKeepClaim(titleId: $titleId) {{{CLAIM_FIELDS}}} }}"
+    );
+
+    let refused = gql_as(&ctx, &keep, json!({ "titleId": title_id }), &requester).await;
+    assert!(refused.get("errors").is_some(), "{refused}");
+
+    let first = gql(&ctx, &keep, json!({ "titleId": title_id })).await;
+    assert_no_errors(&first);
+    let kept = &first["data"]["createOperatorKeepClaim"];
+    assert_eq!(kept["producer"], "OPERATOR_KEEP");
+    assert_eq!(kept["kind"], "KEEP");
+    assert_eq!(kept["state"], "ACTIVE");
+
+    let second = gql(&ctx, &keep, json!({ "titleId": title_id })).await;
+    assert_no_errors(&second);
+    assert_eq!(second["data"]["createOperatorKeepClaim"]["id"], kept["id"]);
+
+    let claims = gql(
+        &ctx,
+        &format!("query($titleId: ID!) {{ titleClaims(titleId: $titleId) {{{CLAIM_FIELDS}}} }}"),
+        json!({ "titleId": title_id }),
+    )
+    .await;
+    assert_no_errors(&claims);
+    let operator_keeps = claims["data"]["titleClaims"]
+        .as_array()
+        .expect("claims")
+        .iter()
+        .filter(|claim| claim["producer"] == "OPERATOR_KEEP")
+        .count();
+    assert_eq!(operator_keeps, 1, "{claims}");
+}
+
 // ===========================================================================
 // 9. The decision browser
 // ===========================================================================

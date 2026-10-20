@@ -14762,6 +14762,10 @@ type MaintenanceCandidate {
 	"""
 	storageRootTotalSizeBytes: Int
 	"""
+	The live operator keep on the subject's title, or null when it is not kept.
+	"""
+	operatorKeepClaimId: ID
+	"""
 	Exact subject display label, falling back to its ID if unavailable.
 	"""
 	subjectLabel: String!
@@ -20343,6 +20347,16 @@ type MutationRoot {
 		Claim identity to convert.
 		"""
 		input: ConvertTitleClaimToPermanentInput!
+	): TitleClaim!
+	"""
+	Keep a title: place an operator keep on it, or return the live one it
+	already has. Requires title management on the title's own library.
+	"""
+	createOperatorKeepClaim(
+		"""
+		Title to keep.
+		"""
+		titleId: ID!
 	): TitleClaim!
 	"""
 	Withdraw a claim by hand. The reason is required and kept as history.

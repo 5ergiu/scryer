@@ -1685,6 +1685,11 @@ async fn administrator_claim_operations_require_manage_titles() {
             .release_title_claim(&harness.user, &claim_id, "no")
             .await
             .err(),
+        harness
+            .app
+            .create_operator_keep_claim(&harness.user, &title_id)
+            .await
+            .err(),
     ] {
         assert!(
             matches!(error, Some(AppError::Unauthorized(_))),
@@ -1771,6 +1776,79 @@ async fn an_administrator_can_extend_convert_and_release_a_claim() {
         .await
         .expect_err("a release reason is required");
     assert!(matches!(blank, AppError::Validation(_)));
+}
+
+#[tokio::test]
+async fn keeping_a_title_twice_returns_the_live_keep_instead_of_stacking_another() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let request_id = submit(&harness, &library_id, 9063, Some(30)).await;
+    harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &request_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("approval should succeed");
+    let title_id = harness.titles.store.lock().await[0].id.clone();
+
+    let kept = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("a title manager may keep a title");
+    assert_eq!(kept.title_id, title_id);
+    assert_eq!(kept.producer, LifecycleClaimProducer::OperatorKeep);
+    assert_eq!(kept.kind, LifecycleClaimKind::Keep);
+    assert_eq!(kept.state, LifecycleClaimState::Active);
+    assert_eq!(kept.producer_ref, None);
+    assert_eq!(
+        kept.created_by.as_deref(),
+        Some(harness.manager.id.as_str())
+    );
+
+    let again = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("keeping a kept title succeeds");
+    assert_eq!(again.id, kept.id, "a second keep returns the first");
+    let operator_keeps = |claims: Vec<scryer_domain::LifecycleClaim>| {
+        claims
+            .into_iter()
+            .filter(|claim| claim.producer == LifecycleClaimProducer::OperatorKeep)
+            .count()
+    };
+    assert_eq!(operator_keeps(harness.lifecycle_claims.all().await), 1);
+
+    // Releasing goes through the existing release path; keeping again after
+    // that is a fresh hold, and the released one stays as history.
+    harness
+        .app
+        .release_title_claim(&harness.manager, &kept.id, "no longer needed")
+        .await
+        .expect("release should succeed");
+    let renewed = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("keep after release");
+    assert_ne!(renewed.id, kept.id);
+    assert_eq!(renewed.state, LifecycleClaimState::Active);
+    assert_eq!(operator_keeps(harness.lifecycle_claims.all().await), 2);
+
+    let missing = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, "no-such-title")
+        .await
+        .expect_err("an unknown title cannot be kept");
+    assert!(matches!(missing, AppError::NotFound(_)), "{missing:?}");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
