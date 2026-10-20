@@ -37,6 +37,8 @@ pub mod post_0_16_6_prerelease;
 pub mod post_processing_output;
 pub mod release_url_scrub;
 pub mod repair_root_title_folders;
+#[cfg(test)]
+mod request_rules_enable_only_upgrade_tests;
 pub mod rule_set_runtime_wrapper;
 pub mod synthetic_root_ids;
 #[cfg(test)]
