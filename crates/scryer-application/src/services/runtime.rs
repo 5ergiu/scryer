@@ -1051,7 +1051,7 @@ pub struct AppRuntimeAcquisitionState {
     pub(crate) release_candidate_passwords:
         Arc<std::sync::Mutex<HashMap<String, ReleaseCandidatePasswordTicket>>>,
     pub(crate) release_candidate_listings: Arc<std::sync::Mutex<ReleaseCandidateListingTickets>>,
-    pub rss_seen_guids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    pub(crate) rss_seen_guids: Arc<tokio::sync::RwLock<crate::acquisition::rss::RssSeenGuids>>,
     pub rss_unknown_age_last_warned_at:
         Arc<tokio::sync::RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     pub tracked_download_handle: Option<tracked_downloads::TrackedDownloadHandle>,
@@ -2580,7 +2580,7 @@ impl AppRuntimeState {
                 release_candidate_listings: Arc::new(std::sync::Mutex::new(
                     ReleaseCandidateListingTickets::default(),
                 )),
-                rss_seen_guids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+                rss_seen_guids: Arc::default(),
                 rss_unknown_age_last_warned_at: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 tracked_download_handle: None,
                 tracked_download_snapshot: Arc::new(tokio::sync::RwLock::new(HashMap::new())),

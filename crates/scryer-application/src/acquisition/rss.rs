@@ -28,26 +28,87 @@ use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
-const RSS_SYNC_MAX_GUIDS: usize = 2000;
+/// How many GUIDs each indexer's seen set keeps between its own polls: five
+/// feed pages of the usual hundred items. A poll that returns more than this,
+/// such as a caught-up poll paging back to its marker, keeps all of them.
+const RSS_SEEN_GUIDS_PER_INDEXER: usize = 500;
 
-/// Bounds the seen-GUID set. A caught-up poll can return more releases than
-/// the cap, so this cycle's GUIDs are never evicted: dropping one would let the
-/// next poll, which reads back to the same marker, treat it as new again.
-fn cap_rss_seen_guids(seen_guids: &mut HashSet<String>, current_guids: &HashSet<String>) {
-    let limit = RSS_SYNC_MAX_GUIDS.max(current_guids.len());
-    if seen_guids.len() <= limit {
-        return;
+/// The process-local record of feed GUIDs already taken through matching, so
+/// an unchanged feed item is not matched again on a later poll.
+///
+/// Each indexer keeps its own bounded set, and a set is trimmed only when its
+/// indexer is polled. A cycle polls only the indexers that are due, so one
+/// shared cap evicted the GUIDs of every indexer not polled that cycle, and
+/// their unchanged items went back through matching on their next poll. Memory
+/// stays bounded by the per-indexer cap times the indexers polled since
+/// startup.
+#[derive(Debug, Default)]
+pub(crate) struct RssSeenGuids {
+    /// Advanced once per cycle; each GUID records the cycle that last saw it.
+    cycle: u64,
+    by_indexer: HashMap<String, HashMap<String, u64>>,
+}
+
+impl RssSeenGuids {
+    fn begin_cycle(&mut self) {
+        self.cycle += 1;
     }
-    let excess = seen_guids.len() - limit;
-    let to_remove: Vec<String> = seen_guids
-        .iter()
-        .filter(|guid| !current_guids.contains(*guid))
-        .take(excess)
-        .cloned()
-        .collect();
-    for key in to_remove {
-        seen_guids.remove(&key);
+
+    fn len(&self) -> usize {
+        self.by_indexer.values().map(HashMap::len).sum()
     }
+
+    /// Records `guid` as returned by `indexer` this cycle. True when no
+    /// indexer had returned it before, which is the old shared-set meaning: an
+    /// item two indexers both carry is matched once.
+    fn observe(&mut self, indexer: &str, guid: &str) -> bool {
+        let is_new = !self.by_indexer.values().any(|seen| seen.contains_key(guid));
+        let cycle = self.cycle;
+        self.by_indexer
+            .entry(indexer.to_string())
+            .or_default()
+            .insert(guid.to_string(), cycle);
+        is_new
+    }
+
+    /// Trims each indexer polled this cycle back to its bound, dropping its
+    /// least recently returned GUIDs first. This cycle's GUIDs are never
+    /// evicted: dropping one would let the next poll, which reads back to the
+    /// same marker, treat it as new again. Indexers not polled this cycle are
+    /// left alone.
+    fn cap_polled_indexers(&mut self) {
+        let cycle = self.cycle;
+        for seen in self.by_indexer.values_mut() {
+            let current = seen.values().filter(|&&last| last == cycle).count();
+            if current == 0 {
+                continue;
+            }
+            let limit = RSS_SEEN_GUIDS_PER_INDEXER.max(current);
+            if seen.len() <= limit {
+                continue;
+            }
+            let excess = seen.len() - limit;
+            let mut earlier: Vec<(u64, String)> = seen
+                .iter()
+                .filter(|(_, last)| **last != cycle)
+                .map(|(guid, last)| (*last, guid.clone()))
+                .collect();
+            earlier.sort_unstable();
+            for (_, guid) in earlier.into_iter().take(excess) {
+                seen.remove(&guid);
+            }
+        }
+    }
+}
+
+/// The key a feed item's GUID is remembered under: the indexer that returned
+/// it, or its source name when the result carries no indexer id.
+fn rss_seen_guid_indexer(result: &IndexerSearchResult) -> &str {
+    result
+        .indexer_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&result.source)
 }
 
 /// The shipped healthy-quota RSS cadence.
@@ -1520,9 +1581,9 @@ impl AppUseCase {
         // Dedup against previously seen GUIDs (in-memory, resets on restart)
         let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
         let initial_seen_count = seen_guids.len();
+        seen_guids.begin_cycle();
 
         let mut new_results: Vec<IndexerSearchResult> = Vec::new();
-        let mut current_guids: HashSet<String> = HashSet::new();
         for result in fresh_results {
             let release_identity = rss_release_identity(&result);
             let guid = result
@@ -1534,8 +1595,7 @@ impl AppUseCase {
 
             // Record every fresh GUID, then give an active unknown-age row one
             // more look even if it was already seen this process lifetime.
-            let is_new_guid = seen_guids.insert(guid.to_string());
-            current_guids.insert(guid.to_string());
+            let is_new_guid = seen_guids.observe(rss_seen_guid_indexer(&result), guid);
             if unknown_age_identities.contains(&release_identity)
                 || unknown_age_listing_prefixes.contains(&rss_listing_identity_prefix(&result))
                 || is_new_guid
@@ -1544,7 +1604,7 @@ impl AppUseCase {
             }
         }
 
-        cap_rss_seen_guids(&mut seen_guids, &current_guids);
+        seen_guids.cap_polled_indexers();
 
         // Release the write lock before doing any I/O
         drop(seen_guids);
@@ -3763,36 +3823,107 @@ mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, Title};
 
-    #[test]
-    fn capping_seen_guids_never_evicts_the_current_poll() {
-        let current: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 500)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..300)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn feed_guids(indexer: &str, page: usize, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| format!("{indexer}-page-{page}-guid-{index}"))
+            .collect()
+    }
 
-        cap_rss_seen_guids(&mut seen, &current);
-
-        assert!(current.iter().all(|guid| seen.contains(guid)));
-        assert_eq!(seen.len(), current.len());
+    /// Runs one cycle that polls each listed indexer, returning how many of
+    /// the observed GUIDs were new.
+    fn poll_cycle(seen: &mut RssSeenGuids, polls: &[(&str, Vec<String>)]) -> usize {
+        seen.begin_cycle();
+        let mut new_count = 0;
+        for (indexer, guids) in polls {
+            for guid in guids {
+                if seen.observe(indexer, guid) {
+                    new_count += 1;
+                }
+            }
+        }
+        seen.cap_polled_indexers();
+        new_count
     }
 
     #[test]
-    fn capping_seen_guids_evicts_only_earlier_polls_down_to_the_cap() {
-        let current: HashSet<String> = (0..10)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 50)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn capping_seen_guids_never_evicts_the_current_poll() {
+        let mut seen = RssSeenGuids::default();
+        poll_cycle(
+            &mut seen,
+            &[("fixture-indexer", feed_guids("fixture-indexer", 0, 300))],
+        );
+        let current = feed_guids("fixture-indexer", 1, RSS_SEEN_GUIDS_PER_INDEXER + 500);
 
-        cap_rss_seen_guids(&mut seen, &current);
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
 
-        assert_eq!(seen.len(), RSS_SYNC_MAX_GUIDS);
-        assert!(current.iter().all(|guid| seen.contains(guid)));
+        assert_eq!(seen.len(), current.len());
+        assert_eq!(
+            poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]),
+            0,
+            "a caught-up poll larger than the cap must not re-match its own items"
+        );
+    }
+
+    #[test]
+    fn capping_seen_guids_evicts_only_earlier_polls_oldest_first() {
+        let mut seen = RssSeenGuids::default();
+        let oldest = feed_guids("fixture-indexer", 0, RSS_SEEN_GUIDS_PER_INDEXER);
+        let older = feed_guids("fixture-indexer", 1, 50);
+        let current = feed_guids("fixture-indexer", 2, 10);
+        poll_cycle(&mut seen, &[("fixture-indexer", oldest.clone())]);
+        poll_cycle(&mut seen, &[("fixture-indexer", older.clone())]);
+
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
+
+        assert_eq!(seen.len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        let kept = |guids: &[String]| {
+            let by_indexer = &seen.by_indexer["fixture-indexer"];
+            guids
+                .iter()
+                .filter(|guid| by_indexer.contains_key(*guid))
+                .count()
+        };
+        assert_eq!(kept(&current), current.len());
+        assert_eq!(kept(&older), older.len());
+        assert_eq!(kept(&oldest), RSS_SEEN_GUIDS_PER_INDEXER - 60);
+    }
+
+    #[test]
+    fn capping_seen_guids_keeps_indexers_not_polled_this_cycle() {
+        // Forty indexers with a full hundred-item page each hold more live
+        // GUIDs than one shared cap ever allowed.
+        let indexers: Vec<String> = (0..40).map(|index| format!("indexer-{index}")).collect();
+        let first_pages: Vec<(&str, Vec<String>)> = indexers
+            .iter()
+            .map(|indexer| (indexer.as_str(), feed_guids(indexer, 0, 100)))
+            .collect();
+        let mut seen = RssSeenGuids::default();
+        assert_eq!(poll_cycle(&mut seen, &first_pages), 4000);
+
+        // Only the first half is due, and each of their feeds has rolled
+        // over completely, several times.
+        for page in 1..=10 {
+            let rolled: Vec<(&str, Vec<String>)> = indexers[..20]
+                .iter()
+                .map(|indexer| (indexer.as_str(), feed_guids(indexer, page, 100)))
+                .collect();
+            assert_eq!(poll_cycle(&mut seen, &rolled), 2000);
+        }
+
+        // The second half's feeds are unchanged, so nothing in them is new.
+        assert_eq!(poll_cycle(&mut seen, &first_pages[20..]), 0);
+        for indexer in &indexers[..20] {
+            assert_eq!(seen.by_indexer[indexer].len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        }
+        assert_eq!(seen.len(), 20 * RSS_SEEN_GUIDS_PER_INDEXER + 20 * 100);
+    }
+
+    #[test]
+    fn a_guid_another_indexer_returned_is_not_new() {
+        let mut seen = RssSeenGuids::default();
+        let shared = vec!["shared-fixture-guid".to_string()];
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-a", shared.clone())]), 1);
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-b", shared.clone())]), 0);
     }
 
     #[test]

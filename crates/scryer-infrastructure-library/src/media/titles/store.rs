@@ -1536,12 +1536,13 @@ impl TitleRepository for TitleStore {
         if value.is_empty() {
             return Ok(Vec::new());
         }
+        // Writers store the source lowercased and the id trimmed, so only the
+        // id's case is left to compare loosely, through its own index.
         let rows = SqlRuntime::fetch_all(
             self.datastore.read_exec(),
-            "SELECT DISTINCT title_id FROM title_external_ids \
-             WHERE LOWER(source) = LOWER({}) AND LOWER(TRIM(external_id)) = LOWER({})",
+            FIND_TITLES_BY_EXTERNAL_ID_SQL,
             &[
-                SqlArg::Text(source.to_string()),
+                SqlArg::Text(source.trim().to_ascii_lowercase()),
                 SqlArg::Text(value.to_string()),
             ],
         )
@@ -3353,6 +3354,12 @@ fn normalized_external_ids(external_ids: &[ExternalId]) -> Vec<NormalizedExterna
         .map(|(_, triple)| triple)
         .collect()
 }
+
+/// Titles in any library claiming an id, the id compared without case. The
+/// `LOWER(external_id)` spelling must match the expression of
+/// `idx_title_external_ids_source_value_nocase`, or the lookup scans the table.
+const FIND_TITLES_BY_EXTERNAL_ID_SQL: &str = "SELECT DISTINCT title_id FROM title_external_ids \
+     WHERE source = {} AND LOWER(external_id) = LOWER({})";
 
 /// `source:kind:id`, matching `ExternalId::key` and SMG's own rendering.
 fn external_id_key(source: &str, kind: &str, value: &str) -> String {
@@ -6415,6 +6422,122 @@ mod tests {
                 .await
                 .as_deref(),
             Some("c-fixture-legacy")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_id_lookup_ignores_id_case_across_libraries_through_its_index() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        scryer_infrastructure_datastore::migrations::replay_source_catalog_for_fresh_install(
+            &pool, None, true,
+        )
+        .await
+        .expect("fresh migrations should apply");
+        let datastore = StoreDatastore::sqlite(pool.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        let run = |sql: &'static str, args: Vec<SqlArg>| {
+            let datastore = datastore.clone();
+            async move {
+                SqlRuntime::execute_write(&datastore, "external_id_lookup_fixture", sql, args)
+                    .await
+                    .unwrap_or_else(|error| panic!("fixture statement failed: {error}\n{sql}"));
+            }
+        };
+        for library_id in ["library-first", "library-second"] {
+            run(
+                "INSERT INTO libraries (id, facet, name, slug, is_default, created_at, updated_at)
+                 VALUES ({}, 'movie', {}, {}, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                vec![
+                    SqlArg::Text(library_id.to_string()),
+                    SqlArg::Text(library_id.to_string()),
+                    SqlArg::Text(library_id.to_string()),
+                ],
+            )
+            .await;
+        }
+        // The same IMDb id stored in two cases in two libraries, and a TVDB
+        // id that shares its digits.
+        for (title_id, library_id, source, value) in [
+            ("fixture-upper", "library-first", "imdb", "TT0004242"),
+            ("fixture-lower", "library-second", "imdb", "tt0004242"),
+            ("fixture-other", "library-first", "tvdb", "0004242"),
+        ] {
+            run(
+                "INSERT INTO titles (id, name, name_normalized, facet, monitored, status, tags,
+                                     external_ids, created_at, library_id, root_folder_id)
+                 VALUES ({}, {}, {}, 'movie', 1, 'active', '[]', '[]', '2026-01-01T00:00:00Z',
+                         {}, 'root-fixture')",
+                vec![
+                    SqlArg::Text(title_id.to_string()),
+                    SqlArg::Text(title_id.to_string()),
+                    SqlArg::Text(title_id.to_string()),
+                    SqlArg::Text(library_id.to_string()),
+                ],
+            )
+            .await;
+            run(
+                "INSERT INTO title_external_ids
+                    (id, title_id, source, external_id, created_at, facet, library_id,
+                     external_kind)
+                 VALUES ({}, {}, {}, {}, '2026-01-01T00:00:00Z', 'movie', {}, 'movie')",
+                vec![
+                    SqlArg::Text(format!("ext-{title_id}")),
+                    SqlArg::Text(title_id.to_string()),
+                    SqlArg::Text(source.to_string()),
+                    SqlArg::Text(value.to_string()),
+                    SqlArg::Text(library_id.to_string()),
+                ],
+            )
+            .await;
+        }
+        let store = TitleStore::new(datastore);
+        let found = |source: &'static str, value: &'static str| {
+            let store = &store;
+            async move {
+                let mut ids = store
+                    .find_titles_by_external_id(source, value)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|title| title.id)
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids
+            }
+        };
+
+        let both = vec!["fixture-lower".to_string(), "fixture-upper".to_string()];
+        assert_eq!(found("imdb", "tt0004242").await, both);
+        assert_eq!(found("IMDb", " Tt0004242 ").await, both);
+        assert_eq!(found("tvdb", "0004242").await, vec!["fixture-other"]);
+        assert!(found("imdb", "0004242").await.is_empty());
+        assert!(found("imdb", "  ").await.is_empty());
+
+        // The store's own statement, with SQLite's placeholders bound in.
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {}",
+            FIND_TITLES_BY_EXTERNAL_ID_SQL.replace("{}", "?")
+        )))
+        .bind("imdb")
+        .bind("tt0004242")
+        .fetch_all(&pool)
+        .await
+        .expect("query plan should load");
+        let plan = plan.into_iter().map(|row| row.3).collect::<Vec<_>>();
+        assert!(
+            plan.iter().any(|detail| detail.contains(
+                "SEARCH title_external_ids USING INDEX idx_title_external_ids_source_value_nocase"
+            )),
+            "the external id lookup should search its index: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|detail| detail.contains("SCAN title_external_ids")),
+            "the external id lookup must not scan the table: {plan:?}"
         );
     }
 
