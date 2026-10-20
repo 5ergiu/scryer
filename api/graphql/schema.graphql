@@ -5875,6 +5875,10 @@ enum DownloadSourceKindValue {
 	Torrent supplied as a magnet URI.
 	"""
 	MAGNET_URI
+	"""
+	HTTP-family release: a provider page, direct file, or streaming manifest.
+	"""
+	HTTP_RESOURCE
 }
 
 """

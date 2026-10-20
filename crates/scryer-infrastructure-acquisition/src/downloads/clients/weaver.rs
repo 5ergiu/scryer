@@ -1280,6 +1280,7 @@ fn weaver_item_to_completed_download(job: &WeaverQueueItem) -> Option<CompletedD
     );
 
     Some(CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: "weaver".to_string(),
         client_id: String::new(),
         download_client_item_id: job.id.to_string(),
@@ -2251,6 +2252,7 @@ mod tests {
     fn test_add_request(download_id: &str) -> DownloadClientAddRequest {
         let facet = MediaFacet::Movie;
         DownloadClientAddRequest {
+            http: None,
             title: Title {
                 id: "title-1".to_string(),
                 name: "Test Title".to_string(),

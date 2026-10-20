@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "Download folder",
+  "settings.downloadClientHttpDownloadDirHelp": "Where finished files and their partials are written, as seen by Scryer. Scryer keeps this downloader's queue in a .scryer-http folder inside it.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "Concurrent downloads",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "How many releases download at once (1 to 8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "Connections per host",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "How many downloads may fetch from the same server at once (1 to 8).",
+  "settings.downloadClientHttpBandwidthLimit": "Bandwidth limit (KB/s)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "Shared by all downloads of this client. Empty or 0 means unlimited.",
   "settings.publicUrlTitle": "Public URL",
   "settings.publicUrlHelp": "The address people and services use to reach Scryer, such as https://scryer.example.com. Account linking and OAuth use a change immediately; passkeys use it after Scryer restarts.",
   "settings.publicUrlLabel": "Public URL",
@@ -5450,6 +5458,7 @@ const en: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}} grabs",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "Release detail",
   "indexerSearch.detail.publishDate": "Published",
   "indexerSearch.detail.releaseGroup": "Release group",

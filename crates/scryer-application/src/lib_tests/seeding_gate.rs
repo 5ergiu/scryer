@@ -309,6 +309,7 @@ async fn host_payload_fixture(
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: tracked.client_type.clone(),
             client_id: tracked.client_id.clone(),
             download_client_item_id: tracked.client_item.download_client_item_id.clone(),
@@ -1994,6 +1995,7 @@ async fn verified_manual_import_without_a_binding_still_removes_the_client_job()
     set_download_client_cleanup_routing(&app, &user, "movie", &config.id, true, true).await;
     let title = movie_title(&app, &user, "Foreign Manual Import").await;
     let completed = scryer_domain::CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: "weaver".into(),
         client_id: config.id.clone(),
         download_client_item_id: "foreign-nzb".into(),
@@ -2785,6 +2787,7 @@ async fn a_usenet_import_retained_by_policy_still_stops_being_tracked() {
 
 fn completed_for(client_id: &str, client_type: &str, item_id: &str) -> CompletedDownload {
     CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: client_type.to_string(),
         client_id: client_id.to_string(),
         download_client_item_id: item_id.to_string(),
@@ -3800,6 +3803,7 @@ async fn rtorrent_cleanup_retries_entry_removal_after_deleting_the_mapped_payloa
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "rtorrent".to_string(),
             client_id: config.id.clone(),
             download_client_item_id: "rtorrent-cleanup-1".to_string(),
@@ -3903,6 +3907,7 @@ async fn rtorrent_cleanup_refuses_to_delete_an_output_root() {
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "rtorrent".to_string(),
             client_id: config.id,
             download_client_item_id: "rtorrent-root-1".to_string(),
@@ -3969,6 +3974,7 @@ async fn rtorrent_cleanup_refuses_a_symlinked_payload_ancestor() {
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "rtorrent".to_string(),
             client_id: config.id,
             download_client_item_id: "rtorrent-symlink-1".to_string(),
@@ -4036,6 +4042,7 @@ async fn rtorrent_cleanup_allows_an_output_root_below_a_symlinked_ancestor() {
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "rtorrent".to_string(),
             client_id: config.id.clone(),
             download_client_item_id: "rtorrent-ancestor-1".to_string(),
@@ -4107,6 +4114,7 @@ async fn rtorrent_cleanup_deletes_a_direct_completed_file() {
         .lock()
         .await
         .push(scryer_domain::CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "rtorrent".to_string(),
             client_id: config.id.clone(),
             download_client_item_id: "rtorrent-file-1".to_string(),

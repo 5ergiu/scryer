@@ -428,7 +428,7 @@ impl AppUseCase {
     /// by the same route as the indexer's searches: an assignment that points at
     /// a missing or disabled proxy is an error, never a reason to send the
     /// request directly.
-    async fn assigned_indexer_proxy(
+    pub(crate) async fn assigned_indexer_proxy(
         &self,
         config: &IndexerConfig,
     ) -> AppResult<Option<scryer_domain::ProxyConfig>> {
@@ -1901,6 +1901,7 @@ fn protocol_families_from_capabilities(
         match protocol {
             scryer_domain::IndexerProtocolCapability::Usenet => families.push("usenet"),
             scryer_domain::IndexerProtocolCapability::Torrent => families.push("torrent"),
+            scryer_domain::IndexerProtocolCapability::Http => families.push("http"),
             scryer_domain::IndexerProtocolCapability::Mixed => {
                 families.push("usenet");
                 families.push("torrent");
@@ -1917,6 +1918,7 @@ fn download_client_supports_protocol_families(
     client_type: &str,
     plugin_provider: Option<&Arc<dyn DownloadClientPluginProvider>>,
     required_families: &[&str],
+    indexer_http: Option<&scryer_domain::IndexerHttpCapabilities>,
 ) -> bool {
     let accepted_inputs = crate::accepted_inputs_for_client(client_type, plugin_provider);
     let supports_usenet = accepted_inputs.iter().any(|input| {
@@ -1931,11 +1933,31 @@ fn download_client_supports_protocol_families(
             DownloadSourceKind::TorrentFile | DownloadSourceKind::MagnetUri
         )
     });
+    let supports_http = accepted_inputs
+        .iter()
+        .any(|input| matches!(input, DownloadSourceKind::HttpResource))
+        && download_client_supports_http_transports(
+            crate::http_capabilities_for_client(client_type, plugin_provider).as_ref(),
+            indexer_http,
+        );
     required_families.iter().all(|family| match *family {
         "usenet" => supports_usenet,
         "torrent" => supports_torrent,
+        "http" => supports_http,
         _ => false,
     })
+}
+
+/// Within the `http` family, a client is usable for an indexer only when
+/// some transport the indexer may emit is one the client declared. A client
+/// without an `http` capability block cannot take any HTTP release.
+fn download_client_supports_http_transports(
+    client_http: Option<&scryer_domain::DownloadClientHttpCapabilities>,
+    indexer_http: Option<&scryer_domain::IndexerHttpCapabilities>,
+) -> bool {
+    let default_indexer_http = scryer_domain::IndexerHttpCapabilities::default();
+    let indexer_http = indexer_http.unwrap_or(&default_indexer_http);
+    client_http.is_some_and(|client_http| client_http.accepts_indexer(indexer_http))
 }
 
 impl AppUseCase {
@@ -1947,6 +1969,18 @@ impl AppUseCase {
             .available()?
             .capabilities_for_provider(provider_type);
         protocol_families_from_capabilities(&capabilities)
+    }
+
+    fn indexer_http_capabilities(
+        &self,
+        provider_type: &str,
+    ) -> Option<scryer_domain::IndexerHttpCapabilities> {
+        self.services
+            .integrations
+            .plugin_provider
+            .available()?
+            .capabilities_for_provider(provider_type)
+            .http
     }
 
     fn indexer_download_client_provider_compatibility(
@@ -1961,6 +1995,7 @@ impl AppUseCase {
         } else {
             self.indexer_download_mapping_families(provider_type)
         };
+        let indexer_http = self.indexer_http_capabilities(provider_type);
         let compatible_client_ids = families
             .as_ref()
             .map(|required_families| {
@@ -1971,6 +2006,7 @@ impl AppUseCase {
                             &client.client_type,
                             plugin_provider,
                             required_families,
+                            indexer_http.as_ref(),
                         )
                     })
                     .map(|client| client.id.clone())
@@ -2016,10 +2052,12 @@ impl AppUseCase {
             .integrations
             .download_client_plugin_provider
             .available();
+        let indexer_http = self.indexer_http_capabilities(&indexer.provider_type);
         if !download_client_supports_protocol_families(
             &client.client_type,
             plugin_provider,
             &required_families,
+            indexer_http.as_ref(),
         ) {
             return Err(AppError::Validation(format!(
                 "download client '{}' does not support all protocol families required by indexer '{}'",

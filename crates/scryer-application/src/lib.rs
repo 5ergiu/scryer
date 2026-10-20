@@ -488,8 +488,8 @@ pub use acquisition::release_search::release_strategy_kind_for_label;
 pub use helpers::{
     HashDomain, MAX_USER_TAGS_PER_TITLE, MAX_USER_TITLE_TAG_LEN, RESERVED_TITLE_TAG_PREFIX,
     accepted_inputs_for_client, background_worker_priority, blake3_identity_hex,
-    is_reserved_title_tag, nice_thread, normalize_release_name, normalize_release_password,
-    normalize_user_title_tag, normalize_user_title_tags,
+    http_capabilities_for_client, is_reserved_title_tag, nice_thread, normalize_release_name,
+    normalize_release_password, normalize_user_title_tag, normalize_user_title_tags,
 };
 pub(crate) use helpers::{
     INHERIT_QUALITY_PROFILE_VALUE, NATIVE_DOWNLOAD_CLIENT_TYPES, await_cancellable,
@@ -543,7 +543,7 @@ pub use library_scan_progress::{
     LibraryScanTracker,
 };
 pub use location::model::VerificationDepth;
-pub use media::analyzer::NativeMediaAnalyzer;
+pub use media::analyzer::{NOT_A_VALID_VIDEO_REASON, NativeMediaAnalyzer};
 pub use notifications::dispatcher::start_notification_dispatcher;
 pub use null_repositories::NullIndexerErrorRepository;
 pub use null_repositories::{

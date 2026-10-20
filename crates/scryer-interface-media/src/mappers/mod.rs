@@ -343,6 +343,7 @@ mod tests {
     #[test]
     fn from_import_record_uses_release_folder_for_numeric_weaver_job_name() {
         let payload = CompletedDownload {
+            subtitle_paths: Vec::new(),
             client_type: "weaver".to_string(),
             client_id: String::new(),
             download_client_item_id: "10495".to_string(),

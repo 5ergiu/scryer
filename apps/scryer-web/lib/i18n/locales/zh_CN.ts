@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const zh_CN: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "下载文件夹",
+  "settings.downloadClientHttpDownloadDirHelp": "完成的文件及其部分文件的写入位置（Scryer 看到的路径）。此下载器的队列保存在其中的 .scryer-http 文件夹里。",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "同时下载数",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "同时下载的发布数量（1 到 8）。",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "每个主机的连接数",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "可同时从同一服务器获取的下载数量（1 到 8）。",
+  "settings.downloadClientHttpBandwidthLimit": "带宽限制（KB/s）",
+  "settings.downloadClientHttpBandwidthLimitHelp": "由此客户端的所有下载共享。留空或 0 表示不限制。",
   "settings.publicUrlTitle": "公共 URL",
   "settings.publicUrlHelp": "用户和服务访问 Scryer 所用的地址，例如 https://scryer.example.com。账户关联和 OAuth 会立即使用更改；通行密钥在 Scryer 重启后才使用。",
   "settings.publicUrlLabel": "公共 URL",
@@ -2407,6 +2415,7 @@ const zh_CN: LocaleDictionary = {
   "indexerSearch.row.grabs": "抓取 {{count}} 次",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "发布详情",
   "indexerSearch.detail.publishDate": "发布时间",
   "indexerSearch.detail.releaseGroup": "发布组",

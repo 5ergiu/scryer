@@ -1363,6 +1363,11 @@ pub struct DownloadClientAddRequest {
     /// title to route by, so the operator names the client instead and it wins
     /// over both. `None` everywhere else, which leaves routing untouched.
     pub pinned_download_client_id: Option<String>,
+    /// The complete HTTP-family source block for an `HttpResource` grab:
+    /// the resolved release, the host selection derived from the quality
+    /// profile and language settings, and the output policy. Built at
+    /// submission; `None` for every other protocol family.
+    pub http: Option<scryer_plugin_sdk::PluginHttpDownloadSource>,
 }
 
 impl std::fmt::Debug for DownloadClientAddRequest {
@@ -1451,6 +1456,7 @@ impl DownloadClientAddRequest {
             is_recent: None,
             season_pack: None,
             pinned_download_client_id: None,
+            http: None,
         }
     }
 }

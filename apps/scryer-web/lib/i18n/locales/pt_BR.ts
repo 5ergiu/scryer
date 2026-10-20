@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const pt_BR: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "Pasta de downloads",
+  "settings.downloadClientHttpDownloadDirHelp": "Onde os arquivos concluídos e suas partes são gravados, como o Scryer vê o caminho. O Scryer mantém a fila deste downloader em uma pasta .scryer-http dentro dela.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "Downloads simultâneos",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "Quantos lançamentos são baixados ao mesmo tempo (1 a 8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "Conexões por host",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "Quantos downloads podem buscar do mesmo servidor ao mesmo tempo (1 a 8).",
+  "settings.downloadClientHttpBandwidthLimit": "Limite de banda (KB/s)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "Compartilhado por todos os downloads deste cliente. Vazio ou 0 significa ilimitado.",
   "settings.publicUrlTitle": "URL pública",
   "settings.publicUrlHelp": "O endereço que pessoas e serviços usam para acessar o Scryer, como https://scryer.example.com. A vinculação de contas e o OAuth aplicam uma alteração imediatamente; as passkeys, depois que o Scryer reinicia.",
   "settings.publicUrlLabel": "URL pública",
@@ -2572,6 +2580,7 @@ const pt_BR: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}} capturas",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "Detalhes do lançamento",
   "indexerSearch.detail.publishDate": "Publicado",
   "indexerSearch.detail.releaseGroup": "Grupo de lançamento",

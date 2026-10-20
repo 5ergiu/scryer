@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const nl: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "Downloadmap",
+  "settings.downloadClientHttpDownloadDirHelp": "Waar voltooide bestanden en hun deelbestanden worden geschreven, zoals Scryer het pad ziet. Scryer bewaart de wachtrij van deze downloader in een map .scryer-http daarbinnen.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "Gelijktijdige downloads",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "Hoeveel releases tegelijk worden gedownload (1 tot 8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "Verbindingen per host",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "Hoeveel downloads tegelijk van dezelfde server mogen halen (1 tot 8).",
+  "settings.downloadClientHttpBandwidthLimit": "Bandbreedtelimiet (KB/s)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "Gedeeld door alle downloads van deze client. Leeg of 0 betekent onbeperkt.",
   "settings.publicUrlTitle": "Openbare URL",
   "settings.publicUrlHelp": "Het adres waarmee mensen en diensten Scryer bereiken, zoals https://scryer.example.com. Accountkoppeling en OAuth gebruiken een wijziging meteen; passkeys pas nadat Scryer opnieuw is gestart.",
   "settings.publicUrlLabel": "Openbare URL",

@@ -1560,6 +1560,7 @@ fn explicit_source_kind(
 ) -> Option<DownloadSourceKind> {
     match result.source_kind {
         Some(IndexerSourceKind::Usenet) => Some(DownloadSourceKind::NzbUrl),
+        Some(IndexerSourceKind::Http) => Some(DownloadSourceKind::HttpResource),
         Some(IndexerSourceKind::Torrent) => {
             if result
                 .magnet_url
@@ -1577,6 +1578,7 @@ fn explicit_source_kind(
         }
         Some(IndexerSourceKind::Generic) | None => match result.protocol {
             Some(IndexerProtocol::Usenet) => Some(DownloadSourceKind::NzbUrl),
+            Some(IndexerProtocol::Http) => Some(DownloadSourceKind::HttpResource),
             Some(IndexerProtocol::Torrent) => {
                 if result
                     .magnet_url
@@ -1712,6 +1714,7 @@ fn host_search_response(
                 auto_decision_code: None,
                 auto_decision_summary: None,
                 release_listing_json: None,
+                http: result.http,
             }
         })
         .collect();
@@ -2316,6 +2319,75 @@ impl IndexerClient for WasmIndexerClient {
         indexer.host.finish_indexer_error_capture(result.is_err());
         result
     }
+
+    async fn resolve_http_release(
+        &self,
+        release: &scryer_plugin_sdk::PluginHttpRelease,
+    ) -> AppResult<Option<scryer_plugin_sdk::PluginHttpRelease>> {
+        let Some(resolve) = release.resolve.as_ref() else {
+            return Ok(None);
+        };
+        let payload = serde_json::to_value(release).map_err(|error| {
+            AppError::Repository(format!(
+                "failed to encode http release for resolve: {error}"
+            ))
+        })?;
+        let indexer = &self.component;
+        let _operation_guard = indexer.invocation_lock.lock().await;
+        indexer.host.begin_indexer_error_capture(
+            self.indexer_error_capture(IndexerErrorOperation::IndexerAction),
+        );
+        let request = PluginActionRequest {
+            action: resolve.action.clone(),
+            payload,
+        };
+        let result = self
+            .invoke_component(
+                PluginIndexerCommand::Action(request),
+                "indexer_http_resolve",
+                None,
+            )
+            .await;
+        let result = match result {
+            Ok(PluginIndexerCommandResult::Action(result)) => decode_http_resolve_result(result),
+            Ok(_) => Err(AppError::Repository(
+                "Indexer component returned the wrong result for http resolve".into(),
+            )),
+            Err(error) => Err(error),
+        };
+        let result = indexer
+            .host
+            .captured_host_policy_error()
+            .map_or(result, Err);
+        indexer.host.finish_indexer_error_capture(result.is_err());
+        result
+    }
+}
+
+/// The `resolve` action's reply: a fresh `PluginHttpRelease`, or `None` when
+/// the plugin reports the action as unsupported. A malformed reply fails the
+/// grab rather than submitting a release the indexer did not describe.
+fn decode_http_resolve_result(
+    result: PluginResult<PluginActionResponse>,
+) -> AppResult<Option<scryer_plugin_sdk::PluginHttpRelease>> {
+    let payload = match result {
+        PluginResult::Ok(response) => response.payload,
+        PluginResult::Err(error) if error.code == PluginErrorCode::Unsupported => return Ok(None),
+        PluginResult::Err(PluginError {
+            code,
+            public_message,
+            ..
+        }) => {
+            return Err(AppError::Repository(format!(
+                "indexer http resolve: plugin error {code:?}: {public_message}"
+            )));
+        }
+    };
+    serde_json::from_value(payload).map(Some).map_err(|error| {
+        AppError::Repository(format!(
+            "indexer http resolve returned an invalid release: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -2327,6 +2399,36 @@ mod tests {
             payload: serde_json::json!({"origins": origins}),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn http_resolve_reply_decodes_a_release_and_treats_unsupported_as_none() {
+        let release = scryer_plugin_sdk::PluginHttpRelease {
+            provider: "mediathek".to_string(),
+            item_id: "item-1".to_string(),
+            page_url: "https://provider.invalid/watch/item-1".to_string(),
+            ..Default::default()
+        };
+        let decoded = decode_http_resolve_result(PluginResult::Ok(PluginActionResponse {
+            payload: serde_json::to_value(&release).unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(decoded, Some(release));
+
+        let unsupported = decode_http_resolve_result(PluginResult::Err(PluginError {
+            code: PluginErrorCode::Unsupported,
+            public_message: "no resolve".to_string(),
+            debug_message: None,
+            details: None,
+            retry_after_seconds: None,
+        }))
+        .unwrap();
+        assert_eq!(unsupported, None);
+
+        let malformed = decode_http_resolve_result(PluginResult::Ok(PluginActionResponse {
+            payload: serde_json::json!({"provider": "mediathek"}),
+        }));
+        assert!(malformed.is_err());
     }
 
     #[test]

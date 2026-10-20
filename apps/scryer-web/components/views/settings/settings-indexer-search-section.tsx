@@ -64,6 +64,7 @@ import {
   RAW_SEARCH_MAX_PAGE_SIZE,
   releaseAgeMs,
   releaseProtocol,
+  type ReleaseProtocol,
   summarizeIndexerHealth,
   totalReleaseBytes,
   type IndexerHealthTone,
@@ -188,6 +189,12 @@ function ReleaseBadge({ text, tone }: { text: string; tone: BadgeTone }) {
   );
 }
 
+const PROTOCOL_LABEL_KEYS: Record<ReleaseProtocol, string> = {
+  usenet: "indexerSearch.protocol.nzb",
+  torrent: "indexerSearch.protocol.torrent",
+  http: "indexerSearch.protocol.http",
+};
+
 function ProtocolBadge({ release }: { release: Release }) {
   const t = useTranslate();
   const protocol = releaseProtocol(release);
@@ -203,11 +210,7 @@ function ProtocolBadge({ release }: { release: Release }) {
           : "border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] text-[var(--scry-info-text-soft)]",
       )}
     >
-      {t(
-        protocol === "usenet"
-          ? "indexerSearch.protocol.nzb"
-          : "indexerSearch.protocol.torrent",
-      )}
+      {t(PROTOCOL_LABEL_KEYS[protocol])}
     </span>
   );
 }

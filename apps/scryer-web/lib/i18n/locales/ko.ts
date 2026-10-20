@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ko: LocaleDictionary = {
+  "settings.downloadClientHttpDownloadDir": "다운로드 폴더",
+  "settings.downloadClientHttpDownloadDirHelp": "완료된 파일과 부분 파일이 기록되는 위치입니다(Scryer 기준 경로). 이 다운로더의 대기열은 그 안의 .scryer-http 폴더에 저장됩니다.",
+  "settings.downloadClientHttpMaxConcurrentDownloads": "동시 다운로드",
+  "settings.downloadClientHttpMaxConcurrentDownloadsHelp": "동시에 다운로드할 릴리스 수(1~8).",
+  "settings.downloadClientHttpMaxConnectionsPerHost": "호스트당 연결 수",
+  "settings.downloadClientHttpMaxConnectionsPerHostHelp": "같은 서버에서 동시에 받을 수 있는 다운로드 수(1~8).",
+  "settings.downloadClientHttpBandwidthLimit": "대역폭 제한(KB/s)",
+  "settings.downloadClientHttpBandwidthLimitHelp": "이 클라이언트의 모든 다운로드가 함께 사용합니다. 비워 두거나 0이면 제한이 없습니다.",
   "settings.publicUrlTitle": "공개 URL",
   "settings.publicUrlHelp": "사용자와 서비스가 Scryer에 접속할 때 쓰는 주소입니다(예: https://scryer.example.com). 계정 연결과 OAuth에는 변경 사항이 즉시 적용되고, 패스키에는 Scryer를 다시 시작한 후 적용됩니다.",
   "settings.publicUrlLabel": "공개 URL",
@@ -2483,6 +2491,7 @@ const ko: LocaleDictionary = {
   "indexerSearch.row.grabs": "{{count}}회 가져옴",
   "indexerSearch.protocol.nzb": "NZB",
   "indexerSearch.protocol.torrent": "Torrent",
+  "indexerSearch.protocol.http": "HTTP",
   "indexerSearch.detail.title": "릴리스 세부 정보",
   "indexerSearch.detail.publishDate": "게시일",
   "indexerSearch.detail.releaseGroup": "릴리스 그룹",
