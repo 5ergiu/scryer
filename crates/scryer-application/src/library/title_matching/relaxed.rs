@@ -394,6 +394,26 @@ impl SpellingCandidates {
         anchors: &[(String, String)],
         facet: Option<&str>,
     ) -> crate::AppResult<Self> {
+        Ok(Self::load_many(titles, &[anchors], facet)
+            .await?
+            .pop()
+            .unwrap_or_default())
+    }
+
+    /// [`Self::load`] for several independent anchor sets in one repository
+    /// call: entry `n` holds exactly what `load` would hold for
+    /// `anchor_sets[n]`, and nothing fetched for another set.
+    ///
+    /// Sets are kept apart on purpose. A set's collision guard must see the
+    /// names its own anchors reached and no others, or a feed item matched in
+    /// a batch could be judged against a neighbour's competitors and answer
+    /// differently than it does alone. Only the reads are shared: a bucket
+    /// asked for by several sets is fetched once and handed to each of them.
+    pub async fn load_many(
+        titles: &dyn crate::ports::TitleRepository,
+        anchor_sets: &[&[(String, String)]],
+        facet: Option<&str>,
+    ) -> crate::AppResult<Vec<Self>> {
         struct AnchorKeys<'a> {
             anchor: &'a String,
             script: TitleScript,
@@ -401,31 +421,49 @@ impl SpellingCandidates {
             romanization_keys: Vec<String>,
             collation_keys: Vec<(&'static str, Vec<u8>)>,
         }
-        let keys = anchors
-            .iter()
-            .filter(|(anchor, _)| !anchor.is_empty())
-            .map(|(anchor, observed_raw)| AnchorKeys {
-                anchor,
-                script: title_script(anchor),
-                numbers_key: scryer_domain::title_spelling::title_numbers_key(observed_raw),
-                romanization_keys: release_romanization_keys(anchor),
-                collation_keys: scryer_domain::title_spelling::COLLATION_PROFILES
-                    .iter()
-                    .filter_map(|profile| {
-                        title_spelling_key(anchor, profile).map(|key| (*profile, key))
-                    })
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
-        let mut buckets = Vec::new();
-        let mut queries = Vec::new();
-        for anchor in &keys {
-            for candidate_facet in ["movie", "series", "anime"] {
-                if facet.is_some_and(|facet| facet != candidate_facet) {
-                    continue;
+        // Every key a bucket query carries derives from the anchor and its
+        // numbers key, so (facet, anchor, numbers key) names the query.
+        let mut keys = Vec::<AnchorKeys<'_>>::new();
+        let mut query_of = HashMap::<(&'static str, &str, String), usize>::new();
+        let mut query_keys = Vec::<(&'static str, usize)>::new();
+        let mut set_buckets = Vec::with_capacity(anchor_sets.len());
+        for anchors in anchor_sets {
+            let mut buckets = Vec::new();
+            for (anchor, observed_raw) in anchors.iter().filter(|(anchor, _)| !anchor.is_empty()) {
+                let numbers_key = scryer_domain::title_spelling::title_numbers_key(observed_raw);
+                for candidate_facet in ["movie", "series", "anime"] {
+                    if facet.is_some_and(|facet| facet != candidate_facet) {
+                        continue;
+                    }
+                    let position = *query_of
+                        .entry((candidate_facet, anchor.as_str(), numbers_key.clone()))
+                        .or_insert_with(|| {
+                            keys.push(AnchorKeys {
+                                anchor,
+                                script: title_script(anchor),
+                                numbers_key: numbers_key.clone(),
+                                romanization_keys: release_romanization_keys(anchor),
+                                collation_keys: scryer_domain::title_spelling::COLLATION_PROFILES
+                                    .iter()
+                                    .filter_map(|profile| {
+                                        title_spelling_key(anchor, profile)
+                                            .map(|key| (*profile, key))
+                                    })
+                                    .collect(),
+                            });
+                            query_keys.push((candidate_facet, keys.len() - 1));
+                            query_keys.len() - 1
+                        });
+                    buckets.push(position);
                 }
-                buckets.push((candidate_facet, anchor));
-                queries.push(crate::ports::TitleNameBucketQuery {
+            }
+            set_buckets.push(buckets);
+        }
+        let queries = query_keys
+            .iter()
+            .map(|&(candidate_facet, key)| {
+                let anchor = &keys[key];
+                crate::ports::TitleNameBucketQuery {
                     facet: Some(candidate_facet),
                     script: anchor.script.as_str(),
                     numbers_key: &anchor.numbers_key,
@@ -434,35 +472,46 @@ impl SpellingCandidates {
                     romanization_keys: &anchor.romanization_keys,
                     collation_keys: &anchor.collation_keys,
                     limit: BUCKET_FETCH_LIMIT,
-                });
-            }
-        }
+                }
+            })
+            .collect::<Vec<_>>();
         // One call for the whole batch: a store backed by the fuzzy index
         // checks its freshness once, not once per anchor and facet.
-        let fetched = titles.find_title_name_candidates_batch(&queries).await?;
+        let fetched = if queries.is_empty() {
+            Vec::new()
+        } else {
+            titles.find_title_name_candidates_batch(&queries).await?
+        };
 
-        let mut index = Self::default();
-        for ((candidate_facet, anchor), rows) in buckets.into_iter().zip(fetched) {
-            for row in rows {
-                index.insert(
-                    &row.facet,
-                    &row.title_id,
-                    SpellingName {
-                        key: row.literal_term,
-                        text: row.match_term,
-                        raw: row.raw_term,
-                        language: row.language_tag,
-                        year: row.match_year,
-                    },
-                );
-            }
-            index.fetched.insert((
-                candidate_facet.to_string(),
-                anchor.anchor.clone(),
-                anchor.numbers_key.clone(),
-            ));
-        }
-        Ok(index)
+        Ok(set_buckets
+            .into_iter()
+            .map(|buckets| {
+                let mut index = Self::default();
+                for position in buckets {
+                    let (candidate_facet, key) = query_keys[position];
+                    let anchor = &keys[key];
+                    for row in fetched.get(position).into_iter().flatten() {
+                        index.insert(
+                            &row.facet,
+                            &row.title_id,
+                            SpellingName {
+                                key: row.literal_term.clone(),
+                                text: row.match_term.clone(),
+                                raw: row.raw_term.clone(),
+                                language: row.language_tag.clone(),
+                                year: row.match_year,
+                            },
+                        );
+                    }
+                    index.fetched.insert((
+                        candidate_facet.to_string(),
+                        anchor.anchor.clone(),
+                        anchor.numbers_key.clone(),
+                    ));
+                }
+                index
+            })
+            .collect())
     }
 
     fn insert(&mut self, facet: &str, title_id: &str, name: SpellingName) {

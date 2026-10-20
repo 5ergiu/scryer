@@ -569,6 +569,178 @@ async fn assert_title_matching_port(catalog: &TitleStore) -> AppResult<()> {
         "no facet hint means every facet: {every_facet:?}"
     );
 
+    assert_batched_reads_answer_as_single_reads(catalog, &titles).await?;
+
+    Ok(())
+}
+
+/// The RSS cycle reads the index once per lane for a whole batch of feed
+/// items. Each batched read must give every request exactly the answer its own
+/// single read gives — same titles, same names in the same order, same
+/// collision keys — however the requests are packed into statements,
+/// including repeated, empty and unanswerable requests.
+async fn assert_batched_reads_answer_as_single_reads(
+    catalog: &TitleStore,
+    titles: &[Title],
+) -> AppResult<()> {
+    // --- key shapes ------------------------------------------------------
+    let key_sets = vec![
+        vec!["tide chart".to_string()],
+        vec![
+            title_spelling::title_lookup_form("Die Höhle der Löwen"),
+            "signal runner".to_string(),
+        ],
+        Vec::new(),
+        vec!["no title answers to this".to_string()],
+        vec!["tide chart 2023".to_string(), "tide chart".to_string()],
+        vec!["tide chart".to_string()],
+    ];
+    let batched =
+        TitleRepository::find_titles_by_lookup_key_shapes_batch(catalog, &key_sets).await?;
+    assert_eq!(batched.len(), key_sets.len());
+    for (keys, found) in key_sets.iter().zip(&batched) {
+        let single = TitleRepository::find_titles_by_lookup_key_shapes(catalog, keys).await?;
+        assert_eq!(ids(found), ids(&single), "{keys:?}");
+    }
+
+    // --- external ids ----------------------------------------------------
+    let lookups = [
+        ("imdb", "tt1856101"),
+        ("imdb", "1856101"),
+        ("tvdb", "445123"),
+        ("TVDB", " 445123 "),
+        ("tmdb", "445123"),
+        ("tvdb", "999999"),
+        ("tvdb", "445123"),
+    ]
+    .map(|(source, value)| (source.to_string(), value.to_string()));
+    let batched = TitleRepository::find_titles_by_external_ids_batch(catalog, &lookups).await?;
+    assert_eq!(batched.len(), lookups.len());
+    for ((source, value), found) in lookups.iter().zip(&batched) {
+        let single = TitleRepository::find_titles_by_external_id(catalog, source, value).await?;
+        assert_eq!(ids(found), ids(&single), "{source}={value}");
+    }
+
+    // --- collision keys --------------------------------------------------
+    let mut requests = titles
+        .iter()
+        .map(|title| (title.id.clone(), title_lookup_forms(title)))
+        .collect::<Vec<_>>();
+    requests.push(("not-a-title".to_string(), vec!["tide chart".to_string()]));
+    requests.push(("tide-series".to_string(), Vec::new()));
+    let batched =
+        TitleRepository::lookup_keys_claimed_by_other_titles_batch(catalog, &requests).await?;
+    assert_eq!(batched.len(), requests.len());
+    for ((title_id, keys), claimed) in requests.iter().zip(&batched) {
+        let single =
+            TitleRepository::lookup_keys_claimed_by_other_titles(catalog, title_id, keys).await?;
+        assert_eq!(sorted(claimed.clone()), sorted(single), "{title_id}");
+    }
+
+    // --- index names -----------------------------------------------------
+    let mut title_ids = titles
+        .iter()
+        .map(|title| title.id.clone())
+        .collect::<Vec<_>>();
+    title_ids.push("not-a-title".to_string());
+    title_ids.push(titles[0].id.clone());
+    let batched = TitleRepository::list_title_index_names_batch(catalog, &title_ids).await?;
+    assert_eq!(batched.len(), title_ids.len());
+    for (title_id, names) in title_ids.iter().zip(&batched) {
+        let single = TitleRepository::list_title_index_names(catalog, title_id).await?;
+        assert_eq!(format!("{names:?}"), format!("{single:?}"), "{title_id}");
+    }
+
+    // --- spelling buckets ------------------------------------------------
+    // Equality, collation, romanization and fuzzy lanes in one batch, with a
+    // repeated query, answered in the order each single read answers.
+    struct Spelling {
+        facet: Option<&'static str>,
+        anchor: String,
+        numbers: String,
+        collation: Vec<(&'static str, Vec<u8>)>,
+        romanization: Vec<String>,
+        typo_distance: Option<u8>,
+    }
+    let spelling = |facet, raw: &str, typo_distance| {
+        let anchor = title_spelling::title_lookup_form(raw);
+        Spelling {
+            facet,
+            numbers: title_spelling::title_numbers_key(raw),
+            collation: collation_keys_for(&anchor),
+            romanization: scryer_domain::title_normalization::release_romanization_keys(&anchor),
+            anchor,
+            typo_distance,
+        }
+    };
+    let spellings = [
+        spelling(Some("series"), "Die Höhle der Löwen", None),
+        spelling(Some("anime"), "Hagane no Renkinjutsushi", None),
+        spelling(Some("anime"), "Hoshizora no Kanata de wa Nemurenai", None),
+        spelling(Some("series"), "Die Höhle der Lowen", Some(4)),
+        spelling(Some("series"), "Die Hoehle der Loewen", Some(2)),
+        spelling(None, "Tide Chart", None),
+        spelling(Some("movie"), "No Title Answers To This", Some(2)),
+        spelling(Some("series"), "Die Höhle der Löwen", None),
+    ];
+    let queries = spellings
+        .iter()
+        .map(|spelling| {
+            bucket_query(
+                spelling.facet,
+                &spelling.anchor,
+                &spelling.numbers,
+                &spelling.collation,
+                &spelling.romanization,
+                spelling.typo_distance,
+                2000,
+            )
+        })
+        .collect::<Vec<_>>();
+    let batched = TitleRepository::find_title_name_candidates_batch(catalog, &queries).await?;
+    assert_eq!(batched.len(), queries.len());
+    for (query, candidates) in queries.iter().zip(&batched) {
+        let single = TitleRepository::find_title_name_candidates(catalog, query.clone()).await?;
+        assert_eq!(
+            format!("{candidates:?}"),
+            format!("{single:?}"),
+            "{}",
+            query.match_term
+        );
+    }
+    assert!(
+        batched[0]
+            .iter()
+            .any(|candidate| candidate.title_id == "de-hoehle"),
+        "{:?}",
+        batched[0]
+    );
+    assert!(
+        batched[3]
+            .iter()
+            .any(|candidate| candidate.title_id == "de-hoehle"),
+        "the fuzzy lane answers inside a batch too: {:?}",
+        batched[3]
+    );
+
+    // A batch larger than one statement's bind and compound-select ceilings
+    // is split across statements without moving any row to another request.
+    let repeated = queries
+        .iter()
+        .cycle()
+        .take(queries.len() * 60)
+        .cloned()
+        .collect::<Vec<_>>();
+    let answers = TitleRepository::find_title_name_candidates_batch(catalog, &repeated).await?;
+    assert_eq!(answers.len(), repeated.len());
+    for (index, candidates) in answers.iter().enumerate() {
+        assert_eq!(
+            format!("{candidates:?}"),
+            format!("{:?}", batched[index % queries.len()]),
+            "request {index}"
+        );
+    }
+
     Ok(())
 }
 

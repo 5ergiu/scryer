@@ -28,26 +28,87 @@ use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
-const RSS_SYNC_MAX_GUIDS: usize = 2000;
+/// How many GUIDs each indexer's seen set keeps between its own polls: five
+/// feed pages of the usual hundred items. A poll that returns more than this,
+/// such as a caught-up poll paging back to its marker, keeps all of them.
+const RSS_SEEN_GUIDS_PER_INDEXER: usize = 500;
 
-/// Bounds the seen-GUID set. A caught-up poll can return more releases than
-/// the cap, so this cycle's GUIDs are never evicted: dropping one would let the
-/// next poll, which reads back to the same marker, treat it as new again.
-fn cap_rss_seen_guids(seen_guids: &mut HashSet<String>, current_guids: &HashSet<String>) {
-    let limit = RSS_SYNC_MAX_GUIDS.max(current_guids.len());
-    if seen_guids.len() <= limit {
-        return;
+/// The process-local record of feed GUIDs already taken through matching, so
+/// an unchanged feed item is not matched again on a later poll.
+///
+/// Each indexer keeps its own bounded set, and a set is trimmed only when its
+/// indexer is polled. A cycle polls only the indexers that are due, so one
+/// shared cap evicted the GUIDs of every indexer not polled that cycle, and
+/// their unchanged items went back through matching on their next poll. Memory
+/// stays bounded by the per-indexer cap times the indexers polled since
+/// startup.
+#[derive(Debug, Default)]
+pub(crate) struct RssSeenGuids {
+    /// Advanced once per cycle; each GUID records the cycle that last saw it.
+    cycle: u64,
+    by_indexer: HashMap<String, HashMap<String, u64>>,
+}
+
+impl RssSeenGuids {
+    fn begin_cycle(&mut self) {
+        self.cycle += 1;
     }
-    let excess = seen_guids.len() - limit;
-    let to_remove: Vec<String> = seen_guids
-        .iter()
-        .filter(|guid| !current_guids.contains(*guid))
-        .take(excess)
-        .cloned()
-        .collect();
-    for key in to_remove {
-        seen_guids.remove(&key);
+
+    fn len(&self) -> usize {
+        self.by_indexer.values().map(HashMap::len).sum()
     }
+
+    /// Records `guid` as returned by `indexer` this cycle. True when no
+    /// indexer had returned it before, which is the old shared-set meaning: an
+    /// item two indexers both carry is matched once.
+    fn observe(&mut self, indexer: &str, guid: &str) -> bool {
+        let is_new = !self.by_indexer.values().any(|seen| seen.contains_key(guid));
+        let cycle = self.cycle;
+        self.by_indexer
+            .entry(indexer.to_string())
+            .or_default()
+            .insert(guid.to_string(), cycle);
+        is_new
+    }
+
+    /// Trims each indexer polled this cycle back to its bound, dropping its
+    /// least recently returned GUIDs first. This cycle's GUIDs are never
+    /// evicted: dropping one would let the next poll, which reads back to the
+    /// same marker, treat it as new again. Indexers not polled this cycle are
+    /// left alone.
+    fn cap_polled_indexers(&mut self) {
+        let cycle = self.cycle;
+        for seen in self.by_indexer.values_mut() {
+            let current = seen.values().filter(|&&last| last == cycle).count();
+            if current == 0 {
+                continue;
+            }
+            let limit = RSS_SEEN_GUIDS_PER_INDEXER.max(current);
+            if seen.len() <= limit {
+                continue;
+            }
+            let excess = seen.len() - limit;
+            let mut earlier: Vec<(u64, String)> = seen
+                .iter()
+                .filter(|(_, last)| **last != cycle)
+                .map(|(guid, last)| (*last, guid.clone()))
+                .collect();
+            earlier.sort_unstable();
+            for (_, guid) in earlier.into_iter().take(excess) {
+                seen.remove(&guid);
+            }
+        }
+    }
+}
+
+/// The key a feed item's GUID is remembered under: the indexer that returned
+/// it, or its source name when the result carries no indexer id.
+fn rss_seen_guid_indexer(result: &IndexerSearchResult) -> &str {
+    result
+        .indexer_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&result.source)
 }
 
 /// The shipped healthy-quota RSS cadence.
@@ -618,13 +679,26 @@ impl TitleContextBank {
         // Discovery read the index, so the proof reads the same names: a cour
         // name lives in the index and on no title row.
         let evidence_title = self.matcher.evidence_title(title).await?;
-        let evidence = canonical_title_evidence(&evidence_title).with_ambiguity(
-            self.matcher
-                .identity_ambiguity(&evidence_title)
-                .await?
-                .with_spelling_candidates(spelling.clone()),
-        );
-        Ok(TitleContextCandidate {
+        let ambiguity = self.matcher.identity_ambiguity(&evidence_title).await?;
+        Ok(TitleContextCandidate::new(
+            title,
+            &evidence_title,
+            ambiguity,
+            spelling,
+        ))
+    }
+}
+
+impl TitleContextCandidate {
+    fn new(
+        title: &Title,
+        evidence_title: &Title,
+        ambiguity: crate::acquisition_release_search::TitleIdentityAmbiguity,
+        spelling: &Arc<crate::title_matching::relaxed::SpellingCandidates>,
+    ) -> Self {
+        let evidence = canonical_title_evidence(evidence_title)
+            .with_ambiguity(ambiguity.with_spelling_candidates(spelling.clone()));
+        Self {
             info: TitleMatchInfo {
                 title_id: title.id.clone(),
                 year: title.year,
@@ -633,7 +707,7 @@ impl TitleContextBank {
                 imdb_id: imdb_id_from_title(title),
             },
             evidence,
-        })
+        }
     }
 }
 
@@ -726,6 +800,18 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
         })
 }
 
+/// How many feed items one batched match reads the title index for at once.
+/// It bounds the binds per statement and the candidates a pass holds; nothing
+/// read for one pass outlives it.
+const RSS_MATCH_BATCH_SIZE: usize = 256;
+
+/// One feed item to match: its release name and the indexer's own id
+/// assertions for it.
+struct ReleaseMatchRequest<'a> {
+    release_title: &'a str,
+    response_attributes: &'a IndexerResponseAttributes,
+}
+
 /// Match an RSS release against monitored titles using real title contexts.
 /// Candidates come from exact lookups of the release's context-free anchor
 /// keys (plus the indexer's own id assertions) — there is no lexical
@@ -733,17 +819,59 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
 /// contextual proof in [`crate::acquisition_release_search::match_parsed_release_to_title_evidence`].
 /// `response_attributes` carries the indexer's own id assertions so a collision
 /// on a shared canonical key can still be resolved (A2(2)).
+///
+/// This is the batched match with a batch of one, so a single release and a
+/// release matched inside an RSS cycle take exactly the same path.
 async fn match_release_to_title_context(
     release_title: &str,
     response_attributes: &IndexerResponseAttributes,
     context_bank: &TitleContextBank,
 ) -> AppResult<Option<TitleMatchInfo>> {
-    let anchor_keys = context_free_identity_anchor_keys(release_title);
-    // A stacked-alias name extracts as one glued title no single key equals, so
-    // candidacy also probes every token prefix of each anchor key. Discovery
-    // only — each candidate still faces the full anchored proof below.
+    Ok(match_releases_to_title_context(
+        &[ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        }],
+        context_bank,
+    )
+    .await?
+    .pop()
+    .flatten())
+}
+
+/// [`match_release_to_title_context`] for every feed item of a cycle,
+/// answered in order.
+///
+/// Matching one item used to cost one round trip per lookup lane and two per
+/// candidate, so a cycle paid for each new feed item in turn. Here each lane
+/// is read once for a whole batch of items — the key shapes, the asserted
+/// ids, the spelling buckets, the spelling candidates' rows, the candidates'
+/// index names and their collision keys — and the per-item decision then
+/// runs over those answers.
+///
+/// Every item is still decided on exactly its own evidence: its own
+/// discovered titles, admitted in the same lane order, and its own spelling
+/// buckets for the collision guard. A batch shares reads, never answers, so
+/// an item resolves to the same title, or stays ambiguous, whatever else is
+/// in the batch. Nothing read here is kept past the call.
+async fn match_releases_to_title_context(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let mut matches = Vec::with_capacity(requests.len());
+    for chunk in requests.chunks(RSS_MATCH_BATCH_SIZE) {
+        matches.extend(match_release_batch(chunk, context_bank).await?);
+    }
+    Ok(matches)
+}
+
+/// The anchor probes of one release name: every token prefix of each
+/// context-free anchor key. A stacked-alias name extracts as one glued title
+/// no single key equals, so candidacy probes the prefixes too. Discovery
+/// only — each candidate still faces the full anchored proof.
+fn identity_anchor_probes(release_title: &str) -> Vec<String> {
     let mut probes = Vec::<String>::new();
-    for key in &anchor_keys {
+    for key in &context_free_identity_anchor_keys(release_title) {
         let tokens = key.split_whitespace().collect::<Vec<_>>();
         for end in 1..=tokens.len() {
             let probe = tokens[..end].join(" ");
@@ -752,69 +880,162 @@ async fn match_release_to_title_context(
             }
         }
     }
+    probes
+}
 
-    let mut discovered = Vec::<Title>::new();
-    let mut seen = HashSet::<String>::new();
-    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
-        for title in titles {
-            if title.monitored && (context_bank.in_scope)(&title) && seen.insert(title.id.clone()) {
-                discovered.push(title);
-            }
+/// The ids an indexer asserted for a feed item, in the order discovery
+/// admits them.
+fn asserted_external_ids(attributes: &IndexerResponseAttributes) -> Vec<(&'static str, &str)> {
+    [
+        ("tvdb", attributes.tvdb_id.as_deref()),
+        ("tmdb", attributes.tmdb_id.as_deref()),
+        ("imdb", attributes.imdb_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(source, asserted_id)| asserted_id.map(|asserted_id| (source, asserted_id)))
+    .collect()
+}
+
+async fn match_release_batch(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let matcher = &context_bank.matcher;
+
+    let probe_sets = requests
+        .iter()
+        .map(|request| identity_anchor_probes(request.release_title))
+        .collect::<Vec<_>>();
+    let asserted = requests
+        .iter()
+        .map(|request| asserted_external_ids(request.response_attributes))
+        .collect::<Vec<_>>();
+    let spelling_anchor_sets = requests
+        .iter()
+        .map(|request| {
+            crate::title_matching::relaxed::neutral_spelling_forms(request.release_title).0
+        })
+        .collect::<Vec<_>>();
+
+    // One read per lookup lane for the whole batch.
+    let mut shape_titles = matcher
+        .titles_naming_key_shapes_batch(&probe_sets)
+        .await?
+        .into_iter();
+    let lookups = asserted.iter().flatten().copied().collect::<Vec<_>>();
+    let mut external_titles = matcher
+        .monitored_titles_by_external_ids(&lookups)
+        .await?
+        .into_iter();
+    let anchor_sets = spelling_anchor_sets
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let spellings = matcher
+        .spelling_candidates_batch(&anchor_sets, None)
+        .await?;
+    let spelling_id_sets = spellings
+        .iter()
+        .zip(&spelling_anchor_sets)
+        .map(|(spelling, anchors)| spelling.candidates(anchors, None))
+        .collect::<Vec<_>>();
+    let mut spelling_ids = Vec::<String>::new();
+    let mut requested = HashSet::<&str>::new();
+    for id in spelling_id_sets.iter().flatten() {
+        if requested.insert(id.as_str()) {
+            spelling_ids.push(id.clone());
         }
-    };
+    }
+    let spelling_titles = matcher.titles_by_ids(&spelling_ids).await?;
 
-    admit(
-        context_bank
-            .matcher
-            .titles_naming_key_shapes(&probes)
-            .await?,
-        &mut discovered,
-    );
-
-    for (source, asserted_id) in [
-        ("tvdb", response_attributes.tvdb_id.as_ref()),
-        ("tmdb", response_attributes.tmdb_id.as_ref()),
-        ("imdb", response_attributes.imdb_id.as_ref()),
-    ] {
-        let Some(asserted_id) = asserted_id else {
-            continue;
+    // Each item admits its own titles, lane by lane, exactly as it would
+    // alone: key shapes, then the asserted ids, then spelling.
+    let mut discovered_sets = Vec::with_capacity(requests.len());
+    for (index, asserted_ids) in asserted.iter().enumerate() {
+        let mut discovered = Vec::<Title>::new();
+        let mut seen = HashSet::<String>::new();
+        let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+            for title in titles {
+                if title.monitored
+                    && (context_bank.in_scope)(&title)
+                    && seen.insert(title.id.clone())
+                {
+                    discovered.push(title);
+                }
+            }
         };
+        admit(shape_titles.next().unwrap_or_default(), &mut discovered);
+        for _ in asserted_ids {
+            admit(external_titles.next().unwrap_or_default(), &mut discovered);
+        }
         admit(
-            context_bank
-                .matcher
-                .monitored_titles_by_external_id(source, asserted_id)
-                .await?,
+            spelling_titles
+                .iter()
+                .filter(|title| spelling_id_sets[index].contains(&title.id))
+                .cloned()
+                .collect(),
             &mut discovered,
         );
+        discovered_sets.push(discovered);
     }
 
-    let (spelling_anchors, _) =
-        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
-    let spelling = context_bank
-        .matcher
-        .spelling_candidates(&spelling_anchors, None)
-        .await?;
-    let spelling_ids = spelling
-        .candidates(&spelling_anchors, None)
-        .into_iter()
+    // Every item's candidates face the proof on the index's names and the
+    // global collision guard, both read once for the batch.
+    let discovered = discovered_sets
+        .iter()
+        .enumerate()
+        .flat_map(|(index, titles)| titles.iter().map(move |title| (index, title)))
         .collect::<Vec<_>>();
-    admit(
-        context_bank.matcher.titles_by_ids(&spelling_ids).await?,
-        &mut discovered,
-    );
-
-    if discovered.is_empty() {
-        return Ok(None);
+    let evidence_titles = matcher
+        .evidence_titles(
+            &discovered
+                .iter()
+                .map(|(_, title)| *title)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let ambiguities = matcher
+        .identity_ambiguities(&evidence_titles.iter().collect::<Vec<_>>())
+        .await?;
+    let mut candidate_sets = vec![Vec::<TitleContextCandidate>::new(); requests.len()];
+    for (((index, title), evidence_title), ambiguity) in
+        discovered.iter().zip(&evidence_titles).zip(ambiguities)
+    {
+        candidate_sets[*index].push(TitleContextCandidate::new(
+            title,
+            evidence_title,
+            ambiguity,
+            &spellings[*index],
+        ));
     }
 
-    let mut candidates = Vec::with_capacity(discovered.len());
-    for title in &discovered {
-        candidates.push(context_bank.candidate(title, &spelling).await?);
+    Ok(requests
+        .iter()
+        .zip(candidate_sets)
+        .map(|(request, candidates)| {
+            decide_release_match(
+                request.release_title,
+                request.response_attributes,
+                &candidates,
+            )
+        })
+        .collect())
+}
+
+/// One release's decision over its own candidates: the year gate, the
+/// anchored proof, the key-specificity ranking and the collision guard.
+fn decide_release_match(
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+    candidates: &[TitleContextCandidate],
+) -> Option<TitleMatchInfo> {
+    if candidates.is_empty() {
+        return None;
     }
 
     let mut best: Option<(&TitleMatchInfo, i32, bool)> = None;
     let mut titles_per_matched_key: HashMap<String, HashSet<&str>> = HashMap::new();
-    for candidate in &candidates {
+    for candidate in candidates {
         // The target-biased parse supplies year/projection semantics (it knows
         // when a year token is part of the title, as in `Signal Runner 2049`);
         // identity still anchors on the context-free extraction inside
@@ -908,10 +1129,10 @@ async fn match_release_to_title_context(
             title_count = colliding_titles.len(),
             "RSS sync: skipping release — shared canonical key matches multiple titles with no disambiguator"
         );
-        return Ok(None);
+        return None;
     }
 
-    Ok(best.map(|(info, _, _)| info.clone()))
+    best.map(|(info, _, _)| info.clone())
 }
 
 /// The RSS cycle's title match over a repository-backed matcher, every title
@@ -927,6 +1148,102 @@ pub(crate) async fn rss_title_id_for_release(
             .await?
             .map(|info| info.title_id),
     )
+}
+
+/// [`rss_title_id_for_release`] with the indexer's own id assertions: one
+/// feed item matched on its own, as the single-item path matches it.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_asserted_release(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    Ok(
+        match_release_to_title_context(release_title, response_attributes, &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
+}
+
+/// One feed item matched lane by lane with the matcher's single-item reads:
+/// a read per lookup lane and two per candidate, then the same decision. It
+/// is the per-item matching a batched cycle must agree with, kept as an
+/// independent oracle for the batched pass.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_release_read_item_by_item(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let mut discovered = Vec::<Title>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+        for title in titles {
+            if title.monitored && (bank.in_scope)(&title) && seen.insert(title.id.clone()) {
+                discovered.push(title);
+            }
+        }
+    };
+    admit(
+        bank.matcher
+            .titles_naming_key_shapes(&identity_anchor_probes(release_title))
+            .await?,
+        &mut discovered,
+    );
+    for (source, asserted_id) in asserted_external_ids(response_attributes) {
+        admit(
+            bank.matcher
+                .monitored_titles_by_external_id(source, asserted_id)
+                .await?,
+            &mut discovered,
+        );
+    }
+    let (spelling_anchors, _) =
+        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
+    let spelling = bank
+        .matcher
+        .spelling_candidates(&spelling_anchors, None)
+        .await?;
+    let spelling_ids = spelling
+        .candidates(&spelling_anchors, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    admit(
+        bank.matcher.titles_by_ids(&spelling_ids).await?,
+        &mut discovered,
+    );
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for title in &discovered {
+        candidates.push(bank.candidate(title, &spelling).await?);
+    }
+    Ok(
+        decide_release_match(release_title, response_attributes, &candidates)
+            .map(|info| info.title_id),
+    )
+}
+
+/// Every feed item of one cycle matched in a single batched pass, as the
+/// poll matches them, every title in scope.
+#[cfg(test)]
+pub(crate) async fn rss_title_ids_for_cycle(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    releases: &[(&str, IndexerResponseAttributes)],
+) -> AppResult<Vec<Option<String>>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let requests = releases
+        .iter()
+        .map(|(release_title, response_attributes)| ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        })
+        .collect::<Vec<_>>();
+    Ok(match_releases_to_title_context(&requests, &bank)
+        .await?
+        .into_iter()
+        .map(|matched| matched.map(|info| info.title_id))
+        .collect())
 }
 
 #[cfg(test)]
@@ -1264,9 +1581,9 @@ impl AppUseCase {
         // Dedup against previously seen GUIDs (in-memory, resets on restart)
         let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
         let initial_seen_count = seen_guids.len();
+        seen_guids.begin_cycle();
 
         let mut new_results: Vec<IndexerSearchResult> = Vec::new();
-        let mut current_guids: HashSet<String> = HashSet::new();
         for result in fresh_results {
             let release_identity = rss_release_identity(&result);
             let guid = result
@@ -1278,8 +1595,7 @@ impl AppUseCase {
 
             // Record every fresh GUID, then give an active unknown-age row one
             // more look even if it was already seen this process lifetime.
-            let is_new_guid = seen_guids.insert(guid.to_string());
-            current_guids.insert(guid.to_string());
+            let is_new_guid = seen_guids.observe(rss_seen_guid_indexer(&result), guid);
             if unknown_age_identities.contains(&release_identity)
                 || unknown_age_listing_prefixes.contains(&rss_listing_identity_prefix(&result))
                 || is_new_guid
@@ -1288,7 +1604,7 @@ impl AppUseCase {
             }
         }
 
-        cap_rss_seen_guids(&mut seen_guids, &current_guids);
+        seen_guids.cap_polled_indexers();
 
         // Release the write lock before doing any I/O
         drop(seen_guids);
@@ -1307,14 +1623,21 @@ impl AppUseCase {
         let mut matched_count = 0usize;
         let total_new = new_results.len();
 
-        for result in new_results {
-            if let Some(title_info) = match_release_to_title_context(
-                &result.title,
-                &result.response_attributes,
-                &title_context_bank,
-            )
-            .await?
-            {
+        // Every new item is matched in one batched pass: each lookup lane is
+        // read once for the batch, not once per item.
+        let match_requests = new_results
+            .iter()
+            .map(|result| ReleaseMatchRequest {
+                release_title: &result.title,
+                response_attributes: &result.response_attributes,
+            })
+            .collect::<Vec<_>>();
+        let title_matches =
+            match_releases_to_title_context(&match_requests, &title_context_bank).await?;
+        drop(match_requests);
+
+        for (result, title_info) in new_results.into_iter().zip(title_matches) {
+            if let Some(title_info) = title_info {
                 matched_count += 1;
                 matched_by_title
                     .entry(title_info.title_id.clone())
@@ -3500,36 +3823,107 @@ mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, Title};
 
-    #[test]
-    fn capping_seen_guids_never_evicts_the_current_poll() {
-        let current: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 500)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..300)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn feed_guids(indexer: &str, page: usize, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| format!("{indexer}-page-{page}-guid-{index}"))
+            .collect()
+    }
 
-        cap_rss_seen_guids(&mut seen, &current);
-
-        assert!(current.iter().all(|guid| seen.contains(guid)));
-        assert_eq!(seen.len(), current.len());
+    /// Runs one cycle that polls each listed indexer, returning how many of
+    /// the observed GUIDs were new.
+    fn poll_cycle(seen: &mut RssSeenGuids, polls: &[(&str, Vec<String>)]) -> usize {
+        seen.begin_cycle();
+        let mut new_count = 0;
+        for (indexer, guids) in polls {
+            for guid in guids {
+                if seen.observe(indexer, guid) {
+                    new_count += 1;
+                }
+            }
+        }
+        seen.cap_polled_indexers();
+        new_count
     }
 
     #[test]
-    fn capping_seen_guids_evicts_only_earlier_polls_down_to_the_cap() {
-        let current: HashSet<String> = (0..10)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 50)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn capping_seen_guids_never_evicts_the_current_poll() {
+        let mut seen = RssSeenGuids::default();
+        poll_cycle(
+            &mut seen,
+            &[("fixture-indexer", feed_guids("fixture-indexer", 0, 300))],
+        );
+        let current = feed_guids("fixture-indexer", 1, RSS_SEEN_GUIDS_PER_INDEXER + 500);
 
-        cap_rss_seen_guids(&mut seen, &current);
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
 
-        assert_eq!(seen.len(), RSS_SYNC_MAX_GUIDS);
-        assert!(current.iter().all(|guid| seen.contains(guid)));
+        assert_eq!(seen.len(), current.len());
+        assert_eq!(
+            poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]),
+            0,
+            "a caught-up poll larger than the cap must not re-match its own items"
+        );
+    }
+
+    #[test]
+    fn capping_seen_guids_evicts_only_earlier_polls_oldest_first() {
+        let mut seen = RssSeenGuids::default();
+        let oldest = feed_guids("fixture-indexer", 0, RSS_SEEN_GUIDS_PER_INDEXER);
+        let older = feed_guids("fixture-indexer", 1, 50);
+        let current = feed_guids("fixture-indexer", 2, 10);
+        poll_cycle(&mut seen, &[("fixture-indexer", oldest.clone())]);
+        poll_cycle(&mut seen, &[("fixture-indexer", older.clone())]);
+
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
+
+        assert_eq!(seen.len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        let kept = |guids: &[String]| {
+            let by_indexer = &seen.by_indexer["fixture-indexer"];
+            guids
+                .iter()
+                .filter(|guid| by_indexer.contains_key(*guid))
+                .count()
+        };
+        assert_eq!(kept(&current), current.len());
+        assert_eq!(kept(&older), older.len());
+        assert_eq!(kept(&oldest), RSS_SEEN_GUIDS_PER_INDEXER - 60);
+    }
+
+    #[test]
+    fn capping_seen_guids_keeps_indexers_not_polled_this_cycle() {
+        // Forty indexers with a full hundred-item page each hold more live
+        // GUIDs than one shared cap ever allowed.
+        let indexers: Vec<String> = (0..40).map(|index| format!("indexer-{index}")).collect();
+        let first_pages: Vec<(&str, Vec<String>)> = indexers
+            .iter()
+            .map(|indexer| (indexer.as_str(), feed_guids(indexer, 0, 100)))
+            .collect();
+        let mut seen = RssSeenGuids::default();
+        assert_eq!(poll_cycle(&mut seen, &first_pages), 4000);
+
+        // Only the first half is due, and each of their feeds has rolled
+        // over completely, several times.
+        for page in 1..=10 {
+            let rolled: Vec<(&str, Vec<String>)> = indexers[..20]
+                .iter()
+                .map(|indexer| (indexer.as_str(), feed_guids(indexer, page, 100)))
+                .collect();
+            assert_eq!(poll_cycle(&mut seen, &rolled), 2000);
+        }
+
+        // The second half's feeds are unchanged, so nothing in them is new.
+        assert_eq!(poll_cycle(&mut seen, &first_pages[20..]), 0);
+        for indexer in &indexers[..20] {
+            assert_eq!(seen.by_indexer[indexer].len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        }
+        assert_eq!(seen.len(), 20 * RSS_SEEN_GUIDS_PER_INDEXER + 20 * 100);
+    }
+
+    #[test]
+    fn a_guid_another_indexer_returned_is_not_new() {
+        let mut seen = RssSeenGuids::default();
+        let shared = vec!["shared-fixture-guid".to_string()];
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-a", shared.clone())]), 1);
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-b", shared.clone())]), 0);
     }
 
     #[test]
