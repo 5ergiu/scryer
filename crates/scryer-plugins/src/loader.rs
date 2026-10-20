@@ -3656,6 +3656,7 @@ impl PluginDescriptorLoader for WasmPluginDescriptorLoader {
                                     STARTUP_COMPONENT_INIT_TIMEOUT,
                                     None,
                                     None,
+                                    None,
                                 )?;
                                 runtime.instantiate(&host).await.map(|_| ())
                             })
