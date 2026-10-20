@@ -2024,6 +2024,77 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn list_active_unbound_submitted_before(
+        &self,
+        submitted_before: chrono::DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        let sql = download_submission_select_sql(
+            &self.datastore,
+            "WHERE submitted_at < {}
+               AND download_client_item_id IS NULL
+               AND EXISTS (
+                   SELECT 1
+                     FROM download_client_bindings binding
+                    WHERE binding.download_id = download_submissions.id
+                      AND binding.native_item_id IS NULL
+                      AND binding.ended_at IS NULL
+               )
+             ORDER BY submitted_at, id",
+        );
+        fetch_download_submissions(
+            self.datastore.read_exec(),
+            &sql,
+            &[SqlArg::Timestamp(submitted_before)],
+        )
+        .await
+    }
+
+    async fn release_unconfirmed_submission(&self, download_id: &DownloadId) -> AppResult<bool> {
+        let download_id = *download_id;
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "release_unconfirmed_download_submission",
+            move |tx| {
+                Box::pin(async move {
+                    let ended_at = Utc::now();
+                    // Only an intent no client job has bound may be released;
+                    // the observer binding it first keeps the download live.
+                    let ended = SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE download_client_bindings
+                         SET ended_at = {}
+                         WHERE download_id = {}
+                           AND native_item_id IS NULL
+                           AND ended_at IS NULL",
+                        &[
+                            SqlArg::Timestamp(ended_at),
+                            SqlArg::Text(download_id.to_string()),
+                        ],
+                    )
+                    .await?;
+                    if ended == 0 {
+                        return Ok(false);
+                    }
+                    // Same exit as `end_binding_tx`: an ended download is over.
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE downloads
+                         SET terminal_at = {}
+                         WHERE id = {}
+                           AND terminal_at IS NULL",
+                        &[
+                            SqlArg::Timestamp(ended_at),
+                            SqlArg::Text(download_id.to_string()),
+                        ],
+                    )
+                    .await?;
+                    Ok(true)
+                })
+            },
+        )
+        .await
+    }
+
     async fn find_by_title_and_request_signature(
         &self,
         title_id: &str,
@@ -4305,6 +4376,179 @@ mod seed_goal_tests {
         .expect("binding should exist")
         .opt_text("native_item_id")
         .expect("native item id should decode")
+    }
+
+    async fn backdate_submission(
+        store: &DownloadSubmissionStore,
+        download_id: DownloadId,
+        submitted_at: chrono::DateTime<Utc>,
+    ) {
+        SqlRuntime::execute_write(
+            &store.datastore,
+            "backdate_fixture_submission",
+            "UPDATE download_submissions SET submitted_at = {} WHERE id = {}",
+            vec![
+                SqlArg::Timestamp(submitted_at),
+                SqlArg::Text(download_id.to_string()),
+            ],
+        )
+        .await
+        .expect("the fixture submission should backdate");
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_intents_list_across_titles_by_submission_age() {
+        let store = store().await;
+        let now = Utc::now();
+        let stale_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(stale_id))
+            .await
+            .expect("the stale intent should persist");
+        backdate_submission(&store, stale_id, now - chrono::Duration::hours(1)).await;
+        let ambiguous_id = DownloadId::new();
+        store
+            .record_ambiguous_submission(submission(ambiguous_id, "", "title-2"))
+            .await
+            .expect("the ambiguous submit should persist");
+        backdate_submission(&store, ambiguous_id, now - chrono::Duration::minutes(30)).await;
+        let fresh_id = DownloadId::new();
+        store
+            .record_pending_submission(DownloadSubmission {
+                title_id: "title-3".to_string(),
+                ..pending_intent(fresh_id)
+            })
+            .await
+            .expect("the fresh intent should persist");
+        let accepted_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(accepted_id, "job-9", "title-1"),
+                submission_identity(accepted_id),
+                None,
+            )
+            .await
+            .expect("the accepted grab should persist");
+        backdate_submission(&store, accepted_id, now - chrono::Duration::hours(2)).await;
+
+        let listed = store
+            .list_active_unbound_submitted_before(now - chrono::Duration::minutes(15))
+            .await
+            .expect("unconfirmed intents should list")
+            .into_iter()
+            .map(|submission| (submission.download_id, submission.title_id))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            listed,
+            vec![
+                (stale_id, "title-1".to_string()),
+                (ambiguous_id, "title-2".to_string()),
+            ],
+            "only unbound intents older than the cutoff list, oldest first; a fresh intent and a bound grab do not"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_an_unconfirmed_intent_ends_its_binding_and_stamps_the_download_terminal() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+
+        assert!(
+            store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("the release should succeed"),
+            "an unbound intent is released"
+        );
+
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty(),
+            "a released intent no longer holds its title"
+        );
+        assert!(
+            store
+                .list_active_unbound_submitted_before(Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .expect("unconfirmed intents should list")
+                .is_empty()
+        );
+        let binding = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT ended_at FROM download_client_bindings WHERE download_id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("binding should read")
+        .expect("the ended binding is kept");
+        assert!(
+            binding
+                .opt_text("ended_at")
+                .expect("ended_at should decode")
+                .is_some()
+        );
+        let download = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT terminal_at FROM downloads WHERE id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("download should read")
+        .expect("the download row is kept");
+        assert!(
+            download
+                .opt_text("terminal_at")
+                .expect("terminal_at should decode")
+                .is_some(),
+            "ending the binding finishes the download, as end_binding does"
+        );
+        assert!(
+            !store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("a repeated release should succeed"),
+            "a second release changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_intent_the_observer_bound_is_neither_unconfirmed_nor_released() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+        backdate_submission(&store, download_id, Utc::now() - chrono::Duration::hours(1)).await;
+        observe_by_token(&store, download_id, "job-1").await;
+
+        assert!(
+            store
+                .list_active_unbound_submitted_before(Utc::now())
+                .await
+                .expect("unconfirmed intents should list")
+                .is_empty(),
+            "a bound intent is confirmed"
+        );
+        assert!(
+            !store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("the release should succeed"),
+            "a bound intent is never released"
+        );
+        assert_eq!(
+            binding_native_item_id(&store, download_id).await.as_deref(),
+            Some("job-1")
+        );
     }
 
     #[tokio::test]

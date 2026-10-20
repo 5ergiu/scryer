@@ -86,6 +86,7 @@ mod title_hydration;
 mod title_image_cache;
 mod title_matcher_invalidation;
 mod title_updates;
+mod unconfirmed_grab_release;
 mod user_permissions;
 mod users_admin_titles;
 mod verification_settings;
