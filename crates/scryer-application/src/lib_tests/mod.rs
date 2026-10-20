@@ -69,6 +69,7 @@ mod romaji_release_matching;
 mod root_change;
 mod root_move;
 mod routing_settings;
+mod rss_match_batching;
 mod rule_tester_listing;
 mod score_evaluation;
 mod script_interpreter_settings;

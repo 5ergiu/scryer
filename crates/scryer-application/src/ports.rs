@@ -1799,6 +1799,22 @@ pub trait TitleRepository: Send + Sync {
         ))
     }
 
+    /// [`Self::find_titles_by_lookup_key_shapes`] for several key sets,
+    /// answered in order: entry `n` holds exactly the titles a single call
+    /// with `key_sets[n]` would return. The RSS cycle asks this once for every
+    /// feed item it matches instead of once per item. The default fans out;
+    /// the SQL store answers every set from one read of the projection.
+    async fn find_titles_by_lookup_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        let mut results = Vec::with_capacity(key_sets.len());
+        for keys in key_sets {
+            results.push(self.find_titles_by_lookup_key_shapes(keys).await?);
+        }
+        Ok(results)
+    }
+
     /// The distinct (library, facet) scopes that hold at least one monitored
     /// title. The RSS cycle resolves indexer routing per scope, and used to
     /// derive them by reading every title row in the catalog.
@@ -1842,6 +1858,39 @@ pub trait TitleRepository: Send + Sync {
             title_id,
             keys,
         ))
+    }
+
+    /// [`Self::find_titles_by_external_id`] for several `(source, value)`
+    /// pairs, answered in order: entry `n` holds exactly the titles a single
+    /// call with `lookups[n]` would return. The default fans out; the SQL
+    /// store reads every pair in one statement.
+    async fn find_titles_by_external_ids_batch(
+        &self,
+        lookups: &[(String, String)],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        let mut results = Vec::with_capacity(lookups.len());
+        for (source, value) in lookups {
+            results.push(self.find_titles_by_external_id(source, value).await?);
+        }
+        Ok(results)
+    }
+
+    /// [`Self::lookup_keys_claimed_by_other_titles`] for several
+    /// `(title_id, keys)` requests, answered in order: entry `n` is exactly
+    /// what a single call with `requests[n]` would return. The default fans
+    /// out; the SQL store reads every key shape in one statement.
+    async fn lookup_keys_claimed_by_other_titles_batch(
+        &self,
+        requests: &[(String, Vec<String>)],
+    ) -> AppResult<Vec<Vec<String>>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for (title_id, keys) in requests {
+            results.push(
+                self.lookup_keys_claimed_by_other_titles(title_id, keys)
+                    .await?,
+            );
+        }
+        Ok(results)
     }
 
     /// One bucket of the persisted name index, for the relaxed spelling lane.
@@ -1890,6 +1939,21 @@ pub trait TitleRepository: Send + Sync {
             .filter(|title| title.id == title_id)
             .flat_map(title_name_candidates)
             .collect())
+    }
+
+    /// [`Self::list_title_index_names`] for several titles, answered in
+    /// order: entry `n` is exactly what a single call with `title_ids[n]`
+    /// would return. The default fans out; the SQL store reads every title's
+    /// names in one statement.
+    async fn list_title_index_names_batch(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<Vec<TitleNameCandidate>>> {
+        let mut results = Vec::with_capacity(title_ids.len());
+        for title_id in title_ids {
+            results.push(self.list_title_index_names(title_id).await?);
+        }
+        Ok(results)
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>>;

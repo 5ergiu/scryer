@@ -618,13 +618,26 @@ impl TitleContextBank {
         // Discovery read the index, so the proof reads the same names: a cour
         // name lives in the index and on no title row.
         let evidence_title = self.matcher.evidence_title(title).await?;
-        let evidence = canonical_title_evidence(&evidence_title).with_ambiguity(
-            self.matcher
-                .identity_ambiguity(&evidence_title)
-                .await?
-                .with_spelling_candidates(spelling.clone()),
-        );
-        Ok(TitleContextCandidate {
+        let ambiguity = self.matcher.identity_ambiguity(&evidence_title).await?;
+        Ok(TitleContextCandidate::new(
+            title,
+            &evidence_title,
+            ambiguity,
+            spelling,
+        ))
+    }
+}
+
+impl TitleContextCandidate {
+    fn new(
+        title: &Title,
+        evidence_title: &Title,
+        ambiguity: crate::acquisition_release_search::TitleIdentityAmbiguity,
+        spelling: &Arc<crate::title_matching::relaxed::SpellingCandidates>,
+    ) -> Self {
+        let evidence = canonical_title_evidence(evidence_title)
+            .with_ambiguity(ambiguity.with_spelling_candidates(spelling.clone()));
+        Self {
             info: TitleMatchInfo {
                 title_id: title.id.clone(),
                 year: title.year,
@@ -633,7 +646,7 @@ impl TitleContextBank {
                 imdb_id: imdb_id_from_title(title),
             },
             evidence,
-        })
+        }
     }
 }
 
@@ -726,6 +739,18 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
         })
 }
 
+/// How many feed items one batched match reads the title index for at once.
+/// It bounds the binds per statement and the candidates a pass holds; nothing
+/// read for one pass outlives it.
+const RSS_MATCH_BATCH_SIZE: usize = 256;
+
+/// One feed item to match: its release name and the indexer's own id
+/// assertions for it.
+struct ReleaseMatchRequest<'a> {
+    release_title: &'a str,
+    response_attributes: &'a IndexerResponseAttributes,
+}
+
 /// Match an RSS release against monitored titles using real title contexts.
 /// Candidates come from exact lookups of the release's context-free anchor
 /// keys (plus the indexer's own id assertions) — there is no lexical
@@ -733,17 +758,59 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
 /// contextual proof in [`crate::acquisition_release_search::match_parsed_release_to_title_evidence`].
 /// `response_attributes` carries the indexer's own id assertions so a collision
 /// on a shared canonical key can still be resolved (A2(2)).
+///
+/// This is the batched match with a batch of one, so a single release and a
+/// release matched inside an RSS cycle take exactly the same path.
 async fn match_release_to_title_context(
     release_title: &str,
     response_attributes: &IndexerResponseAttributes,
     context_bank: &TitleContextBank,
 ) -> AppResult<Option<TitleMatchInfo>> {
-    let anchor_keys = context_free_identity_anchor_keys(release_title);
-    // A stacked-alias name extracts as one glued title no single key equals, so
-    // candidacy also probes every token prefix of each anchor key. Discovery
-    // only — each candidate still faces the full anchored proof below.
+    Ok(match_releases_to_title_context(
+        &[ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        }],
+        context_bank,
+    )
+    .await?
+    .pop()
+    .flatten())
+}
+
+/// [`match_release_to_title_context`] for every feed item of a cycle,
+/// answered in order.
+///
+/// Matching one item used to cost one round trip per lookup lane and two per
+/// candidate, so a cycle paid for each new feed item in turn. Here each lane
+/// is read once for a whole batch of items — the key shapes, the asserted
+/// ids, the spelling buckets, the spelling candidates' rows, the candidates'
+/// index names and their collision keys — and the per-item decision then
+/// runs over those answers.
+///
+/// Every item is still decided on exactly its own evidence: its own
+/// discovered titles, admitted in the same lane order, and its own spelling
+/// buckets for the collision guard. A batch shares reads, never answers, so
+/// an item resolves to the same title, or stays ambiguous, whatever else is
+/// in the batch. Nothing read here is kept past the call.
+async fn match_releases_to_title_context(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let mut matches = Vec::with_capacity(requests.len());
+    for chunk in requests.chunks(RSS_MATCH_BATCH_SIZE) {
+        matches.extend(match_release_batch(chunk, context_bank).await?);
+    }
+    Ok(matches)
+}
+
+/// The anchor probes of one release name: every token prefix of each
+/// context-free anchor key. A stacked-alias name extracts as one glued title
+/// no single key equals, so candidacy probes the prefixes too. Discovery
+/// only — each candidate still faces the full anchored proof.
+fn identity_anchor_probes(release_title: &str) -> Vec<String> {
     let mut probes = Vec::<String>::new();
-    for key in &anchor_keys {
+    for key in &context_free_identity_anchor_keys(release_title) {
         let tokens = key.split_whitespace().collect::<Vec<_>>();
         for end in 1..=tokens.len() {
             let probe = tokens[..end].join(" ");
@@ -752,69 +819,162 @@ async fn match_release_to_title_context(
             }
         }
     }
+    probes
+}
 
-    let mut discovered = Vec::<Title>::new();
-    let mut seen = HashSet::<String>::new();
-    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
-        for title in titles {
-            if title.monitored && (context_bank.in_scope)(&title) && seen.insert(title.id.clone()) {
-                discovered.push(title);
-            }
+/// The ids an indexer asserted for a feed item, in the order discovery
+/// admits them.
+fn asserted_external_ids(attributes: &IndexerResponseAttributes) -> Vec<(&'static str, &str)> {
+    [
+        ("tvdb", attributes.tvdb_id.as_deref()),
+        ("tmdb", attributes.tmdb_id.as_deref()),
+        ("imdb", attributes.imdb_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(source, asserted_id)| asserted_id.map(|asserted_id| (source, asserted_id)))
+    .collect()
+}
+
+async fn match_release_batch(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let matcher = &context_bank.matcher;
+
+    let probe_sets = requests
+        .iter()
+        .map(|request| identity_anchor_probes(request.release_title))
+        .collect::<Vec<_>>();
+    let asserted = requests
+        .iter()
+        .map(|request| asserted_external_ids(request.response_attributes))
+        .collect::<Vec<_>>();
+    let spelling_anchor_sets = requests
+        .iter()
+        .map(|request| {
+            crate::title_matching::relaxed::neutral_spelling_forms(request.release_title).0
+        })
+        .collect::<Vec<_>>();
+
+    // One read per lookup lane for the whole batch.
+    let mut shape_titles = matcher
+        .titles_naming_key_shapes_batch(&probe_sets)
+        .await?
+        .into_iter();
+    let lookups = asserted.iter().flatten().copied().collect::<Vec<_>>();
+    let mut external_titles = matcher
+        .monitored_titles_by_external_ids(&lookups)
+        .await?
+        .into_iter();
+    let anchor_sets = spelling_anchor_sets
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let spellings = matcher
+        .spelling_candidates_batch(&anchor_sets, None)
+        .await?;
+    let spelling_id_sets = spellings
+        .iter()
+        .zip(&spelling_anchor_sets)
+        .map(|(spelling, anchors)| spelling.candidates(anchors, None))
+        .collect::<Vec<_>>();
+    let mut spelling_ids = Vec::<String>::new();
+    let mut requested = HashSet::<&str>::new();
+    for id in spelling_id_sets.iter().flatten() {
+        if requested.insert(id.as_str()) {
+            spelling_ids.push(id.clone());
         }
-    };
+    }
+    let spelling_titles = matcher.titles_by_ids(&spelling_ids).await?;
 
-    admit(
-        context_bank
-            .matcher
-            .titles_naming_key_shapes(&probes)
-            .await?,
-        &mut discovered,
-    );
-
-    for (source, asserted_id) in [
-        ("tvdb", response_attributes.tvdb_id.as_ref()),
-        ("tmdb", response_attributes.tmdb_id.as_ref()),
-        ("imdb", response_attributes.imdb_id.as_ref()),
-    ] {
-        let Some(asserted_id) = asserted_id else {
-            continue;
+    // Each item admits its own titles, lane by lane, exactly as it would
+    // alone: key shapes, then the asserted ids, then spelling.
+    let mut discovered_sets = Vec::with_capacity(requests.len());
+    for (index, asserted_ids) in asserted.iter().enumerate() {
+        let mut discovered = Vec::<Title>::new();
+        let mut seen = HashSet::<String>::new();
+        let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+            for title in titles {
+                if title.monitored
+                    && (context_bank.in_scope)(&title)
+                    && seen.insert(title.id.clone())
+                {
+                    discovered.push(title);
+                }
+            }
         };
+        admit(shape_titles.next().unwrap_or_default(), &mut discovered);
+        for _ in asserted_ids {
+            admit(external_titles.next().unwrap_or_default(), &mut discovered);
+        }
         admit(
-            context_bank
-                .matcher
-                .monitored_titles_by_external_id(source, asserted_id)
-                .await?,
+            spelling_titles
+                .iter()
+                .filter(|title| spelling_id_sets[index].contains(&title.id))
+                .cloned()
+                .collect(),
             &mut discovered,
         );
+        discovered_sets.push(discovered);
     }
 
-    let (spelling_anchors, _) =
-        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
-    let spelling = context_bank
-        .matcher
-        .spelling_candidates(&spelling_anchors, None)
-        .await?;
-    let spelling_ids = spelling
-        .candidates(&spelling_anchors, None)
-        .into_iter()
+    // Every item's candidates face the proof on the index's names and the
+    // global collision guard, both read once for the batch.
+    let discovered = discovered_sets
+        .iter()
+        .enumerate()
+        .flat_map(|(index, titles)| titles.iter().map(move |title| (index, title)))
         .collect::<Vec<_>>();
-    admit(
-        context_bank.matcher.titles_by_ids(&spelling_ids).await?,
-        &mut discovered,
-    );
-
-    if discovered.is_empty() {
-        return Ok(None);
+    let evidence_titles = matcher
+        .evidence_titles(
+            &discovered
+                .iter()
+                .map(|(_, title)| *title)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let ambiguities = matcher
+        .identity_ambiguities(&evidence_titles.iter().collect::<Vec<_>>())
+        .await?;
+    let mut candidate_sets = vec![Vec::<TitleContextCandidate>::new(); requests.len()];
+    for (((index, title), evidence_title), ambiguity) in
+        discovered.iter().zip(&evidence_titles).zip(ambiguities)
+    {
+        candidate_sets[*index].push(TitleContextCandidate::new(
+            title,
+            evidence_title,
+            ambiguity,
+            &spellings[*index],
+        ));
     }
 
-    let mut candidates = Vec::with_capacity(discovered.len());
-    for title in &discovered {
-        candidates.push(context_bank.candidate(title, &spelling).await?);
+    Ok(requests
+        .iter()
+        .zip(candidate_sets)
+        .map(|(request, candidates)| {
+            decide_release_match(
+                request.release_title,
+                request.response_attributes,
+                &candidates,
+            )
+        })
+        .collect())
+}
+
+/// One release's decision over its own candidates: the year gate, the
+/// anchored proof, the key-specificity ranking and the collision guard.
+fn decide_release_match(
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+    candidates: &[TitleContextCandidate],
+) -> Option<TitleMatchInfo> {
+    if candidates.is_empty() {
+        return None;
     }
 
     let mut best: Option<(&TitleMatchInfo, i32, bool)> = None;
     let mut titles_per_matched_key: HashMap<String, HashSet<&str>> = HashMap::new();
-    for candidate in &candidates {
+    for candidate in candidates {
         // The target-biased parse supplies year/projection semantics (it knows
         // when a year token is part of the title, as in `Signal Runner 2049`);
         // identity still anchors on the context-free extraction inside
@@ -908,10 +1068,10 @@ async fn match_release_to_title_context(
             title_count = colliding_titles.len(),
             "RSS sync: skipping release — shared canonical key matches multiple titles with no disambiguator"
         );
-        return Ok(None);
+        return None;
     }
 
-    Ok(best.map(|(info, _, _)| info.clone()))
+    best.map(|(info, _, _)| info.clone())
 }
 
 /// The RSS cycle's title match over a repository-backed matcher, every title
@@ -927,6 +1087,102 @@ pub(crate) async fn rss_title_id_for_release(
             .await?
             .map(|info| info.title_id),
     )
+}
+
+/// [`rss_title_id_for_release`] with the indexer's own id assertions: one
+/// feed item matched on its own, as the single-item path matches it.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_asserted_release(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    Ok(
+        match_release_to_title_context(release_title, response_attributes, &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
+}
+
+/// One feed item matched lane by lane with the matcher's single-item reads:
+/// a read per lookup lane and two per candidate, then the same decision. It
+/// is the per-item matching a batched cycle must agree with, kept as an
+/// independent oracle for the batched pass.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_release_read_item_by_item(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let mut discovered = Vec::<Title>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+        for title in titles {
+            if title.monitored && (bank.in_scope)(&title) && seen.insert(title.id.clone()) {
+                discovered.push(title);
+            }
+        }
+    };
+    admit(
+        bank.matcher
+            .titles_naming_key_shapes(&identity_anchor_probes(release_title))
+            .await?,
+        &mut discovered,
+    );
+    for (source, asserted_id) in asserted_external_ids(response_attributes) {
+        admit(
+            bank.matcher
+                .monitored_titles_by_external_id(source, asserted_id)
+                .await?,
+            &mut discovered,
+        );
+    }
+    let (spelling_anchors, _) =
+        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
+    let spelling = bank
+        .matcher
+        .spelling_candidates(&spelling_anchors, None)
+        .await?;
+    let spelling_ids = spelling
+        .candidates(&spelling_anchors, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    admit(
+        bank.matcher.titles_by_ids(&spelling_ids).await?,
+        &mut discovered,
+    );
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for title in &discovered {
+        candidates.push(bank.candidate(title, &spelling).await?);
+    }
+    Ok(
+        decide_release_match(release_title, response_attributes, &candidates)
+            .map(|info| info.title_id),
+    )
+}
+
+/// Every feed item of one cycle matched in a single batched pass, as the
+/// poll matches them, every title in scope.
+#[cfg(test)]
+pub(crate) async fn rss_title_ids_for_cycle(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    releases: &[(&str, IndexerResponseAttributes)],
+) -> AppResult<Vec<Option<String>>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let requests = releases
+        .iter()
+        .map(|(release_title, response_attributes)| ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        })
+        .collect::<Vec<_>>();
+    Ok(match_releases_to_title_context(&requests, &bank)
+        .await?
+        .into_iter()
+        .map(|matched| matched.map(|info| info.title_id))
+        .collect())
 }
 
 #[cfg(test)]
@@ -1307,14 +1563,21 @@ impl AppUseCase {
         let mut matched_count = 0usize;
         let total_new = new_results.len();
 
-        for result in new_results {
-            if let Some(title_info) = match_release_to_title_context(
-                &result.title,
-                &result.response_attributes,
-                &title_context_bank,
-            )
-            .await?
-            {
+        // Every new item is matched in one batched pass: each lookup lane is
+        // read once for the batch, not once per item.
+        let match_requests = new_results
+            .iter()
+            .map(|result| ReleaseMatchRequest {
+                release_title: &result.title,
+                response_attributes: &result.response_attributes,
+            })
+            .collect::<Vec<_>>();
+        let title_matches =
+            match_releases_to_title_context(&match_requests, &title_context_bank).await?;
+        drop(match_requests);
+
+        for (result, title_info) in new_results.into_iter().zip(title_matches) {
+            if let Some(title_info) = title_info {
                 matched_count += 1;
                 matched_by_title
                     .entry(title_info.title_id.clone())

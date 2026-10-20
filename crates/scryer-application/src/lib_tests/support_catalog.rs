@@ -40,6 +40,11 @@ pub(super) struct MockTitleRepo {
     /// Scheduled pollers must not pay for this before they know they have
     /// somewhere to send a result.
     pub(super) list_for_matching_calls: AtomicUsize,
+    /// Every read title matching makes through the index port: key shapes,
+    /// external ids, spelling buckets, index names, collision keys and title
+    /// rows by id. A batched call is one read, as it is one round trip (per
+    /// chunk) in the SQL store.
+    pub(super) matching_reads: AtomicUsize,
     pub(super) list_calls: AtomicUsize,
     pub(super) discovery_context_reads: AtomicUsize,
     pub(super) discovery_read_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
@@ -277,6 +282,30 @@ impl MockTitleRepo {
             .iter()
             .filter_map(|found| store.iter().find(|title| title.id == found.id).cloned())
             .collect())
+    }
+
+    async fn titles_naming_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = crate::ports::titles_matching_lookup_key_shapes(
+            self.list_for_matching(None, None).await?,
+            keys,
+        );
+        self.rows_of(found).await
+    }
+
+    async fn index_names(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
+        let Some(mut title) = self.get_by_id(title_id).await? else {
+            return Ok(Vec::new());
+        };
+        if let Some(names) = self.index_only_names.lock().await.get(title_id) {
+            title.tagged_aliases.extend(names.iter().cloned());
+        }
+        Ok(crate::ports::title_name_candidates(&title))
     }
 
     pub(super) async fn fail_create_or_get_existing(&self, message: &str) {
@@ -732,27 +761,127 @@ impl TitleRepository for MockTitleRepo {
     }
 
     async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        self.titles_naming_key_shapes(keys).await
+    }
+
+    async fn find_titles_by_lookup_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(key_sets.len());
+        for keys in key_sets {
+            results.push(self.titles_naming_key_shapes(keys).await?);
+        }
+        Ok(results)
+    }
+
+    async fn find_titles_by_external_id(&self, source: &str, value: &str) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::ports::titles_matching_external_id(
+            self.list_for_matching(None, None).await?,
+            source,
+            value,
+        ))
+    }
+
+    async fn find_titles_by_external_ids_batch(
+        &self,
+        lookups: &[(String, String)],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(lookups.len());
+        for (source, value) in lookups {
+            results.push(crate::ports::titles_matching_external_id(
+                self.list_for_matching(None, None).await?,
+                source,
+                value,
+            ));
+        }
+        Ok(results)
+    }
+
+    async fn lookup_keys_claimed_by_other_titles(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let found = crate::ports::titles_matching_lookup_key_shapes(
-            self.list_for_matching(None, None).await?,
+        Ok(crate::ports::lookup_keys_claimed_by_others(
+            &self.list_for_matching(None, None).await?,
+            title_id,
             keys,
-        );
-        self.rows_of(found).await
+        ))
+    }
+
+    async fn lookup_keys_claimed_by_other_titles_batch(
+        &self,
+        requests: &[(String, Vec<String>)],
+    ) -> AppResult<Vec<Vec<String>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let titles = self.list_for_matching(None, None).await?;
+        Ok(requests
+            .iter()
+            .map(|(title_id, keys)| {
+                crate::ports::lookup_keys_claimed_by_others(&titles, title_id, keys)
+            })
+            .collect())
+    }
+
+    async fn find_title_name_candidates(
+        &self,
+        query: crate::ports::TitleNameBucketQuery<'_>,
+    ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::ports::name_candidates_in_bucket(
+            &self.list_for_matching(None, None).await?,
+            &query,
+        ))
+    }
+
+    async fn find_title_name_candidates_batch(
+        &self,
+        queries: &[crate::ports::TitleNameBucketQuery<'_>],
+    ) -> AppResult<Vec<Vec<crate::ports::TitleNameCandidate>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let titles = self.list_for_matching(None, None).await?;
+        Ok(queries
+            .iter()
+            .map(|query| crate::ports::name_candidates_in_bucket(&titles, query))
+            .collect())
     }
 
     async fn list_title_index_names(
         &self,
         title_id: &str,
     ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
-        let Some(mut title) = self.get_by_id(title_id).await? else {
-            return Ok(Vec::new());
-        };
-        if let Some(names) = self.index_only_names.lock().await.get(title_id) {
-            title.tagged_aliases.extend(names.iter().cloned());
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        self.index_names(title_id).await
+    }
+
+    async fn list_title_index_names_batch(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<Vec<crate::ports::TitleNameCandidate>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(title_ids.len());
+        for title_id in title_ids {
+            results.push(self.index_names(title_id).await?);
         }
-        Ok(crate::ports::title_name_candidates(&title))
+        Ok(results)
+    }
+
+    async fn get_by_ids(&self, ids: &[String]) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let list = self.store.lock().await;
+        Ok(ids
+            .iter()
+            .filter_map(|id| list.iter().find(|title| &title.id == id).cloned())
+            .collect())
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {

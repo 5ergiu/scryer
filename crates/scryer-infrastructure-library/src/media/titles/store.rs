@@ -518,8 +518,31 @@ fn folder_path_non_ascii_owner_pattern(candidate: &str) -> String {
 pub fn title_name_equality_statement(
     query: &scryer_application::TitleNameBucketQuery<'_>,
 ) -> (String, Vec<SqlArg>) {
-    const LANE_COLUMNS: &str = "t.title_id, t.facet, t.raw_term, t.literal_term, \
-         t.match_term, t.match_year, t.language_tag";
+    let (lanes, args) = title_name_equality_lanes(query, None);
+    (lanes.join(" UNION ALL "), args)
+}
+
+/// The lanes of [`title_name_equality_statement`], one SELECT each.
+///
+/// With a `batch_position`, every lane also selects that position as
+/// `batch_position`, so the lanes of many bucket queries can share one
+/// UNION ALL statement and each row still says which query it answers. The
+/// lanes themselves are unchanged — each keeps its own WHERE and therefore
+/// its own index plan.
+fn title_name_equality_lanes(
+    query: &scryer_application::TitleNameBucketQuery<'_>,
+    batch_position: Option<usize>,
+) -> (Vec<String>, Vec<SqlArg>) {
+    let lane_columns = match batch_position {
+        None => "t.title_id, t.facet, t.raw_term, t.literal_term, \
+                 t.match_term, t.match_year, t.language_tag"
+            .to_string(),
+        Some(position) => format!(
+            "CAST({position} AS BIGINT) AS batch_position, t.title_id, t.facet, \
+             t.raw_term, t.literal_term, t.match_term, t.match_year, t.language_tag"
+        ),
+    };
+    let lane_columns = lane_columns.as_str();
 
     // Script and numbers are compared as expressions so they cannot drive an
     // index: SQLite without planner statistics otherwise prefers the
@@ -542,7 +565,7 @@ pub fn title_name_equality_statement(
     }
 
     let mut lanes = vec![format!(
-        "SELECT {LANE_COLUMNS} FROM title_search_terms t \
+        "SELECT {lane_columns} FROM title_search_terms t \
          WHERE {bucket} AND t.match_term = {{}}"
     )];
     let mut args = bucket_args.clone();
@@ -561,7 +584,7 @@ pub fn title_name_equality_statement(
             ),
         };
         lanes.push(format!(
-            "SELECT {LANE_COLUMNS} FROM title_search_terms t \
+            "SELECT {lane_columns} FROM title_search_terms t \
              WHERE {bucket} AND t.romanization_key {keys}"
         ));
         args.extend(bucket_args.iter().cloned());
@@ -584,7 +607,7 @@ pub fn title_name_equality_statement(
         .collect::<Vec<_>>()
         .join(" OR ");
         lanes.push(format!(
-            "SELECT {LANE_COLUMNS} FROM title_search_collation_keys k \
+            "SELECT {lane_columns} FROM title_search_collation_keys k \
              CROSS JOIN title_search_terms t \
              WHERE t.term_id = k.term_id AND {bucket} AND ({pairs})"
         ));
@@ -594,7 +617,35 @@ pub fn title_name_equality_statement(
             args.push(SqlArg::OptBytes(Some(key.clone())));
         }
     }
-    (lanes.join(" UNION ALL "), args)
+    (lanes, args)
+}
+
+/// Binds per batched read. Under sqlite's historical 999-variable ceiling,
+/// and far under PostgreSQL's.
+const MATCHING_BATCH_BIND_LIMIT: usize = 900;
+
+/// SELECTs per batched UNION ALL statement, under sqlite's default compound
+/// SELECT ceiling of 500.
+const MATCHING_BATCH_LANE_LIMIT: usize = 240;
+
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat_n("{}", count)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn title_name_candidate_from_row(
+    row: &SqlRow,
+) -> AppResult<scryer_application::TitleNameCandidate> {
+    Ok(scryer_application::TitleNameCandidate {
+        title_id: row.text("title_id")?,
+        facet: row.text("facet")?,
+        raw_term: row.text("raw_term")?,
+        literal_term: row.text("literal_term")?,
+        match_term: row.text("match_term")?,
+        match_year: row.opt_i32("match_year")?,
+        language_tag: row.opt_text("language_tag")?,
+    })
 }
 
 #[async_trait]
@@ -1599,44 +1650,79 @@ impl TitleRepository for TitleStore {
             }
         }
 
-        let mut results = Vec::with_capacity(queries.len());
-        for (query, term_ids) in queries.iter().zip(fuzzy_term_ids) {
-            // The equality lanes, uncapped: a romanization or a locale-equal
-            // spelling is not a bounded edit distance, so no length band can
-            // stand in for them.
-            let (sql, args) = title_name_equality_statement(query);
-            let mut rows = SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await?;
-            if !term_ids.is_empty() {
-                let placeholders = std::iter::repeat_n("{}", term_ids.len())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let hydrate_sql = format!(
-                    "SELECT {CANDIDATE_COLUMNS} FROM title_search_terms \
-                     WHERE term_id IN ({placeholders})"
-                );
-                let hydrate_args = term_ids
-                    .iter()
-                    .copied()
-                    .map(SqlArg::I64)
-                    .collect::<Vec<_>>();
-                rows.extend(
-                    SqlRuntime::fetch_all(self.datastore.read_exec(), &hydrate_sql, &hydrate_args)
-                        .await?,
-                );
+        // The equality lanes, uncapped: a romanization or a locale-equal
+        // spelling is not a bounded edit distance, so no length band can stand
+        // in for them. Every query's lanes go into as few UNION ALL statements
+        // as the bind and compound-select ceilings allow; each lane keeps its
+        // own WHERE, and therefore its own index plan, and tags its rows with
+        // the query they answer. Rows come back lane by lane, so each query
+        // sees its rows in the order its own statement would return them.
+        let mut equality = vec![Vec::new(); queries.len()];
+        let mut next = 0;
+        while next < queries.len() {
+            let mut lanes = Vec::new();
+            let mut args = Vec::new();
+            while next < queries.len() {
+                let (query_lanes, query_args) =
+                    title_name_equality_lanes(&queries[next], Some(next));
+                if !lanes.is_empty()
+                    && (args.len() + query_args.len() > MATCHING_BATCH_BIND_LIMIT
+                        || lanes.len() + query_lanes.len() > MATCHING_BATCH_LANE_LIMIT)
+                {
+                    break;
+                }
+                lanes.extend(query_lanes);
+                args.extend(query_args);
+                next += 1;
             }
+            let sql = lanes.join(" UNION ALL ");
+            for row in &SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await? {
+                let position = usize::try_from(row.i64("batch_position")?)
+                    .map_err(|_| AppError::Repository("invalid batch position".into()))?;
+                equality
+                    .get_mut(position)
+                    .ok_or_else(|| AppError::Repository("batch position out of range".into()))?
+                    .push(title_name_candidate_from_row(row)?);
+            }
+        }
 
+        // The fuzzy lane's term ids, hydrated once for the whole batch from
+        // the same projection rows the equality lanes read. Each query then
+        // takes its own ids in ascending term id order, the order its own
+        // `term_id IN (...)` read returned them in.
+        let distinct_term_ids = fuzzy_term_ids
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut hydrated = std::collections::HashMap::with_capacity(distinct_term_ids.len());
+        for chunk in distinct_term_ids.chunks(MATCHING_BATCH_BIND_LIMIT) {
+            let hydrate_sql = format!(
+                "SELECT term_id, {CANDIDATE_COLUMNS} FROM title_search_terms \
+                 WHERE term_id IN ({})",
+                sql_placeholders(chunk.len())
+            );
+            let hydrate_args = chunk.iter().copied().map(SqlArg::I64).collect::<Vec<_>>();
+            for row in
+                &SqlRuntime::fetch_all(self.datastore.read_exec(), &hydrate_sql, &hydrate_args)
+                    .await?
+            {
+                hydrated.insert(row.i64("term_id")?, title_name_candidate_from_row(row)?);
+            }
+        }
+
+        let mut results = Vec::with_capacity(queries.len());
+        for (rows, term_ids) in equality.into_iter().zip(fuzzy_term_ids) {
+            let term_ids = term_ids.into_iter().collect::<BTreeSet<i64>>();
             let mut seen = std::collections::HashSet::new();
-            let mut candidates = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let candidate = scryer_application::TitleNameCandidate {
-                    title_id: row.text("title_id")?,
-                    facet: row.text("facet")?,
-                    raw_term: row.text("raw_term")?,
-                    literal_term: row.text("literal_term")?,
-                    match_term: row.text("match_term")?,
-                    match_year: row.opt_i32("match_year")?,
-                    language_tag: row.opt_text("language_tag")?,
-                };
+            let mut candidates = Vec::with_capacity(rows.len() + term_ids.len());
+            for candidate in rows.into_iter().chain(
+                term_ids
+                    .iter()
+                    .filter_map(|term_id| hydrated.get(term_id).cloned()),
+            ) {
                 if seen.insert((candidate.title_id.clone(), candidate.literal_term.clone())) {
                     candidates.push(candidate);
                 }
@@ -1678,6 +1764,249 @@ impl TitleRepository for TitleStore {
             }
         }
         Ok(names)
+    }
+
+    /// Every title's index names in one read per chunk, each title's in the
+    /// same term order and with the same dedup a single read applies.
+    async fn list_title_index_names_batch(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<Vec<scryer_application::TitleNameCandidate>>> {
+        let distinct = title_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut names_by_title =
+            std::collections::HashMap::<String, Vec<scryer_application::TitleNameCandidate>>::new();
+        let mut seen = std::collections::HashSet::<(String, String)>::new();
+        for chunk in distinct.chunks(MATCHING_BATCH_BIND_LIMIT) {
+            let sql = format!(
+                "SELECT title_id, facet, raw_term, literal_term, match_term, match_year, \
+                 language_tag FROM title_search_terms \
+                 WHERE title_id IN ({}) AND term_kind IN ('name', 'alias', 'tagged_alias') \
+                 ORDER BY title_id, term_id",
+                sql_placeholders(chunk.len())
+            );
+            let args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+            for row in &SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await? {
+                let name = title_name_candidate_from_row(row)?;
+                if seen.insert((name.title_id.clone(), name.literal_term.clone())) {
+                    names_by_title
+                        .entry(name.title_id.clone())
+                        .or_default()
+                        .push(name);
+                }
+            }
+        }
+        Ok(title_ids
+            .iter()
+            .map(|title_id| names_by_title.get(title_id).cloned().unwrap_or_default())
+            .collect())
+    }
+
+    /// Every key set's titles from one read of the projection per chunk of
+    /// keys: the same two key columns a single call reads, with each row
+    /// saying which key reached it, then one hydration of every title found.
+    async fn find_titles_by_lookup_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        let distinct_keys = key_sets
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut titles_by_key = std::collections::HashMap::<String, BTreeSet<String>>::new();
+        // Each key is bound twice, once per key column.
+        for chunk in distinct_keys.chunks(MATCHING_BATCH_BIND_LIMIT / 2) {
+            let placeholders = sql_placeholders(chunk.len());
+            let sql = format!(
+                "SELECT literal_term AS probe, title_id FROM title_search_terms \
+                 WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+                 AND literal_term IN ({placeholders}) \
+                 UNION \
+                 SELECT stripped_year_key AS probe, title_id FROM title_search_terms \
+                 WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+                 AND stripped_year_key IN ({placeholders})"
+            );
+            let mut args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+            args.extend(chunk.iter().cloned().map(SqlArg::Text));
+            for row in &SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await? {
+                titles_by_key
+                    .entry(row.text("probe")?)
+                    .or_default()
+                    .insert(row.text("title_id")?);
+            }
+        }
+
+        let ids_per_set = key_sets
+            .iter()
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|key| titles_by_key.get(key))
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>();
+        let distinct_ids = ids_per_set
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut titles = Vec::with_capacity(distinct_ids.len());
+        for chunk in distinct_ids.chunks(MATCHING_BATCH_BIND_LIMIT) {
+            titles.extend(self.titles_for_matching_by_ids(chunk).await?);
+        }
+        Ok(ids_per_set
+            .iter()
+            .map(|ids| {
+                titles
+                    .iter()
+                    .filter(|title| ids.contains(&title.id))
+                    .cloned()
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Every `(source, value)` pair's titles from one read per chunk of
+    /// pairs, compared exactly as a single lookup compares them: source and
+    /// value case-insensitively, the stored value trimmed of spaces.
+    async fn find_titles_by_external_ids_batch(
+        &self,
+        lookups: &[(String, String)],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        // SQL `LOWER` folds ASCII only on sqlite and `TRIM` strips spaces
+        // only, so the pairing below folds and trims the same way.
+        let pair_key = |source: &str, value: &str| {
+            (
+                source.to_ascii_lowercase(),
+                value.trim_matches(' ').to_ascii_lowercase(),
+            )
+        };
+        let wanted = lookups
+            .iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .map(|(source, value)| pair_key(source, value.trim()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut ids_by_pair =
+            std::collections::HashMap::<(String, String), BTreeSet<String>>::new();
+        // Two binds per pair.
+        for chunk in wanted.chunks(MATCHING_BATCH_BIND_LIMIT / 2) {
+            let sources = chunk
+                .iter()
+                .map(|(source, _)| source.clone())
+                .collect::<BTreeSet<_>>();
+            let values = chunk
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect::<BTreeSet<_>>();
+            let sql = format!(
+                "SELECT DISTINCT title_id, source, external_id FROM title_external_ids \
+                 WHERE LOWER(source) IN ({}) AND LOWER(TRIM(external_id)) IN ({})",
+                sql_placeholders(sources.len()),
+                sql_placeholders(values.len())
+            );
+            let mut args = sources.into_iter().map(SqlArg::Text).collect::<Vec<_>>();
+            args.extend(values.into_iter().map(SqlArg::Text));
+            for row in &SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await? {
+                let key = pair_key(&row.text("source")?, &row.text("external_id")?);
+                if chunk.binary_search(&key).is_ok() {
+                    ids_by_pair
+                        .entry(key)
+                        .or_default()
+                        .insert(row.text("title_id")?);
+                }
+            }
+        }
+
+        let ids_per_lookup = lookups
+            .iter()
+            .map(|(source, value)| {
+                if value.trim().is_empty() {
+                    return BTreeSet::new();
+                }
+                ids_by_pair
+                    .get(&pair_key(source, value.trim()))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let distinct_ids = ids_per_lookup
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut titles = Vec::with_capacity(distinct_ids.len());
+        for chunk in distinct_ids.chunks(MATCHING_BATCH_BIND_LIMIT) {
+            titles.extend(self.titles_for_matching_by_ids(chunk).await?);
+        }
+        Ok(ids_per_lookup
+            .iter()
+            .map(|ids| {
+                titles
+                    .iter()
+                    .filter(|title| ids.contains(&title.id))
+                    .cloned()
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Every request's claimed keys from one read of the year-stripped key
+    /// column per chunk of shapes. A shape is claimed against a title when
+    /// any *other* title holds it, which is what a single call counts.
+    async fn lookup_keys_claimed_by_other_titles_batch(
+        &self,
+        requests: &[(String, Vec<String>)],
+    ) -> AppResult<Vec<Vec<String>>> {
+        let shapes = requests
+            .iter()
+            .flat_map(|(_, keys)| keys)
+            .map(|key| scryer_domain::title_spelling::strip_trailing_year(key).to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut claimants = std::collections::HashMap::<String, BTreeSet<String>>::new();
+        for chunk in shapes.chunks(MATCHING_BATCH_BIND_LIMIT) {
+            let sql = format!(
+                "SELECT DISTINCT stripped_year_key, title_id FROM title_search_terms \
+                 WHERE term_kind IN ('name', 'alias', 'tagged_alias') \
+                 AND stripped_year_key IN ({})",
+                sql_placeholders(chunk.len())
+            );
+            let args = chunk.iter().cloned().map(SqlArg::Text).collect::<Vec<_>>();
+            for row in &SqlRuntime::fetch_all(self.datastore.read_exec(), &sql, &args).await? {
+                claimants
+                    .entry(row.text("stripped_year_key")?)
+                    .or_default()
+                    .insert(row.text("title_id")?);
+            }
+        }
+        Ok(requests
+            .iter()
+            .map(|(title_id, keys)| {
+                keys.iter()
+                    .filter(|key| {
+                        claimants
+                            .get(scryer_domain::title_spelling::strip_trailing_year(key))
+                            .is_some_and(|holders| holders.iter().any(|holder| holder != title_id))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .collect())
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
