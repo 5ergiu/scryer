@@ -6445,6 +6445,14 @@ fn defused_episode_label(token: &str) -> Option<String> {
 }
 
 fn parse_standard_episode_token(token: &str) -> Option<(Option<u32>, Vec<u32>)> {
+    let token = token
+        .rsplit_once('V')
+        .filter(|(_, version)| {
+            !version.is_empty()
+                && version.bytes().all(|byte| byte.is_ascii_digit())
+                && version.parse::<u32>().is_ok_and(|version| version > 0)
+        })
+        .map_or(token, |(episode, _)| episode);
     if token.starts_with('S') && token.contains('E') {
         let e_index = token.find('E')?;
         let season = token.get(1..e_index)?.parse::<u32>().ok();

@@ -9,6 +9,22 @@ use crate::{
 };
 
 #[test]
+fn standard_episode_revision_suffix_preserves_episode_coordinates() {
+    for facet in [ContextFacetHint::Anime, ContextFacetHint::Series] {
+        let target = context(facet, "Hero Academy");
+        for marker in ["S07E12v2", "S07E12v3", "S07E12V10", "7x12v2"] {
+            let raw = format!(
+                "Hero Academy (2016) - {marker} - Episode Name [Bluray-1080p][Opus 2.0][Dual Audio][AV1]-Group"
+            );
+            let parsed = crate::best_parse_for_target(&raw, &target);
+            let episode = parsed.episode.expect(&raw);
+            assert_eq!(episode.season, Some(7), "{raw}");
+            assert_eq!(episode.episode_numbers, vec![12], "{raw}");
+        }
+    }
+}
+
+#[test]
 fn multilingual_spelling_preserves_native_letters_and_raw_offsets() {
     for (name, language) in [
         ("Майский вечер", "RUSSIAN"),
