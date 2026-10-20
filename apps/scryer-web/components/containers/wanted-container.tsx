@@ -766,7 +766,6 @@ export const WantedContainer = memo(function WantedContainer({
         scope: releaseQueueScopeInput(release, cutoffQueueScope(item)),
         candidateToken: release.candidateToken,
         sizeBytes: release.sizeBytes ?? null,
-        overrideMovieAvailability: release.manualAvailabilityOverrideConfirmed ?? false,
       };
 
       try {

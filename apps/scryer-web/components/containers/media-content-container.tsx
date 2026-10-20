@@ -3557,8 +3557,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           scope: releaseQueueScopeInput(release, { title: true }),
           candidateToken: release.candidateToken,
           sizeBytes: release.sizeBytes ?? null,
-          overrideMovieAvailability:
-            release.manualAvailabilityOverrideConfirmed ?? false,
         };
         const replacesPrimary = hasPrimaryMediaFile(title.mediaFiles);
         const mutation = replacesPrimary
@@ -3611,8 +3609,6 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               scope: releaseQueueScopeInput(release, { title: true }),
               candidateToken: release.candidateToken,
               sizeBytes: release.sizeBytes ?? null,
-              overrideMovieAvailability:
-                release.manualAvailabilityOverrideConfirmed ?? false,
               purpose: "ADDITIONAL_FILE",
             },
           })

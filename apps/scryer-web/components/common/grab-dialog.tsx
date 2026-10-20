@@ -40,6 +40,10 @@ import {
   downloadClientCategoriesQuery,
 } from "@/lib/graphql/queries";
 import type { Release, TitleRecord } from "@/lib/types";
+import {
+  isMovieAvailabilityBlocked,
+  MovieAvailabilityBadge,
+} from "@/components/common/movie-availability-badge";
 import { cn } from "@/lib/utils";
 import {
   assertNoReplaceConflict,
@@ -640,6 +644,8 @@ function LabelledField({
 function ReleaseSummary({ releases }: { releases: Release[] }) {
   const t = useTranslate();
   const single = releases.length === 1 ? releases[0] : null;
+  // Automatic search would hold this movie; the grab still goes through.
+  const heldRelease = releases.find(isMovieAvailabilityBlocked);
   return (
     <div
       id="grab-dialog-release-summary"
@@ -656,6 +662,9 @@ function ReleaseSummary({ releases }: { releases: Release[] }) {
       <span className="col-start-2 row-start-1 text-[12.5px] tabular-nums text-[var(--scry-muted2)]">
         {formatReleaseSize(totalReleaseBytes(releases))}
       </span>
+      {heldRelease ? (
+        <MovieAvailabilityBadge result={heldRelease} className="col-span-2 row-start-3 justify-self-start" />
+      ) : null}
     </div>
   );
 }

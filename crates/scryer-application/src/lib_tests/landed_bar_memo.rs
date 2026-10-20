@@ -264,6 +264,51 @@ async fn the_score_pass_skips_tier_targets_and_its_memo_never_changes_the_target
 }
 
 #[tokio::test]
+async fn an_unavailable_movie_is_neither_a_tier_nor_a_score_cutoff_target() {
+    let fixture = fixture(score_cutoff_profile(None)).await;
+    fixture.app.swap_user_rules_engine(
+        AppUseCase::build_user_rules_engine(
+            crate::rules::builtin_trash::baseline_rule_sets(),
+            Vec::new(),
+        )
+        .expect("bundled scoring rules compile"),
+    );
+    let below_tier = fixture
+        .add_movie(
+            "Gate Tier Short",
+            "Gate.Tier.Short.2024.720p.WEB-DL.x264-GRP",
+            2_000_000_000,
+        )
+        .await;
+    let below_score = fixture
+        .add_movie(
+            "Gate Score Short",
+            "Gate.Score.Short.2024.1080p.HDTV.x264-GRP",
+            1_500_000_000,
+        )
+        .await;
+    fixture
+        .quality_profiles
+        .set_profiles(vec![score_cutoff_profile(Some(i32::MAX))])
+        .await;
+    assert_eq!(
+        fixture.target_titles().await,
+        BTreeSet::from([below_tier.id.clone(), below_score.id.clone()])
+    );
+
+    // Neither fixture title is hydrated, so `released` has no date to open on:
+    // both the tier sweep and the score pass must drop them.
+    for title_id in [&below_tier.id, &below_score.id] {
+        fixture
+            .edit_title(title_id, |title| {
+                title.min_availability = Some("released".into());
+            })
+            .await;
+    }
+    assert!(fixture.target_titles().await.is_empty());
+}
+
+#[tokio::test]
 async fn every_scoring_input_change_misses_the_memo() {
     let fixture = fixture(score_cutoff_profile(None)).await;
     let title = fixture

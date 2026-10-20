@@ -8988,6 +8988,66 @@ async fn add_rss_target_movie(
 }
 
 #[tokio::test]
+async fn rss_sync_never_grabs_a_movie_the_availability_gate_blocks() {
+    let release_title = "Rss.Gated.Movie.2024.1080p.WEB-DL-GRP";
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            Arc::new(StubDownloadClient::default()),
+            download_submissions.clone(),
+            Arc::new(TrackingPendingReleaseRepo::default()),
+            wanted_items.clone(),
+            Arc::new(FixedReleaseIndexerClient::new(release_title)),
+        );
+    let title = add_rss_target_movie(&app, &user, &wanted_items, "Rss Gated Movie").await;
+    // The unhydrated title has no release dates, so `released` is unknown.
+    app.update_title_min_availability(&user, &title.id, Some("released".to_string()))
+        .await
+        .expect("set movie availability");
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(download_submissions.store.lock().await.is_empty());
+    assert!(release_attempts.attempts.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn external_release_is_rejected_for_a_movie_the_availability_gate_blocks() {
+    let pending = Arc::new(TrackingPendingReleaseRepo::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        submissions.clone(),
+        pending.clone(),
+        wanted.clone(),
+        Arc::new(MockIndexerClient),
+    );
+    let title = add_rss_target_movie(&app, &user, &wanted, "Convergent Skyline").await;
+    app.update_title_min_availability(&user, &title.id, Some("released".to_string()))
+        .await
+        .expect("set movie availability");
+    let mut input = external_test_input();
+    input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
+    input.published_at = Some(Utc::now());
+
+    let outcome = app
+        .submit_external_release(&user, input, &[])
+        .await
+        .expect("evaluate external release");
+
+    assert_eq!(
+        outcome.status,
+        crate::ExternalReleaseStatus::Rejected,
+        "{outcome:?}"
+    );
+    assert!(submissions.store.lock().await.is_empty());
+    assert!(pending.store.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn rss_submit_unavailable_records_pending_without_failed_signature() {
     let release_title = "Rss.Deferred.Movie.2024.1080p.WEB-DL-GRP";
     let download_client = Arc::new(StubDownloadClient::default());

@@ -7126,66 +7126,62 @@ async fn persisted_listing(fixture: &ListingTokenFixture) -> Option<String> {
 }
 
 #[tokio::test]
-async fn unknown_movie_availability_requires_explicit_candidate_queue_override() {
-    let blocked = listing_token_fixture().await;
-    let offered = offer_listing_with_token(&blocked, fixed_instant("2026-05-01T10:00:00Z")).await;
-    let updated = blocked
+async fn manual_queue_accepts_a_movie_the_availability_gate_blocks_for_automation() {
+    let fixture = listing_token_fixture().await;
+    let updated = fixture
         .app
         .update_title_min_availability(
-            &blocked.operator,
-            &blocked.title.id,
+            &fixture.operator,
+            &fixture.title.id,
             Some("released".to_string()),
         )
         .await
         .expect("set movie availability");
     assert_eq!(updated.min_availability.as_deref(), Some("released"));
-    let error = blocked
-        .app
-        .queue_existing_title_download_from_candidate_token(
-            &blocked.operator,
-            &blocked.title.id,
-            offered.candidate_token.as_deref().expect("candidate token"),
-            SubmissionScope::Title,
-            SubmissionConflictPolicy::Abort,
-        )
-        .await
-        .expect_err("unknown release dates must block a standard manual queue");
-    assert!(
-        matches!(error, AppError::Validation(ref message) if message.contains("movie availability gate: home_release_date_unknown")),
-        "unexpected queue error: {error:?}"
-    );
-    assert!(
-        blocked.submissions.store.lock().await.is_empty(),
-        "blocked candidate must not reach the download client"
-    );
 
-    let overridden = listing_token_fixture().await;
-    let offered =
-        offer_listing_with_token(&overridden, fixed_instant("2026-05-01T10:00:00Z")).await;
-    overridden
+    // Automatic admission still refuses: the never-hydrated title has no
+    // release dates, so its auto-decision reports the availability block.
+    let subject = fixture
         .app
-        .update_title_min_availability(
-            &overridden.operator,
-            &overridden.title.id,
-            Some("released".to_string()),
-        )
+        .resolve_release_search_subject_for_title(&updated)
         .await
-        .expect("set movie availability");
-    let outcome = overridden
+        .expect("resolve search subject");
+    let evaluated = fixture
         .app
-        .queue_existing_title_download_from_candidate_token_with_availability_override(
-            &overridden.operator,
-            &overridden.title.id,
-            offered.candidate_token.as_deref().expect("candidate token"),
-            SubmissionScope::Title,
-            SubmissionConflictPolicy::Abort,
-            DownloadSubmissionPurpose::Standard,
-            None,
+        .evaluate_search_results_for_subject(
+            &updated,
+            &subject,
+            vec![
+                FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP")
+                    .with_listing_facts()
+                    .release(),
+            ],
             true,
         )
         .await
-        .expect("explicit override should queue the candidate");
+        .expect("evaluate search results");
+    assert_eq!(
+        evaluated[0].auto_decision_code.as_deref(),
+        Some("movie_availability_blocked"),
+        "{:?}",
+        evaluated[0]
+    );
+
+    // The operator's own grab of the same release is never refused.
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            offered.candidate_token.as_deref().expect("candidate token"),
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a manual queue is never gated by movie availability");
     assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(fixture.submissions.store.lock().await.len(), 1);
 }
 
 #[tokio::test]

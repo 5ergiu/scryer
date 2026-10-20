@@ -25326,9 +25326,10 @@ input QueueDownloadInput {
 	"""
 	purpose: QueueDownloadPurposeValue
 	"""
-	Explicit confirmation to queue a movie before its configured availability date.
+	Deprecated and ignored. Manual queueing is never gated by movie
+	availability; kept for one release so older web bundles still parse.
 	"""
-	overrideMovieAvailability: Boolean
+	overrideMovieAvailability: Boolean @deprecated(reason: "Manual queueing is never gated by availability; ignored.")
 }
 
 """
