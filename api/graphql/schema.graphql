@@ -18289,7 +18289,9 @@ type MovieAvailabilityPayload {
 	"""
 	effectiveDate: String
 	"""
-	Whether the effective date uses the theatrical-plus-90-day estimate.
+	Whether the effective date is an estimate rather than a home release
+	date for the configured market: a theatrical date plus 90 days, or a
+	date taken from another market.
 	"""
 	estimated: Boolean!
 	"""

@@ -1647,7 +1647,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
                   title={t("settings.movieAvailability")}
                   description={t("settings.libraryMovieAvailabilityDescription")}
                 >
-                  <div className="grid gap-3 md:grid-cols-3">
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <div className="space-y-2">
                       <Label htmlFor="library-movie-default-availability">
                         {t("settings.movieDefaultAvailability")}

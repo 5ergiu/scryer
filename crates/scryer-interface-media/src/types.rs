@@ -148,7 +148,9 @@ pub struct MovieAvailabilityPayload {
     pub status: String,
     /// Effective calendar date after applying the configured offset.
     pub effective_date: Option<String>,
-    /// Whether the effective date uses the theatrical-plus-90-day estimate.
+    /// Whether the effective date is an estimate rather than a home release
+    /// date for the configured market: a theatrical date plus 90 days, or a
+    /// date taken from another market.
     pub estimated: bool,
     /// Stable reason code for waiting or unknown state.
     pub reason: String,
