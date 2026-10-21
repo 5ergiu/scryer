@@ -219,6 +219,9 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     // any indexer is queried.
     let dl_snapshot = DownloadClientSnapshot::fetch(app).await;
     check_grabbed_for_failures(app, &dl_snapshot).await;
+    // Grabs no client ever confirmed are the other half of failure handling:
+    // released, they re-open their scope for this same pass.
+    release_unconfirmed_grab_intents(app).await;
     // Between walks the tick stops here, unless failure handling (this pass's
     // or the download lifecycle's since the last walk) re-opened a scope: that
     // scope's saved results are tried now, as they were before the walk had
@@ -5937,6 +5940,17 @@ pub async fn start_background_acquisition_poller(
         let token = token.child_token();
         tokio::spawn(async move {
             run_discovery_sync_worker(app, token).await;
+        });
+    }
+
+    // A process that died mid-grab left intents no client confirmed. They
+    // predate this process, so they are released now rather than a poll
+    // interval (or a grace period) from now; the release is idempotent, so a
+    // poll tick that overlaps it settles nothing twice.
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            release_unconfirmed_grab_intents(&app).await;
         });
     }
 

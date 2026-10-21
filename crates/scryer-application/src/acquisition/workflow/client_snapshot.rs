@@ -1562,22 +1562,397 @@ async fn resolve_failure_wanted_item(
             .and_then(|grabbed_release| normalize_release_name(Some(grabbed_release.as_str())))
             .as_ref()
             == Some(&failed_release);
-        let scope_matches = match &submission.scope {
-            SubmissionScope::Title => {
-                item.episode_id.is_none() && item.series_movie_link_id.is_none()
-            }
-            SubmissionScope::Episode { episode_id } => {
-                item.episode_id.as_deref() == Some(episode_id)
-            }
-            SubmissionScope::SeriesMovie {
-                series_movie_link_id,
-            } => item.series_movie_link_id.as_deref() == Some(series_movie_link_id),
-            SubmissionScope::Collection { .. }
-            | SubmissionScope::EpisodeSet { .. }
-            | SubmissionScope::Orphan => false,
-        };
-        release_matches && scope_matches
+        release_matches && wanted_item_matches_single_scope(item, &submission.scope)
     })
+}
+
+/// Whether a wanted row is the one scope a single-scope submission claims.
+/// Pack scopes (collection, episode set) cover several rows and never match.
+fn wanted_item_matches_single_scope(item: &AcquisitionScopeState, scope: &SubmissionScope) -> bool {
+    match scope {
+        SubmissionScope::Title => item.episode_id.is_none() && item.series_movie_link_id.is_none(),
+        SubmissionScope::Episode { episode_id } => item.episode_id.as_deref() == Some(episode_id),
+        SubmissionScope::SeriesMovie {
+            series_movie_link_id,
+        } => item.series_movie_link_id.as_deref() == Some(series_movie_link_id),
+        SubmissionScope::Collection { .. }
+        | SubmissionScope::EpisodeSet { .. }
+        | SubmissionScope::Orphan => false,
+    }
+}
+
+/// How long a grab intent may stay unconfirmed before Scryer releases it.
+///
+/// A grab durably records its intent (an active client binding with no client
+/// job yet) before it submits, and acceptance binds it as soon as the client
+/// answers. The submit is bounded by the client's HTTP timeouts, well under a
+/// minute, and a client that accepted but answered ambiguously lists the job
+/// within the queue observer's binding window (the observer binds it from the
+/// job's wire token on its next tick, and gives a submission 60 s to appear).
+/// Fifteen minutes is far past both, so an intent still unbound by then was
+/// never confirmed: the process died mid-submit, or the client answered
+/// ambiguously and never listed the job. Left alone, one such row blocks every
+/// move of its title and every later grab on it, permanently.
+pub(crate) const UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES: i64 = 15;
+
+/// Recent-activity rows read per client when checking unconfirmed grabs, the
+/// same depth the submission path reads to judge an existing submission.
+const UNCONFIRMED_GRAB_SNAPSHOT_ACTIVITY_LIMIT: usize = 100;
+
+/// Release grab intents no download client ever confirmed.
+///
+/// An intent is old enough once it is past
+/// [`UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES`], or as soon as it predates this
+/// process: a submit the previous process started is no longer in flight. The
+/// client snapshot is consulted first, and an intent whose wire token a client
+/// lists is handed to the queue observer's own resolution, which binds the
+/// unbound row to that job. Only when every client that could hold the intent
+/// answered in full without listing it is the intent released: its binding is
+/// ended (which stamps the download terminal), a failed-grab history entry is
+/// written without blocklisting the release, which was never seen to fail, and
+/// its wanted scope is re-opened under its existing coverage, as a failed grab
+/// re-opens it.
+pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
+    let now = Utc::now();
+    let grace_cutoff = now - Duration::minutes(UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES);
+    let submissions = &app.services.workflow.download_submissions;
+    let mut candidates = match submissions
+        .list_active_unbound_submitted_before(grace_cutoff)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| (row, UnconfirmedGrabAge::PastGrace))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            warn!(error = %error, "failed to list unconfirmed grab intents");
+            return;
+        }
+    };
+    let process_started_at = app.runtime.acquisition.process_started_at;
+    if process_started_at > grace_cutoff {
+        match submissions
+            .list_active_unbound_submitted_before(process_started_at)
+            .await
+        {
+            Ok(rows) => {
+                for row in rows {
+                    if !candidates
+                        .iter()
+                        .any(|(candidate, _)| candidate.download_id == row.download_id)
+                    {
+                        candidates.push((row, UnconfirmedGrabAge::BeforeRestart));
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to list grab intents left by a previous process");
+                return;
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+
+    // A fresh read: this decides that a job is absent, so it must describe
+    // the clients as they are now, every client type included.
+    let snapshot = match app
+        .services
+        .integrations
+        .download_client
+        .list_snapshot_outcome_excluding_client_types(UNCONFIRMED_GRAB_SNAPSHOT_ACTIVITY_LIMIT, &[])
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(
+                error = %error,
+                unconfirmed = candidates.len(),
+                "download clients could not be read; unconfirmed grab intents are kept"
+            );
+            return;
+        }
+    };
+    let configs = match app
+        .services
+        .integrations
+        .download_client_configs
+        .list(None)
+        .await
+    {
+        Ok(configs) => configs,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "download client configs could not be read; unconfirmed grab intents are kept"
+            );
+            return;
+        }
+    };
+    let configured_client_ids = configs
+        .iter()
+        .map(|config| config.id.clone())
+        .collect::<HashSet<_>>();
+    let enabled_client_ids = configs
+        .iter()
+        .filter(|config| config.is_enabled)
+        .map(|config| config.id.clone())
+        .collect::<Vec<_>>();
+
+    for (submission, age) in candidates {
+        let listed = snapshot
+            .items
+            .iter()
+            .filter(|item| {
+                item.download_id
+                    .as_deref()
+                    .and_then(scryer_domain::download_identity::DownloadId::from_wire)
+                    == Some(submission.download_id)
+            })
+            .map(crate::download_identity::observed_queue_item_job)
+            .chain(
+                snapshot
+                    .completed_downloads
+                    .iter()
+                    .flat_map(|completed| completed.rows.iter())
+                    .filter(|item| {
+                        item.download_id
+                            .as_deref()
+                            .and_then(scryer_domain::download_identity::DownloadId::from_wire)
+                            == Some(submission.download_id)
+                    })
+                    .map(crate::download_identity::observed_completed_job),
+            )
+            .collect::<Vec<_>>();
+        if !listed.is_empty() {
+            // The client holds the grab after all: bind it the way the queue
+            // observer does, and never drop it.
+            for observation in listed {
+                crate::download_identity::resolve_observed_client_job(app, observation).await;
+            }
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            info!(
+                title_id = submission.title_id.as_str(),
+                download_id = %submission.download_id,
+                "unconfirmed grab intent is listed by its download client; bound it to the job"
+            );
+            continue;
+        }
+        if !unconfirmed_grab_absence_is_proven(
+            &submission,
+            &snapshot.authoritative_client_ids,
+            &configured_client_ids,
+            &enabled_client_ids,
+        ) {
+            debug!(
+                title_id = submission.title_id.as_str(),
+                download_id = %submission.download_id,
+                "a download client that could hold this unconfirmed grab did not answer; keeping it"
+            );
+            continue;
+        }
+        release_unconfirmed_grab_intent(app, &submission, age).await;
+    }
+}
+
+/// Why an unconfirmed grab intent is old enough to release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnconfirmedGrabAge {
+    PastGrace,
+    BeforeRestart,
+}
+
+/// Whether the snapshot proves no client holds this intent: the client it was
+/// sent to answered in full (or no longer exists), or, for an intent that
+/// never learned its client, every enabled client answered in full.
+fn unconfirmed_grab_absence_is_proven(
+    submission: &DownloadSubmission,
+    authoritative_client_ids: &HashSet<String>,
+    configured_client_ids: &HashSet<String>,
+    enabled_client_ids: &[String],
+) -> bool {
+    match submission
+        .download_client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|client_id| !client_id.is_empty())
+    {
+        Some(client_id) => {
+            authoritative_client_ids.contains(client_id)
+                || !configured_client_ids.contains(client_id)
+        }
+        None => enabled_client_ids
+            .iter()
+            .all(|client_id| authoritative_client_ids.contains(client_id)),
+    }
+}
+
+async fn release_unconfirmed_grab_intent(
+    app: &AppUseCase,
+    submission: &DownloadSubmission,
+    age: UnconfirmedGrabAge,
+) {
+    let title_id = submission.title_id.as_str();
+    match app
+        .services
+        .workflow
+        .download_submissions
+        .release_unconfirmed_submission(&submission.download_id)
+        .await
+    {
+        // A job bound it between the snapshot and now; it is live after all.
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(error) => {
+            warn!(
+                title_id,
+                download_id = %submission.download_id,
+                error = %error,
+                "failed to release an unconfirmed grab intent"
+            );
+            return;
+        }
+    }
+    // As after a withdrawal: the ended binding retires memoized resolutions of
+    // its id, and the title's cached submission state no longer describes it.
+    app.runtime
+        .acquisition
+        .invalidate_download_registry_observations();
+    app.runtime
+        .acquisition
+        .download_submission_guards
+        .clear_title_state(title_id);
+
+    let operator_submission =
+        submission.purpose.is_operator_queued() || submission.purpose.is_manual_replacement();
+    let wanted_items = if operator_submission {
+        Vec::new()
+    } else {
+        unconfirmed_grab_wanted_items(app, submission).await
+    };
+    let pack_items = matches!(
+        submission.scope,
+        SubmissionScope::Collection { .. } | SubmissionScope::EpisodeSet { .. }
+    )
+    .then_some(wanted_items.as_slice());
+    let attribution = resolve_failed_release_attribution(
+        app,
+        Some(title_id),
+        Some(submission),
+        if pack_items.is_some() {
+            None
+        } else {
+            wanted_items.first()
+        },
+        pack_items,
+    )
+    .await;
+
+    let unconfirmed = match age {
+        UnconfirmedGrabAge::PastGrace => format!(
+            "the download client never confirmed this grab (Scryer restarted or the client answered ambiguously); released after {UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES} minutes"
+        ),
+        UnconfirmedGrabAge::BeforeRestart => "the download client never confirmed this grab before Scryer restarted; released".to_string(),
+    };
+    let failure_reason = if wanted_items.is_empty() {
+        unconfirmed
+    } else {
+        format!("{unconfirmed}; re-opened scope to try its saved search results")
+    };
+    record_failed_release_outcome(
+        app,
+        Some(title_id),
+        &attribution,
+        normalize_release_name(submission.source_title.as_deref()),
+        resolved_failed_release_hint(Some(submission)),
+        submission.source_provider_id.clone().unwrap_or_default(),
+        submission.info_hash.clone(),
+        None,
+        submission.download_client_id.clone(),
+        None,
+        normalized_non_empty_owned(Some(submission.download_client_type.clone())),
+        release_quality_hint(submission.source_title.as_deref()),
+        Some(failure_reason),
+        // Never confirmed as failed, so the release stays eligible.
+        None,
+        None,
+    )
+    .await;
+
+    for item in &wanted_items {
+        app.reopen_wanted_scope_for_acquisition(item, CoverageReopen::Keep)
+            .await;
+    }
+    if !wanted_items.is_empty() {
+        app.runtime
+            .acquisition
+            .scope_reopened_since_walk
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    info!(
+        title_id,
+        download_id = %submission.download_id,
+        release_title = submission.source_title.as_deref().unwrap_or(""),
+        reopened_scopes = wanted_items.len(),
+        "released a grab intent no download client confirmed"
+    );
+}
+
+/// The wanted rows an unconfirmed grab was meant to fill: rows still `wanted`
+/// for its scope, or `grabbed` for this very release.
+async fn unconfirmed_grab_wanted_items(
+    app: &AppUseCase,
+    submission: &DownloadSubmission,
+) -> Vec<AcquisitionScopeState> {
+    if matches!(
+        submission.scope,
+        SubmissionScope::Collection { .. } | SubmissionScope::EpisodeSet { .. }
+    ) {
+        return match resolve_failed_pack_episode_wanted_items(app, submission).await {
+            Ok(items) => items,
+            Err(error) => {
+                warn!(
+                    title_id = submission.title_id.as_str(),
+                    error = %error,
+                    "failed to resolve wanted items for an unconfirmed pack grab"
+                );
+                Vec::new()
+            }
+        };
+    }
+    let items = match app
+        .services
+        .workflow
+        .acquisition_scope_states
+        .list_acquisition_scope_states_for_title_ids(std::slice::from_ref(&submission.title_id))
+        .await
+    {
+        Ok(items) => items,
+        Err(error) => {
+            warn!(
+                title_id = submission.title_id.as_str(),
+                error = %error,
+                "failed to list wanted items for an unconfirmed grab"
+            );
+            return Vec::new();
+        }
+    };
+    let release = normalize_release_name(submission.source_title.as_deref());
+    items
+        .into_iter()
+        .filter(|item| {
+            wanted_item_matches_single_scope(item, &submission.scope)
+                && (item.status == AcquisitionScopeStatus::Wanted
+                    || (item.status == AcquisitionScopeStatus::Grabbed
+                        && release.is_some()
+                        && extract_grabbed_release_title(item.grabbed_release.as_deref())
+                            .and_then(|grabbed| normalize_release_name(Some(grabbed.as_str())))
+                            == release))
+        })
+        .collect()
 }
 
 /// Drop saved search results whose scope no longer needs them.

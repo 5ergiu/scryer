@@ -1700,10 +1700,107 @@ impl StrategyBatchHealth {
     }
 }
 
-/// Admission limit for searches someone is waiting on. Background sweeps
-/// (RSS and the consenting convergence lanes) are deliberately unbounded here;
-/// the upstream scheduler's per-destination pacing is the only throttle.
+/// Admission limit for searches someone is waiting on. The consenting
+/// convergence lanes are deliberately unbounded here; the upstream scheduler's
+/// per-destination pacing is their only throttle. RSS has its own lane, see
+/// [`DEFAULT_RSS_INDEXER_POLL_CONCURRENCY`].
 const INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT: usize = 24;
+
+/// How many indexer RSS polls run at once. Every poll holds its whole feed (a
+/// catch-up poll can be thousands of results) until the RSS worker has taken
+/// it, so the old unbounded fan-out made a cycle's peak memory grow with the
+/// number of configured indexers. Two keeps a cycle moving while one poll is
+/// paced or slow and keeps live results at a couple of polls.
+const DEFAULT_RSS_INDEXER_POLL_CONCURRENCY: usize = 2;
+/// Overrides [`DEFAULT_RSS_INDEXER_POLL_CONCURRENCY`].
+pub const RSS_INDEXER_POLL_CONCURRENCY_ENV: &str = "SCRYER_RSS_INDEXER_CONCURRENCY";
+/// Provider pages one RSS poll may hand on; its item cap is counted in pages
+/// of [`RSS_POLL_ITEMS_PER_PAGE`]. Five pages of a hundred is the window the
+/// RSS seen-GUID set keeps per indexer.
+const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 5;
+/// Overrides [`DEFAULT_RSS_POLL_PAGE_BUDGET`].
+pub const RSS_POLL_PAGE_BUDGET_ENV: &str = "SCRYER_RSS_POLL_PAGE_BUDGET";
+const RSS_POLL_ITEMS_PER_PAGE: usize = 100;
+
+/// Absent, blank, unparseable and zero all fall back to the default.
+fn parse_rss_indexer_poll_concurrency(raw: Option<&str>) -> usize {
+    raw.map(str::trim)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_RSS_INDEXER_POLL_CONCURRENCY)
+}
+
+/// Absent, blank, unparseable and zero all fall back to the default.
+fn parse_rss_poll_page_budget(raw: Option<&str>) -> u32 {
+    raw.map(str::trim)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|budget| *budget > 0)
+        .unwrap_or(DEFAULT_RSS_POLL_PAGE_BUDGET)
+}
+
+/// The RSS poll concurrency for this process, read once.
+static RSS_INDEXER_POLL_CONCURRENCY: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    parse_rss_indexer_poll_concurrency(
+        std::env::var(RSS_INDEXER_POLL_CONCURRENCY_ENV)
+            .ok()
+            .as_deref(),
+    )
+});
+
+/// The RSS per-poll page budget for this process, read once.
+static RSS_POLL_PAGE_BUDGET: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+    parse_rss_poll_page_budget(std::env::var(RSS_POLL_PAGE_BUDGET_ENV).ok().as_deref())
+});
+
+/// The most results one RSS poll hands on: its page budget in provider pages.
+fn rss_poll_item_cap(page_budget: u32) -> usize {
+    (page_budget as usize).saturating_mul(RSS_POLL_ITEMS_PER_PAGE)
+}
+
+/// Cuts one RSS poll back to `cap` results, keeping the newest by publish
+/// time (an undated result counts as newest, so it is never the one dropped)
+/// and the feed order among those kept. Returns how many were dropped.
+///
+/// The bundled RSS adapters page a feed's catch-up inside the plugin and do
+/// not take a page budget for a feed read, so this is the host-side bound on
+/// what one poll passes on. A cut poll is reported as stopped at its page
+/// ceiling, exactly like a plugin that ran out of pages before the previous
+/// poll's marker, so the poll logs the window it did not cover.
+fn truncate_rss_poll_results(results: &mut Vec<IndexerSearchResult>, cap: usize) -> usize {
+    if results.len() <= cap {
+        return 0;
+    }
+    let mut order = results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            (
+                index,
+                result
+                    .published_at
+                    .as_deref()
+                    .and_then(scryer_application::parse_published_at),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Undated first, then newest first; the sort is stable, so feed order
+    // breaks ties.
+    order.sort_by(|(_, left), (_, right)| match (left, right) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(left), Some(right)) => right.cmp(left),
+    });
+    let mut keep = vec![false; results.len()];
+    for (index, _) in order.into_iter().take(cap) {
+        keep[index] = true;
+    }
+    let before = results.len();
+    let mut keep = keep.into_iter();
+    results.retain(|_| keep.next().unwrap_or(false));
+    before - results.len()
+}
+
 const LEARNED_EMPTY_SUPPRESSION_THRESHOLD: u32 = 3;
 const LEARNED_SUPPRESSION_REPROBE_INTERVAL_DAYS: i64 = 7;
 
@@ -1979,10 +2076,44 @@ fn strategy_retry_after(
 
 /// What one RSS poll of an indexer returned, gathered from every response
 /// before the results are filtered or handed to scoring.
+/// The RSS hand-off slot a poll holds from before its fetch until the
+/// aggregator has handed its page to scoring. Without it a cycle's finished
+/// polls pile up in the join set, each with a full feed in memory, while the
+/// aggregator waits on the scoring pipeline. Shared by reference so a summary
+/// copied for scheduler feedback cannot free the slot early; summaries
+/// compare equal regardless of the slot.
+#[derive(Clone)]
+struct RssHandOffSlot {
+    /// Held, never read: dropping the last clone frees the slot.
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+impl RssHandOffSlot {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            _permit: Arc::new(permit),
+        }
+    }
+}
+
+impl std::fmt::Debug for RssHandOffSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RssHandOffSlot")
+    }
+}
+
+impl PartialEq for RssHandOffSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct RssFeedSummary {
     /// The marker the poll was asked to read back to, if any.
     catch_up: Option<IndexerRssCatchUp>,
+    /// The hand-off slot the poll holds until its page reaches scoring.
+    hand_off: Option<RssHandOffSlot>,
     /// Every release identity the poll returned, in feed order.
     seen_identities: Vec<String>,
     /// The parsed publish time of each entry in `seen_identities`.
@@ -1990,6 +2121,11 @@ struct RssFeedSummary {
     oldest_published_at: Option<DateTime<Utc>>,
     /// The indexer reported it stopped paging at its page ceiling.
     stopped_at_page_ceiling: bool,
+    /// [`IndexerSearchResult::approximate_size_bytes`] summed over every
+    /// observed result. Diagnostic only.
+    approximate_bytes: usize,
+    /// Results the host cut from this poll to keep it within its page budget.
+    truncated: usize,
 }
 
 impl RssFeedSummary {
@@ -2023,6 +2159,19 @@ impl RssFeedSummary {
             }
             self.seen_identities.push(identity);
             self.published_at.push(published_at);
+            self.approximate_bytes = self
+                .approximate_bytes
+                .saturating_add(result.approximate_size_bytes());
+        }
+    }
+
+    /// Records that the host cut `dropped` results from this poll. A cut poll
+    /// did not read everything back to its marker, which is what the page
+    /// ceiling flag tells the scheduler and the poll log.
+    fn note_truncated(&mut self, dropped: usize) {
+        if dropped > 0 {
+            self.truncated = self.truncated.saturating_add(dropped);
+            self.stopped_at_page_ceiling = true;
         }
     }
 
@@ -2092,6 +2241,8 @@ impl RssFeedSummary {
         info!(
             indexer = indexer_name,
             results = self.result_count(),
+            approx_bytes = self.approximate_bytes,
+            truncated = self.truncated,
             catch_up = self.catch_up.is_some(),
             stopped_at_page_ceiling = self.stopped_at_page_ceiling,
             reached_previous = reached,
@@ -3303,6 +3454,15 @@ pub struct MultiIndexerSearchClient {
     rss_feed_cache: RssFeedCache,
     rss_bare_query_indexers: RssBareQueryIndexers,
     interactive_search_limit: Arc<Semaphore>,
+    /// The RSS lane, separate from the interactive one so a cycle can never
+    /// starve a search someone is waiting on (or the reverse).
+    rss_search_limit: Arc<Semaphore>,
+    /// Bounds the RSS polls alive at once, from before the fetch until the
+    /// page is handed to scoring, so a cycle never holds more feeds in memory
+    /// than the lane admits. Sized like the lane.
+    rss_hand_off: Arc<Semaphore>,
+    /// Provider pages one RSS poll may hand on.
+    rss_poll_page_budget: u32,
 }
 
 impl MultiIndexerSearchClient {
@@ -3332,6 +3492,9 @@ impl MultiIndexerSearchClient {
             interactive_search_limit: Arc::new(Semaphore::new(
                 INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT,
             )),
+            rss_search_limit: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
+            rss_hand_off: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
+            rss_poll_page_budget: *RSS_POLL_PAGE_BUDGET,
         }
     }
 
@@ -3713,19 +3876,24 @@ impl MultiIndexerSearchClient {
         .await
     }
 
-    /// Machine-initiated sweeps — RSS and the convergence lanes that consent
-    /// to corpus reuse — dispatch unbounded: with twenty-plus indexers a
-    /// Scryer-side ceiling only serialises the walk, and the upstream
-    /// scheduler already paces and cools each destination. An operator's
-    /// Auto-mode search — queue-best-release, the UI search buttons, and the
-    /// acquisition-search job they start — admits through the interactive lane.
+    /// RSS polls admit through their own bounded lane: each poll holds its
+    /// whole feed until the RSS worker has taken it, so an unbounded fan-out
+    /// across every indexer and category set held every feed of a cycle at
+    /// once. The convergence lanes that consent to corpus reuse dispatch
+    /// unbounded: with twenty-plus indexers a Scryer-side ceiling only
+    /// serialises the walk, and the upstream scheduler already paces and cools
+    /// each destination. An operator's Auto-mode search — queue-best-release,
+    /// the UI search buttons, and the acquisition-search job they start —
+    /// admits through the interactive lane.
     fn search_limit_for_mode(
         &self,
         mode: SearchMode,
         is_rss_request: bool,
         learning_context: Option<&IndexerSearchLearningContext>,
     ) -> SearchAdmission {
-        if Self::is_background_pass(mode, is_rss_request, learning_context) {
+        if is_rss_request && mode == SearchMode::Auto {
+            Some(self.rss_search_limit.clone())
+        } else if Self::is_background_pass(mode, is_rss_request, learning_context) {
             None
         } else {
             Some(self.interactive_search_limit.clone())
@@ -5611,7 +5779,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let cache_entry = {
                     let mut cache = self.rss_feed_cache.lock().await;
                     cache
-                        .entry(rss_cache_key)
+                        .entry(rss_cache_key.clone())
                         .or_insert_with(|| Arc::new(RssFeedCacheEntry::new()))
                         .clone()
                 };
@@ -5620,7 +5788,12 @@ impl IndexerClient for MultiIndexerSearchClient {
                     .clone()
                     .try_lock_owned()
                     .ok();
-                let initial_permit = if initialization_guard.is_some()
+                // An RSS poll takes its hand-off slot inside the task, before
+                // the lane permit; pre-acquiring the permit here would hold it
+                // while the task waits for a slot the aggregator only frees
+                // once it is joining, which it does after this loop.
+                let initial_permit = if !is_rss_request
+                    && initialization_guard.is_some()
                     && cache_entry.cell.get().is_none()
                 {
                     match acquire_search_permit(search_limit.clone(), &cancel_token, deadline_at)
@@ -5678,6 +5851,10 @@ impl IndexerClient for MultiIndexerSearchClient {
                 let search_limit = search_limit.clone();
                 let task_cancel_token = cancel_token.child_token();
                 let scheduler_lease_for_task = scheduler_lease.clone();
+                let rss_feed_cache = self.rss_feed_cache.clone();
+                let rss_poll_page_budget = is_rss_request.then_some(self.rss_poll_page_budget);
+                let rss_poll_item_cap = rss_poll_page_budget.map(rss_poll_item_cap);
+                let rss_hand_off = is_rss_request.then(|| self.rss_hand_off.clone());
 
                 set.spawn(async move {
                         let _initialization_guard = tokio::select! {
@@ -5700,6 +5877,46 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         .await,
                                 }
                             } => guard,
+                        };
+                        let hand_off = match acquire_search_permit(
+                            rss_hand_off,
+                            &task_cancel_token,
+                            deadline_at,
+                        )
+                        .await
+                        {
+                            Ok(permit) => permit.map(RssHandOffSlot::new),
+                            Err(SearchPermitError::Cancelled) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::canceled("RSS indexer search canceled")),
+                                    false,
+                                );
+                            }
+                            Err(SearchPermitError::DeadlineExpired) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::Repository(
+                                        "RSS indexer search timed out before dispatch".to_string(),
+                                    )),
+                                    false,
+                                );
+                            }
+                            Err(SearchPermitError::Closed(error)) => {
+                                return (
+                                    indexer_id,
+                                    indexer_name,
+                                    scheduler_lease_for_task.clone(),
+                                    Err(AppError::Repository(format!(
+                                        "RSS hand-off limiter closed: {error}"
+                                    ))),
+                                    false,
+                                );
+                            }
                         };
                         let cached_results = tokio::select! {
                             _ = task_cancel_token.cancelled() => {
@@ -5771,7 +5988,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 let request_cancel_token = task_cancel_token.child_token();
                                 let request_deadline =
                                     effective_request_deadline(search_timeout, deadline_at);
-                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: None,
+                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: rss_poll_page_budget,
                                     strategy_id: String::new(),
                                     labels: Vec::new(),
                                     query,
@@ -5831,7 +6048,21 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         for result in &mut response.results {
                                             result.indexer_id = Some(indexer_id.clone());
                                         }
-                                        Ok((response.results, response.completion))
+                                        // Cut before caching, so the shared
+                                        // entry never holds more than one
+                                        // bounded poll.
+                                        let mut completion = response.completion;
+                                        if let Some(cap) = rss_poll_item_cap
+                                            && truncate_rss_poll_results(&mut response.results, cap) > 0
+                                        {
+                                            completion = IndexerSearchCompletion::Partial {
+                                                reason: Some(
+                                                    IndexerSearchIncompleteReason::PageCeilingReached,
+                                                ),
+                                                retry_after: None,
+                                            };
+                                        }
+                                        Ok((response.results, completion))
                                     }
                                     Ok(Err(err)) => {
                                         if err.is_canceled() {
@@ -5918,6 +6149,22 @@ impl IndexerClient for MultiIndexerSearchClient {
                             );
                         }
                         let should_record_feedback = cache_entry.claim_feedback();
+                        // An RSS cycle asks each (indexer, categories) feed
+                        // once, so once this caller holds its copy the map
+                        // has nothing left to share it with. Callers already
+                        // waiting on the entry keep their own handle; the
+                        // feed is freed when the last of them is done instead
+                        // of when the whole search ends.
+                        if rss_poll_item_cap.is_some() {
+                            let mut cache = rss_feed_cache.lock().await;
+                            if cache
+                                .get(&rss_cache_key)
+                                .is_some_and(|entry| Arc::ptr_eq(entry, &cache_entry))
+                            {
+                                cache.remove(&rss_cache_key);
+                            }
+                        }
+                        drop(cache_entry);
                         let (results, feed_completion) = match cached_results {
                             Ok((mut results, completion)) => {
                                 for result in &mut results {
@@ -5937,6 +6184,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                         };
 
                         let mut rss_summary = RssFeedSummary::new(rss_catch_up);
+                        rss_summary.hand_off = hand_off;
                         rss_summary.observe(&results);
                         rss_summary.note_completion(&feed_completion);
                         let response = IndexerSearchResponse { next_cursor: None,
@@ -6149,6 +6397,8 @@ impl IndexerClient for MultiIndexerSearchClient {
             let scheduler_lease_for_task = scheduler_lease.clone();
             let live_search_admitted = scheduler_lease_for_task.is_some();
             let page_sink = Some(page_sink.clone());
+            let rss_poll_page_budget = is_rss_request.then_some(self.rss_poll_page_budget);
+            let rss_hand_off = is_rss_request.then(|| self.rss_hand_off.clone());
 
             set.spawn(async move {
                 if task_cancel_token.is_cancelled() {
@@ -6160,9 +6410,55 @@ impl IndexerClient for MultiIndexerSearchClient {
                         false,
                     );
                 }
+                // Taken before any lane permit (those are per plan, below) so
+                // a poll cannot hold the lane while waiting for a slot.
+                let hand_off = match acquire_search_permit(
+                    rss_hand_off,
+                    &task_cancel_token,
+                    deadline_at,
+                )
+                .await
+                {
+                    Ok(permit) => permit.map(RssHandOffSlot::new),
+                    Err(SearchPermitError::Cancelled) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::canceled("indexer search canceled")),
+                            false,
+                        );
+                    }
+                    Err(SearchPermitError::DeadlineExpired) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::Repository(
+                                "RSS indexer search timed out before dispatch".to_string(),
+                            )),
+                            false,
+                        );
+                    }
+                    Err(SearchPermitError::Closed(error)) => {
+                        return (
+                            indexer_id,
+                            indexer_name,
+                            scheduler_lease_for_task.clone(),
+                            Err(AppError::Repository(format!(
+                                "RSS hand-off limiter closed: {error}"
+                            ))),
+                            false,
+                        );
+                    }
+                };
+                let rss_poll_item_cap = rss_poll_page_budget.map(rss_poll_item_cap);
                 let mut collected_results = Vec::new();
-                let mut rss_summary =
-                    is_rss_request.then(|| RssFeedSummary::new(rss_catch_up.clone()));
+                let mut rss_summary = is_rss_request.then(|| {
+                    let mut summary = RssFeedSummary::new(rss_catch_up.clone());
+                    summary.hand_off = hand_off;
+                    summary
+                });
                 let mut reusable_strategies = reusable_strategies;
                 let mut contained = ContainedStrategyTracker::new(
                     search_diagnostics
@@ -6171,11 +6467,15 @@ impl IndexerClient for MultiIndexerSearchClient {
                     &reusable_strategies,
                 );
                 // Only a background pass with diagnostics to resume from reads
-                // a paged strategy a few pages at a time.
+                // a paged strategy a few pages at a time. An RSS poll always
+                // carries its page budget, so an adapter that pages a feed
+                // read can stop there; the item cap below holds it for one
+                // that does not.
                 let background_page_budget = search_diagnostics
                     .as_ref()
                     .filter(|diagnostics| diagnostics.background)
-                    .map(|_| BACKGROUND_PAGES_PER_PASS);
+                    .map(|_| BACKGROUND_PAGES_PER_PASS)
+                    .or(rss_poll_page_budget);
                 let mut page_chains: HashMap<String, PageChain> = HashMap::new();
                 let mut any_strategy_fired = false;
                 let mut all_strategies_complete = true;
@@ -6329,9 +6629,13 @@ impl IndexerClient for MultiIndexerSearchClient {
 response.next_cursor.is_some(),
 );
                             let raw_result_count = response.results.len();
+                            let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
+                                truncate_rss_poll_results(&mut response.results, cap)
+                            });
                             if let Some(summary) = rss_summary.as_mut() {
                                 summary.observe(&response.results);
                                 summary.note_completion(&response.completion);
+                                summary.note_truncated(rss_truncated);
                             }
                             batch_health.mark_success();
                             debug!(
@@ -6695,9 +6999,13 @@ response.next_cursor.is_some(),
 response.next_cursor.is_some(),
 );
                                 let raw_result_count = response.results.len();
+                                let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
+                                    truncate_rss_poll_results(&mut response.results, cap)
+                                });
                                 if let Some(summary) = rss_summary.as_mut() {
                                     summary.observe(&response.results);
                                     summary.note_completion(&response.completion);
+                                    summary.note_truncated(rss_truncated);
                                 }
                                 batch_health.mark_success();
                                 debug!(
@@ -7030,6 +7338,9 @@ response.next_cursor.is_some(),
         }
 
         let mut all_results: Vec<IndexerSearchResult> = Vec::new();
+        // Download URLs of RSS-only feed results already handed on, so the
+        // URL dedup still spans every feed of the cycle.
+        let mut rss_forwarded_urls: HashSet<String> = HashSet::new();
         let mut successful_searches = 0usize;
         let mut failed_searches = 0usize;
         let mut first_failure: Option<String> = None;
@@ -7102,7 +7413,35 @@ response.next_cursor.is_some(),
                             retry_after,
                         },
                     };
-                    all_results.append(&mut response.results);
+                    if is_rss_request && !response.results.is_empty() {
+                        // An RSS poll's feed goes to the consumer as soon as
+                        // it is joined, with the same URL dedup and parse the
+                        // aggregate below applies, instead of waiting in
+                        // `all_results` for every other poll of the cycle.
+                        let mut results = std::mem::take(&mut response.results);
+                        results.retain(|result| {
+                            result.download_url.as_ref().is_none_or(|url| {
+                                rss_forwarded_urls.insert(url.to_ascii_lowercase())
+                            })
+                        });
+                        for result in &mut results {
+                            if result.parsed_release_metadata.is_none() {
+                                result.parsed_release_metadata =
+                                    Some(scryer_application::parse_release_metadata(&result.title));
+                            }
+                        }
+                        if !results.is_empty() && page_sink.send(results).await.is_err() {
+                            set.abort_all();
+                            while set.join_next().await.is_some() {}
+                            self.rss_feed_cache.lock().await.clear();
+                            return Err(AppError::canceled("indexer scoring pipeline closed"));
+                        }
+                        // The page is scoring's now: free the poll's hand-off
+                        // slot so the next poll of the cycle may fetch.
+                        drop(rss_summary);
+                    } else {
+                        all_results.append(&mut response.results);
+                    }
                     if explicit_outcomes.is_empty() {
                         indexer_outcomes.push(IndexerQueryOutcome {
                             indexer_id: id,
@@ -9759,6 +10098,18 @@ mod tests {
 
     struct BlockingIndexerClient {
         probe: StdArc<SearchConcurrencyProbe>,
+        /// Results each poll returns once released. Zero keeps the client
+        /// silent, so a page is never handed on.
+        results_per_search: usize,
+    }
+
+    impl BlockingIndexerClient {
+        fn silent(probe: StdArc<SearchConcurrencyProbe>) -> Self {
+            Self {
+                probe,
+                results_per_search: 0,
+            }
+        }
     }
 
     #[async_trait]
@@ -9791,11 +10142,19 @@ mod tests {
                 _ = self.probe.wait_until_released() => {}
             }
             self.probe.mark_finished();
+            let results = (0..self.results_per_search)
+                .map(|index| {
+                    let mut result = search_result(&format!("Blocking.Feed.{index}.1080p.WEB-DL"));
+                    result.guid = Some(format!("blocking-{index}"));
+                    result.download_url = Some(format!("https://example.test/{index}"));
+                    result
+                })
+                .collect();
             Ok(IndexerSearchResponse {
                 next_cursor: None,
                 completion: IndexerSearchCompletion::Complete,
                 indexer_outcomes: Vec::new(),
-                results: vec![],
+                results,
 
                 api_current: None,
                 api_max: None,
@@ -9855,9 +10214,7 @@ mod tests {
     async fn assert_leaf_search_limit_shared_across_clones(mode: SearchMode, limit: usize) {
         let config_count = limit + 4;
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(config_count),
@@ -9950,9 +10307,7 @@ mod tests {
     #[tokio::test]
     async fn interactive_search_cancellation_returns_promptly() {
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(3),
@@ -11088,9 +11443,7 @@ mod tests {
             }),
             Arc::new(MockIndexerStatsTracker),
             Arc::new(ScriptedIndexerPluginProvider {
-                client: Arc::new(BlockingIndexerClient {
-                    probe: probe.clone(),
-                }),
+                client: Arc::new(BlockingIndexerClient::silent(probe.clone())),
                 caps: rss_only_caps(),
             }),
         )
@@ -11301,9 +11654,7 @@ mod tests {
     async fn background_passes_fan_out_to_every_indexer_at_once() {
         let config_count = INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT + 4;
         let probe = StdArc::new(SearchConcurrencyProbe::default());
-        let client = Arc::new(BlockingIndexerClient {
-            probe: probe.clone(),
-        });
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
         let multi = MultiIndexerSearchClient::new(
             Arc::new(MockIndexerConfigRepository {
                 configs: indexed_mock_configs(config_count),
@@ -13555,6 +13906,308 @@ mod tests {
         let calls = calls.lock().expect("call log mutex");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].rss_catch_up, None);
+    }
+
+    #[test]
+    fn rss_limits_fall_back_to_their_defaults() {
+        for raw in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("zero"),
+            Some("0"),
+            Some("-3"),
+        ] {
+            assert_eq!(
+                parse_rss_indexer_poll_concurrency(raw),
+                DEFAULT_RSS_INDEXER_POLL_CONCURRENCY
+            );
+            assert_eq!(
+                parse_rss_poll_page_budget(raw),
+                DEFAULT_RSS_POLL_PAGE_BUDGET
+            );
+        }
+        assert_eq!(parse_rss_indexer_poll_concurrency(Some(" 4 ")), 4);
+        assert_eq!(parse_rss_poll_page_budget(Some("12")), 12);
+        assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 500);
+    }
+
+    #[test]
+    fn truncating_an_rss_poll_keeps_undated_and_newest_in_feed_order() {
+        let base = fixed_utc("2026-09-20T12:00:00Z");
+        let mut results = vec![
+            dated_rss_result("old", base - Duration::hours(5)),
+            dated_rss_result("newest", base),
+            search_result("Synthetic.Undated.1080p.WEB-DL"),
+            dated_rss_result("middle", base - Duration::hours(1)),
+            dated_rss_result("older", base - Duration::hours(3)),
+        ];
+
+        assert_eq!(truncate_rss_poll_results(&mut results, 5), 0);
+        assert_eq!(results.len(), 5);
+
+        assert_eq!(truncate_rss_poll_results(&mut results, 3), 2);
+        let kept = results
+            .iter()
+            .map(|result| result.guid.clone().unwrap_or_else(|| result.title.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            vec![
+                "newest".to_string(),
+                "Synthetic.Undated.1080p.WEB-DL".to_string(),
+                "middle".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_polls_send_the_rss_page_budget() {
+        for caps in [
+            IndexerProviderCapabilities {
+                rss: true,
+                ..movie_caps()
+            },
+            rss_only_caps(),
+        ] {
+            let scheduler = Arc::new(RecordingScheduler::default());
+            let (mut client, calls) = scripted_search_client(caps, |_| response_with_titles(&[]));
+            client.rss_poll_page_budget = 3;
+            let client = client.with_upstream_scheduler(scheduler);
+
+            run_rss_poll(&client, &["2000"]).await;
+
+            let calls = calls.lock().expect("call log mutex");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].page_budget, Some(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_rss_poll_over_its_budget_keeps_the_newest_and_records_the_gap() {
+        let marker_at = fixed_utc("2026-09-20T10:00:00Z");
+        let newest_at = fixed_utc("2026-09-20T14:00:00Z");
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (mut client, _calls) = scripted_search_client(caps, move |_| {
+            // A deep catch-up: 251 results that do reach the marker, the first
+            // an old post indexed late.
+            let mut results = vec![dated_rss_result(
+                "late-indexed-guid",
+                marker_at - Duration::hours(6),
+            )];
+            results.push(dated_rss_result("newest-guid", newest_at));
+            for index in 0..249 {
+                results.push(dated_rss_result(
+                    &format!("paged-guid-{index}"),
+                    newest_at - Duration::minutes(index + 1),
+                ));
+            }
+            Ok(IndexerSearchResponse {
+                next_cursor: None,
+                completion: IndexerSearchCompletion::Complete,
+                indexer_outcomes: Vec::new(),
+                results,
+                api_current: None,
+                api_max: None,
+                grab_current: None,
+                grab_max: None,
+            })
+        });
+        // One page: a hundred results.
+        client.rss_poll_page_budget = 1;
+        let client = client.with_upstream_scheduler(scheduler.clone());
+
+        let response = run_rss_poll(&client, &["2000"]).await;
+
+        assert_eq!(response.results.len(), 100);
+        let guids = response
+            .results
+            .iter()
+            .filter_map(|result| result.guid.as_deref())
+            .collect::<HashSet<_>>();
+        assert!(guids.contains("newest-guid"));
+        assert!(guids.contains("paged-guid-98"));
+        assert!(!guids.contains("paged-guid-99"));
+        assert!(!guids.contains("late-indexed-guid"));
+        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        assert_eq!(
+            entry.rss_last_seen_release_identity.as_deref(),
+            Some("newest-guid")
+        );
+        assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
+        assert_eq!(
+            entry.rss_last_feed_gap_end_at,
+            Some(newest_at - Duration::minutes(99))
+        );
+    }
+
+    /// RSS polls admit through their own small lane: a cycle across many
+    /// indexers holds at most that many feeds at once, and an interactive
+    /// search running alongside it is not queued behind the cycle.
+    #[tokio::test(start_paused = true)]
+    async fn rss_polls_are_bounded_by_their_own_lane() {
+        let config_count = 6;
+        let probe = StdArc::new(SearchConcurrencyProbe::default());
+        let client = Arc::new(BlockingIndexerClient::silent(probe.clone()));
+        let mut multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: indexed_mock_configs(config_count),
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: IndexerProviderCapabilities {
+                    rss: true,
+                    ..movie_caps()
+                },
+            }),
+        );
+        multi.rss_search_limit = Arc::new(Semaphore::new(2));
+        multi.rss_poll_page_budget = 2;
+        let multi = multi.with_upstream_scheduler(Arc::new(RecordingScheduler::default()));
+
+        let rss_client = multi.clone();
+        let rss_cycle = tokio::spawn(async move { run_rss_poll(&rss_client, &["2000"]).await });
+
+        wait_for_started(&probe, 2).await;
+        run_until_idle().await;
+        assert_eq!(probe.started.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.max_active.load(Ordering::SeqCst), 2);
+
+        let interactive_client = multi.clone();
+        let interactive = tokio::spawn(async move {
+            <MultiIndexerSearchClient as IndexerClient>::search(
+                &interactive_client,
+                "Search Limit".to_string(),
+                HashMap::new(),
+                None,
+                Some("movie".to_string()),
+                None,
+                None,
+                None,
+                SearchMode::Interactive,
+                IndexerErrorOperation::InteractiveSearch,
+                None,
+                None,
+                None,
+                None,
+                vec![],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+        });
+
+        // Every interactive request starts while the RSS lane stays full.
+        wait_for_started(&probe, 2 + config_count).await;
+        assert_eq!(probe.max_active.load(Ordering::SeqCst), 2 + config_count);
+
+        probe.release_all();
+        tokio::time::timeout(std::time::Duration::from_secs(30), rss_cycle)
+            .await
+            .expect("rss cycle should finish")
+            .expect("rss cycle task should join");
+        tokio::time::timeout(std::time::Duration::from_secs(30), interactive)
+            .await
+            .expect("interactive search should finish")
+            .expect("interactive search task should join")
+            .expect("interactive search should succeed");
+        assert_eq!(probe.started.load(Ordering::SeqCst), 2 * config_count);
+        assert_eq!(probe.max_active.load(Ordering::SeqCst), 2 + config_count);
+    }
+
+    /// A poll keeps its hand-off slot until the aggregator has given its page
+    /// to scoring, so a cycle whose consumer is slow holds at most the lane's
+    /// worth of feeds plus the page in flight, never every finished poll.
+    #[tokio::test(start_paused = true)]
+    async fn rss_polls_wait_for_the_hand_off_of_earlier_pages() {
+        let config_count = 6;
+        let concurrency = 2;
+        let probe = StdArc::new(SearchConcurrencyProbe::default());
+        let client = Arc::new(BlockingIndexerClient {
+            probe: probe.clone(),
+            results_per_search: 3,
+        });
+        let mut multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: indexed_mock_configs(config_count),
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: IndexerProviderCapabilities {
+                    rss: true,
+                    ..movie_caps()
+                },
+            }),
+        );
+        multi.rss_search_limit = Arc::new(Semaphore::new(concurrency));
+        multi.rss_hand_off = Arc::new(Semaphore::new(concurrency));
+        multi.rss_poll_page_budget = 2;
+        let multi = multi.with_upstream_scheduler(Arc::new(RecordingScheduler::default()));
+
+        // A consumer that accepts one page and then stalls: the first page
+        // sits unread in the channel, so the second hand-off cannot complete.
+        let (page_tx, mut page_rx) = tokio::sync::mpsc::channel(1);
+        let page_sink = IndexerSearchPageSink::new(page_tx, 1);
+        let rss_client = multi.clone();
+        let rss_cycle = tokio::spawn(async move {
+            rss_client
+                .search_stream(
+                    String::new(),
+                    HashMap::new(),
+                    None,
+                    None,
+                    None,
+                    Some(vec!["2000".to_string()]),
+                    None,
+                    SearchMode::Auto,
+                    IndexerErrorOperation::RssSync,
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    CancellationToken::new(),
+                    page_sink,
+                )
+                .await
+        });
+
+        wait_for_started(&probe, concurrency).await;
+        run_until_idle().await;
+        assert_eq!(probe.started.load(Ordering::SeqCst), concurrency);
+
+        // Every poll returns as soon as it starts from here on. Only the slots
+        // the aggregator frees by handing a page on admit further polls: one
+        // page goes through, the next blocks on the stalled consumer.
+        probe.release_all();
+        run_until_idle().await;
+        assert_eq!(
+            probe.started.load(Ordering::SeqCst),
+            concurrency + 1,
+            "finished polls must not pile up behind a stalled hand-off"
+        );
+        assert!(probe.max_active.load(Ordering::SeqCst) <= concurrency);
+
+        // Draining the consumer lets the cycle finish with every poll made.
+        let mut pages = 0;
+        while let Some(page) = page_rx.recv().await {
+            pages += 1;
+            drop(page);
+        }
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rss_cycle)
+            .await
+            .expect("rss cycle should finish")
+            .expect("rss cycle task should join")
+            .expect("rss cycle should succeed");
+        assert_eq!(pages, config_count);
+        assert_eq!(probe.started.load(Ordering::SeqCst), config_count);
+        assert!(response.results.is_empty());
     }
 
     #[tokio::test]
@@ -16530,9 +17183,19 @@ mod tests {
         };
 
         let background_lane = |limit: &SearchAdmission| limit.is_none();
+        let rss_lane = multi.search_limit_for_mode(SearchMode::Auto, true, None);
         assert!(
-            background_lane(&multi.search_limit_for_mode(SearchMode::Auto, true, None)),
-            "RSS dispatches on the unbounded background lane"
+            rss_lane
+                .as_ref()
+                .is_some_and(|limit| Arc::ptr_eq(limit, &multi.rss_search_limit)),
+            "RSS dispatches on its own bounded lane"
+        );
+        assert!(
+            !rss_lane
+                .as_ref()
+                .zip(multi.search_limit_for_mode(SearchMode::Interactive, false, None))
+                .is_some_and(|(rss, interactive)| Arc::ptr_eq(rss, &interactive)),
+            "RSS never takes interactive permits"
         );
         assert!(
             background_lane(&multi.search_limit_for_mode(

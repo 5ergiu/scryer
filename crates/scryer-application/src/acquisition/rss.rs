@@ -26,7 +26,7 @@ use crate::types::{PendingReleaseObservation, PendingReleaseRole};
 use chrono::{DateTime, Utc};
 use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// How many GUIDs each indexer's seen set keeps between its own polls: five
 /// feed pages of the usual hundred items. A poll that returns more than this,
@@ -54,7 +54,7 @@ impl RssSeenGuids {
         self.cycle += 1;
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.by_indexer.values().map(HashMap::len).sum()
     }
 
@@ -1261,6 +1261,65 @@ struct TitleQueueSnapshot {
     >,
 }
 
+/// Feed pages an RSS cycle lets the search client queue ahead of the one it
+/// is ingesting. A page is one poll's response, so with one in flight the
+/// live feed is the page being matched, the page waiting behind it, and the
+/// polls still running in the search client's bounded RSS lane.
+const RSS_FEED_PAGES_IN_FLIGHT: usize = 1;
+
+/// Active unknown-age pending rows, by the identities a feed item can match
+/// them on. A matching item bypasses the process-local seen filter.
+struct RssUnknownAgeBypass {
+    identities: HashSet<String>,
+    listing_prefixes: HashSet<String>,
+}
+
+/// What one RSS cycle keeps from its feed: the releases that matched a
+/// monitored title, and the counts its intake log reports.
+#[derive(Default)]
+struct RssCycleIntake {
+    matched_by_title: HashMap<String, Vec<IndexerSearchResult>>,
+    matched_identities: HashMap<String, HashSet<String>>,
+    /// Feed pages ingested.
+    pages: usize,
+    /// Feed items received, before the seen filter.
+    fetched: usize,
+    /// [`IndexerSearchResult::approximate_size_bytes`] over every received
+    /// item.
+    fetched_bytes: usize,
+    /// Items that passed the seen filter.
+    new: usize,
+    /// New items that matched a monitored title.
+    matched: usize,
+    /// Matched items kept for title processing (after identity dedup).
+    retained: usize,
+    /// The most feed results this cycle held at once: the retained matches
+    /// plus the page being ingested.
+    peak_live: usize,
+}
+
+/// This process's current and peak resident set size in KiB, where the
+/// platform reports them (`/proc/self/status` on Linux), for the RSS cycle
+/// logs. `None` elsewhere or when the file cannot be read.
+fn process_resident_kib() -> (Option<u64>, Option<u64>) {
+    match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => (
+            proc_status_kib(&status, "VmRSS:"),
+            proc_status_kib(&status, "VmHWM:"),
+        ),
+        Err(_) => (None, None),
+    }
+}
+
+/// One `kB` field of a `/proc/<pid>/status` file.
+fn proc_status_kib(status: &str, field: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
 impl AppUseCase {
     /// Run a single RSS sync cycle: fetch latest releases from all enabled indexers,
     /// match against monitored titles, score, and grab approved releases.
@@ -1385,6 +1444,112 @@ impl AppUseCase {
             .unwrap_or(true)
     }
 
+    /// Takes one page of feed results through the cycle: records every GUID
+    /// in the seen set, keeps the new ones (and any an unknown-age row is
+    /// waiting on), matches them in the usual batches, keeps the matches and
+    /// drops the rest.
+    async fn ingest_rss_feed_page(
+        &self,
+        results: Vec<IndexerSearchResult>,
+        unknown_age: &RssUnknownAgeBypass,
+        title_context_bank: &TitleContextBank,
+        intake: &mut RssCycleIntake,
+    ) -> AppResult<()> {
+        let page_len = results.len();
+        let page_bytes = results
+            .iter()
+            .map(IndexerSearchResult::approximate_size_bytes)
+            .sum::<usize>();
+        intake.pages += 1;
+        intake.fetched += page_len;
+        intake.fetched_bytes = intake.fetched_bytes.saturating_add(page_bytes);
+        intake.peak_live = intake.peak_live.max(intake.retained + page_len);
+
+        let new_results = {
+            // Held only for the in-memory filter, never across I/O.
+            let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
+            let mut new_results: Vec<IndexerSearchResult> = Vec::new();
+            for result in results {
+                let release_identity = rss_release_identity(&result);
+                let guid = result
+                    .guid
+                    .as_deref()
+                    .or(result.download_url.as_deref())
+                    .or(result.link.as_deref())
+                    .unwrap_or(&result.title);
+
+                // Record every fresh GUID, then give an active unknown-age row
+                // one more look even if it was already seen this process
+                // lifetime.
+                let is_new_guid = seen_guids.observe(rss_seen_guid_indexer(&result), guid);
+                if unknown_age.identities.contains(&release_identity)
+                    || unknown_age
+                        .listing_prefixes
+                        .contains(&rss_listing_identity_prefix(&result))
+                    || is_new_guid
+                {
+                    new_results.push(result);
+                }
+            }
+            new_results
+        };
+        let page_new = new_results.len();
+        intake.new += page_new;
+        if new_results.is_empty() {
+            debug!(
+                page_results = page_len,
+                "RSS sync: feed page held nothing new"
+            );
+            return Ok(());
+        }
+
+        // Parse fresh releases and match them against monitored titles, each
+        // lookup lane read once per batch rather than once per item.
+        let match_requests = new_results
+            .iter()
+            .map(|result| ReleaseMatchRequest {
+                release_title: &result.title,
+                response_attributes: &result.response_attributes,
+            })
+            .collect::<Vec<_>>();
+        let title_matches =
+            match_releases_to_title_context(&match_requests, title_context_bank).await?;
+        drop(match_requests);
+
+        let mut page_matched = 0usize;
+        for (result, title_info) in new_results.into_iter().zip(title_matches) {
+            if let Some(title_info) = title_info {
+                page_matched += 1;
+                intake
+                    .matched_by_title
+                    .entry(title_info.title_id.clone())
+                    .or_default();
+                let identities = intake
+                    .matched_identities
+                    .entry(title_info.title_id.clone())
+                    .or_default();
+                if identities.insert(rss_release_identity(&result)) {
+                    intake
+                        .matched_by_title
+                        .entry(title_info.title_id.clone())
+                        .or_default()
+                        .push(result);
+                    intake.retained += 1;
+                }
+            }
+        }
+        intake.matched += page_matched;
+        debug!(
+            page_results = page_len,
+            page_approx_bytes = page_bytes,
+            new_count = page_new,
+            matched = page_matched,
+            retained_matched = intake.retained,
+            "RSS sync: matched one feed page"
+        );
+        Ok(())
+    }
+
     pub(crate) async fn run_scheduled_rss_sync(&self) -> AppResult<RssSyncReport> {
         let now = Utc::now();
         let sync_start = std::time::Instant::now();
@@ -1489,75 +1654,13 @@ impl AppUseCase {
             return Ok(RssSyncReport::default());
         }
 
-        // Fetch RSS feed (empty query = latest releases) from all indexers
-        let rss_results = self
-            .services
-            .integrations
-            .indexer_client
-            .search(
-                String::new(), // empty query = RSS feed
-                HashMap::new(),
-                None, // no category filter
-                None, // no facet hint
-                None, // no ID-search facet override
-                None, // categories are owned by each indexer's routing entry
-                rss_routing,
-                SearchMode::Auto,
-                IndexerErrorOperation::RssSync,
-                None,
-                None,
-                None,
-                None, // an RSS poll has no subject, so no year
-                vec![],
-                None,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await;
-
-        let fresh_results = match rss_results {
-            Ok(r) => r,
-            Err(err) => {
-                // A temporary feed failure must not suppress already-held
-                // releases. They are re-evaluated through this same pass.
-                warn!(error = %err, "RSS sync: failed to fetch RSS feed from indexers; evaluating active pending releases");
-                IndexerSearchResponse { next_cursor: None,
-                    results: Vec::new(),
-
-                    completion: IndexerSearchCompletion::Partial {
-                        reason: Some(IndexerSearchIncompleteReason::UpstreamFailure),
-                        retry_after: None,
-                    },
-                    api_current: None,
-                    api_max: None,
-                    grab_current: None,
-                    grab_max: None,
-                    indexer_outcomes: Vec::new(),
-                }
-            }
-        }
-        .results;
-
-        debug!(
-            result_count = fresh_results.len(),
-            "RSS sync: fetched releases from indexers"
-        );
-
-        // Load the active set before applying the process-local GUID filter.
-        // In particular, an unknown-age row must accept a later observation of
-        // the same release when the indexer finally supplies its publish time.
-        let active_pending = self
-            .services
-            .workflow
-            .pending_releases
-            .list_waiting_pending_releases()
-            .await
-            .unwrap_or_else(|error| {
-                warn!(error = %error, "RSS sync: failed to load active pending releases");
-                Vec::new()
-            });
-        // Manual-review rows do not re-enter the automatic candidate set by
-        // themselves, but a later valid feed observation must still bypass
-        // the process-local seen filter so it can hydrate and re-evaluate one.
+        // Load the unknown-age set before applying the process-local GUID
+        // filter, which now runs on each feed page as it arrives: an
+        // unknown-age row must accept a later observation of the same release
+        // when the indexer finally supplies its publish time. Manual-review
+        // rows do not re-enter the automatic candidate set by themselves, but
+        // a later valid feed observation must still bypass the seen filter so
+        // it can hydrate and re-evaluate one.
         let active_unknown_age = self
             .services
             .workflow
@@ -1568,92 +1671,162 @@ impl AppUseCase {
                 warn!(error = %error, "RSS sync: failed to load unknown-age pending releases");
                 Vec::new()
             });
-        let unknown_age_identities = active_unknown_age
-            .iter()
-            .map(|pending| pending.release_identity.clone())
-            .collect::<HashSet<_>>();
-        let unknown_age_listing_prefixes = active_unknown_age
-            .iter()
-            .filter(|pending| pending.release_identity.starts_with("listing:"))
-            .map(pending_release_as_rss_result)
-            .map(|release| rss_listing_identity_prefix(&release))
-            .collect::<HashSet<_>>();
+        let unknown_age = RssUnknownAgeBypass {
+            identities: active_unknown_age
+                .iter()
+                .map(|pending| pending.release_identity.clone())
+                .collect(),
+            listing_prefixes: active_unknown_age
+                .iter()
+                .filter(|pending| pending.release_identity.starts_with("listing:"))
+                .map(pending_release_as_rss_result)
+                .map(|release| rss_listing_identity_prefix(&release))
+                .collect(),
+        };
+        drop(active_unknown_age);
 
-        // Dedup against previously seen GUIDs (in-memory, resets on restart)
-        let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
-        let initial_seen_count = seen_guids.len();
-        seen_guids.begin_cycle();
+        // Dedup against previously seen GUIDs (in-memory, resets on restart).
+        // The cycle opens here; every page is observed into it as it arrives,
+        // and the polled indexers are capped once the feed is drained.
+        let initial_seen_count = {
+            let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
+            let initial_seen_count = seen_guids.len();
+            seen_guids.begin_cycle();
+            initial_seen_count
+        };
 
-        let mut new_results: Vec<IndexerSearchResult> = Vec::new();
-        for result in fresh_results {
-            let release_identity = rss_release_identity(&result);
-            let guid = result
-                .guid
-                .as_deref()
-                .or(result.download_url.as_deref())
-                .or(result.link.as_deref())
-                .unwrap_or(&result.title);
-
-            // Record every fresh GUID, then give an active unknown-age row one
-            // more look even if it was already seen this process lifetime.
-            let is_new_guid = seen_guids.observe(rss_seen_guid_indexer(&result), guid);
-            if unknown_age_identities.contains(&release_identity)
-                || unknown_age_listing_prefixes.contains(&rss_listing_identity_prefix(&result))
-                || is_new_guid
-            {
-                new_results.push(result);
-            }
-        }
-
-        seen_guids.cap_polled_indexers();
-
-        // Release the write lock before doing any I/O
-        drop(seen_guids);
-
-        debug!(
-            new_count = new_results.len(),
-            previously_seen = initial_seen_count,
-            "RSS sync: filtered to new releases"
+        // Fetch RSS feed (empty query = latest releases) from all indexers,
+        // one page at a time. Each page is filtered, matched in batches and
+        // dropped before the next is taken, so a cycle holds one page plus
+        // the releases that matched a monitored title, not every indexer's
+        // whole feed. The bounded sink makes a finished poll wait for the
+        // page ahead of it to be consumed.
+        let (page_tx, mut page_rx) = tokio::sync::mpsc::channel(RSS_FEED_PAGES_IN_FLIGHT);
+        let page_sink = crate::IndexerSearchPageSink::new(page_tx, RSS_FEED_PAGES_IN_FLIGHT);
+        let feed_cancel = tokio_util::sync::CancellationToken::new();
+        let mut producer = self.services.integrations.indexer_client.search_stream(
+            String::new(), // empty query = RSS feed
+            HashMap::new(),
+            None, // no category filter
+            None, // no facet hint
+            None, // no ID-search facet override
+            None, // categories are owned by each indexer's routing entry
+            rss_routing,
+            SearchMode::Auto,
+            IndexerErrorOperation::RssSync,
+            None,
+            None,
+            None,
+            None, // an RSS poll has no subject, so no year
+            vec![],
+            None,
+            feed_cancel.clone(),
+            page_sink,
         );
 
-        // Parse fresh releases and match them against monitored titles. Active
-        // pending rows are merged below by their durable title association, so
-        // a changed title parser cannot strand a previously accepted release.
-        let mut matched_by_title: HashMap<String, Vec<IndexerSearchResult>> = HashMap::new();
-        let mut matched_identities: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut matched_count = 0usize;
-        let total_new = new_results.len();
-
-        // Every new item is matched in one batched pass: each lookup lane is
-        // read once for the batch, not once per item.
-        let match_requests = new_results
-            .iter()
-            .map(|result| ReleaseMatchRequest {
-                release_title: &result.title,
-                response_attributes: &result.response_attributes,
-            })
-            .collect::<Vec<_>>();
-        let title_matches =
-            match_releases_to_title_context(&match_requests, &title_context_bank).await?;
-        drop(match_requests);
-
-        for (result, title_info) in new_results.into_iter().zip(title_matches) {
-            if let Some(title_info) = title_info {
-                matched_count += 1;
-                matched_by_title
-                    .entry(title_info.title_id.clone())
-                    .or_default();
-                let identities = matched_identities
-                    .entry(title_info.title_id.clone())
-                    .or_default();
-                if identities.insert(rss_release_identity(&result)) {
-                    matched_by_title
-                        .entry(title_info.title_id.clone())
-                        .or_default()
-                        .push(result);
+        let mut intake = RssCycleIntake::default();
+        let mut feed_response = None;
+        let mut page_source_open = true;
+        let mut intake_error = None;
+        while feed_response.is_none() || page_source_open {
+            tokio::select! {
+                response = &mut producer, if feed_response.is_none() => {
+                    feed_response = Some(response);
+                }
+                page = page_rx.recv(), if page_source_open => match page {
+                    // The page (and its sink reservation) lives until it is
+                    // ingested, so the producer is held back meanwhile.
+                    Some(mut page) => {
+                        let results = std::mem::take(&mut page.results);
+                        if let Err(error) = self
+                            .ingest_rss_feed_page(results, &unknown_age, &title_context_bank, &mut intake)
+                            .await
+                        {
+                            intake_error = Some(error);
+                            break;
+                        }
+                        drop(page);
+                    }
+                    None => page_source_open = false,
+                },
+            }
+        }
+        if intake_error.is_none() {
+            match feed_response {
+                // Results the client returned instead of streaming them.
+                Some(Ok(response)) if !response.results.is_empty() => {
+                    if let Err(error) = self
+                        .ingest_rss_feed_page(
+                            response.results,
+                            &unknown_age,
+                            &title_context_bank,
+                            &mut intake,
+                        )
+                        .await
+                    {
+                        intake_error = Some(error);
+                    }
+                }
+                Some(Ok(_)) | None => {}
+                Some(Err(err)) => {
+                    // A temporary feed failure must not suppress already-held
+                    // releases. They are re-evaluated through this same pass.
+                    warn!(error = %err, "RSS sync: failed to fetch RSS feed from indexers; evaluating active pending releases");
                 }
             }
         }
+        // A failed intake stops every poll still running before the cycle
+        // closes, exactly as the feed read used to end before matching began.
+        feed_cancel.cancel();
+        drop(producer);
+        drop(page_rx);
+
+        self.runtime
+            .acquisition
+            .rss_seen_guids
+            .write()
+            .await
+            .cap_polled_indexers();
+
+        let (resident_kib, peak_resident_kib) = process_resident_kib();
+        info!(
+            pages = intake.pages,
+            fetched = intake.fetched,
+            fetched_approx_bytes = intake.fetched_bytes,
+            new_count = intake.new,
+            previously_seen = initial_seen_count,
+            matched = intake.matched,
+            retained_matched = intake.retained,
+            peak_live_results = intake.peak_live,
+            resident_kib,
+            peak_resident_kib,
+            "RSS sync: feed intake finished"
+        );
+        if let Some(error) = intake_error {
+            return Err(error);
+        }
+
+        // Active pending rows are merged below by their durable title
+        // association, so a changed title parser cannot strand a previously
+        // accepted release. Loaded after the feed, as before streaming.
+        let active_pending = self
+            .services
+            .workflow
+            .pending_releases
+            .list_waiting_pending_releases()
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "RSS sync: failed to load active pending releases");
+                Vec::new()
+            });
+
+        let RssCycleIntake {
+            mut matched_by_title,
+            mut matched_identities,
+            matched: matched_count,
+            new: total_new,
+            ..
+        } = intake;
 
         let pending_count = active_pending.len();
         for pending in active_pending {
@@ -1774,11 +1947,15 @@ impl AppUseCase {
 
         self.reconcile_release_age_unknown_pending(&now).await;
 
-        debug!(
+        let (resident_kib, peak_resident_kib) = process_resident_kib();
+        info!(
             fetched = report.releases_fetched,
             matched = report.releases_matched,
             grabbed = report.releases_grabbed,
             held = report.releases_held,
+            titles_processed = matched_by_title.len(),
+            resident_kib,
+            peak_resident_kib,
             "RSS sync cycle completed"
         );
 
@@ -5732,5 +5909,14 @@ mod tests {
             Some("pending-legacy"),
             "a fresh listing keeps the row it matched"
         );
+    }
+
+    #[test]
+    fn proc_status_kib_reads_resident_fields() {
+        let status = "Name:\tscryer\nVmHWM:\t  812344 kB\nVmRSS:\t  402112 kB\nThreads:\t42\n";
+        assert_eq!(proc_status_kib(status, "VmRSS:"), Some(402_112));
+        assert_eq!(proc_status_kib(status, "VmHWM:"), Some(812_344));
+        assert_eq!(proc_status_kib(status, "VmSwap:"), None);
+        assert_eq!(proc_status_kib("VmRSS:\tlots kB\n", "VmRSS:"), None);
     }
 }

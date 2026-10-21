@@ -6159,6 +6159,26 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every Scryer submission, across titles, whose canonical client binding
+    /// is still active without a native client item and that was submitted
+    /// before `submitted_before`: grab intents no client job ever confirmed.
+    /// Defaults to empty for stores without canonical bindings.
+    async fn list_active_unbound_submitted_before(
+        &self,
+        _submitted_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        Ok(Vec::new())
+    }
+
+    /// End the still-active, still-unbound binding of an unconfirmed grab
+    /// intent, stamping the download terminal exactly as `end_binding` does.
+    /// Returns `false` without changing anything when the binding is already
+    /// bound to a client job or already ended, so a job the queue observer
+    /// bound in the meantime keeps its download.
+    async fn release_unconfirmed_submission(&self, _download_id: &DownloadId) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn find_by_title_and_request_signature(
         &self,
         title_id: &str,

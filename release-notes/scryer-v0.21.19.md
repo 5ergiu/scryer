@@ -9,6 +9,23 @@ These changes are relative to v0.21.18.
 - Ship a built-in maintenance rule, **Expired request leases**, that deletes requested titles seven days after their request lease expires unless they are kept. Read the upgrade notes below before upgrading an instance with **Maintenance** switched on.
 - Keep a title with one click from maintenance candidates, the title page, or the Requests claims panel.
 - Run scheduled jobs independently, so a long RSS sync no longer delays housekeeping, health checks, Prowlarr sync, or pending-release processing.
+- Bound RSS polling and indexer plugin memory, and process feeds as they arrive instead of retaining every indexer's results for the whole cycle.
+- Configure movie availability on the Movie facet and override it per library. Manual queueing bypasses availability thresholds; automatic acquisition continues to enforce them.
+
+## Movie availability
+
+- Move the default availability threshold, release market, and date offset from Acquisition settings to the Movie facet's **General** section. Movie libraries can override each setting independently; a title's own threshold still takes precedence.
+- When the selected market has no release date, fall back to worldwide release dates. For **Released**, use a worldwide digital or physical date before estimating from a theatrical date plus 90 days. For **In Cinemas**, use a worldwide theatrical date before falling back to a home-release date. Dates taken from another market are marked as estimated and explain their source; unusable home-release dates still hold automatic acquisition.
+- Queue manually selected releases without an availability confirmation or refusal. Release results and the grab dialog show when automatic search is waiting for availability; RSS and other automatic acquisition paths still enforce the threshold.
+- Refresh affected movies' release dates when their effective release market changes. Show the selected library's effective threshold when adding a movie, and keep the availability controls from overlapping at narrower widths.
+
+## RSS and indexer reliability
+
+- Poll at most two RSS indexers concurrently by default, separately from interactive searches. Process each completed feed before accepting more queued results, and release RSS plugin instances after each invocation.
+- Limit each RSS poll to five pages, retaining at most the newest 500 results by default. Log and record when a poll reaches its ceiling so an uncovered catch-up window is visible.
+- Give indexer plugins a separate 128 MiB memory limit and release retained instances above a 32 MiB watermark. Report memory-limit failures with the indexer name, and log invocation memory and retention decisions.
+- Match RSS titles in batches using indexed external-ID lookups. Track seen release GUIDs separately for each indexer so polling one does not evict another's history.
+- Queue indexer error history without waiting for database writes, preventing error recording from blocking acquisition and other writers. If the bounded history queue fills, log and count dropped entries while still counting every indexer error.
 
 ## Maintenance rules
 
@@ -16,6 +33,7 @@ These changes are relative to v0.21.18.
 - Two instance switches appear above every maintenance pane. **Maintenance** controls whether rules are evaluated and their results shown on the instance. **Pause all actions** stops every rule from acting, reversible and destructive alike, while evaluation continues. The separate gates pane is gone; existing links to it open the rule list.
 - Enabling a rule that deletes files shows the full list of current candidates in the confirmation.
 - **Keep** a title from its candidate row, from the title page, or from the Requests claims panel. Maintenance rules do not delete a kept title or its files while the keep is in place, and the title shows as **Kept** with a control to release the keep. Keeping a title that is already kept returns the existing keep. Keeping a title requires title management permission on its library.
+- Keep at most one live operator Keep per title, including concurrent clicks and conversions of request leases to permanent Keeps. Upgrade consolidates duplicate operator Keeps while preserving the title's protection.
 - Exclusions are now listed under the candidates they were made from.
 - The rule editor now lists name, template, matcher, action sequence, grace period, and libraries in that order. Rule scope and storage root sit under **Advanced**, which opens automatically when either has a non-default value.
 - Rules can use list facts: which enabled lists hold a title, public and personal list counts, first and last seen dates, days on a list, best rank, on-leave and departure-handled status, and membership states. They can also read how a title was requested and the name of the public list it came from. Personal list names are never exposed. A fact that cannot be read is reported as unknown rather than treated as absent.
@@ -40,6 +58,12 @@ These changes are relative to v0.21.18.
 - During manual import, use the catalog's own numbering when a community anime season index collides with an official season and every file falls inside the grabbed episodes.
 - Focus the search field when the manual import episode picker opens, and keep long episode selections from widening the import table.
 
+## Downloads and recovery
+
+- Recover unconfirmed grabs that otherwise leave titles stuck with active downloads and block further grabs or moves. After a 15-minute grace period, or after restarting Scryer, check a fresh download-client snapshot: bind a job that is present, retain the intent when the client cannot answer reliably, and release it only when its absence is confirmed. Record the failed grab and reopen its wanted scope without blocklisting the release. Move previews explain when a grab remains unconfirmed.
+- Prevent download cleanup from blocking database writes by completing pending cleanup claims before applying their outcomes.
+- Read queue age from download-client plugins that supply an `added_at` timestamp, allowing existing stalled-download recovery to apply to those items.
+
 ## Scheduling and jobs
 
 - Run every scheduled job in its own task. A job that is still running when its next run is due skips that run rather than starting a second copy, and jobs running past their expected time are reported in the logs and metrics without being stopped.
@@ -47,6 +71,11 @@ These changes are relative to v0.21.18.
 
 ## Compatibility and upgrade notes
 
-- Existing rules are migrated on a best-effort basis. Maintenance rules that were in shadow mode become **Dry run** and need to be enabled again. Request rules that were in shadow mode become **Disabled**. The previous maintenance gate settings and the request-rules instance gate are removed and must be set again through the new switches: **Maintenance** and **Pause all actions** for maintenance rules, and each request rule's **Enabled** checkbox for request rules.
-- GraphQL clients must move from the removed `setMaintenanceRuleMode`, `setMaintenanceRuleArming`, `setRequestRuleMode`, and `setRequestRuleInstanceGates` mutations, the `requestRuleInstanceGates` field, the `SHADOW` enum value, the `includeShadow` argument, `evaluationMode` and `effectArming` on maintenance rule sets, and `evaluationMode` on request rule sets to `setMaintenanceRuleState`, `setMaintenanceInstanceGates`, and `setRequestRuleEnabled`.
+- Maintenance rules that were in shadow mode become **Dry run** and need to be enabled again. Review maintenance behavior through the new **Maintenance** and **Pause all actions** switches.
+- Request rules that were in shadow mode become **Disabled**. Enforcing rules also become **Disabled** when the retired instance gate was off or unset; those behind an enabled gate remain enabled. Review each rule's **Enabled** checkbox after upgrading.
+- GraphQL rule controls have breaking changes. Replace `setMaintenanceRuleMode` and `setMaintenanceRuleArming` with `setMaintenanceRuleState`, and use `MaintenanceRuleState` (`DISABLED`, `DRY_RUN`, `ENABLED`) instead of the removed `MaintenanceEvaluationMode` type. Maintenance rule sets now expose `state`, `enabledArming`, and `editedSinceEnabled` instead of `enabled`, `evaluationMode`, `effectArming`, and `destructiveRearmRequired`. `MaintenanceInstanceGates` and its update input now use `enabled` and `actionsPaused` in place of the previous gate fields; `maintenanceCandidates` no longer accepts `includeShadow`.
+- Replace `setRequestRuleMode` with `setRequestRuleEnabled`. The request-rule instance-gate query, mutation, and types are removed, along with `RequestRuleSet.evaluationMode` and `RequestRuleEvaluationModeValue.SHADOW`. Request decision and preflight modes still report `DISABLED` or `ENFORCE`.
+- Existing acquisition availability settings migrate to the Movie facet, with existing facet values taking precedence. GraphQL clients should read and write them through `mediaSettings` and `updateMediaSettings` with Movie scope, or through library settings for overrides. The acquisition fields are deprecated: reads return facet values and writes are ignored. `QueueDownloadInput.overrideMovieAvailability` is also deprecated and ignored.
+- RSS tuning is available through `SCRYER_RSS_INDEXER_CONCURRENCY` and `SCRYER_RSS_POLL_PAGE_BUDGET`. Indexer plugin limits can be adjusted with `SCRYER_INDEXER_PLUGIN_MEMORY_MAX_MIB` and `SCRYER_INDEXER_PLUGIN_RETAIN_WATERMARK_MIB`.
+- Download-client plugins may optionally return `added_at` as an RFC 3339 timestamp or Unix seconds. Older plugin payloads remain supported; Rust SDK users constructing `PluginDownloadItem` literals must include the new optional field when updating their SDK.
 - Add Prometheus metrics for skipped overlapping scheduled runs, long-running scheduled jobs, and failed job-run status writes.

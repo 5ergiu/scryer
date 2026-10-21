@@ -17078,3 +17078,182 @@ async fn replace_delay_profiles(app: &AppUseCase, catalog: serde_json::Value) ->
         .collect();
     repository.save_many(profiles).await
 }
+
+fn streamed_rss_result(indexer_id: &str, guid: &str, title: &str) -> IndexerSearchResult {
+    IndexerSearchResult {
+        indexer_id: Some(indexer_id.to_string()),
+        source: indexer_id.to_string(),
+        title: title.to_string(),
+        link: Some(format!("https://example.invalid/info/{guid}")),
+        download_url: Some(format!("https://example.invalid/download/{guid}.nzb")),
+        source_kind: Some(DownloadSourceKind::NzbUrl),
+        size_bytes: None,
+        published_at: Some("1970-01-01T00:00:00Z".into()),
+        thumbs_up: None,
+        thumbs_down: None,
+        indexer_languages: None,
+        indexer_subtitles: None,
+        indexer_grabs: None,
+        password_hint: None,
+        parsed_release_metadata: Some(crate::parse_release_metadata(title)),
+        quality_profile_decision: None,
+        extra: Default::default(),
+        response_attributes: Default::default(),
+        guid: Some(guid.to_string()),
+        info_url: Some(format!("https://example.invalid/info/{guid}")),
+        provenance: None,
+        auto_eligible: None,
+        auto_decision_code: None,
+        auto_decision_summary: None,
+        candidate_token: None,
+        queue_scope: None,
+        coverage_scope: None,
+        release_listing_json: None,
+    }
+}
+
+/// Streams two indexers' polls as separate pages, and before it hands on the
+/// second it waits for the first to be taken and records what the RSS worker
+/// had seen by then.
+struct StreamingRssIndexerClient {
+    seen_guids:
+        std::sync::OnceLock<Arc<tokio::sync::RwLock<crate::acquisition::rss::RssSeenGuids>>>,
+    seen_before_second_poll: Mutex<Option<usize>>,
+    first_title: String,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for StreamingRssIndexerClient {
+    async fn search(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+
+    async fn search_stream(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+        page_sink: crate::IndexerSearchPageSink,
+    ) -> AppResult<IndexerSearchResponse> {
+        page_sink
+            .send(vec![streamed_rss_result(
+                "indexer-a",
+                "stream-guid-a",
+                &self.first_title,
+            )])
+            .await
+            .expect("the RSS worker should take the first poll");
+        // The worker holds one page at a time, so this reservation is granted
+        // only once the first poll's page has been taken and released.
+        let reservation =
+            tokio::time::timeout(std::time::Duration::from_secs(30), page_sink.reserve())
+                .await
+                .expect("the first poll should be released while the cycle is still fetching")
+                .expect("the page sink should stay open");
+        let seen = self
+            .seen_guids
+            .get()
+            .expect("seen-guid handle installed")
+            .read()
+            .await
+            .len();
+        *self.seen_before_second_poll.lock().await = Some(seen);
+        reservation
+            .send(vec![streamed_rss_result(
+                "indexer-b",
+                "stream-guid-b",
+                "Unrelated.Feed.Item.2019.720p.HDTV-GRP",
+            )])
+            .await
+            .expect("the RSS worker should take the second poll");
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn scheduled_rss_ingests_each_poll_before_the_next_is_fetched() {
+    let release_title = "Streamed Feed Movie.2024.1080p.WEB-DL-GRP".replace(' ', ".");
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client = Arc::new(StreamingRssIndexerClient {
+        seen_guids: std::sync::OnceLock::new(),
+        seen_before_second_poll: Mutex::new(None),
+        first_title: release_title,
+    });
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases,
+        wanted_items.clone(),
+        indexer_client.clone(),
+    );
+    let seen_guids = app.runtime.acquisition.rss_seen_guids.clone();
+    indexer_client
+        .seen_guids
+        .set(seen_guids.clone())
+        .expect("seen-guid handle installed once");
+    seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Streamed Feed Movie", 2024)
+        .await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(
+        *indexer_client.seen_before_second_poll.lock().await,
+        Some(1),
+        "the first poll must be deduped before the second is handed on"
+    );
+    assert_eq!(seen_guids.read().await.len(), 2);
+    assert_eq!(
+        report.releases_grabbed, 1,
+        "a match from the first poll must survive to title processing: {report:?}"
+    );
+}

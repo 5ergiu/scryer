@@ -2937,8 +2937,10 @@ impl AppUseCase {
     /// The durable tracked-state ledger is what is consulted, not the download
     /// client: a preview must not depend on a network round-trip, and a
     /// submission Scryer has accepted but not yet bound to a client item is
-    /// just as much an in-flight claim as one that is downloading.
-    pub(super) async fn active_work_blocking_a_move(
+    /// just as much an in-flight claim as one that is downloading. One the
+    /// client never confirms is released by the acquisition failure check
+    /// after `UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES`, which lifts this block.
+    pub(crate) async fn active_work_blocking_a_move(
         &self,
         title: &Title,
     ) -> AppResult<Option<String>> {
@@ -2950,9 +2952,10 @@ impl AppUseCase {
             .await?;
         if !unbound.is_empty() {
             return Ok(Some(format!(
-                "\"{}\" has {} grab(s) waiting on the download client; the move can start once they finish",
+                "\"{}\" has {} grab(s) that the download client has not confirmed; Scryer releases unconfirmed grabs after {} minutes, then the move can start",
                 title.name,
-                unbound.len()
+                unbound.len(),
+                crate::acquisition_workflow::UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES
             )));
         }
 

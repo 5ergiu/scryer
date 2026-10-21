@@ -3780,19 +3780,27 @@ impl AppUseCase {
     /// Stable per-instance seed for schedule jitter. Named for its first
     /// consumer; every scheduled job that wants a deterministic offset uses it.
     pub(crate) async fn discovery_scheduler_seed(&self) -> AppResult<String> {
-        if let Some(existing) = self
-            .read_setting_string_value(SCHEDULER_INSTANCE_ID_KEY, None)
-            .await?
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(existing) = self.stored_scheduler_seed().await? {
+            return Ok(existing);
+        }
+
+        // Several scheduled workers resolve the seed concurrently at startup.
+        // The settings upsert is read-then-insert, so two first callers would
+        // both miss the row and the second insert would trip the unique index
+        // (seen on Postgres as a duplicate-key warning). Serialize creation
+        // within this process and re-read under the lock; a loser of a race
+        // across processes re-reads the winner's row after its insert fails.
+        static SEED_CREATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _creating = SEED_CREATION.lock().await;
+        if let Some(existing) = self.stored_scheduler_seed().await? {
             return Ok(existing);
         }
 
         let seed = uuid::Uuid::new_v4().to_string();
         let value_json = serde_json::to_string(&seed)
             .map_err(|error| AppError::Repository(error.to_string()))?;
-        self.services
+        let inserted = self
+            .services
             .config
             .settings
             .upsert_setting_json(
@@ -3803,8 +3811,22 @@ impl AppUseCase {
                 "system",
                 None,
             )
-            .await?;
-        Ok(seed)
+            .await;
+        match inserted {
+            Ok(()) => Ok(seed),
+            Err(error) => match self.stored_scheduler_seed().await? {
+                Some(existing) => Ok(existing),
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn stored_scheduler_seed(&self) -> AppResult<Option<String>> {
+        Ok(self
+            .read_setting_string_value(SCHEDULER_INSTANCE_ID_KEY, None)
+            .await?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()))
     }
 
     pub(crate) async fn finish_job_run(

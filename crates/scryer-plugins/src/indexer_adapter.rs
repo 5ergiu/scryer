@@ -31,8 +31,8 @@ use crate::types::{
     normalize_indexer_info_hash, tagged_alias_to_sdk,
 };
 use crate::wasmtime_host::component_host::{
-    ComponentActor, ComponentContractVersion, ComponentHost, ComponentRuntime,
-    component_strategy_event_channel,
+    ComponentActor, ComponentContractVersion, ComponentHost, ComponentRuntime, GuestMemoryUsage,
+    INDEXER_MEMORY_CAP_ENV, IndexerMemoryPolicy, component_strategy_event_channel,
 };
 use crate::wasmtime_host::engine;
 
@@ -57,8 +57,64 @@ struct ComponentIndexer {
     runtime: Arc<ComponentRuntime>,
     host: ComponentHost,
     timeout: std::time::Duration,
+    /// Store cap (already applied to `host`) and the retention watermark
+    /// checked after every invocation.
+    memory_policy: IndexerMemoryPolicy,
     invocation_lock: tokio::sync::Mutex<()>,
     actor: tokio::sync::Mutex<Option<ComponentActor>>,
+}
+
+/// What happened to the retained component actor after one invocation.
+///
+/// Wasm linear memory never shrinks, so a retained Store keeps whatever its
+/// guest peaked at for the life of the process. Dropping the actor is the only
+/// way to give that memory back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActorRelease {
+    /// Kept for the next call: below the watermark and not an RSS call.
+    Retained,
+    /// Dropped because its linear memory exceeded the retention watermark.
+    Watermark,
+    /// Dropped unconditionally after an RSS call: RSS runs every few minutes,
+    /// paging deep catch-up feeds, so re-instantiating costs far less than
+    /// retaining a Store sized for the deepest page burst.
+    Rss,
+    /// Dropped because the call trapped, timed out, was cancelled, or hit
+    /// the memory cap.
+    Error,
+}
+
+impl ActorRelease {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retained => "retained",
+            Self::Watermark => "watermark",
+            Self::Rss => "rss",
+            Self::Error => "error",
+        }
+    }
+
+    const fn drops_actor(self) -> bool {
+        !matches!(self, Self::Retained)
+    }
+
+    /// The release decision for an invocation that returned to the host.
+    fn after_invocation(
+        operation: IndexerErrorOperation,
+        usage: Option<GuestMemoryUsage>,
+        policy: IndexerMemoryPolicy,
+        failed: bool,
+    ) -> Self {
+        if failed || usage.is_some_and(|usage| usage.denied) {
+            Self::Error
+        } else if matches!(operation, IndexerErrorOperation::RssSync) {
+            Self::Rss
+        } else if usage.is_some_and(|usage| usage.resident_bytes > policy.retain_watermark_bytes) {
+            Self::Watermark
+        } else {
+            Self::Retained
+        }
+    }
 }
 
 struct PluginSearchCallResponse {
@@ -171,6 +227,7 @@ impl WasmIndexerClient {
             .into_iter()
             .collect::<BTreeMap<_, _>>();
         crate::loader::bind_plugin_settings(&mut host_config, settings);
+        let memory_policy = IndexerMemoryPolicy::from_env();
         let host = ComponentHost::for_indexer_with_provider_profile(
             host_config,
             inputs.allowed_hosts,
@@ -178,6 +235,7 @@ impl WasmIndexerClient {
             inputs.proxy_policy,
             inputs.timeout,
             None,
+            Some(memory_policy.cap_bytes),
             provider_profile,
         )
         .map_err(AppError::Repository)?;
@@ -202,6 +260,7 @@ impl WasmIndexerClient {
                 runtime: Arc::new(runtime),
                 host,
                 timeout: inputs.timeout,
+                memory_policy,
                 invocation_lock: tokio::sync::Mutex::new(()),
                 actor: tokio::sync::Mutex::new(None),
             }),
@@ -312,6 +371,63 @@ impl WasmIndexerClient {
         }
     }
 
+    /// Decide whether the actor survives this invocation, drop it if not, and
+    /// log what the guest cost. Returns the guest's memory usage so a failure
+    /// can be attributed to the memory cap.
+    fn finish_actor_invocation(
+        &self,
+        actor: &mut Option<ComponentActor>,
+        operation: &'static str,
+        context: IndexerErrorOperation,
+        started: std::time::Instant,
+        response_bytes: usize,
+        failed: bool,
+    ) -> Option<GuestMemoryUsage> {
+        let usage = actor.as_ref().map(ComponentActor::memory_usage);
+        let release =
+            ActorRelease::after_invocation(context, usage, self.component.memory_policy, failed);
+        if release.drops_actor() {
+            actor.take();
+        }
+        tracing::info!(
+            indexer_id = %self.indexer_id,
+            indexer = %self.indexer_name,
+            plugin = %self.descriptor.id,
+            operation,
+            context = context.as_str(),
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            response_bytes,
+            guest_memory_bytes = usage.map_or(0, |usage| usage.resident_bytes),
+            guest_largest_memory_bytes = usage.map_or(0, |usage| usage.largest_memory_bytes),
+            guest_memory_cap_bytes = usage.map_or(0, |usage| usage.cap_bytes),
+            guest_memory_denied = usage.is_some_and(|usage| usage.denied),
+            retain_watermark_bytes = self.component.memory_policy.retain_watermark_bytes,
+            actor = release.as_str(),
+            "indexer component invocation finished"
+        );
+        usage
+    }
+
+    /// A failed call whose Store hit the memory cap is reported as that, by
+    /// indexer and cap, instead of as the trap the refused growth produced.
+    fn component_call_error(
+        &self,
+        operation: &str,
+        usage: Option<GuestMemoryUsage>,
+        message: String,
+    ) -> AppError {
+        match usage {
+            Some(usage) if usage.denied => AppError::Repository(format!(
+                "indexer component {} for indexer '{}' ({}) {operation} exceeded its guest memory cap of {} MiB and was discarded; set {INDEXER_MEMORY_CAP_ENV} to raise the cap ({message})",
+                self.descriptor.id,
+                self.indexer_name,
+                self.indexer_id,
+                usage.cap_bytes / (1024 * 1024),
+            )),
+            _ => AppError::Repository(message),
+        }
+    }
+
     /// Invoke one retained component operation. Store ownership remains inside
     /// the actor for ordinary calls. Cancellation, timeout, and a component
     /// trap remove the actor while holding its serialization lock, which drops
@@ -321,6 +437,7 @@ impl WasmIndexerClient {
         &self,
         command: PluginIndexerCommand,
         operation: &'static str,
+        context: IndexerErrorOperation,
         cancel_token: Option<&CancellationToken>,
     ) -> AppResult<PluginIndexerCommandResult> {
         let indexer = &self.component;
@@ -342,6 +459,7 @@ impl WasmIndexerClient {
             *actor = Some(self.initialize_component(&token).await?);
         }
 
+        let started = std::time::Instant::now();
         let call = async {
             let Some(actor) = actor.as_mut() else {
                 unreachable!("component actor was initialized above");
@@ -357,35 +475,55 @@ impl WasmIndexerClient {
         };
         let response = tokio::select! {
             _ = token.cancelled() => {
-                actor.take();
+                self.finish_actor_invocation(&mut actor, operation, context, started, 0, true);
                 return Err(AppError::canceled("plugin indexer component search canceled"));
             }
             result = call => match result {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
-                    actor.take();
-                    return Err(AppError::Repository(format!(
-                        "indexer component {} {operation} failed: {error}",
-                        self.descriptor.id
-                    )));
+                    let usage =
+                        self.finish_actor_invocation(&mut actor, operation, context, started, 0, true);
+                    return Err(self.component_call_error(
+                        operation,
+                        usage,
+                        format!("indexer component {} {operation} failed: {error}", self.descriptor.id),
+                    ));
                 }
                 Err(_) => {
-                    actor.take();
-                    return Err(AppError::Repository(format!(
-                        "indexer component {} {operation} timed out after {} ms",
-                        self.descriptor.id,
-                        indexer.timeout.as_millis(),
-                    )));
+                    let usage =
+                        self.finish_actor_invocation(&mut actor, operation, context, started, 0, true);
+                    return Err(self.component_call_error(
+                        operation,
+                        usage,
+                        format!(
+                            "indexer component {} {operation} timed out after {} ms",
+                            self.descriptor.id,
+                            indexer.timeout.as_millis(),
+                        ),
+                    ));
                 }
             },
         };
+        let response_bytes = response.as_ref().map_or(0, Vec::len);
+        let usage = self.finish_actor_invocation(
+            &mut actor,
+            operation,
+            context,
+            started,
+            response_bytes,
+            false,
+        );
         let bytes = match response {
             Ok(bytes) => bytes,
             Err(error) => {
-                return Err(AppError::Repository(format!(
-                    "indexer component {} {operation} returned invocation error {error:?}",
-                    self.descriptor.id
-                )));
+                return Err(self.component_call_error(
+                    operation,
+                    usage,
+                    format!(
+                        "indexer component {} {operation} returned invocation error {error:?}",
+                        self.descriptor.id
+                    ),
+                ));
             }
         };
         let result = if is_search {
@@ -438,6 +576,8 @@ impl WasmIndexerClient {
             }
         }
 
+        const PLAN_OPERATION: &str = "strategy_plan";
+        let started = std::time::Instant::now();
         let (raw_event_tx, mut raw_event_rx) = component_strategy_event_channel();
         let mut event_error = None;
         let call_result = {
@@ -489,37 +629,68 @@ impl WasmIndexerClient {
         };
 
         if let Some(error) = indexer.host.captured_host_policy_error() {
-            actor.take();
+            self.finish_actor_invocation(&mut actor, PLAN_OPERATION, operation, started, 0, true);
             indexer.host.finish_indexer_error_capture(true);
             return Err(error);
         }
         if let Some(error) = event_error {
-            actor.take();
+            self.finish_actor_invocation(&mut actor, PLAN_OPERATION, operation, started, 0, true);
             indexer.host.finish_indexer_error_capture(true);
             return Err(error);
         }
         let response = match call_result {
             Ok(response) => response,
             Err(error) => {
-                actor.take();
+                let usage = self.finish_actor_invocation(
+                    &mut actor,
+                    PLAN_OPERATION,
+                    operation,
+                    started,
+                    0,
+                    true,
+                );
                 indexer.host.finish_indexer_error_capture(true);
-                return Err(error);
+                return Err(match usage {
+                    Some(usage) if usage.denied && !error.is_canceled() => {
+                        self.component_call_error(PLAN_OPERATION, Some(usage), error.to_string())
+                    }
+                    _ => error,
+                });
             }
         };
         while let Ok(event) = raw_event_rx.try_recv() {
             if let Err(error) =
                 forward_component_strategy_event(self, &event, attested, event_sink).await
             {
-                actor.take();
+                self.finish_actor_invocation(
+                    &mut actor,
+                    PLAN_OPERATION,
+                    operation,
+                    started,
+                    0,
+                    true,
+                );
                 indexer.host.finish_indexer_error_capture(true);
                 return Err(error);
             }
         }
+        let usage = self.finish_actor_invocation(
+            &mut actor,
+            PLAN_OPERATION,
+            operation,
+            started,
+            response.as_ref().map_or(0, Vec::len),
+            false,
+        );
         let bytes = response.map_err(|error| {
-            AppError::Repository(format!(
-                "indexer component {} strategy plan returned invocation error {error:?}",
-                self.descriptor.id
-            ))
+            self.component_call_error(
+                PLAN_OPERATION,
+                usage,
+                format!(
+                    "indexer component {} strategy plan returned invocation error {error:?}",
+                    self.descriptor.id
+                ),
+            )
         })?;
         let summary = serde_json::from_slice::<PluginSearchPlanSummary>(&bytes).map_err(|error| {
             AppError::Repository(format!(
@@ -570,6 +741,7 @@ impl WasmIndexerClient {
                     payload: serde_json::json!({ "query": query }),
                 }),
                 "indexer_action",
+                operation,
                 None,
             )
             .await
@@ -624,6 +796,7 @@ impl WasmIndexerClient {
             .invoke_component(
                 PluginIndexerCommand::Search(request.clone()),
                 "indexer_search",
+                operation,
                 Some(&cancel_token),
             )
             .await
@@ -2303,7 +2476,12 @@ impl IndexerClient for WasmIndexerClient {
             payload: serde_json::json!({ "url": download_url }),
         };
         let result = self
-            .invoke_component(PluginIndexerCommand::Action(request), "indexer_grab", None)
+            .invoke_component(
+                PluginIndexerCommand::Action(request),
+                "indexer_grab",
+                IndexerErrorOperation::IndexerAction,
+                None,
+            )
             .await;
         let result = match result {
             Ok(PluginIndexerCommandResult::Action(result)) => decode_grab_result(result),
@@ -3608,6 +3786,163 @@ mod tests {
         assert_eq!(
             inputs.config_entries.get("api_path").map(String::as_str),
             Some("/api")
+        );
+    }
+
+    fn usage(resident_bytes: usize, denied: bool) -> GuestMemoryUsage {
+        GuestMemoryUsage {
+            resident_bytes,
+            largest_memory_bytes: resident_bytes,
+            cap_bytes: 128 * 1024 * 1024,
+            denied,
+        }
+    }
+
+    #[test]
+    fn actor_release_policy_drops_on_watermark_rss_and_error() {
+        let policy = IndexerMemoryPolicy::default();
+        let small = Some(usage(4 * 1024 * 1024, false));
+        let large = Some(usage(policy.retain_watermark_bytes + 1, false));
+        let interactive = IndexerErrorOperation::InteractiveSearch;
+
+        assert_eq!(
+            ActorRelease::after_invocation(interactive, small, policy, false),
+            ActorRelease::Retained
+        );
+        assert_eq!(
+            ActorRelease::after_invocation(interactive, large, policy, false),
+            ActorRelease::Watermark
+        );
+        // RSS drops even a small Store.
+        assert_eq!(
+            ActorRelease::after_invocation(IndexerErrorOperation::RssSync, small, policy, false),
+            ActorRelease::Rss
+        );
+        // A failed call or a cap denial always drops, whatever the operation.
+        assert_eq!(
+            ActorRelease::after_invocation(interactive, small, policy, true),
+            ActorRelease::Error
+        );
+        assert_eq!(
+            ActorRelease::after_invocation(
+                IndexerErrorOperation::RssSync,
+                Some(usage(1024, true)),
+                policy,
+                false
+            ),
+            ActorRelease::Error
+        );
+        assert!(!ActorRelease::Retained.drops_actor());
+        for release in [
+            ActorRelease::Watermark,
+            ActorRelease::Rss,
+            ActorRelease::Error,
+        ] {
+            assert!(release.drops_actor(), "{release:?}");
+        }
+    }
+
+    #[test]
+    fn memory_cap_failures_name_the_indexer_and_the_cap() {
+        let client = builtin_newznab_client(IndexerMemoryPolicy::default());
+        let error = client.component_call_error(
+            "indexer_search",
+            Some(usage(64 * 1024 * 1024, true)),
+            "indexer component newznab indexer_search failed: wasm trap".to_string(),
+        );
+        let message = error.to_string();
+        assert!(message.contains("'Test' (cfg)"), "{message}");
+        assert!(message.contains("guest memory cap of 128 MiB"), "{message}");
+        assert!(message.contains(INDEXER_MEMORY_CAP_ENV), "{message}");
+        assert!(message.contains("wasm trap"), "{message}");
+
+        let plain = client
+            .component_call_error("indexer_search", Some(usage(1024, false)), "boom".into())
+            .to_string();
+        assert!(!plain.contains("memory cap"), "{plain}");
+    }
+
+    /// The bundled Newznab component, configured against a closed local port.
+    /// The probes below are actions the component answers without HTTP.
+    fn builtin_newznab_client(policy: IndexerMemoryPolicy) -> WasmIndexerClient {
+        let asset = crate::builtins::NEWZNAB;
+        let wasm = crate::builtins::decode_builtin_wasm(asset).expect("bundled Newznab wasm");
+        let descriptor: PluginDescriptor =
+            serde_json::from_str(asset.descriptor_json).expect("bundled Newznab descriptor");
+        let mut config = sample_indexer_config("newznab", None);
+        config.base_url = "http://127.0.0.1:9".to_string();
+        let mut client = WasmIndexerClient::new_component_with_plugin_settings(
+            wasm,
+            descriptor,
+            "Test".to_string(),
+            config,
+            None,
+            Arc::new(scryer_application::NullIndexerErrorRecorder),
+            &BTreeMap::new(),
+        )
+        .expect("bundled Newznab client");
+        Arc::get_mut(&mut client.component)
+            .expect("fresh component")
+            .memory_policy = policy;
+        client
+    }
+
+    async fn run_probe_action(client: &WasmIndexerClient, operation: IndexerErrorOperation) {
+        // Unknown actions are answered in-guest; the reply itself is irrelevant
+        // here, only that the invocation returned to the host.
+        let _ = client
+            .indexer_action_with_operation(
+                "scryer_memory_release_probe",
+                BTreeMap::new(),
+                operation,
+                true,
+            )
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_interactive_store_is_retained_between_calls() {
+        let client = builtin_newznab_client(IndexerMemoryPolicy::default());
+        run_probe_action(&client, IndexerErrorOperation::InteractiveSearch).await;
+        let actor = client.component.actor.lock().await;
+        let usage = actor
+            .as_ref()
+            .map(ComponentActor::memory_usage)
+            .expect("a Store below the watermark is retained");
+        assert!(usage.resident_bytes > 0, "{usage:?}");
+        assert!(
+            usage.resident_bytes <= IndexerMemoryPolicy::default().retain_watermark_bytes,
+            "{usage:?}"
+        );
+        assert_eq!(usage.cap_bytes, IndexerMemoryPolicy::default().cap_bytes);
+        assert!(!usage.denied);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn store_above_the_watermark_is_dropped_after_the_call() {
+        let client = builtin_newznab_client(IndexerMemoryPolicy {
+            retain_watermark_bytes: 1,
+            ..IndexerMemoryPolicy::default()
+        });
+        run_probe_action(&client, IndexerErrorOperation::InteractiveSearch).await;
+        assert!(
+            client.component.actor.lock().await.is_none(),
+            "a Store past the watermark must be released"
+        );
+        // The next call re-instantiates a fresh Store.
+        run_probe_action(&client, IndexerErrorOperation::InteractiveSearch).await;
+        assert!(client.component.actor.lock().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rss_invocation_always_drops_the_store() {
+        let client = builtin_newznab_client(IndexerMemoryPolicy::default());
+        run_probe_action(&client, IndexerErrorOperation::InteractiveSearch).await;
+        assert!(client.component.actor.lock().await.is_some());
+        run_probe_action(&client, IndexerErrorOperation::RssSync).await;
+        assert!(
+            client.component.actor.lock().await.is_none(),
+            "an RSS call must not leave a retained Store behind"
         );
     }
 }

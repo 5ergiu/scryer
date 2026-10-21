@@ -2282,6 +2282,43 @@ pub struct IndexerSearchResult {
     pub http: Option<scryer_plugin_sdk::PluginHttpRelease>,
 }
 
+impl IndexerSearchResult {
+    /// A rough size of this result's variable-length payload: its strings,
+    /// the frozen listing JSON, and the `extra` map. Diagnostic only, for
+    /// logging how much a batch of results holds; it walks `extra` without
+    /// serializing it, so counting a page allocates nothing.
+    pub fn approximate_size_bytes(&self) -> usize {
+        fn json_value_size(value: &serde_json::Value) -> usize {
+            match value {
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_) => std::mem::size_of::<serde_json::Value>(),
+                serde_json::Value::String(text) => text.len(),
+                serde_json::Value::Array(items) => items.iter().map(json_value_size).sum(),
+                serde_json::Value::Object(map) => map
+                    .iter()
+                    .map(|(key, value)| key.len() + json_value_size(value))
+                    .sum(),
+            }
+        }
+        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+        let extra = self
+            .extra
+            .iter()
+            .map(|(key, value)| key.len() + json_value_size(value))
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            + self.title.len()
+            + self.source.len()
+            + optional(&self.link)
+            + optional(&self.download_url)
+            + optional(&self.guid)
+            + optional(&self.info_url)
+            + optional(&self.release_listing_json)
+            + extra
+    }
+}
+
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
 /// identifier. Keeping this validation in the application layer prevents an
 /// HTTP download URL from being mislabeled as a magnet merely because a
