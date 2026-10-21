@@ -1,16 +1,22 @@
-# Scryer 0.21.19 release notes
+# Scryer 0.21.20 release notes
 
-These changes are relative to v0.21.18.
+These changes are relative to v0.21.18. Release 0.21.19 was withdrawn shortly after it was published; everything it contained ships here instead, with maintenance rules and request rules kept experimental.
 
 ## Highlights
 
-- Maintenance rules and request rules are no longer experimental. They are available on every instance without turning on experimental features.
+- Maintenance rules and request rules stay experimental. Both panes require the experimental features switch, no rule is enabled by default, and instances that ran 0.21.19 without that switch have every rule disabled on upgrade.
 - Give each maintenance rule one **Disabled**, **Dry run**, or **Enabled** state, controlled together with two instance switches: **Maintenance** and **Pause all actions**. Request rules are enabled with a single checkbox.
-- Ship a built-in maintenance rule, **Expired request leases**, that deletes requested titles seven days after their request lease expires unless they are kept. Read the upgrade notes below before upgrading an instance with **Maintenance** switched on.
+- Ship a built-in maintenance rule, **Expired request leases**, that deletes requested titles seven days after their request lease expires unless they are kept. It is created **Disabled**.
 - Keep a title with one click from maintenance candidates, the title page, or the Requests claims panel.
 - Run scheduled jobs independently, so a long RSS sync no longer delays housekeeping, health checks, Prowlarr sync, or pending-release processing.
 - Bound RSS polling and indexer plugin memory, and process feeds as they arrive instead of retaining every indexer's results for the whole cycle.
 - Configure movie availability on the Movie facet and override it per library. Manual queueing bypasses availability thresholds; automatic acquisition continues to enforce them.
+
+## Maintenance and request rules are experimental
+
+- The maintenance rules and request rules sections, their sidebar entries, and their command-palette routes require the experimental features switch, as in 0.21.18. Rules, exclusions, candidates, and recorded decisions created on 0.21.19 are kept.
+- No rule is enabled by default. The built-in **Expired request leases** rule is created **Disabled** on new instances; enable it on purpose, with the usual candidate-count confirmation, once experimental features are on.
+- On upgrade, every maintenance rule becomes **Disabled** and every request rule is disabled unless the instance already had experimental features enabled. Instances that had opted in keep their rule states, subject to the mode changes in the upgrade notes below. Re-enable rules from the experimental rules sections after upgrading.
 
 ## Movie availability
 
@@ -48,7 +54,7 @@ These changes are relative to v0.21.18.
 
 ## Expired request leases
 
-- Scryer now ships a built-in maintenance rule, **Expired request leases**. Seven days after a requested title's request lease expires, the rule deletes the title and its files unless the title has a Keep (a forever request or an operator Keep). It starts **Enabled** on every instance but, like every maintenance rule, only acts while **Maintenance** is switched on and actions are not paused. On upgrade with **Maintenance** on, titles whose leases had already expired become candidates on the first evaluation pass and are deleted seven days later; to prevent that, Keep those titles, set the rule to **Dry run** or **Disabled**, or switch on **Pause all actions**. The rule cannot be renamed or deleted and its matcher and action cannot be changed; its grace period, libraries and state can be edited, and changing the grace period or libraries sets it to **Dry run** until it is enabled again.
+- Scryer now ships a built-in maintenance rule, **Expired request leases**. Seven days after a requested title's request lease expires, the rule deletes the title and its files unless the title has a Keep (a forever request or an operator Keep). It is created **Disabled** and, like every maintenance rule, only acts once an operator enables it while **Maintenance** is switched on and actions are not paused. When it is enabled, titles whose leases had already expired become candidates on the first evaluation pass and are deleted seven days later; Keep those titles first, or use **Dry run** to review the candidates. The rule cannot be renamed or deleted and its matcher and action cannot be changed; its grace period, libraries and state can be edited, and changing the grace period or libraries sets it to **Dry run** until it is enabled again.
 - The rule is marked as built in on the maintenance rules list, and the request rules page includes a control for its state and grace period.
 
 ## Parsing and imports
@@ -71,11 +77,13 @@ These changes are relative to v0.21.18.
 
 ## Compatibility and upgrade notes
 
-- Maintenance rules that were in shadow mode become **Dry run** and need to be enabled again. Review maintenance behavior through the new **Maintenance** and **Pause all actions** switches.
-- Request rules that were in shadow mode become **Disabled**. Enforcing rules also become **Disabled** when the retired instance gate was off or unset; those behind an enabled gate remain enabled. Review each rule's **Enabled** checkbox after upgrading.
+- Unless experimental features were already enabled on the instance, every maintenance rule becomes **Disabled** and every request rule is disabled on upgrade, including rules enabled on 0.21.19.
+- On instances with experimental features enabled, maintenance rules that were in shadow mode become **Dry run** and need to be enabled again. Review maintenance behavior through the new **Maintenance** and **Pause all actions** switches.
+- On those instances, request rules that were in shadow mode become **Disabled**. Enforcing rules also become **Disabled** when the retired instance gate was off or unset; those behind an enabled gate remain enabled. Review each rule's **Enabled** checkbox after upgrading.
 - GraphQL rule controls have breaking changes. Replace `setMaintenanceRuleMode` and `setMaintenanceRuleArming` with `setMaintenanceRuleState`, and use `MaintenanceRuleState` (`DISABLED`, `DRY_RUN`, `ENABLED`) instead of the removed `MaintenanceEvaluationMode` type. Maintenance rule sets now expose `state`, `enabledArming`, and `editedSinceEnabled` instead of `enabled`, `evaluationMode`, `effectArming`, and `destructiveRearmRequired`. `MaintenanceInstanceGates` and its update input now use `enabled` and `actionsPaused` in place of the previous gate fields; `maintenanceCandidates` no longer accepts `includeShadow`.
 - Replace `setRequestRuleMode` with `setRequestRuleEnabled`. The request-rule instance-gate query, mutation, and types are removed, along with `RequestRuleSet.evaluationMode` and `RequestRuleEvaluationModeValue.SHADOW`. Request decision and preflight modes still report `DISABLED` or `ENFORCE`.
 - Existing acquisition availability settings migrate to the Movie facet, with existing facet values taking precedence. GraphQL clients should read and write them through `mediaSettings` and `updateMediaSettings` with Movie scope, or through library settings for overrides. The acquisition fields are deprecated: reads return facet values and writes are ignored. `QueueDownloadInput.overrideMovieAvailability` is also deprecated and ignored.
-- RSS tuning is available through `SCRYER_RSS_INDEXER_CONCURRENCY` and `SCRYER_RSS_POLL_PAGE_BUDGET`. Indexer plugin limits can be adjusted with `SCRYER_INDEXER_PLUGIN_MEMORY_MAX_MIB` and `SCRYER_INDEXER_PLUGIN_RETAIN_WATERMARK_MIB`.
 - Download-client plugins may optionally return `added_at` as an RFC 3339 timestamp or Unix seconds. Older plugin payloads remain supported; Rust SDK users constructing `PluginDownloadItem` literals must include the new optional field when updating their SDK.
+- RSS tuning is available through `SCRYER_RSS_INDEXER_CONCURRENCY` and `SCRYER_RSS_POLL_PAGE_BUDGET`. Indexer plugin limits can be adjusted with `SCRYER_INDEXER_PLUGIN_MEMORY_MAX_MIB` and `SCRYER_INDEXER_PLUGIN_RETAIN_WATERMARK_MIB`.
 - Add Prometheus metrics for skipped overlapping scheduled runs, long-running scheduled jobs, and failed job-run status writes.
+- A migration applies the rule reset described above.

@@ -3374,6 +3374,23 @@ engine = "postgres"
 scope = "all"
 
 
+[[migration]]
+version = 304
+description = "rules disabled unless experimental"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0304_rules_disabled_unless_experimental.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0304_rules_disabled_unless_experimental.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"
