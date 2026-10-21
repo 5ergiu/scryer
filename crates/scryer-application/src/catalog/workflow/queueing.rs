@@ -999,6 +999,7 @@ impl AppUseCase {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn queue_replacement_release_with_listing(
         &self,
         actor: &User,

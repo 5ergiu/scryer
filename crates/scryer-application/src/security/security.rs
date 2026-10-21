@@ -1130,6 +1130,7 @@ impl AppUseCase {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_release_candidate_token_with_signing_key(
         &self,
         actor: &User,

@@ -2523,6 +2523,7 @@ impl IndexerClient for WasmIndexerClient {
             .invoke_component(
                 PluginIndexerCommand::Action(request),
                 "indexer_http_resolve",
+                IndexerErrorOperation::IndexerAction,
                 None,
             )
             .await;

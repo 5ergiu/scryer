@@ -17087,6 +17087,7 @@ fn streamed_rss_result(indexer_id: &str, guid: &str, title: &str) -> IndexerSear
         link: Some(format!("https://example.invalid/info/{guid}")),
         download_url: Some(format!("https://example.invalid/download/{guid}.nzb")),
         source_kind: Some(DownloadSourceKind::NzbUrl),
+        http: None,
         size_bytes: None,
         published_at: Some("1970-01-01T00:00:00Z".into()),
         thumbs_up: None,
