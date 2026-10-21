@@ -317,11 +317,13 @@ function SmgUpgradeBanner({
 
 function SmgScryerUpdateBanner({
   canManageSystemSettings,
+  settingsSubscriptionEnabled,
   notice,
   t,
   onDismiss,
 }: {
   canManageSystemSettings: boolean;
+  settingsSubscriptionEnabled: boolean;
   notice: SmgScryerUpdateNotice;
   t: TranslateFn;
   onDismiss: () => void;
@@ -329,7 +331,9 @@ function SmgScryerUpdateBanner({
   const currentVersion = notice.currentVersion.trim();
   const latestVersion = notice.latestVersion.trim();
   const releaseUrl = notice.releaseUrl?.trim() || null;
-  const { status, refresh } = useApplicationUpgradeStatus(canManageSystemSettings);
+  const { status, refresh } = useApplicationUpgradeStatus(canManageSystemSettings, {
+    settingsSubscriptionEnabled,
+  });
 
   return (
     <div
@@ -366,6 +370,7 @@ function SmgScryerUpdateBanner({
           <ApplicationUpgradeAction
             status={status}
             className="flex-none"
+            refreshStatus={refresh}
             onStatusChanged={() => void refresh()}
           />
         ) : null}
@@ -1769,6 +1774,7 @@ function AuthenticatedHomePage({
                       updateNoticeMatchesRunningVersion ? (
                         <SmgScryerUpdateBanner
                           canManageSystemSettings={canManageSystemSettings}
+                          settingsSubscriptionEnabled={canSubscribeToLibraryEvents}
                           notice={smgScryerUpdateNotice}
                           t={t}
                           onDismiss={dismissSmgScryerUpdateReminder}

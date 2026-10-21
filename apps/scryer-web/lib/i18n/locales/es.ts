@@ -2023,6 +2023,7 @@ const es: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer se reiniciará durante esta actualización.",
   "appUpgrade.uacNotice": "Windows mostrará un aviso local de elevación.",
   "appUpgrade.startFailed": "No se pudo iniciar la actualización.",
+  "appUpgrade.targetChanged": "La actualización disponible cambió. Revísala e inténtalo de nuevo.",
   "appUpgrade.loading": "Cargando estado de actualización…",
   "appUpgrade.currentVersion": "Versión actual",
   "appUpgrade.availableVersion": "Versión disponible",

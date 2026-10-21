@@ -3502,6 +3502,7 @@ const nl: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer wordt opnieuw gestart tijdens deze upgrade.",
   "appUpgrade.uacNotice": "Windows toont een lokale rechtenverhogingsprompt.",
   "appUpgrade.startFailed": "Upgrade kon niet worden gestart.",
+  "appUpgrade.targetChanged": "De beschikbare update is gewijzigd. Controleer de update en probeer het opnieuw.",
   "appUpgrade.loading": "Upgradestatus laden…",
   "appUpgrade.currentVersion": "Huidige versie",
   "appUpgrade.availableVersion": "Beschikbare versie",

@@ -4935,6 +4935,7 @@ const ru: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer будет перезапущен во время обновления.",
   "appUpgrade.uacNotice": "Windows покажет локальный запрос повышения прав.",
   "appUpgrade.startFailed": "Не удалось начать обновление.",
+  "appUpgrade.targetChanged": "Доступное обновление изменилось. Проверьте его и повторите попытку.",
   "appUpgrade.loading": "Загрузка статуса обновления…",
   "appUpgrade.currentVersion": "Текущая версия",
   "appUpgrade.availableVersion": "Доступная версия",

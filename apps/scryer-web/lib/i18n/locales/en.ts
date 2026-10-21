@@ -4133,6 +4133,7 @@ const en: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer will restart during this upgrade.",
   "appUpgrade.uacNotice": "Windows will show a local elevation prompt.",
   "appUpgrade.startFailed": "Unable to start the upgrade.",
+  "appUpgrade.targetChanged": "The available update changed. Review it and try again.",
   "appUpgrade.loading": "Loading upgrade status…",
   "appUpgrade.currentVersion": "Current version",
   "appUpgrade.availableVersion": "Available version",

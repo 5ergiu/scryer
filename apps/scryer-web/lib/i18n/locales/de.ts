@@ -1996,6 +1996,7 @@ const de: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer wird während der Aktualisierung neu gestartet.",
   "appUpgrade.uacNotice": "Windows zeigt eine lokale Berechtigungsabfrage an.",
   "appUpgrade.startFailed": "Aktualisierung konnte nicht gestartet werden.",
+  "appUpgrade.targetChanged": "Die verfügbare Aktualisierung hat sich geändert. Prüfen Sie sie und versuchen Sie es erneut.",
   "appUpgrade.loading": "Aktualisierungsstatus wird geladen…",
   "appUpgrade.currentVersion": "Aktuelle Version",
   "appUpgrade.availableVersion": "Verfügbare Version",

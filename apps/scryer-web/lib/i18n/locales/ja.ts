@@ -1967,6 +1967,7 @@ const ja: LocaleDictionary = {
   "appUpgrade.restartNotice": "このアップグレード中に Scryer が再起動します。",
   "appUpgrade.uacNotice": "Windows にローカルの昇格確認が表示されます。",
   "appUpgrade.startFailed": "アップグレードを開始できませんでした。",
+  "appUpgrade.targetChanged": "利用可能な更新が変更されました。内容を確認してからもう一度お試しください。",
   "appUpgrade.loading": "アップグレードの状態を読み込んでいます…",
   "appUpgrade.currentVersion": "現在のバージョン",
   "appUpgrade.availableVersion": "利用可能なバージョン",

@@ -3288,6 +3288,7 @@ const zh_TW: LocaleDictionary = {
   "appUpgrade.restartNotice": "此升級期間 Scryer 將重新啟動。",
   "appUpgrade.uacNotice": "Windows 將顯示本地許可權提升提示。",
   "appUpgrade.startFailed": "無法開始升級。",
+  "appUpgrade.targetChanged": "可用的更新已變更。請檢查後再試一次。",
   "appUpgrade.loading": "正在載入升級狀態…",
   "appUpgrade.currentVersion": "當前版本",
   "appUpgrade.availableVersion": "可用版本",
