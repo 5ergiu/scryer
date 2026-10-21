@@ -568,8 +568,9 @@ impl AppUseCase {
 
     /// Create the rule every instance ships with: titles whose request lease
     /// expired are deleted with their files after a seven-day grace period,
-    /// unless someone keeps them. It starts Enabled. Startup calls this on
-    /// every boot, so it does nothing once the rule exists.
+    /// unless someone keeps them. It starts Disabled, like every other rule:
+    /// an operator enables it on purpose. Startup calls this on every boot, so
+    /// it does nothing once the rule exists.
     pub async fn ensure_expired_request_leases_rule(&self) -> AppResult<()> {
         let rules = &self.services.customization.maintenance_rule_sets;
         if rules
@@ -605,9 +606,9 @@ impl AppUseCase {
             description: "Deletes a requested title and its files once its request lease has \
                           expired, unless someone keeps it."
                 .into(),
-            enabled: true,
-            evaluation_mode: MaintenanceEvaluationMode::Observe,
-            effect_arming: scryer_domain::MaintenanceEffectArming::Destructive,
+            enabled: false,
+            evaluation_mode: MaintenanceEvaluationMode::Disabled,
+            effect_arming: scryer_domain::MaintenanceEffectArming::None,
             destructive_rearm_required: false,
             library_ids: Vec::new(),
             subject_kind: MaintenanceRuleSubjectKind::Title,

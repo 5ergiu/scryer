@@ -6745,3 +6745,156 @@ async fn migration_0295_preserves_inherited_movie_availability() {
         ]
     );
 }
+
+/// Runs 0305 against a fully migrated schema holding one enabled destructive
+/// maintenance rule, one shadow maintenance rule and one enforcing request
+/// rule, with the experimental-features setting stored as `value_json`, or
+/// absent when `experimental` is `None`. Returns the rule rows afterwards as
+/// `(id, enabled, evaluation_mode, effect_arming, destructive_rearm_required)`
+/// and `(id, enabled, evaluation_mode)`.
+async fn rules_after_0305(
+    experimental: Option<&str>,
+) -> (
+    Vec<(String, i64, String, String, i64)>,
+    Vec<(String, i64, String)>,
+) {
+    let directory = tempfile::tempdir().expect("synthetic schema fixture");
+    let services = SqliteServices::new(directory.path().join("rules-0305.db").to_string_lossy())
+        .await
+        .expect("migrations should apply");
+    let pool = services.pool().clone();
+    let mut conn = pool.acquire().await.expect("rule reset connection");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await
+        .expect("relax foreign keys for the seeded rows");
+
+    sqlx::query(
+        "INSERT INTO maintenance_rule_sets
+         (id, name, enabled, evaluation_mode, effect_arming, destructive_rearm_required, system_owned)
+         VALUES ('rule-armed', 'Synthetic armed rule', 1, 'observe', 'destructive', 0, 1),
+                ('rule-shadow', 'Synthetic shadow rule', 0, 'shadow', 'none', 1, 0)",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("seed maintenance rules");
+    sqlx::query(
+        "INSERT INTO request_rule_sets (id, name, enabled, evaluation_mode)
+         VALUES ('request-enforcing', 'Synthetic request rule', 1, 'enforce')",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("seed request rule");
+    if let Some(value_json) = experimental {
+        sqlx::query(
+            "INSERT INTO settings_definitions
+             (id, category, scope, key_name, data_type, created_at, updated_at)
+             VALUES ('def-experimental', 'ui', 'system', 'ui.experimental_features_enabled',
+                     'boolean', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("seed setting definition");
+        sqlx::query(
+            "INSERT INTO settings_values
+             (id, setting_definition_id, scope, scope_id, value_json, source, created_at, updated_at)
+             VALUES ('value-experimental', 'def-experimental', 'system', NULL, ?, 'user',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(value_json)
+        .execute(&mut *conn)
+        .await
+        .expect("seed setting value");
+    }
+
+    for statement in include_str!(
+        "../../../scryer/src/db/migrations/0305_rules_disabled_unless_experimental.sql"
+    )
+    .split(';')
+    .map(str::trim)
+    .filter(|statement| !statement.is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("0305 should apply");
+    }
+
+    let maintenance = sqlx::query_as(
+        "SELECT id, enabled, evaluation_mode, effect_arming, destructive_rearm_required
+         FROM maintenance_rule_sets ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("read maintenance rules");
+    let requests =
+        sqlx::query_as("SELECT id, enabled, evaluation_mode FROM request_rule_sets ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("read request rules");
+    (maintenance, requests)
+}
+
+#[tokio::test]
+async fn migration_0305_disables_every_rule_unless_experimental_features_are_on() {
+    for experimental in [None, Some("false"), Some("\"off\"")] {
+        let (maintenance, requests) = rules_after_0305(experimental).await;
+        assert_eq!(
+            maintenance,
+            vec![
+                (
+                    "rule-armed".to_string(),
+                    0,
+                    "disabled".to_string(),
+                    "none".to_string(),
+                    0
+                ),
+                (
+                    "rule-shadow".to_string(),
+                    0,
+                    "disabled".to_string(),
+                    "none".to_string(),
+                    0
+                ),
+            ],
+            "experimental = {experimental:?}"
+        );
+        assert_eq!(
+            requests,
+            vec![("request-enforcing".to_string(), 0, "disabled".to_string())],
+            "experimental = {experimental:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migration_0305_keeps_rule_states_when_experimental_features_are_on() {
+    for experimental in [Some("true"), Some("\"true\"")] {
+        let (maintenance, requests) = rules_after_0305(experimental).await;
+        assert_eq!(
+            maintenance,
+            vec![
+                (
+                    "rule-armed".to_string(),
+                    1,
+                    "observe".to_string(),
+                    "destructive".to_string(),
+                    0
+                ),
+                (
+                    "rule-shadow".to_string(),
+                    0,
+                    "shadow".to_string(),
+                    "none".to_string(),
+                    1
+                ),
+            ],
+            "experimental = {experimental:?}"
+        );
+        assert_eq!(
+            requests,
+            vec![("request-enforcing".to_string(), 1, "enforce".to_string())],
+            "experimental = {experimental:?}"
+        );
+    }
+}
