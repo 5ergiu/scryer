@@ -12,6 +12,7 @@ import {
   maintenanceRulesSectionFromPath,
   resolveAppRoute,
   rulesSectionFromPath,
+  rulesSectionsFor,
   type ParsedAppRoute,
 } from "./routing.ts";
 import { isMediaSettingsSection } from "./routes.ts";
@@ -348,9 +349,16 @@ test("indexerSettingsTabs always offers the search pane", () => {
   assert.equal(buildIndexerSettingsPath("indexers"), "/integrations/indexers");
 });
 
-test("each kind of rule has its own Rules pane path", () => {
+test("rulesSectionsFor drops maintenance and request rules until experimental features are on", () => {
+  assert.deepEqual(rulesSectionsFor(true), ["scoring", "maintenance", "request"]);
+  // One entry left means there is no kind to switch between, which is how the
+  // Rules page decides to drop its kind rail.
+  assert.deepEqual(rulesSectionsFor(false), ["scoring"]);
+  // Scoring stays reachable either way, and its path is unchanged.
+  for (const enabled of [true, false]) {
+    assert.ok(rulesSectionsFor(enabled).includes("scoring"));
+  }
   assert.equal(buildRulesPath("scoring"), "/automation/rules/scoring");
-  assert.equal(buildRulesPath("maintenance"), "/automation/rules/maintenance");
   assert.equal(buildRulesPath("request"), "/automation/rules/request");
 });
 
