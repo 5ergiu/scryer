@@ -247,15 +247,34 @@ pub(crate) enum ReleaseAutoDecisionCode {
     DownloadClientUnavailable,
     RepackGroupMismatch,
     MinimumSeeders,
+    MovieAvailabilityBlocked,
     PackBelowMissingThreshold,
     SubtitlesOnly,
     /// The release's numbering has more than one equally-good reading under the
     /// title's anime numbering bridge. A release nobody can place must not be
     /// grabbed on a coin toss.
     AnimeNumberingAmbiguous,
+    /// A movie subject was offered a season, a pack or a multi-episode
+    /// release. A film is one file; a name match does not make a pack one.
+    EpisodicReleaseForMovie,
+    /// A movie subject was offered a release whose year is more than a year
+    /// away from the movie's own: a different film that shares the name.
+    TitleYearMismatch,
+    /// An automatic single-episode search was offered a season or a pack of
+    /// three or more episodes. Packs belong to season searches, where the
+    /// missing-episode threshold decides whether one is worth taking.
+    PackForSingleEpisode,
 }
 
 impl ReleaseAutoDecisionCode {
+    fn with_movie_availability(self, blocked: bool) -> Self {
+        if blocked && !self.is_identity_refusal() && self != Self::MinimumSeeders {
+            Self::MovieAvailabilityBlocked
+        } else {
+            self
+        }
+    }
+
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "eligible" => Some(Self::Eligible),
@@ -285,9 +304,13 @@ impl ReleaseAutoDecisionCode {
             "download_client_unavailable" => Some(Self::DownloadClientUnavailable),
             "repack_group_mismatch" => Some(Self::RepackGroupMismatch),
             "minimum_seeders" => Some(Self::MinimumSeeders),
+            "movie_availability_blocked" => Some(Self::MovieAvailabilityBlocked),
             "pack_below_missing_threshold" => Some(Self::PackBelowMissingThreshold),
             "subtitles_only" => Some(Self::SubtitlesOnly),
             "anime_numbering_ambiguous" => Some(Self::AnimeNumberingAmbiguous),
+            "episodic_release_for_movie" => Some(Self::EpisodicReleaseForMovie),
+            "title_year_mismatch" => Some(Self::TitleYearMismatch),
+            "pack_for_single_episode" => Some(Self::PackForSingleEpisode),
             _ => None,
         }
     }
@@ -319,9 +342,13 @@ impl ReleaseAutoDecisionCode {
             Self::DownloadClientUnavailable => "download_client_unavailable",
             Self::RepackGroupMismatch => "repack_group_mismatch",
             Self::MinimumSeeders => "minimum_seeders",
+            Self::MovieAvailabilityBlocked => "movie_availability_blocked",
             Self::PackBelowMissingThreshold => "pack_below_missing_threshold",
             Self::SubtitlesOnly => "subtitles_only",
             Self::AnimeNumberingAmbiguous => "anime_numbering_ambiguous",
+            Self::EpisodicReleaseForMovie => "episodic_release_for_movie",
+            Self::TitleYearMismatch => "title_year_mismatch",
+            Self::PackForSingleEpisode => "pack_for_single_episode",
         }
     }
 
@@ -368,6 +395,7 @@ impl ReleaseAutoDecisionCode {
             Self::DownloadClientUnavailable => "matching download clients are unavailable",
             Self::RepackGroupMismatch => "repack group does not match the existing file",
             Self::MinimumSeeders => "too few seeders for this indexer's seeding profile",
+            Self::MovieAvailabilityBlocked => "movie has not reached its configured availability",
             Self::PackBelowMissingThreshold => {
                 "series pack does not meet the missing-episode threshold"
             }
@@ -375,11 +403,32 @@ impl ReleaseAutoDecisionCode {
             Self::AnimeNumberingAmbiguous => {
                 "release numbering has several equally-good readings for this anime"
             }
+            Self::EpisodicReleaseForMovie => {
+                "release is a season, pack or multi-episode release, not a movie"
+            }
+            Self::TitleYearMismatch => "release year is more than a year away from the movie's",
+            Self::PackForSingleEpisode => {
+                "an automatic single-episode search does not take a season or multi-episode pack"
+            }
         }
     }
 
     pub(crate) fn is_eligible(self) -> bool {
         matches!(self, Self::Eligible)
+    }
+
+    /// The release is not this subject at all. No availability, delay or
+    /// quality state can change that, so these reasons outrank them.
+    pub(crate) fn is_identity_refusal(self) -> bool {
+        matches!(
+            self,
+            Self::SubtitlesOnly
+                | Self::TitleMismatch
+                | Self::EpisodeMismatch
+                | Self::CategoryMismatch
+                | Self::EpisodicReleaseForMovie
+                | Self::TitleYearMismatch
+        )
     }
 }
 
@@ -557,6 +606,11 @@ pub(crate) fn series_movie_search_title(
     search_title.name = movie.title.clone();
     search_title.facet = MediaFacet::Movie;
     search_title.year = movie.year;
+    // A linked movie has no availability threshold of its own; the series'
+    // NULL must not pick up the movie instance default.
+    search_title
+        .min_availability
+        .get_or_insert_with(|| "announced".to_string());
     search_title.imdb_id = movie.imdb_id.clone();
     search_title.runtime_minutes = movie.runtime_minutes;
     search_title.external_ids.retain(|external_id| {
@@ -1756,6 +1810,7 @@ pub(crate) fn automatic_candidate_delay_decision(
         delay_profiles,
         &title.tags,
         &title.facet,
+        &title.library_id,
         candidate.source_kind,
         candidate
             .published_at
@@ -1784,6 +1839,159 @@ fn release_title_is_subtitles_only(release_title: &str) -> bool {
                 .iter()
                 .any(|subtitle_extension| extension.eq_ignore_ascii_case(subtitle_extension))
         })
+}
+
+/// A movie title of its own, not a movie linked to a series. A linked movie
+/// is legitimately released in episodic shapes (an `S00E01` special, a
+/// "Show - Movie" name) under the series' own years, so neither movie refusal
+/// applies to it.
+fn subject_is_standalone_movie(subject: &ResolvedReleaseSearchSubject) -> bool {
+    subject.search_facet == MediaFacet::Movie
+        && subject.owner_facet == MediaFacet::Movie
+        && !matches!(
+            subject.submission_scope,
+            SubmissionScope::SeriesMovie { .. }
+        )
+}
+
+/// The two refusals only a standalone movie subject can earn: an episodic
+/// release and a release from another year. Both are identity, not taste, so
+/// they run ahead of every quality and availability gate in every lane.
+pub(crate) fn movie_subject_refusal(
+    candidate: &IndexerSearchResult,
+    subject: &ResolvedReleaseSearchSubject,
+    title_match: Option<&CandidateTitleMatch>,
+) -> Option<ReleaseAutoDecisionCode> {
+    if !subject_is_standalone_movie(subject) {
+        return None;
+    }
+    if movie_year_contradicts_subject(candidate, &subject.title_evidence, title_match) {
+        return Some(ReleaseAutoDecisionCode::TitleYearMismatch);
+    }
+    title_match?;
+    if release_title_is_episodic(&candidate.title) {
+        return Some(ReleaseAutoDecisionCode::EpisodicReleaseForMovie);
+    }
+    None
+}
+
+/// [`movie_subject_refusal`] for a lane that has not matched the title yet.
+pub(crate) fn movie_subject_refusal_unmatched(
+    candidate: &IndexerSearchResult,
+    subject: &ResolvedReleaseSearchSubject,
+) -> Option<ReleaseAutoDecisionCode> {
+    if !subject_is_standalone_movie(subject) {
+        return None;
+    }
+    let title_match = candidate_title_match(candidate, &subject.title_evidence);
+    movie_subject_refusal(candidate, subject, title_match.as_ref())
+}
+
+/// A movie release names its year. One year either side is the same film
+/// (a festival premiere, a regional date, a December release); further away
+/// it is a different film that shares the name. The veto only fires when the
+/// name itself matches once the year is set aside — anything else is an
+/// ordinary title mismatch — and a matched alias that carries the release's
+/// year always wins.
+fn movie_year_contradicts_subject(
+    candidate: &IndexerSearchResult,
+    evidence: &CanonicalTitleEvidence,
+    title_match: Option<&CandidateTitleMatch>,
+) -> bool {
+    let Some(expected_year) = evidence.year else {
+        return false;
+    };
+    if title_match
+        .and_then(|title_match| title_match.evidence_match.as_ref())
+        .is_some_and(|evidence_match| evidence_match.year_corroborated)
+    {
+        return false;
+    }
+    let parsed_owned;
+    let parsed = if let Some(parsed) = candidate.parsed_release_metadata.as_ref() {
+        parsed
+    } else {
+        parsed_owned =
+            crate::parse_release_metadata_for_target(&candidate.title, &evidence.parse_context);
+        &parsed_owned
+    };
+    let Some(parsed_year) = parsed.year else {
+        return false;
+    };
+    // An alias that carries this year already corroborated the match above;
+    // a year alias that did not match is no evidence for another name.
+    if (parsed_year - expected_year).abs() <= 1
+        || evidence.episode_release_years.contains(&parsed_year)
+    {
+        return false;
+    }
+    if title_match.is_some() {
+        return true;
+    }
+    let mut yearless = parsed.clone();
+    yearless.year = None;
+    let identity = &evidence.spelling_identity;
+    let asserted_ids = strict_external_id_agreement(
+        &candidate.response_attributes,
+        identity.tvdb_id.as_deref(),
+        identity.tmdb_id.as_deref(),
+        identity.imdb_id.as_deref(),
+    );
+    match_parsed_release_with_asserted_ids(&yearless, evidence, asserted_ids).is_some()
+}
+
+/// Read without the movie's context on purpose: a movie-faceted parse never
+/// projects episode numbering, which is exactly what hides a pack that carries
+/// the film's bare name. A single bare number (`Name - 01`, `Name 2`) is how
+/// films are numbered too, so only a season, a pack marker, or more than one
+/// episode number makes a release episodic.
+pub(crate) fn release_title_is_episodic(release_title: &str) -> bool {
+    let parsed = crate::parse_release_metadata(release_title);
+    let Some(episode) = parsed.episode.as_ref() else {
+        return false;
+    };
+    episode.season.is_some()
+        || !episode.season_numbers.is_empty()
+        || episode.full_season
+        || episode.is_partial_season
+        || episode.is_multi_season
+        || episode.is_series_pack
+        || episode.episode_numbers.len() > 1
+        || episode.absolute_episode_numbers.len() > 1
+}
+
+/// Episode count at which a multi-episode release stops being a double
+/// episode and becomes a pack.
+const SINGLE_EPISODE_PACK_MIN_EPISODES: usize = 3;
+
+/// A season, a multi-season or series pack, or a run of three or more
+/// episodes. Resolved coverage is read first; a release the catalog could not
+/// place falls back to its own parse, so a run longer than the catalog knows
+/// is still a pack.
+fn candidate_is_pack_for_single_episode(candidate: &IndexerSearchResult) -> bool {
+    match &candidate.coverage_scope {
+        Some(SubmissionScope::Collection { .. }) => return true,
+        Some(SubmissionScope::EpisodeSet { episode_ids })
+            if episode_ids.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let Some(episode) = candidate
+        .parsed_release_metadata
+        .as_ref()
+        .and_then(|parsed| parsed.episode.as_ref())
+    else {
+        return false;
+    };
+    episode.full_season
+        || episode.is_partial_season
+        || episode.is_multi_season
+        || episode.is_series_pack
+        || episode.season_numbers.len() > 1
+        || episode.episode_numbers.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES
+        || episode.absolute_episode_numbers.len() >= SINGLE_EPISODE_PACK_MIN_EPISODES
 }
 
 pub(crate) fn evaluate_auto_candidate(
@@ -1826,12 +2034,32 @@ pub(crate) fn evaluate_auto_candidate(
         | CandidateParseState::Parsed => {}
     }
 
+    if let Some(code) = movie_subject_refusal(candidate, context.subject, title_match.as_ref()) {
+        return code;
+    }
+
     let Some(title_match) = title_match else {
         return ReleaseAutoDecisionCode::TitleMismatch;
     };
 
     if candidate_numbering_contradicts_subject(candidate, context.subject) {
         return ReleaseAutoDecisionCode::EpisodeMismatch;
+    }
+
+    // Sonarr's `SingleEpisodeSearchMatchSpecification`: an automatic search
+    // for one episode takes that episode, or a double episode that holds it,
+    // never a season. The season and collection searches own packs and their
+    // missing-episode threshold. An operator-started search and the feed are
+    // not single-episode searches and are left alone.
+    if !context.user_invoked
+        && !context.is_rss_lane
+        && matches!(
+            context.subject.submission_scope,
+            SubmissionScope::Episode { .. }
+        )
+        && candidate_is_pack_for_single_episode(candidate)
+    {
+        return ReleaseAutoDecisionCode::PackForSingleEpisode;
     }
 
     // Sonarr's `MonitoredEpisodeSpecification`. A multi-episode release that
@@ -2380,6 +2608,16 @@ impl AppUseCase {
             .collect::<Vec<_>>();
         let delay_profiles = self.load_delay_profiles().await;
         let now = Utc::now();
+        let movie_availability = if title.facet == MediaFacet::Movie {
+            let policies = self.movie_availability_policies().await?;
+            Some(
+                crate::acquisition::targets::movie_availability_decision_for_title(
+                    title, &policies, &now,
+                ),
+            )
+        } else {
+            None
+        };
         let cutoff_scope = self.cutoff_scope_for(&subject.submission_scope).await;
         let analyzed_cutoff_quality =
             crate::acquisition::decision_helpers::analyzed_cutoff_quality_for_scope(
@@ -2677,11 +2915,15 @@ impl AppUseCase {
                 decision.revision_preference =
                     crate::admission::revision_preference(facts, candidate_context.admission);
             }
-            let code = active_pending_release_delay_code(
+            let evaluated_code = active_pending_release_delay_code(
                 evaluate_auto_candidate(candidate, &candidate_context),
                 user_invoked,
                 has_active_pending_overlap,
             );
+            let code =
+                evaluated_code.with_movie_availability(movie_availability.as_ref().is_some_and(
+                    |decision| decision.status != crate::types::MovieAvailabilityStatus::Available,
+                ));
             annotate_external_id_diagnostics(candidate, evaluation_context.subject);
             crate::quality::grab_scoring::attach(
                 candidate,
@@ -2690,6 +2932,14 @@ impl AppUseCase {
                 now,
             );
             annotate_auto_decision(candidate, code);
+            if code == ReleaseAutoDecisionCode::MovieAvailabilityBlocked
+                && let Some(decision) = &movie_availability
+            {
+                candidate.auto_decision_summary = Some(match &decision.effective_date {
+                    Some(date) => format!("{}: {} ({date})", code.summary(), decision.reason),
+                    None => format!("{}: {}", code.summary(), decision.reason),
+                });
+            }
         }
 
         results.sort_by(crate::catalog::release_search::compare_release_search_results);
@@ -3436,6 +3686,32 @@ mod tests {
     use scryer_domain::{MediaFacet, TaggedAlias, Title};
 
     #[test]
+    fn movie_availability_preserves_non_overridable_refusals() {
+        for code in [
+            ReleaseAutoDecisionCode::MinimumSeeders,
+            ReleaseAutoDecisionCode::TitleMismatch,
+        ] {
+            assert_eq!(code.with_movie_availability(true), code);
+        }
+        assert_eq!(
+            ReleaseAutoDecisionCode::Eligible.with_movie_availability(true),
+            ReleaseAutoDecisionCode::MovieAvailabilityBlocked
+        );
+        assert_eq!(
+            ReleaseAutoDecisionCode::Eligible.with_movie_availability(false),
+            ReleaseAutoDecisionCode::Eligible
+        );
+    }
+
+    #[test]
+    fn movie_availability_decision_code_round_trips_and_has_summary() {
+        let code = ReleaseAutoDecisionCode::MovieAvailabilityBlocked;
+        assert_eq!(code.as_str(), "movie_availability_blocked");
+        assert_eq!(ReleaseAutoDecisionCode::parse(code.as_str()), Some(code));
+        assert!(code.summary().contains("configured availability"));
+    }
+
+    #[test]
     fn a_whole_season_search_accepts_only_a_plain_season_number() {
         assert_eq!(whole_season_number("2").ok(), Some(2));
         assert_eq!(whole_season_number(" 02 ").ok(), Some(2));
@@ -4060,6 +4336,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }
@@ -4420,7 +4697,7 @@ mod tests {
 
         assert_eq!(
             evaluate_auto_candidate(&candidate, &context),
-            ReleaseAutoDecisionCode::TitleMismatch
+            ReleaseAutoDecisionCode::TitleYearMismatch
         );
     }
 
@@ -4617,6 +4894,360 @@ mod tests {
         assert_eq!(
             decision_for(&title, &subject, &content),
             ReleaseAutoDecisionCode::Eligible
+        );
+    }
+
+    fn quillon_movie(year: i32) -> (Title, ResolvedReleaseSearchSubject) {
+        let mut title = make_title();
+        title.name = "Quillon".to_string();
+        title.facet = MediaFacet::Movie;
+        title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+        title.tagged_aliases = Vec::new();
+        title.year = Some(year);
+        let mut subject = numbering_scoped_subject(&title, None, None);
+        subject.subject_kind = ReleaseSearchSubjectKind::Title;
+        (title, subject)
+    }
+
+    fn movie_candidate(
+        subject: &ResolvedReleaseSearchSubject,
+        release: &str,
+    ) -> IndexerSearchResult {
+        let mut candidate = make_candidate(release, None);
+        candidate.parsed_release_metadata = Some(crate::parse_release_metadata_for_target(
+            release,
+            &subject.title_evidence.parse_context,
+        ));
+        candidate.quality_profile_decision = Some(allowed_quality_decision(2400));
+        candidate
+    }
+
+    #[test]
+    fn episodic_shapes_are_told_apart_from_a_bare_number() {
+        for episodic in [
+            "[SynthSubs] Quillon S01 [1080p]",
+            "[SynthSubs] Quillon (01-12) [1080p]",
+            "Quillon.S01.1080p.BluRay.x264-SYNTH",
+            "Quillon.S01E01.1080p.WEB-DL-SYNTH",
+            "Quillon.S01E01E02.1080p.WEB-DL-SYNTH",
+            "Quillon.S01-S03.1080p.WEB-DL-SYNTH",
+        ] {
+            assert!(
+                release_title_is_episodic(episodic),
+                "{episodic} is episodic"
+            );
+        }
+        for single in [
+            "[SynthSubs] Quillon - 01 [1080p]",
+            "Quillon.2028.1080p.WEB-DL-SYNTH",
+            "Quillon 2 2028 1080p BluRay x264-SYNTH",
+        ] {
+            assert!(
+                !release_title_is_episodic(single),
+                "{single} is not episodic"
+            );
+        }
+    }
+
+    #[test]
+    fn a_movie_subject_refuses_packs_and_seasons_that_carry_its_name() {
+        let (title, subject) = quillon_movie(2028);
+        for release in [
+            "[SynthSubs] Quillon S01 [1080p]",
+            "[SynthSubs] Quillon (01-12) [1080p]",
+            "Quillon.S01.1080p.BluRay.x264-SYNTH",
+        ] {
+            assert_eq!(
+                decision_for(&title, &subject, &movie_candidate(&subject, release)),
+                ReleaseAutoDecisionCode::EpisodicReleaseForMovie,
+                "{release}"
+            );
+        }
+        assert_eq!(
+            decision_for(
+                &title,
+                &subject,
+                &movie_candidate(&subject, "[SynthSubs] Quillon - 01 [1080p]")
+            ),
+            ReleaseAutoDecisionCode::Eligible
+        );
+
+        // A series subject reads the same pack as its own season.
+        let mut series = title.clone();
+        series.facet = MediaFacet::Series;
+        let mut series_subject = numbering_scoped_subject(&series, Some(1), None);
+        series_subject.subject_kind = ReleaseSearchSubjectKind::Title;
+        assert!(
+            movie_subject_refusal_unmatched(
+                &movie_candidate(&series_subject, "Quillon.S01.1080p.BluRay.x264-SYNTH"),
+                &series_subject
+            )
+            .is_none()
+        );
+    }
+
+    /// A movie linked to a series, searched as a movie, the way
+    /// `resolve_release_search_subject_for_series_movie` builds it.
+    fn quillon_linked_movie() -> (Title, ResolvedReleaseSearchSubject) {
+        let (mut title, _) = quillon_movie(2028);
+        title.aliases = vec!["Brightvale - Quillon".to_string()];
+        let mut subject = numbering_scoped_subject(&title, None, None);
+        subject.subject_kind = ReleaseSearchSubjectKind::Title;
+        subject.owner_facet = MediaFacet::Series;
+        subject.id_search_facet = Some(MediaFacet::Movie);
+        subject.submission_scope = SubmissionScope::SeriesMovie {
+            series_movie_link_id: "link-quillon".to_string(),
+        };
+        (title, subject)
+    }
+
+    #[test]
+    fn a_linked_movie_keeps_its_specials_and_series_named_releases() {
+        let (title, subject) = quillon_linked_movie();
+        for release in [
+            "Quillon.S00E01.1080p.WEB-DL-SYNTH",
+            "[SynthSubs] Quillon S00E01 [1080p]",
+            "Brightvale - Quillon 2028 1080p WEB-DL-SYNTH",
+        ] {
+            let candidate = movie_candidate(&subject, release);
+            assert_eq!(
+                movie_subject_refusal_unmatched(&candidate, &subject),
+                None,
+                "{release}"
+            );
+            assert_eq!(
+                decision_for(&title, &subject, &candidate),
+                ReleaseAutoDecisionCode::Eligible,
+                "{release}"
+            );
+        }
+        // Neither movie refusal reaches a linked movie, even for a pack or
+        // another year; those keep whatever the shared ladder decides.
+        for release in [
+            "[SynthSubs] Quillon S01 [1080p]",
+            "Quillon.2000.1080p.WEB-DL-SYNTH",
+        ] {
+            let decision = decision_for(&title, &subject, &movie_candidate(&subject, release));
+            assert!(
+                !matches!(
+                    decision,
+                    ReleaseAutoDecisionCode::EpisodicReleaseForMovie
+                        | ReleaseAutoDecisionCode::TitleYearMismatch
+                ),
+                "{release}: {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_movie_subject_refuses_a_release_from_another_year() {
+        let (title, subject) = quillon_movie(2028);
+        for release in [
+            "Quillon 2000 1080p BluRay x264-SYNTH",
+            "Quillon.2000.1080p.WEB-DL.DDP5.1.H.264-SYNTH",
+            "Quillon (2000) [1080p] [BluRay]",
+        ] {
+            let mut candidate = movie_candidate(&subject, release);
+            // The year veto is identity, so it outranks the quality gate.
+            candidate.quality_profile_decision = None;
+            assert_eq!(
+                decision_for(&title, &subject, &candidate),
+                ReleaseAutoDecisionCode::TitleYearMismatch,
+                "{release}"
+            );
+        }
+        assert_eq!(
+            decision_for(
+                &title,
+                &subject,
+                &movie_candidate(&subject, "Quillon.2028.1080p.WEB-DL-SYNTH")
+            ),
+            ReleaseAutoDecisionCode::Eligible
+        );
+        // A different name stays an ordinary title mismatch.
+        assert_eq!(
+            decision_for(
+                &title,
+                &subject,
+                &movie_candidate(&subject, "Brasswing.2000.1080p.WEB-DL-SYNTH")
+            ),
+            ReleaseAutoDecisionCode::TitleMismatch
+        );
+    }
+
+    #[test]
+    fn an_alias_year_keeps_a_movie_release_from_the_year_veto() {
+        let (mut title, _) = quillon_movie(2028);
+        title.aliases = vec!["Quillon Reborn (2000)".to_string()];
+        let mut subject = numbering_scoped_subject(&title, None, None);
+        subject.subject_kind = ReleaseSearchSubjectKind::Title;
+        assert_eq!(
+            subject
+                .title_evidence
+                .alias_release_years
+                .get("quillon reborn 2000"),
+            Some(&2000),
+            "the alias carries its year"
+        );
+        assert_ne!(
+            decision_for(
+                &title,
+                &subject,
+                &movie_candidate(&subject, "Quillon.Reborn.2000.1080p.WEB-DL-SYNTH")
+            ),
+            ReleaseAutoDecisionCode::TitleYearMismatch
+        );
+        // The year alias is no evidence for the bare name.
+        assert_eq!(
+            decision_for(
+                &title,
+                &subject,
+                &movie_candidate(&subject, "Quillon.2000.1080p.WEB-DL-SYNTH")
+            ),
+            ReleaseAutoDecisionCode::TitleYearMismatch
+        );
+    }
+
+    #[test]
+    fn the_new_movie_refusals_round_trip_and_outrank_availability() {
+        for code in [
+            ReleaseAutoDecisionCode::EpisodicReleaseForMovie,
+            ReleaseAutoDecisionCode::TitleYearMismatch,
+        ] {
+            assert_eq!(ReleaseAutoDecisionCode::parse(code.as_str()), Some(code));
+            assert!(code.is_identity_refusal());
+        }
+        assert!(!ReleaseAutoDecisionCode::QualityBlocked.is_identity_refusal());
+        assert!(!ReleaseAutoDecisionCode::Eligible.is_identity_refusal());
+    }
+
+    fn single_episode_decision(
+        release: &str,
+        wanted_episode: u32,
+        coverage_scope: Option<SubmissionScope>,
+        user_invoked: bool,
+    ) -> ReleaseAutoDecisionCode {
+        let mut title = make_title();
+        title.name = "Synthetic Show".to_string();
+        title.facet = MediaFacet::Series;
+        title.library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+        title.tagged_aliases = Vec::new();
+        title.year = None;
+        let mut subject = numbering_scoped_subject(&title, Some(1), Some(wanted_episode));
+        subject.submission_scope = SubmissionScope::Episode {
+            episode_id: format!("ep-{wanted_episode}"),
+        };
+        let mut candidate = make_candidate(release, None);
+        candidate.parsed_release_metadata = Some(crate::parse_release_metadata_for_target(
+            release,
+            &subject.title_evidence.parse_context,
+        ));
+        candidate.quality_profile_decision = Some(allowed_quality_decision(2400));
+        candidate.coverage_scope = coverage_scope;
+        let profile = QualityProfile::default();
+        let thresholds = AcquisitionThresholds::default();
+        let now = Utc::now();
+        let db_blocklist = crate::app_usecase_discovery::TitleReleaseBlocklistSignatures::default();
+        let no_minimum_seeders = HashMap::new();
+        let context = AutoCandidateEvaluationContext {
+            title: &title,
+            subject: &subject,
+            admission: &empty_admission(),
+            profile: &profile,
+            thresholds: &thresholds,
+            incumbent_at_cutoff: false,
+            is_rss_lane: false,
+            user_invoked,
+            oldest_overlapping_pending_published_at: None,
+            now: &now,
+            dl_snapshot: None,
+            db_blocklist: &db_blocklist,
+            existing_files: &[],
+            delay_profiles: &[],
+            failed_routes: None,
+            minimum_seeders: &no_minimum_seeders,
+            unmonitored_episode_ids: &HashSet::new(),
+        };
+        evaluate_auto_candidate(&candidate, &context)
+    }
+
+    #[test]
+    fn an_automatic_single_episode_search_does_not_take_packs() {
+        let long_run = "Synthetic.Show.S01E01-240.1080p.WEB-DL-SYNTH";
+        assert_eq!(
+            single_episode_decision(long_run, 1, None, false),
+            ReleaseAutoDecisionCode::PackForSingleEpisode,
+            "{long_run}"
+        );
+        let season_range = "Synthetic Show S01 [25-48] [1080p]";
+        assert_eq!(
+            single_episode_decision(season_range, 30, None, false),
+            ReleaseAutoDecisionCode::PackForSingleEpisode,
+            "{season_range}"
+        );
+        let resolved_season = SubmissionScope::Collection {
+            collection_id: "season-1".to_string(),
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01.1080p.WEB-DL-SYNTH",
+                1,
+                Some(resolved_season.clone()),
+                false
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+        let triple = SubmissionScope::EpisodeSet {
+            episode_ids: vec!["ep-1".into(), "ep-2".into(), "ep-3".into()],
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01E01-E03.1080p.WEB-DL-SYNTH",
+                1,
+                Some(triple),
+                false
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+    }
+
+    #[test]
+    fn a_single_episode_search_still_takes_its_episode_or_a_double_holding_it() {
+        assert_eq!(
+            single_episode_decision("Synthetic.Show.S01E01.1080p.WEB-DL-SYNTH", 1, None, false),
+            ReleaseAutoDecisionCode::Eligible
+        );
+        let double = SubmissionScope::EpisodeSet {
+            episode_ids: vec!["ep-1".into(), "ep-2".into()],
+        };
+        assert_eq!(
+            single_episode_decision(
+                "Synthetic.Show.S01E01E02.1080p.WEB-DL-SYNTH",
+                1,
+                Some(double),
+                false
+            ),
+            ReleaseAutoDecisionCode::Eligible
+        );
+    }
+
+    #[test]
+    fn an_operator_started_episode_search_may_take_a_pack() {
+        let resolved_season = SubmissionScope::Collection {
+            collection_id: "season-1".to_string(),
+        };
+        assert_ne!(
+            single_episode_decision(
+                "Synthetic.Show.S01.1080p.WEB-DL-SYNTH",
+                1,
+                Some(resolved_season),
+                true
+            ),
+            ReleaseAutoDecisionCode::PackForSingleEpisode
+        );
+        assert_eq!(
+            ReleaseAutoDecisionCode::parse(ReleaseAutoDecisionCode::PackForSingleEpisode.as_str()),
+            Some(ReleaseAutoDecisionCode::PackForSingleEpisode)
         );
     }
 

@@ -2,6 +2,7 @@ import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import { ExpiredRequestLeasesControl } from "@/components/containers/settings/expired-request-leases-control";
 import {
   SettingsRequestRulesSection,
   type RequestQualityProfileOption,
@@ -9,12 +10,11 @@ import {
 import type { RequestRuleTemplate } from "@/lib/constants/request-rule-templates";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
+import { useSessionUser } from "@/lib/hooks/use-auth";
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import type { LibraryRecord } from "@/lib/types";
 import type {
-  RequestEvaluationMode,
   RequestRuleDecisionRecord,
-  RequestRuleInstanceGates,
   RequestRulePreviewResult,
   RequestRulePreviewSample,
   RequestRulePreviewSource,
@@ -36,11 +36,11 @@ import {
   updateRequestRuleMatcherInput,
   updateRequestRuleMetadataInput,
 } from "@/lib/utils/request-rule-sets";
+import { APP_PERMISSIONS, hasAppPermission } from "@/lib/utils/permissions";
 import {
   librariesQuery,
   qualityProfileOptionsQuery,
   requestRuleDecisionsQuery,
-  requestRuleInstanceGatesQuery,
   requestRuleSetQuery,
   requestRuleSetsQuery,
   searchMetadataQuery,
@@ -50,8 +50,7 @@ import {
   createRequestRuleSetMutation,
   deleteRequestRuleSetMutation,
   previewRequestRuleMutation,
-  setRequestRuleInstanceGatesMutation,
-  setRequestRuleModeMutation,
+  setRequestRuleEnabledMutation,
   updateRequestRuleMatcherMutation,
   updateRequestRuleMetadataMutation,
 } from "@/lib/graphql/mutations";
@@ -86,6 +85,10 @@ export function SettingsRequestRulesContainer() {
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
   const client = useClient();
+  const canManagePermissions = hasAppPermission(
+    useSessionUser(),
+    APP_PERMISSIONS.managePermissions,
+  );
 
   const [ruleSetRecords, setRuleSetRecords] = useState<RequestRuleSetRecord[]>([]);
   const [libraries, setLibraries] = useState<LibraryRecord[]>([]);
@@ -119,14 +122,6 @@ export function SettingsRequestRulesContainer() {
   const [previewResult, setPreviewResult] =
     useState<RequestRulePreviewResult | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
-
-  const [gates, setGates] = useState<RequestRuleInstanceGates | null>(null);
-  /// True once the gate query has been refused. Reading it needs
-  /// system-settings management, which is a *different* permission from the one
-  /// this page otherwise requires, so a catalog administrator must still get a
-  /// working page rather than a failed section.
-  const [gatesLocked, setGatesLocked] = useState(false);
-  const [savingGate, setSavingGate] = useState(false);
 
   const [decisions, setDecisions] = useState<RequestRuleDecisionRecord[]>([]);
   const [decisionsLoading, setDecisionsLoading] = useState(false);
@@ -352,22 +347,6 @@ export function SettingsRequestRulesContainer() {
     }
   }, [client, setGlobalStatus, t]);
 
-  const refreshGates = useCallback(async () => {
-    try {
-      const { data, error } = await client
-        .query(requestRuleInstanceGatesQuery, {}, { requestPolicy: "network-only" })
-        .toPromise();
-      if (error) throw error;
-      const next =
-        (data?.requestRuleInstanceGates as RequestRuleInstanceGates) ?? null;
-      setGates(next);
-      setGatesLocked(next === null);
-    } catch {
-      setGates(null);
-      setGatesLocked(true);
-    }
-  }, [client]);
-
   const refreshDecisions = useCallback(async () => {
     setDecisionsLoading(true);
     setDecisionsError(null);
@@ -403,10 +382,6 @@ export function SettingsRequestRulesContainer() {
   useEffect(() => {
     void refreshCatalogs();
   }, [refreshCatalogs]);
-
-  useEffect(() => {
-    void refreshGates();
-  }, [refreshGates]);
 
   useEffect(() => {
     void refreshDecisions();
@@ -518,19 +493,20 @@ export function SettingsRequestRulesContainer() {
     }
   };
 
-  const setRuleMode = useCallback(
-    async (record: RequestRuleSetRecord, mode: RequestEvaluationMode) => {
-      if (mode === record.evaluationMode) return;
+  const setRuleEnabled = useCallback(
+    async (record: RequestRuleSetRecord, enabled: boolean) => {
+      if (enabled === record.enabled) return;
       setMutatingRuleSetId(record.id);
       try {
         const { error } = await client
-          .mutation(setRequestRuleModeMutation, {
-            input: { ruleSetId: record.id, mode },
+          .mutation(setRequestRuleEnabledMutation, {
+            ruleSetId: record.id,
+            enabled,
           })
           .toPromise();
         if (error) throw error;
         setGlobalStatus(
-          t("settings.requestRuleModeUpdated", { name: record.name }),
+          t("settings.requestRuleEnabledUpdated", { name: record.name }),
         );
         await refreshRuleSets();
       } catch (error) {
@@ -543,33 +519,6 @@ export function SettingsRequestRulesContainer() {
       }
     },
     [client, refreshRuleSets, setGlobalStatus, t],
-  );
-
-  /// The gate write is never optimistic: the mutation returns the gate, but the
-  /// panel refetches instead, so what it shows is what the server holds even
-  /// when another operator moved it in the same moment.
-  const setGate = useCallback(
-    async (enabled: boolean) => {
-      setSavingGate(true);
-      try {
-        const { error } = await client
-          .mutation(setRequestRuleInstanceGatesMutation, {
-            input: { evaluationEnabled: enabled },
-          })
-          .toPromise();
-        if (error) throw error;
-        setGlobalStatus(t("settings.requestGateUpdated"), { level: "SUCCESS" });
-      } catch (error) {
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToUpdate"),
-          { level: "ERROR" },
-        );
-      } finally {
-        setSavingGate(false);
-        await refreshGates();
-      }
-    },
-    [client, refreshGates, setGlobalStatus, t],
   );
 
   const searchPreviewTitles = useCallback(
@@ -641,6 +590,7 @@ export function SettingsRequestRulesContainer() {
   return (
     <>
       <SettingsRequestRulesSection
+        leaseRuleControl={<ExpiredRequestLeasesControl />}
         isEditorOpen={isEditorOpen}
         editingRuleSetId={editingRuleSetId}
         ruleSetDraft={ruleSetDraft}
@@ -661,11 +611,8 @@ export function SettingsRequestRulesContainer() {
         validating={validating}
         validationResult={validationResult}
         applyRequesters={applyRequesters}
-        setRuleMode={(record, mode) => void setRuleMode(record, mode)}
-        gates={gates}
-        gatesLocked={gatesLocked}
-        savingGate={savingGate}
-        setGate={(enabled) => void setGate(enabled)}
+        setRuleEnabled={(record, enabled) => void setRuleEnabled(record, enabled)}
+        canManagePermissions={canManagePermissions}
         previewSource={previewSource}
         setPreviewSource={setPreviewSource}
         previewRuleSetId={previewRuleSetId}

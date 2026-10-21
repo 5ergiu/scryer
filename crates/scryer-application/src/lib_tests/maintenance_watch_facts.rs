@@ -21,15 +21,15 @@ use crate::lib_tests::media_server_signals::{
     jellyfin_connection, named_jellyfin_connection,
 };
 use crate::maintenance_rules::{
-    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceGatesUpdate, MaintenanceMatcherDraft,
+    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceMatcherDraft,
     MaintenancePreviewMatcher, MaintenancePreviewRequest, MaintenancePreviewResult,
     MaintenancePreviewSelection, MaintenanceRuleDraft,
 };
 use crate::ports::MediaServerSignalRepository;
 use scryer_domain::{
-    AppPermissionMask, ExternalAccountProvider, ExternalAccountStatus, MaintenanceEvaluationMode,
-    MediaRequest, MediaServerConnection, MediaServerProvider, MediaServerSignalKind,
-    MediaServerSignalSyncState, NewUserMediaSignal, UserExternalAccount,
+    AppPermissionMask, ExternalAccountProvider, ExternalAccountStatus, MediaRequest,
+    MediaServerConnection, MediaServerProvider, MediaServerSignalKind, MediaServerSignalSyncState,
+    NewUserMediaSignal, UserExternalAccount,
 };
 use scryer_rules::maintenance::MaintenanceOutcome;
 
@@ -197,7 +197,6 @@ fn draft(rego_source: &str) -> MaintenanceRuleDraft {
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -867,26 +866,22 @@ async fn a_stored_person_fact_rule_still_evaluates_under_the_system_principal() 
         .create_maintenance_rule_set(&fixture.user, draft(WATCHED_BY_ALL_REQUESTERS_MATCHER))
         .await
         .expect("create rule set");
-    fixture
-        .app
-        .set_maintenance_rule_evaluation_mode(
-            &fixture.user,
-            &created.rule_set.id,
-            MaintenanceEvaluationMode::Shadow,
-        )
-        .await
-        .expect("arm rule");
-    fixture
-        .app
-        .set_maintenance_instance_gates(
-            &fixture.user,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("arm the evaluation gate");
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &created.rule_set.id,
+        scryer_domain::MaintenanceRuleState::DryRun,
+        None,
+    )
+    .await;
+    super::maintenance_rules::store_maintenance_gates(
+        &fixture.app,
+        crate::maintenance_rules::MaintenanceGates {
+            evaluation_enabled: true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // The job body takes no actor at all, which is the point.
     let report = fixture

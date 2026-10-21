@@ -24,6 +24,7 @@ use crate::plugin_http_host::{
     enforce_allowed_hosts, shared_plugin_http_runtime,
 };
 use crate::wasmtime_host::sandbox::HostLimits;
+pub(crate) use crate::wasmtime_host::sandbox::{INDEXER_MEMORY_CAP_ENV, IndexerMemoryPolicy};
 
 mod contract_v1_0 {
     wasmtime::component::bindgen!({
@@ -91,6 +92,8 @@ struct ComponentHostInner {
     proxy_policy: Option<ProxyPolicy>,
     timeout: Duration,
     max_response_bytes: usize,
+    /// Per-Store linear-memory cap (see `DEFAULT_INDEXER_MEMORY_CAP_BYTES`).
+    memory_max_bytes: usize,
     clock_origin: std::time::Instant,
     operation_deadline: Mutex<std::time::Instant>,
     state: Mutex<ComponentState>,
@@ -182,9 +185,11 @@ impl ComponentHost {
             timeout,
             max_http_response_bytes,
             None,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn for_indexer_with_provider_profile(
         config: BTreeMap<String, String>,
         allowed_hosts: Vec<String>,
@@ -192,6 +197,7 @@ impl ComponentHost {
         proxy_policy: Option<ProxyPolicy>,
         timeout: Duration,
         max_http_response_bytes: Option<u64>,
+        memory_max_bytes: Option<usize>,
         provider_profile: Option<Vec<u8>>,
     ) -> Result<Self, String> {
         Ok(Self {
@@ -207,6 +213,8 @@ impl ComponentHost {
                 max_response_bytes: max_http_response_bytes
                     .and_then(|value| usize::try_from(value).ok())
                     .unwrap_or(DEFAULT_MAX_HTTP_RESPONSE_BYTES),
+                memory_max_bytes: memory_max_bytes
+                    .unwrap_or_else(|| IndexerMemoryPolicy::from_env().cap_bytes),
                 clock_origin: std::time::Instant::now(),
                 operation_deadline: Mutex::new(std::time::Instant::now() + timeout),
                 state: Mutex::new(ComponentState::default()),
@@ -229,6 +237,7 @@ impl ComponentHost {
             None,
             self.inner.timeout,
             None,
+            Some(self.inner.memory_max_bytes),
             self.inner.provider_profile.clone(),
         )?;
         Arc::get_mut(&mut host.inner)
@@ -352,7 +361,7 @@ impl ComponentHost {
                 table: ResourceTable::new(),
                 wasi: WasiCtxBuilder::new().build(),
                 host: self.clone(),
-                limits: HostLimits::new(None),
+                limits: HostLimits::with_cap(self.inner.memory_max_bytes),
             },
         );
         store.limiter(|ctx: &mut ComponentCtx| &mut ctx.limits);
@@ -1538,7 +1547,30 @@ pub(crate) struct ComponentActor {
     plugin: ComponentPlugin,
 }
 
+/// How much linear memory a component Store holds, as reported by its limiter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GuestMemoryUsage {
+    /// Linear memory resident in the Store. Memory never shrinks, so this is
+    /// also the Store's peak.
+    pub(crate) resident_bytes: usize,
+    /// Largest single linear memory, the figure the cap is checked against.
+    pub(crate) largest_memory_bytes: usize,
+    pub(crate) cap_bytes: usize,
+    /// The limiter refused a growth past `cap_bytes`.
+    pub(crate) denied: bool,
+}
+
 impl ComponentActor {
+    pub(crate) fn memory_usage(&self) -> GuestMemoryUsage {
+        let limits = &self.store.data().limits;
+        GuestMemoryUsage {
+            resident_bytes: limits.resident_memory_bytes(),
+            largest_memory_bytes: limits.largest_memory_bytes(),
+            cap_bytes: limits.max_memory_bytes(),
+            denied: limits.memory_denied,
+        }
+    }
+
     pub(crate) async fn search(
         &mut self,
         request: Vec<u8>,
@@ -1646,6 +1678,7 @@ mod tests {
             scryer_outbound_http::PluginEgressPolicy::default(),
             None,
             Duration::from_secs(1),
+            None,
             None,
             provider_profile,
         )
@@ -1910,6 +1943,94 @@ mod tests {
         assert!(
             store.data().limits.memory_denied,
             "the shared limiter must record the rejected growth"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn indexer_store_uses_the_indexer_cap_and_tracks_peak_memory() {
+        use crate::wasmtime_host::sandbox::{
+            DEFAULT_ARCHIVE_MEMORY_CAP_BYTES, DEFAULT_INDEXER_MEMORY_CAP_BYTES,
+        };
+        const PAGE: usize = 65536;
+        let host = ComponentHost::for_indexer(
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("component host should build");
+        let engine = crate::wasmtime_host::engine::shared_async_engine();
+        let module = wasmtime::Module::new(
+            engine,
+            wat::parse_str("(module (memory (export \"memory\") 1))")
+                .expect("core module WAT must parse"),
+        )
+        .expect("core module must compile");
+        let mut store = host.new_store(engine);
+        assert_eq!(
+            store.data().limits.max_memory_bytes(),
+            DEFAULT_INDEXER_MEMORY_CAP_BYTES
+        );
+        const { assert!(DEFAULT_INDEXER_MEMORY_CAP_BYTES < DEFAULT_ARCHIVE_MEMORY_CAP_BYTES) };
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("core module must instantiate");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("memory export must exist");
+        assert_eq!(store.data().limits.resident_memory_bytes(), PAGE);
+
+        memory
+            .grow_async(&mut store, 15)
+            .await
+            .expect("growth below the indexer cap must succeed");
+        assert_eq!(store.data().limits.resident_memory_bytes(), 16 * PAGE);
+        assert_eq!(store.data().limits.largest_memory_bytes(), 16 * PAGE);
+        assert!(!store.data().limits.memory_denied);
+
+        // One page past the indexer cap (far below the archive cap) is refused.
+        let past_indexer_cap_pages = u64::try_from(DEFAULT_INDEXER_MEMORY_CAP_BYTES / PAGE)
+            .expect("indexer cap fits in u64")
+            - 16
+            + 1;
+        assert!(
+            memory
+                .grow_async(&mut store, past_indexer_cap_pages)
+                .await
+                .is_err(),
+            "indexer Store must reject growth past the indexer cap"
+        );
+        assert!(store.data().limits.memory_denied);
+        assert_eq!(
+            store.data().limits.resident_memory_bytes(),
+            16 * PAGE,
+            "a refused growth must not count as resident memory"
+        );
+    }
+
+    #[test]
+    fn indexer_host_cap_override_reaches_the_store_and_the_endpoint_resolver() {
+        let host = ComponentHost::for_indexer_with_provider_profile(
+            BTreeMap::new(),
+            Vec::new(),
+            scryer_outbound_http::PluginEgressPolicy::default(),
+            None,
+            Duration::from_secs(1),
+            None,
+            Some(8 * 1024 * 1024),
+            None,
+        )
+        .expect("component host should build");
+        let engine = crate::wasmtime_host::engine::shared_async_engine();
+        assert_eq!(
+            host.new_store(engine).data().limits.max_memory_bytes(),
+            8 * 1024 * 1024
+        );
+        let resolver = host.endpoint_resolver().expect("resolver host");
+        assert_eq!(
+            resolver.new_store(engine).data().limits.max_memory_bytes(),
+            8 * 1024 * 1024
         );
     }
 

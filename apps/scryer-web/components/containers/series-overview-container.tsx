@@ -522,6 +522,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     preview: titleDeletePreview,
     loading: titleDeletePreviewLoading,
     error: titleDeletePreviewError,
+    errorReason: titleDeletePreviewErrorReason,
   } = useDeletePreview(
     deleteTitlePreviewQuery,
     "deleteTitlePreview",
@@ -2128,6 +2129,8 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
               preview={titleDeletePreview}
               loading={titleDeletePreviewLoading}
               error={titleDeletePreviewError}
+              errorReason={titleDeletePreviewErrorReason}
+              onRemoveFromCatalogOnly={() => setDeleteFilesOnDisk(false)}
               typedConfirmation={titleDeleteTypedConfirmation}
               onTypedConfirmationChange={setTitleDeleteTypedConfirmation}
               typedConfirmationPromptId="title-delete-typed-confirmation-prompt"

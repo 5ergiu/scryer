@@ -493,6 +493,19 @@ pub async fn promote_staged_file(
     }
 }
 
+/// Place a journaled recovery copy without the claim-and-replace fallback.
+/// On volumes without exclusive rename, retain the staging link as well.
+/// If neither operation is supported, preserve everything and refuse.
+pub(crate) async fn promote_recovery_staged_file(
+    staged: &Path,
+    dest: &Path,
+) -> std::io::Result<()> {
+    if let Some(result) = exclusive_rename(staged, dest).await {
+        return result;
+    }
+    tokio::fs::hard_link(staged, dest).await
+}
+
 /// Claims `dest` so no other writer can take it, failing if it is already held.
 async fn claim_destination(dest: &Path) -> std::io::Result<()> {
     tokio::fs::OpenOptions::new()

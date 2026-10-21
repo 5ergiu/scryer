@@ -112,6 +112,18 @@ pub struct LibrarySettingsPayload {
     pub indexer_routing_override: Option<Vec<IndexerRoutingEntryPayload>>,
     /// Library override download-client routing entries; null means inherit.
     pub download_client_routing_override: Option<Vec<DownloadClientRoutingEntryPayload>>,
+    /// Library override movie availability threshold; null means inherit.
+    pub default_movie_availability_override: Option<String>,
+    /// Effective movie availability threshold; null for non-Movie libraries.
+    pub default_movie_availability: Option<String>,
+    /// Library override movie release market; null means inherit.
+    pub movie_release_market_override: Option<String>,
+    /// Effective movie release market; null for non-Movie libraries.
+    pub movie_release_market: Option<String>,
+    /// Library override movie availability delay in days; null means inherit.
+    pub movie_availability_delay_days_override: Option<i32>,
+    /// Effective movie availability delay in days; null for non-Movie libraries.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -953,6 +965,8 @@ impl ExternalIdInput {
 #[derive(InputObject, Clone)]
 /// Optional title settings used when creating or updating a title.
 pub struct TitleOptionsInput {
+    /// Movie minimum availability override; omission preserves it, null clears it so the movie inherits its library's threshold and then the Movie facet's, and a value replaces it. Only the threshold is set per title: the release market and delay come from the library or the Movie facet. Other facets reject this field.
+    pub min_availability: MaybeUndefined<String>,
     /// Search-language override: omitted preserves, null inherits the library, empty searches only the primary name and custom aliases.
     pub search_languages: MaybeUndefined<Vec<String>>,
     /// User-owned search aliases: omitted preserves, null or empty clears. Metadata refresh preserves these aliases.
@@ -1389,6 +1403,15 @@ pub struct LibrarySettingsInput {
     pub indexer_routing: Option<Vec<IndexerRoutingEntryInput>>,
     /// Download-client routing rules for this library.
     pub download_client_routing: Option<Vec<DownloadClientRoutingEntryInput>>,
+    /// Movie availability threshold override: `announced`, `in_cinemas` or
+    /// `released`; null inherits the Movie facet. Movie libraries only.
+    pub default_movie_availability: Option<String>,
+    /// ISO-3166-1 alpha-2 release market override; null inherits the Movie
+    /// facet. Movie libraries only.
+    pub movie_release_market: Option<String>,
+    /// Availability delay override in signed days; null inherits the Movie
+    /// facet. Movie libraries only.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(SimpleObject, Clone)]

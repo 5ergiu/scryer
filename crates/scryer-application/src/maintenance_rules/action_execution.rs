@@ -28,7 +28,7 @@ use chrono::{Duration, Utc};
 use scryer_domain::{
     AppPermission, Id, LifecycleActionRun, LifecycleActionRunStatus, LifecycleCandidate,
     MaintenanceActionJobReceipt, MaintenanceActionStepRun, MaintenanceCandidateState,
-    MaintenanceEffectArming, MaintenanceEvaluationMode, Title, User,
+    MaintenanceEffectArming, MaintenanceEvaluationMode, MaintenanceRuleState, Title, User,
 };
 use scryer_rules::maintenance::{
     MaintenanceOutcome, MaintenancePolicy, MaintenanceRulesEngine, MaintenanceRulesEvaluator,
@@ -416,65 +416,105 @@ pub(super) struct MaintenanceExecutionContext<'a> {
     pub(super) tag_conflicts: &'a Option<HashSet<String>>,
 }
 
-// ── Arming ──────────────────────────────────────────────────────────────────
+// ── Rule state ──────────────────────────────────────────────────────────────
+
+/// The arming an Enabled rule receives: file deletion when any part of its
+/// action is high-risk, library updates when it changes anything else, and
+/// nothing for an action that only tracks membership.
+pub fn derived_effect_arming(definition: &MaintenanceActionDefinition) -> MaintenanceEffectArming {
+    let risks: Vec<MaintenanceRiskClass> = match definition {
+        MaintenanceActionDefinition::Legacy(spec) => vec![descriptor_for(spec.kind).risk_class],
+        MaintenanceActionDefinition::Sequence(sequence) => sequence
+            .steps
+            .iter()
+            .map(|step| step.descriptor().risk_class)
+            .collect(),
+    };
+    if risks.contains(&MaintenanceRiskClass::High) {
+        MaintenanceEffectArming::Destructive
+    } else if risks.iter().any(|risk| *risk != MaintenanceRiskClass::None) {
+        MaintenanceEffectArming::Reversible
+    } else {
+        MaintenanceEffectArming::None
+    }
+}
+
+/// The state an operator sees. A rule reads as Enabled only while it holds
+/// exactly the arming enabling it would grant and has not been edited since,
+/// because any other arming lets nothing execute.
+pub fn maintenance_rule_state(detail: &MaintenanceRuleSetDetail) -> MaintenanceRuleState {
+    let rule = &detail.rule_set;
+    if rule.evaluation_mode == MaintenanceEvaluationMode::Disabled {
+        MaintenanceRuleState::Disabled
+    } else if rule.effect_arming != MaintenanceEffectArming::None
+        && !rule.destructive_rearm_required
+        && rule.effect_arming == derived_effect_arming(&detail.action_definition)
+    {
+        MaintenanceRuleState::Enabled
+    } else {
+        MaintenanceRuleState::DryRun
+    }
+}
 
 impl AppUseCase {
-    /// Set how far one rule's effects are armed.
+    /// Move one rule to Disabled, Dry run, or Enabled.
     ///
-    /// Destructive arming is the elevated, count-acknowledged step of RFC 9.10:
-    /// it applies only to rules whose action is high-risk, additionally
-    /// requires system-settings authority (RFC 15), and demands the caller
-    /// acknowledge the number of candidates the arming would expose. Arming is
-    /// deliberately independent of the instance gates — execution requires
-    /// both.
+    /// Disabled is never evaluated; Dry run is evaluated but unarmed. Enabled
+    /// arms exactly the effects the rule's own action can have
+    /// ([`derived_effect_arming`]); execution still requires the matching
+    /// instance gate as well. Enabling a rule that can delete files is the
+    /// elevated, count-acknowledged step: it additionally requires
+    /// system-settings authority, a confirmation of the reviewed revision and
+    /// library scope, and the current number of non-terminal candidates.
+    /// Enabling any other rule needs no confirmation.
     ///
     /// Arming never outlives the revision it was granted against: what an
     /// operator acknowledged is one matcher's blast radius under one action, so
-    /// appending a revision resets the rule to
-    /// [`MaintenanceEffectArming::None`] and this call has to be repeated
-    /// against the new matcher (see
-    /// [`AppUseCase::update_maintenance_rule_matcher`]). Mode changes and
-    /// metadata renames leave arming alone, because neither moves the matcher or
-    /// the action.
-    pub async fn set_maintenance_rule_arming(
+    /// appending a revision drops an Enabled rule back to Dry run and this call
+    /// has to be repeated against the new matcher (see
+    /// [`AppUseCase::update_maintenance_rule_matcher`]).
+    pub async fn set_maintenance_rule_state(
         &self,
         actor: &User,
         rule_set_id: &str,
-        arming: MaintenanceEffectArming,
-        acknowledged_candidate_count: Option<i64>,
+        state: MaintenanceRuleState,
         confirmation: Option<scryer_domain::MaintenanceRuleArmingConfirmation>,
+        acknowledged_candidate_count: Option<i64>,
     ) -> AppResult<MaintenanceRuleSetDetail> {
         self.require_app_permission(actor, AppPermission::ManageCatalogSettings)
             .await?;
+
+        let rule_set = self.require_maintenance_rule_set(rule_set_id).await?;
+        let mut detail = self.load_maintenance_rule_detail(rule_set).await?;
+        let (mode, arming) = match state {
+            MaintenanceRuleState::Disabled => (
+                MaintenanceEvaluationMode::Disabled,
+                MaintenanceEffectArming::None,
+            ),
+            MaintenanceRuleState::DryRun => (
+                MaintenanceEvaluationMode::Observe,
+                MaintenanceEffectArming::None,
+            ),
+            MaintenanceRuleState::Enabled => (
+                MaintenanceEvaluationMode::Observe,
+                derived_effect_arming(&detail.action_definition),
+            ),
+        };
+        if state == MaintenanceRuleState::Enabled && arming == MaintenanceEffectArming::None {
+            return Err(AppError::Validation(
+                "this rule's action never changes anything, so it can only run as a dry run".into(),
+            ));
+        }
+
         if arming == MaintenanceEffectArming::Destructive {
             self.require_app_permission(actor, AppPermission::ManageSystemSettings)
                 .await?;
-        }
-
-        let rule_set = self.require_maintenance_rule_set(rule_set_id).await?;
-        let detail = self.load_maintenance_rule_detail(rule_set).await?;
-
-        if arming == MaintenanceEffectArming::Destructive {
             if !confirmation
                 .as_ref()
                 .is_some_and(|reviewed| reviewed.matches(&detail.rule_set))
             {
                 return Err(AppError::Validation(
                     "the rule configuration must be reviewed again before arming deletion; reopen the confirmation".into(),
-                ));
-            }
-            let high_risk = match &detail.action_definition {
-                MaintenanceActionDefinition::Legacy(spec) => {
-                    descriptor_for(spec.kind).risk_class == MaintenanceRiskClass::High
-                }
-                MaintenanceActionDefinition::Sequence(sequence) => sequence
-                    .steps
-                    .iter()
-                    .any(|step| step.descriptor().risk_class == MaintenanceRiskClass::High),
-            };
-            if !high_risk {
-                return Err(AppError::Validation(
-                    "destructive arming applies only to rules whose action can delete files".into(),
                 ));
             }
             let current = self
@@ -494,7 +534,13 @@ impl AppUseCase {
             .services
             .customization
             .maintenance_rule_sets
-            .update_rule_set_arming(&detail.rule_set.id, arming, confirmation.as_ref(), now)
+            .update_rule_set_state(
+                &detail.rule_set.id,
+                mode,
+                arming,
+                confirmation.as_ref(),
+                now,
+            )
             .await?;
         if !updated {
             return Err(AppError::Validation(
@@ -502,11 +548,11 @@ impl AppUseCase {
             ));
         }
 
-        let mut detail = detail;
+        // Mirrors the single store write.
+        detail.rule_set.evaluation_mode = mode;
+        detail.rule_set.enabled = mode != MaintenanceEvaluationMode::Disabled;
         detail.rule_set.effect_arming = arming;
-        if arming == MaintenanceEffectArming::Destructive {
-            detail.rule_set.destructive_rearm_required = false;
-        }
+        detail.rule_set.destructive_rearm_required = false;
         detail.rule_set.updated_at = now;
         Ok(detail)
     }
@@ -861,13 +907,17 @@ impl AppUseCase {
                         continue;
                     }
                     let high_risk = descriptor.risk_class == MaintenanceRiskClass::High;
-                    let eligible = if high_risk {
-                        gates.destructive_effects_enabled
-                            && detail.rule_set.effect_arming == MaintenanceEffectArming::Destructive
-                            && !detail.rule_set.destructive_rearm_required
-                    } else {
-                        gates.reversible_effects_enabled
-                    };
+                    // A rule acts only while it reads Enabled: its stored arming
+                    // must match what its action derives, so a rule left over-armed
+                    // by an older build cannot act while the page shows Dry run.
+                    let rule_enabled =
+                        maintenance_rule_state(&detail) == MaintenanceRuleState::Enabled;
+                    let eligible = rule_enabled
+                        && if high_risk {
+                            gates.destructive_effects_enabled
+                        } else {
+                            gates.reversible_effects_enabled
+                        };
                     (EligibleRuleAction::Legacy(kind), high_risk, eligible)
                 }
                 MaintenanceActionDefinition::Sequence(sequence) => {
@@ -893,12 +943,10 @@ impl AppUseCase {
                         .steps
                         .iter()
                         .any(|step| step.descriptor().risk_class != MaintenanceRiskClass::High);
-                    let arming_allows_sequence = if high_risk {
-                        detail.rule_set.effect_arming == MaintenanceEffectArming::Destructive
-                            && !detail.rule_set.destructive_rearm_required
-                    } else {
-                        detail.rule_set.effect_arming != MaintenanceEffectArming::None
-                    };
+                    // Same rule as above: stored arming must equal the derived
+                    // arming, which is what "Enabled" means.
+                    let arming_allows_sequence =
+                        maintenance_rule_state(&detail) == MaintenanceRuleState::Enabled;
                     let eligible = arming_allows_sequence
                         && (!high_risk || gates.destructive_effects_enabled)
                         && (!has_reversible || gates.reversible_effects_enabled);
@@ -2067,7 +2115,7 @@ impl AppUseCase {
         let lists_by_title = self
             .maintenance_list_facts_or_unknown(std::slice::from_ref(&title))
             .await;
-        super::list_facts::apply_list_facts(&mut input.facts, lists_by_title.as_ref(), &title.id);
+        super::list_facts::apply_list_facts(&mut input, &lists_by_title, &title.id);
         // The capacity snapshot must be fresh for this lease. Baseline restore
         // below deliberately excludes storage facts, so a resumed deletion
         // cannot match against the capacity it observed before deleting.

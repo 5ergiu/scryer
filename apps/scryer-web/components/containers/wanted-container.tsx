@@ -47,8 +47,10 @@ import {
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
 import { autoSearchOutcomeMessage } from "@/lib/utils/auto-search-outcome";
 import { releaseQueueScopeInput } from "@/lib/utils/release-queue-scope";
+import { createWantedNavigationCountsCache } from "@/lib/utils/wanted-navigation-counts";
 
 type WantedContainerProps = {
+  authorizationSignature: string;
   wantedSection: WantedSection;
   onOpenOverview?: (
     targetView: ViewId,
@@ -59,6 +61,11 @@ type WantedContainerProps = {
 
 const PENDING_RELEASE_PAGE_SIZE = 300;
 const CUTOFF_PAGE_SIZE = 50;
+
+// Switching Wanted sections remounts this container. The sidebar keeps the
+// last counts it showed until the refreshed counts replace them, instead of
+// dropping to zero while the query is in flight.
+const navigationCountsForScope = createWantedNavigationCountsCache();
 // The interactive acquisition-search job runs server-side; its id
 // is kept in sessionStorage so progress survives navigation and reload.
 const ACQUISITION_SEARCH_JOB_STORAGE_KEY = "scryer.acquisitionSearchJobId";
@@ -113,9 +120,11 @@ function cutoffQueueScope(item: CutoffUnmetItem) {
 }
 
 export const WantedContainer = memo(function WantedContainer({
+  authorizationSignature,
   wantedSection,
   onOpenOverview,
 }: WantedContainerProps) {
+  const [lastNavigationCounts] = useState(() => navigationCountsForScope(authorizationSignature));
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
   const client = useClient();
@@ -124,7 +133,7 @@ export const WantedContainer = memo(function WantedContainer({
 
   // --- Wanted items state ---
   const [items, setItems] = useState<WantedItem[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState(() => lastNavigationCounts.wanted);
   const [loading, setLoading] = useState(false);
   const [selectedTitle, setSelectedTitle] = useState<TitleRecord | null>(null);
   const [libraries, setLibraries] = useState<LibraryRecord[]>([]);
@@ -147,7 +156,7 @@ export const WantedContainer = memo(function WantedContainer({
 
   // --- Cutoff (Upgrades) state ---
   const [cutoffItems, setCutoffItems] = useState<CutoffUnmetItem[]>([]);
-  const [cutoffTotal, setCutoffTotal] = useState(0);
+  const [cutoffTotal, setCutoffTotal] = useState(() => lastNavigationCounts.cutoff);
   const [cutoffOffset, setCutoffOffset] = useState(0);
   const [cutoffLoading, setCutoffLoading] = useState(false);
   const [cutoffFacetFilter, setCutoffFacetFilter] = useState<string | undefined>(undefined);
@@ -165,7 +174,7 @@ export const WantedContainer = memo(function WantedContainer({
 
   // --- Pending releases state ---
   const [pendingItems, setPendingItems] = useState<PendingReleaseItem[]>([]);
-  const [pendingTotal, setPendingTotal] = useState(0);
+  const [pendingTotal, setPendingTotal] = useState(() => lastNavigationCounts.pending);
   const [pendingHasMore, setPendingHasMore] = useState(false);
   const [pendingNextOffset, setPendingNextOffset] = useState(0);
   const [pendingLoading, setPendingLoading] = useState(false);
@@ -173,6 +182,12 @@ export const WantedContainer = memo(function WantedContainer({
   const pendingLoadInFlightRef = useRef(false);
   const [, executeForceGrab] = useMutation(forceGrabPendingReleaseMutation);
   const [, executeDismiss] = useMutation(dismissPendingReleaseMutation);
+
+  useEffect(() => {
+    lastNavigationCounts.wanted = total;
+    lastNavigationCounts.cutoff = cutoffTotal;
+    lastNavigationCounts.pending = pendingTotal;
+  }, [lastNavigationCounts, total, cutoffTotal, pendingTotal]);
 
   const refreshWantedNavigationCounts = useCallback(async () => {
     try {

@@ -89,6 +89,7 @@ import {
   EMPTY_TITLE_QUICK_FILTERS,
   buildTitleCatalogQueryVariables,
   titleCatalogProjectionForTable,
+  loadTitleCatalogSelection,
   titleCatalogQueryKey,
   type TitleCatalogAdvancedFilters,
 } from "@/lib/utils/title-catalog-query";
@@ -156,6 +157,7 @@ import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { useLibraryScanProgress } from "@/lib/context/library-scan-progress-context";
 import { useSearchContext } from "@/lib/context/search-context";
+import { catalogDeletionRefresh } from "@/lib/utils/catalog-deletion-refresh";
 import {
   reactiveRefreshEpoch,
   useReactiveRefresh,
@@ -199,6 +201,8 @@ const TITLE_DELETION_JOB_FALLBACK_DELAYS_MS = [
   10_000, 60_000, 180_000,
 ] as const;
 const TITLE_CATALOG_PAGE_SIZE = 72;
+// The titles query clamps a page to 300 items.
+const TITLE_CATALOG_SELECT_ALL_PAGE_SIZE = 300;
 const LIBRARY_SCAN_TITLE_REFRESH_THROTTLE_MS = 5_000;
 // The title panel shows a recent-blocks window, not the whole blocklist.
 const SELECTED_OVERVIEW_BLOCKLIST_LIMIT = 6;
@@ -540,6 +544,9 @@ function librarySettingsInput(
     fileChmod: settings.fileChmod,
     folderChmod: settings.folderChmod,
     chownGroup: settings.chownGroup,
+    defaultMovieAvailability: settings.defaultMovieAvailability ?? null,
+    movieReleaseMarket: settings.movieReleaseMarket ?? null,
+    movieAvailabilityDelayDays: settings.movieAvailabilityDelayDays ?? null,
     indexerRouting: settings.indexerRouting,
     downloadClientRouting: settings.downloadClientRouting,
   };
@@ -547,13 +554,13 @@ function librarySettingsInput(
 
 function splitSucceededTitleIds(
   targets: TitleRecord[],
-  predicate: (title: TitleRecord) => boolean,
+  predicate: (title: TitleRecord, index: number) => boolean,
 ): { succeededIds: string[]; failedIds: string[] } {
   const succeededIds: string[] = [];
   const failedIds: string[] = [];
 
-  targets.forEach((title) => {
-    if (predicate(title)) {
+  targets.forEach((title, index) => {
+    if (predicate(title, index)) {
       succeededIds.push(title.id);
     } else {
       failedIds.push(title.id);
@@ -687,7 +694,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   const { registerInteractiveJobRun } = useJobRunToasts();
   const { confirmReplaceConflict, replaceConflictDialog } =
     useDownloadConflictConfirmation();
-  const { queueCatalogTitleRefresh } = useReactiveRefresh();
+  const { queueCatalogTitleRefresh, registerReactiveRefresh } = useReactiveRefresh();
   const [titleDeleteTypedConfirmation, setTitleDeleteTypedConfirmation] =
     React.useState("");
   const [pendingDeletedTitleIds, setPendingDeletedTitleIds] = React.useState<
@@ -1321,6 +1328,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     preview: titleDeletePreview,
     loading: titleDeletePreviewLoading,
     error: titleDeletePreviewError,
+    errorReason: titleDeletePreviewErrorReason,
   } = useDeletePreview(
     deleteTitlePreviewQuery,
     "deleteTitlePreview",
@@ -2150,6 +2158,15 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     [reloadTitles, titleFilter],
   );
 
+  React.useEffect(() => {
+    if (!shouldLoadCatalogTitles) return;
+    return registerReactiveRefresh(catalogDeletionRefresh(activeFacet, () => {
+      latestCriticalMutationEpochRef.current = reactiveRefreshEpoch();
+      setTitleContextTitles([]);
+      void refreshTitles();
+    }));
+  }, [activeFacet, registerReactiveRefresh, refreshTitles, shouldLoadCatalogTitles]);
+
   const handleCatalogDiscoveryAction = React.useCallback(
     async (item: CatalogDiscoveryItem) => {
       const actionAuthorizationSignature = authorizationSignature;
@@ -2484,12 +2501,16 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
             (title) => !pendingDeletedTitleIdsRef.current.has(title.id),
           ),
         );
+        const deletedIds = new Set(pendingDeletedTitleIdsRef.current);
+        setMonitoredTitles((current) =>
+          current.filter((title) => !deletedIds.has(title.id)),
+        );
         setPendingDeletedTitleIds(new Set());
       }
       void refreshTitles();
       return true;
     },
-    [clearDeletionFallbackTimers, refreshTitles],
+    [clearDeletionFallbackTimers, refreshTitles, setMonitoredTitles],
   );
 
   const refreshTrackedDeletionJobs = React.useCallback(async () => {
@@ -2735,6 +2756,10 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
 
       applySelectedOverviewDetail(titleId, title, requestEpoch);
+      if (!title) {
+        // A response started before this deletion must not resurrect its row.
+        latestCriticalMutationEpochRef.current = requestEpoch;
+      }
 
       setMonitoredTitles((current) => {
         const next = [...current];
@@ -3417,7 +3442,9 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               tmdbId: candidate.tmdbId ?? undefined,
               imdbId: imdbId || undefined,
               ...(queueFacet === "MOVIE"
-                ? { minAvailability: minAvailabilityForQueue }
+                ? minAvailabilityForQueue === "default"
+                  ? {}
+                  : { minAvailability: minAvailabilityForQueue }
                 : {}),
             },
           })
@@ -3652,6 +3679,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   );
 
   const toggleTitleSelection = React.useCallback((titleId: string) => {
+    selectAllRequestSeqRef.current += 1;
     setSelectedTitleIds((current) => {
       const next = new Set(current);
       if (next.has(titleId)) {
@@ -3718,16 +3746,91 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     [],
   );
 
+  const selectAllRequestSeqRef = React.useRef(0);
   const toggleAllVisibleTitles = React.useCallback(
     (checked: boolean) => {
+      const requestSeq = ++selectAllRequestSeqRef.current;
       setSelectedTitleIds(
         checked ? new Set(visibleTitles.map((title) => title.id)) : new Set(),
       );
+      if (!checked || !catalogPaginationState.hasMore) {
+        return;
+      }
+
+      // Bulk actions need each selected record, including its library and
+      // settings. Load the matching pages before extending the selection.
+      const queryKey = catalogQueryKeyRef.current;
+      const variables = buildTitleCatalogQueryVariables({
+        facet: activeFacet,
+        libraryIds: selectedLibraryIds,
+        query: activeCatalogQueryRef.current.trim(),
+        filters: effectiveTitleQuickFilters,
+        advancedFilters: effectiveAdvancedTitleFilters,
+        sort: effectiveTitleCatalogSort,
+        limit: TITLE_CATALOG_SELECT_ALL_PAGE_SIZE,
+        offset: 0,
+      });
+      void (async () => {
+        let titles: TitleRecord[] | null;
+        try {
+          titles = await loadTitleCatalogSelection<TitleRecord>(
+            TITLE_CATALOG_SELECT_ALL_PAGE_SIZE,
+            async (offset) => {
+              const { data, error } = await client
+                .query(
+                  buildTitlesQuery(
+                    { ...titleCatalogProjection, includeSettings: true },
+                    { includeAggregates: false },
+                  ),
+                  { ...variables, offset },
+                  { requestPolicy: "network-only" },
+                )
+                .toPromise();
+              if (error) throw error;
+              const page = data?.titles;
+              if (!page) throw new Error(t("status.failedToLoad"));
+              return { items: page.items as TitleRecord[], hasMore: Boolean(page.hasMore) };
+            },
+            () => requestSeq === selectAllRequestSeqRef.current && queryKey === catalogQueryKeyRef.current,
+          );
+        } catch (error) {
+          setGlobalStatus(
+            userFacingGraphQlErrorMessage(error, t("status.failedToLoad")),
+            { level: "ERROR" },
+          );
+          return;
+        }
+        if (!titles || requestSeq !== selectAllRequestSeqRef.current || queryKey !== catalogQueryKeyRef.current) {
+          return;
+        }
+        setMonitoredTitles((current) => mergeCatalogTitlesPreservingImages(current, titles));
+        setCatalogPaginationState((current) => ({
+          ...current,
+          hasMore: false,
+          nextOffset: titles.length,
+          loadingMore: false,
+        }));
+        setSelectedTitleIds((current) => new Set([...current, ...titles.map((title) => title.id)]));
+      })();
     },
-    [visibleTitles],
+    [
+      activeFacet,
+      catalogPaginationState.hasMore,
+      client,
+      effectiveAdvancedTitleFilters,
+      effectiveTitleCatalogSort,
+      effectiveTitleQuickFilters,
+      selectedLibraryIds,
+      setGlobalStatus,
+      setMonitoredTitles,
+      t,
+      titleCatalogProjection,
+      visibleTitles,
+    ],
   );
 
   const clearSelectedTitles = React.useCallback(() => {
+    selectAllRequestSeqRef.current += 1;
     setSelectedTitleIds((current) =>
       current.size === 0 ? current : new Set(),
     );
@@ -3770,23 +3873,19 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           .toPromise();
         const payload = result.data ?? {};
         const refreshedTitles = await reloadTitles();
-        let { succeededIds, failedIds } = refreshedTitles
+        const inferred = refreshedTitles
           ? inferMonitoredBatchOutcome(targets, refreshedTitles, monitored)
           : {
               succeededIds: [] as string[],
               failedIds: [...targets.map((title) => title.id)],
             };
-        if (!refreshedTitles && !result.error) {
-          succeededIds = [];
-          failedIds = [];
-          targets.forEach((title, index) => {
-            if (payload[batchItemAlias(index)]) {
-              succeededIds.push(title.id);
-            } else {
-              failedIds.push(title.id);
-            }
-          });
-        }
+        // A refreshed first page cannot report on off-page selections. Each
+        // successful mutation alias is authoritative for its selected title.
+        const { succeededIds, failedIds } = splitSucceededTitleIds(targets, (title, index) => {
+          const updated = payload[batchItemAlias(index)];
+          return updated?.id === title.id && updated.monitored === monitored
+            || inferred.succeededIds.includes(title.id);
+        });
         setSelectedTitleIds(new Set(failedIds));
 
         const detail = batchFailureDetail(result.error);
@@ -3913,23 +4012,16 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           .toPromise();
         const payload = result.data ?? {};
         const refreshedTitles = await reloadTitles();
-        let { succeededIds, failedIds } = refreshedTitles
+        const inferred = refreshedTitles
           ? inferTitleUpdateBatchOutcome(targets, refreshedTitles, changes)
           : {
               succeededIds: [] as string[],
               failedIds: [...targets.map((title) => title.id)],
             };
-        if (!refreshedTitles && !result.error) {
-          succeededIds = [];
-          failedIds = [];
-          targets.forEach((title, index) => {
-            if (payload[batchItemAlias(index)]) {
-              succeededIds.push(title.id);
-            } else {
-              failedIds.push(title.id);
-            }
-          });
-        }
+        const { succeededIds, failedIds } = splitSucceededTitleIds(targets, (title, index) =>
+          payload[batchItemAlias(index)]?.id === title.id
+            || inferred.succeededIds.includes(title.id),
+        );
         setSelectedTitleIds(new Set(failedIds));
 
         const detail = batchFailureDetail(result.error);
@@ -5455,6 +5547,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
               preview={titleDeletePreview}
               loading={titleDeletePreviewLoading}
               error={titleDeletePreviewError}
+              errorReason={titleDeletePreviewErrorReason}
+              onRemoveFromCatalogOnly={() => setDeleteFilesOnDisk(false)}
               typedConfirmation={titleDeleteTypedConfirmation}
               onTypedConfirmationChange={setTitleDeleteTypedConfirmation}
             />

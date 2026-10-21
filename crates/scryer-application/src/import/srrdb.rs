@@ -62,7 +62,7 @@ pub(crate) fn srrdb_lookup_applies(enabled: bool, client_type: &str) -> bool {
 /// The returned CRC is formatted for the API as `format!("{crc:08X}")`.
 pub(crate) fn crc32_iso_hdlc_of_file(path: &Path) -> std::io::Result<(u32, u64)> {
     let mut file = std::fs::File::open(path)?;
-    let mut digest = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32IsoHdlc);
+    let mut digest = crc_turbo::Digest::new(crc_turbo::CrcAlgorithm::Crc32IsoHdlc);
     let mut buffer = vec![0u8; SRRDB_CRC_CHUNK_BYTES];
     let mut total: u64 = 0;
     loop {

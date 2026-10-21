@@ -136,6 +136,24 @@ pub struct AcquisitionSettingsPayload {
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Number of days before long-tail scopes are reconverged.
     pub long_tail_reconverge_days: i32,
+    /// Deprecated: the Movie facet's default availability threshold, now
+    /// read from `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.defaultMovieAvailability on the Movie facet; returns that value. Removed in the next minor."
+    )]
+    pub default_movie_availability: String,
+    /// Deprecated: the Movie facet's release market, now read from
+    /// `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.movieReleaseMarket on the Movie facet; returns that value. Removed in the next minor."
+    )]
+    pub movie_release_market: String,
+    /// Deprecated: the Movie facet's availability delay, now read from
+    /// `mediaSettings(scope: MOVIE)`. Removed in the next minor.
+    #[graphql(
+        deprecation = "Moved to MediaSettings.movieAvailabilityDelayDays on the Movie facet; returns that value. Removed in the next minor."
+    )]
+    pub movie_availability_delay_days: i32,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -595,6 +613,8 @@ pub struct DelayProfilePayload {
     pub applies_to_facets: Vec<MediaFacetValue>,
     /// Tags used to select this profile.
     pub tags: Vec<String>,
+    /// Libraries the profile is limited to; empty applies it to every library.
+    pub library_ids: Vec<ID>,
     /// Lower values run with higher priority according to service ordering.
     pub priority: i32,
     /// Whether the profile is enabled.
@@ -883,6 +903,15 @@ pub struct MediaSettingsPayload {
     pub folder_chmod: Option<String>,
     /// Chown group, or null when unset.
     pub chown_group: Option<String>,
+    /// Availability threshold for movies without their own: `announced`,
+    /// `in_cinemas` or `released`. Null for facets other than Movie.
+    pub default_movie_availability: Option<String>,
+    /// ISO-3166-1 alpha-2 market whose release dates are read first. Null for
+    /// facets other than Movie.
+    pub movie_release_market: Option<String>,
+    /// Signed offset in days from the applicable release date. Null for
+    /// facets other than Movie.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -1119,6 +1148,8 @@ pub struct DelayProfileInput {
     pub applies_to_facets: Vec<MediaFacetValue>,
     /// Tags restricting the profile's scope.
     pub tags: Vec<String>,
+    /// Libraries the profile is limited to; an empty list applies it to every library. Null keeps the libraries an existing profile already has.
+    pub library_ids: Option<Vec<ID>>,
     /// Relative priority among delay profiles.
     pub priority: i32,
     /// Whether this delay profile is active.
@@ -1185,6 +1216,14 @@ pub struct UpdateMediaSettingsInput {
     pub folder_chmod: Option<String>,
     /// Optional Unix group name for imported paths.
     pub chown_group: Option<String>,
+    /// Availability threshold for movies without their own: `announced`,
+    /// `in_cinemas` or `released`. Movie scope only.
+    pub default_movie_availability: Option<String>,
+    /// ISO-3166-1 alpha-2 market whose release dates are read first. Movie
+    /// scope only.
+    pub movie_release_market: Option<String>,
+    /// Signed offset in days from the applicable release date. Movie scope only.
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(InputObject, Clone)]
@@ -1403,6 +1442,24 @@ pub struct UpdateAcquisitionSettingsInput {
     pub long_tail_backfill_max_scopes_per_cycle: i32,
     /// Days between long-tail reconvergence passes.
     pub long_tail_reconverge_days: i32,
+    /// Deprecated and ignored: set `defaultMovieAvailability` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set defaultMovieAvailability through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
+    pub default_movie_availability: Option<String>,
+    /// Deprecated and ignored: set `movieReleaseMarket` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set movieReleaseMarket through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
+    pub movie_release_market: Option<String>,
+    /// Deprecated and ignored: set `movieAvailabilityDelayDays` through
+    /// `updateMediaSettings` for the Movie facet. Removed in the next minor.
+    #[graphql(
+        deprecation = "Ignored: set movieAvailabilityDelayDays through updateMediaSettings for the Movie facet. Removed in the next minor."
+    )]
+    pub movie_availability_delay_days: Option<i32>,
 }
 
 #[derive(InputObject, Clone)]

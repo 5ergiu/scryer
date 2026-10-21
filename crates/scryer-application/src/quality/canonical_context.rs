@@ -85,10 +85,6 @@ impl ResolvedScoringContext {
         &self.profile
     }
 
-    pub(crate) fn required_audio_languages(&self) -> &[String] {
-        &self.required_audio_languages
-    }
-
     /// The title's own runtime, used as the per-episode fallback when the
     /// catalog has no duration for an episode.
     pub(crate) fn default_runtime_minutes(&self) -> Option<i32> {
@@ -134,42 +130,6 @@ impl ResolvedScoringContext {
         hash_debug(hasher, title_tags);
         hash_debug(hasher, default_runtime_minutes);
     }
-}
-
-/// The announced-evidence parse for a release against one title.
-///
-/// The one place `languages_audio` is enriched, so grab, pending and import
-/// cannot disagree about what a release claims to carry. Most release names say
-/// nothing about audio; `release_audio_language_hints_for_title` infers the
-/// title's original language when a profile requires one, and a lane that skips
-/// the enrichment sees an empty language list and raises
-/// `required_audio_language_missing` against a release that is perfectly fine.
-/// That was the asymmetry between the grab side (enriched at
-/// `catalog/release_search.rs`) and the import side (not enriched at all).
-///
-/// The audio context is keyed on the **title's** facet, not the search category:
-/// a search collapses anime movies and series-movie links to `"movie"`, which
-/// hides their anime origin and breaks dual-audio inference (eng+jpn).
-pub(crate) fn announced_metadata_for_title(
-    title: &Title,
-    parsed: &crate::ParsedReleaseMetadata,
-    required_audio_languages: &[String],
-    indexer_languages: Option<&[String]>,
-) -> crate::ParsedReleaseMetadata {
-    let language_context = crate::title_audio_language_context(
-        title.language.as_deref(),
-        title.country.as_deref(),
-        Some(title.facet.as_str()),
-        &title.tags,
-    );
-    let mut enriched = parsed.clone();
-    enriched.languages_audio = crate::release_audio_language_hints_for_title(
-        parsed,
-        indexer_languages,
-        Some(&language_context),
-        !required_audio_languages.is_empty(),
-    );
-    enriched
 }
 
 /// Everything a lane needs about a release it only knows by name.
@@ -235,8 +195,7 @@ pub(crate) fn score_parked_release_title(
         catalog_collections,
         None,
     );
-    let parsed =
-        announced_metadata_for_title(title, &raw_parsed, context.required_audio_languages(), None);
+    let parsed = raw_parsed.clone();
     let size_basis = crate::acquisition_coverage::coverage_size_basis(
         &coverage,
         &parsed,

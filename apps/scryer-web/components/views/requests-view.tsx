@@ -27,6 +27,7 @@ import {
   TvdbMovieExternalLink,
   TvdbSeriesExternalLink,
 } from "@/components/common/external-media-links";
+import { TitleKeepControl } from "@/components/common/title-keep-control";
 import { TitleRatingsDisplay } from "@/components/common/title-ratings-display";
 import { LibraryMultiSelect } from "@/components/common/library-multi-select";
 import { MonitorSelectionPicker } from "@/components/common/monitor-selection-picker";
@@ -75,6 +76,7 @@ import {
   REQUEST_LEASE_DAYS_MIN,
   REQUEST_LEASE_DAY_CHOICES,
   clampRequestLeaseDays,
+  liveOperatorKeep,
   requestDecisionOutcomeBadgeTone,
   requestDecisionOutcomeLabelKey,
   requestFallbackReasonLabelKey,
@@ -119,6 +121,7 @@ import {
   mediaRequestReopenId,
   mediaRequestRowId,
   mediaRequestStatusId,
+  selectorId,
   titleClaimExtendId,
   titleClaimPermanentId,
   titleClaimReleaseId,
@@ -512,9 +515,6 @@ function RequestDecisionChip({
           >
             <ScrollText className="h-3 w-3" />
             {outcomeKey ? t(outcomeKey) : decision.effectiveOutcome}
-            {decision.mode === "SHADOW"
-              ? ` · ${t("requests.decisionShadow")}`
-              : ""}
           </Badge>
         </button>
       </PopoverTrigger>
@@ -587,7 +587,8 @@ function RequestDecisionChip({
 
 /// The holds on a created title, and the three things a manager can do to one.
 /// Releasing always asks for a reason: the API refuses a blank one, and the
-/// trail is the point of the operation.
+/// trail is the point of the operation. Keep is offered until the title has an
+/// operator keep; from then on that keep's row carries its release.
 function RequestClaimsPanel({
   request,
   claims,
@@ -597,6 +598,7 @@ function RequestClaimsPanel({
   onConvertClaim,
   onStartExtend,
   onStartRelease,
+  onKeepChanged,
 }: {
   request: MediaRequestRecord;
   claims: TitleClaimRecord[] | undefined;
@@ -606,8 +608,18 @@ function RequestClaimsPanel({
   onConvertClaim: (claim: TitleClaimRecord) => void;
   onStartExtend: (claim: TitleClaimRecord) => void;
   onStartRelease: (claim: TitleClaimRecord) => void;
+  onKeepChanged: () => void;
 }) {
   const t = useTranslate();
+  const keepControl =
+    claims && request.createdTitleId && !liveOperatorKeep(claims) ? (
+      <TitleKeepControl
+        id={selectorId("media-request-claims-keep", request.id)}
+        titleId={request.createdTitleId}
+        keepClaimId={null}
+        onChanged={onKeepChanged}
+      />
+    ) : null;
 
   if (loading && !claims) {
     return (
@@ -622,12 +634,13 @@ function RequestClaimsPanel({
 
   if (!claims || claims.length === 0) {
     return (
-      <p
+      <div
         id={mediaRequestClaimsPanelId(request.id)}
-        className="text-xs text-[var(--scry-muted3)]"
+        className="flex flex-wrap items-center gap-2 text-xs text-[var(--scry-muted3)]"
       >
         {t("requests.claimsEmpty")}
-      </p>
+        {keepControl}
+      </div>
     );
   }
 
@@ -655,7 +668,9 @@ function RequestClaimsPanel({
               {stateKey ? t(stateKey) : claim.state}
             </Badge>
             <span className="text-[var(--scry-muted3)]">
-              {claim.kind === "KEEP"
+              {claim.producer === "OPERATOR_KEEP"
+                ? t("label.kept")
+                : claim.kind === "KEEP"
                 ? t("requests.claimKindKeep")
                 : claim.expiresAt
                   ? t("requests.claimExpiresAt", {
@@ -674,27 +689,30 @@ function RequestClaimsPanel({
             ) : null}
             {live ? (
               <div className="ml-auto flex flex-wrap gap-1">
-                <Button
-                  id={titleClaimExtendId(claim.id)}
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() => onStartExtend(claim)}
-                >
-                  {t("requests.claimExtend")}
-                </Button>
+                {/* A keep has no window: the API refuses to extend one. */}
                 {claim.kind === "RETAIN_UNTIL" ? (
-                  <Button
-                    id={titleClaimPermanentId(claim.id)}
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => onConvertClaim(claim)}
-                  >
-                    {t("requests.claimMakePermanent")}
-                  </Button>
+                  <>
+                    <Button
+                      id={titleClaimExtendId(claim.id)}
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => onStartExtend(claim)}
+                    >
+                      {t("requests.claimExtend")}
+                    </Button>
+                    <Button
+                      id={titleClaimPermanentId(claim.id)}
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => onConvertClaim(claim)}
+                    >
+                      {t("requests.claimMakePermanent")}
+                    </Button>
+                  </>
                 ) : null}
                 <Button
                   id={titleClaimReleaseId(claim.id)}
@@ -711,6 +729,7 @@ function RequestClaimsPanel({
           </div>
         );
       })}
+      {keepControl ? <div className="flex justify-end">{keepControl}</div> : null}
     </div>
   );
 }
@@ -1286,6 +1305,7 @@ export function RequestsView({
                 onStartRelease={(claim) =>
                   setPendingClaimAction({ kind: "release", claim, reason: "" })
                 }
+                onKeepChanged={() => onLoadClaims(request)}
               />
             ) : null}
             <p className="line-clamp-4 max-w-[80ch] text-sm leading-6 text-[var(--scry-muted2)]">
@@ -1410,11 +1430,62 @@ export function RequestsView({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-[var(--scry-border3)]">
+        <div className="flex flex-wrap items-center gap-2">
+          <LibraryMultiSelect
+            libraries={libraries}
+            selectedLibraryIds={selectedLibraryIds}
+            onSelectedLibraryIdsChange={onSelectedLibraryIdsChange}
+            triggerClassName="h-10 w-full rounded-[11px] sm:w-64"
+          />
+          {mode === "admin" &&
+          (requesterOptions.length > 0 || selectedRequesterId !== null) ? (
+            <Select
+              value={selectedRequesterId ?? ALL_REQUESTERS_VALUE}
+              onValueChange={(value) =>
+                onSelectedRequesterIdChange(
+                  value === ALL_REQUESTERS_VALUE ? null : value,
+                )
+              }
+            >
+              <SelectTrigger
+                id="requests-requester-filter"
+                aria-label={t("requests.requesterFilter.label")}
+                className="h-10 min-w-44 rounded-[11px]"
+              >
+                <User className="h-4 w-4 shrink-0 text-[var(--scry-muted3)]" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_REQUESTERS_VALUE}>
+                  {t("requests.requesterFilter.all")}
+                </SelectItem>
+                {requesterOptions.map((option) => (
+                  <SelectItem key={option.userId} value={option.userId}>
+                    {option.username}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          {mode === "mine" ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 w-10 rounded-[11px] p-0"
+              onClick={onRefresh}
+              disabled={loading}
+              aria-label="Refresh requests"
+            >
+              {loading ? <LoadingMark className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
+            </Button>
+          ) : null}
+        </div>
+
+        <div className="border-b border-[var(--scry-border3)]">
           <div
             role="group"
             aria-label="Request filters"
-            className="relative top-px flex min-h-10 min-w-0 max-w-full flex-1 flex-wrap items-center justify-start gap-x-5 gap-y-1 border-0 bg-transparent p-0 shadow-none"
+            className="relative top-px flex min-h-10 min-w-0 max-w-full flex-wrap items-center justify-start gap-x-5 gap-y-1 border-0 bg-transparent p-0 shadow-none"
           >
             {showModeSwitch ? (
               <>
@@ -1462,56 +1533,6 @@ export function RequestsView({
                 onClick={() => onStatusFilterChange(filter.value)}
               />
             ))}
-          </div>
-          <div className="mb-3 flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
-            <LibraryMultiSelect
-              libraries={libraries}
-              selectedLibraryIds={selectedLibraryIds}
-              onSelectedLibraryIdsChange={onSelectedLibraryIdsChange}
-              triggerClassName="h-10 min-w-56 rounded-[11px]"
-            />
-            {mode === "admin" &&
-            (requesterOptions.length > 0 || selectedRequesterId !== null) ? (
-              <Select
-                value={selectedRequesterId ?? ALL_REQUESTERS_VALUE}
-                onValueChange={(value) =>
-                  onSelectedRequesterIdChange(
-                    value === ALL_REQUESTERS_VALUE ? null : value,
-                  )
-                }
-              >
-                <SelectTrigger
-                  id="requests-requester-filter"
-                  aria-label={t("requests.requesterFilter.label")}
-                  className="h-10 min-w-44 rounded-[11px]"
-                >
-                  <User className="h-4 w-4 shrink-0 text-[var(--scry-muted3)]" />
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL_REQUESTERS_VALUE}>
-                    {t("requests.requesterFilter.all")}
-                  </SelectItem>
-                  {requesterOptions.map((option) => (
-                    <SelectItem key={option.userId} value={option.userId}>
-                      {option.username}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-            {mode === "mine" ? (
-              <Button
-                type="button"
-                variant="outline"
-                className="h-10 w-10 rounded-[11px] p-0"
-                onClick={onRefresh}
-                disabled={loading}
-                aria-label="Refresh requests"
-              >
-                {loading ? <LoadingMark className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
-              </Button>
-            ) : null}
           </div>
         </div>
 

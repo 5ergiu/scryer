@@ -33,8 +33,10 @@ import { useTranslate } from "@/lib/context/translate-context";
 import type { InteractiveSearchIndexerProgress } from "@/lib/graphql/release-search";
 import type { Release } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { useIsMobile } from "@/lib/hooks/use-mobile";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
+import { useIsNarrowElement } from "@/lib/hooks/use-mobile";
 import {
+  selectorId,
   seriesOverviewSeasonInteractiveSearchId,
   seriesOverviewSeasonMonitorId,
   seriesOverviewSeasonSectionId,
@@ -71,6 +73,9 @@ import {
 import { LoadingMark } from "@/components/common/loading-mark";
 
 const EMPTY_INDEXER_PROGRESS: InteractiveSearchIndexerProgress[] = [];
+// Below this section width the episode table squeezes titles into a
+// one-word column, so episodes render as cards instead.
+const EPISODE_TABLE_MIN_WIDTH = 720;
 
 export { SeriesMovieTimelineSection } from "./series-movie-row";
 
@@ -239,10 +244,14 @@ function SeasonSectionImpl({
 }: SeasonSectionProps) {
   const t = useTranslate();
   const canRefreshScores = useCanManageOverviewTitle(libraryId);
-  const isMobile = useIsMobile();
+  const sectionRef = React.useRef<HTMLDivElement>(null);
+  // The overview also renders inside a side panel, so the episode table
+  // gives way to cards by the section's own width, not the window's.
+  const isMobile = useIsNarrowElement(sectionRef, EPISODE_TABLE_MIN_WIDTH);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [seasonToggling, setSeasonToggling] = React.useState(false);
   const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const [seasonSearchOpen, setSeasonSearchOpen] = React.useState(false);
   const stableSubtitleDownloads = subtitleDownloads ?? EMPTY_SUBTITLE_DOWNLOADS;
   const selectionEnabled = Boolean(onToggleEpisodeSelected);
 
@@ -403,6 +412,7 @@ function SeasonSectionImpl({
 
   return (
     <div
+      ref={sectionRef}
       id={seriesOverviewSeasonSectionId(collection.id)}
       data-timeline-kind="collection"
       data-collection-id={collection.id}
@@ -525,7 +535,13 @@ function SeasonSectionImpl({
                 className="w-[6.75rem]"
               />
             ) : null}
-            {canRefreshScores ? <RefreshScoresButton selection={{ seasonIds: [collection.id] }} /> : null}
+            {canRefreshScores ? (
+              <RefreshScoresButton
+                appearance="icon"
+                id={`season-refresh-scores-${collection.id}`}
+                selection={{ seasonIds: [collection.id] }}
+              />
+            ) : null}
             <IconButton
               id={`season-details-${collection.id}`}
               label={`${seasonHeading(collection, t)} — ${t("episode.details")}`}
@@ -582,6 +598,7 @@ function SeasonSectionImpl({
                 disabled={seasonInteractiveSearchLoading}
                 onClick={(event) => {
                   event.stopPropagation();
+                  setSeasonSearchOpen(true);
                   onRunSeasonInteractiveSearch();
                 }}
                 label={t("series.interactiveSearchSeason")}
@@ -606,30 +623,37 @@ function SeasonSectionImpl({
         </div>
       ) : null}
 
+      {seasonSearchOpen && onQueueFromSeasonSearch ? (
+        <InteractiveSearchDialog
+          id={selectorId("series-overview-season-search-dialog", collection.id)}
+          open={seasonSearchOpen}
+          onOpenChange={setSeasonSearchOpen}
+          title={t("seasonSection.seasonSearchResults", {
+            season: seasonHeading(collection, t),
+          })}
+          description={t("series.interactiveSearchSeason")}
+        >
+          {seasonInteractiveSearchLoading && !seasonSearchResults?.length ? (
+            <div className="flex flex-col items-center justify-center gap-4 py-16">
+              <LoadingMark className="h-10 w-10 text-[var(--scry-accent-text)]" />
+              <p className="text-lg text-muted-foreground">{t("label.searching")}</p>
+            </div>
+          ) : seasonSearchResults && seasonSearchResults.length > 0 ? (
+            <SearchResultBuckets
+              titleId={collection.titleId}
+              ownedScope={{ collectionId: collection.id }}
+              results={seasonSearchResults}
+              onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
+              requireCandidateToken
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
+          )}
+        </InteractiveSearchDialog>
+      ) : null}
+
       {showSectionContent ? (
         <>
-            {seasonSearchResults &&
-            onQueueFromSeasonSearch &&
-            (seasonSearchResults.length > 0 || !seasonInteractiveSearchLoading) ? (
-              <div className={cn(showCollectionHeader && "border-t border-border", "px-4 py-3")}>
-                <p className="mb-2 text-xs font-medium text-muted-foreground">
-                  {t("seasonSection.seasonSearchResults", {
-                    season: seasonHeading(collection, t),
-                  })}
-                </p>
-                {seasonSearchResults.length > 0 ? (
-                  <SearchResultBuckets
-                    titleId={collection.titleId}
-                    ownedScope={{ collectionId: collection.id }}
-                    results={seasonSearchResults}
-                    onQueue={(release) => onQueueFromSeasonSearch(collection, release)}
-                    requireCandidateToken
-                  />
-                ) : (
-                  <p className="text-sm text-muted-foreground">{t("nzb.noResultsYet")}</p>
-                )}
-              </div>
-            ) : null}
             {!episodesReady ? (
               <div
                 className={cn(
@@ -645,8 +669,8 @@ function SeasonSectionImpl({
                 {t("seasonSection.noEpisodeRecords")}
               </div>
             ) : isMobile ? (
-              <div className={cn(showCollectionHeader && "border-t border-border", "px-3 py-3")}>
-                <div className="space-y-3">
+              <div className={cn(showCollectionHeader && "border-t border-border", "p-2")}>
+                <div className="space-y-2">
                   {episodes.map((episode) => (
                     <EpisodeRow
                       key={episode.id}
@@ -702,7 +726,8 @@ function SeasonSectionImpl({
                       <TableHead className="w-10 text-center" />
                       <TableHead className="w-12 text-center">{t("episode.numberLabel")}</TableHead>
                       <TableHead>{t("label.title")}</TableHead>
-                      <TableHead className="w-44 text-center">{t("episode.airDate")}</TableHead>
+                      <TableHead className="w-32 text-center">{t("episode.airDate")}</TableHead>
+                      <TableHead className="w-16 text-center">{t("mediaInfo.size")}</TableHead>
                       <TableHead className="w-32 text-center">{t("episode.quality")}</TableHead>
                       <TableActionsHead className="w-28">{t("label.actions")}</TableActionsHead>
                     </TableRow>

@@ -91,6 +91,7 @@ fn from_subtitle_settings(
 
 fn from_acquisition_settings(
     settings: scryer_application::AcquisitionSettings,
+    movie_availability: scryer_application::MovieAvailabilitySettings,
 ) -> AcquisitionSettingsPayload {
     AcquisitionSettingsPayload {
         enabled: settings.enabled,
@@ -103,6 +104,10 @@ fn from_acquisition_settings(
         walk_interval_seconds: settings.walk_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,
+        // Deprecated: these report the Movie facet values they moved to.
+        default_movie_availability: movie_availability.default_availability,
+        movie_release_market: movie_availability.release_market,
+        movie_availability_delay_days: movie_availability.delay_days,
     }
 }
 
@@ -380,6 +385,7 @@ fn from_delay_profile(profile: scryer_application::DelayProfile) -> DelayProfile
             .filter_map(|facet| MediaFacetValue::parse(&facet))
             .collect(),
         tags: profile.tags,
+        library_ids: profile.library_ids.into_iter().map(ID::from).collect(),
         priority: profile.priority,
         enabled: profile.enabled,
     }
@@ -870,17 +876,14 @@ impl SettingsMutations {
             require_config_app_permission(ctx, scryer_domain::AppPermission::ManageCatalogSettings)
                 .await?;
 
-        // A client that predates the walk interval does not send it; keep
-        // what is stored rather than resetting it.
-        let walk_interval_seconds = match input.walk_interval_seconds {
-            Some(walk_interval_seconds) => walk_interval_seconds,
-            None => {
-                app.get_acquisition_settings(&actor)
-                    .await
-                    .map_err(to_gql_error)?
-                    .walk_interval_seconds
-            }
-        };
+        // Clients that predate any optional acquisition field keep its stored value.
+        let current = app
+            .get_acquisition_settings(&actor)
+            .await
+            .map_err(to_gql_error)?;
+        let walk_interval_seconds = input
+            .walk_interval_seconds
+            .unwrap_or(current.walk_interval_seconds);
         let settings = app
             .update_acquisition_settings(
                 &actor,
@@ -896,8 +899,14 @@ impl SettingsMutations {
             )
             .await
             .map_err(to_gql_error)?;
+        // The deprecated movie availability fields are ignored here; they are
+        // set on the Movie facet through updateMediaSettings.
+        let movie_availability = app
+            .get_movie_availability_facet_settings(&actor)
+            .await
+            .map_err(to_gql_error)?;
 
-        Ok(from_acquisition_settings(settings))
+        Ok(from_acquisition_settings(settings, movie_availability))
     }
 
     /// Saves general system settings after checking the system-settings permission.
@@ -1428,11 +1437,23 @@ impl SettingsMutations {
             require_config_app_permission(ctx, scryer_domain::AppPermission::ManageCatalogSettings)
                 .await?;
 
+        let profile_id = input.id.to_string();
+        let library_ids = match input.library_ids {
+            Some(library_ids) => library_ids.into_iter().map(|id| id.to_string()).collect(),
+            None => app
+                .get_delay_profiles(&actor)
+                .await
+                .map_err(to_gql_error)?
+                .into_iter()
+                .find(|profile| profile.id.trim() == profile_id.trim())
+                .map(|profile| profile.library_ids)
+                .unwrap_or_default(),
+        };
         let profile = app
             .upsert_delay_profile(
                 &actor,
                 scryer_application::DelayProfile {
-                    id: input.id.to_string(),
+                    id: profile_id,
                     name: input.name,
                     usenet_delay_minutes: input.usenet_delay_minutes as i64,
                     torrent_delay_minutes: input.torrent_delay_minutes as i64,
@@ -1448,6 +1469,7 @@ impl SettingsMutations {
                         .map(|facet| facet.into_domain().as_str().to_string())
                         .collect(),
                     tags: input.tags,
+                    library_ids,
                     priority: input.priority,
                     enabled: input.enabled,
                 },
@@ -1631,6 +1653,11 @@ impl SettingsMutations {
                 file_chmod: input.file_chmod,
                 folder_chmod: input.folder_chmod,
                 chown_group: input.chown_group,
+                movie_availability: scryer_application::MovieAvailabilityOverrides {
+                    default_availability: input.default_movie_availability,
+                    release_market: input.movie_release_market,
+                    delay_days: input.movie_availability_delay_days,
+                },
             },
         )
         .await

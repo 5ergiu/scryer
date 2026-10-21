@@ -602,6 +602,7 @@ mod tests {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         };
 
         apply_remote_path_mappings_to_completed_download(&mut completed, &mappings);
@@ -627,6 +628,7 @@ mod tests {
             size_bytes: None,
             completed_at: None,
             parameters: Vec::new(),
+            posted_file_names: Vec::new(),
         };
 
         apply_remote_path_mappings_to_completed_download(&mut completed, &mappings);

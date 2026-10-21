@@ -2,10 +2,10 @@ import type {
   LifecycleClaimState,
   MediaRequestLeaseRecord,
   RequestDecisionOutcome,
-  RequestEvaluationMode,
   RequestRuleSetDetail,
   RequestRuleSetDraft,
   RequestVote,
+  TitleClaimRecord,
 } from "@/lib/types/request-rule-sets";
 
 /// How many stored decisions the recent-decisions table asks for. The API
@@ -159,45 +159,6 @@ export function applyRequestersToSource(
 
 // ── Labels and tones ─────────────────────────────────────────────────────
 
-export const REQUEST_EVALUATION_MODES: RequestEvaluationMode[] = [
-  "DISABLED",
-  "SHADOW",
-  "ENFORCE",
-];
-
-const EVALUATION_MODE_LABEL_KEYS: Record<RequestEvaluationMode, string> = {
-  DISABLED: "settings.requestRuleModeDisabled",
-  SHADOW: "settings.requestRuleModeShadow",
-  ENFORCE: "settings.requestRuleModeEnforce",
-};
-
-export function requestEvaluationModeLabelKey(mode: string): string | null {
-  return EVALUATION_MODE_LABEL_KEYS[mode as RequestEvaluationMode] ?? null;
-}
-
-const EVALUATION_MODE_HELP_KEYS: Record<RequestEvaluationMode, string> = {
-  DISABLED: "settings.requestRuleModeDisabledHelp",
-  SHADOW: "settings.requestRuleModeShadowHelp",
-  ENFORCE: "settings.requestRuleModeEnforceHelp",
-};
-
-export function requestEvaluationModeHelpKey(mode: string): string | null {
-  return EVALUATION_MODE_HELP_KEYS[mode as RequestEvaluationMode] ?? null;
-}
-
-export function requestEvaluationModeBadgeTone(
-  mode: string,
-): "neutral" | "info" | "warning" | "positive" {
-  switch (mode) {
-    case "ENFORCE":
-      return "positive";
-    case "SHADOW":
-      return "info";
-    default:
-      return "neutral";
-  }
-}
-
 const DECISION_OUTCOME_LABEL_KEYS: Record<RequestDecisionOutcome, string> = {
   AUTO_APPROVE: "requests.decisionOutcomeAutoApprove",
   MANUAL_REVIEW: "requests.decisionOutcomeManualReview",
@@ -303,6 +264,20 @@ export function titleClaimStateBadgeTone(
   }
 }
 
+/// The live operator keep among a title's claims: what Keep placed, and what
+/// its release control withdraws.
+export function liveOperatorKeep(
+  claims: TitleClaimRecord[] | undefined,
+): TitleClaimRecord | null {
+  return (
+    claims?.find(
+      (claim) =>
+        claim.producer === "OPERATOR_KEEP" &&
+        (claim.state === "ACTIVE" || claim.state === "DORMANT"),
+    ) ?? null
+  );
+}
+
 // ── Lease badges ─────────────────────────────────────────────────────────
 
 /// What one request's lease is doing right now. `requested` is a window nobody
@@ -392,4 +367,16 @@ export function requestFilterArgument(value: string): string | undefined {
 /// verbatim, so this only recognises it well enough to mark the banner.
 export function isPersonTargetingRefusal(message: string): boolean {
   return message.toLowerCase().includes("input.requester");
+}
+
+const REQUESTER_REFERENCE_PATTERN =
+  /\binput\s*(?:\.\s*requester\b|\[\s*"requester"\s*\])/;
+
+/// Whether a matcher reads requester fields, which the API only saves for an
+/// author who can manage permissions. Comments are ignored so a note about the
+/// requester does not raise the hint; the server's check stays authoritative.
+export function requestRuleReadsRequester(source: string): boolean {
+  return source
+    .split("\n")
+    .some((line) => REQUESTER_REFERENCE_PATTERN.test(line.replace(/#.*$/, "")));
 }

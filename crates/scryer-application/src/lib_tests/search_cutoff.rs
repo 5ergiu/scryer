@@ -188,6 +188,8 @@ async fn automatic_search_includes_permitted_upgrades_for_an_unmonitored_complet
                     facet: MediaFacet::Movie,
                     monitored: false,
                     year: Some(2024),
+                    // An unhydrated fixture has no release dates to wait on.
+                    min_availability: Some("announced".into()),
                     ..Default::default()
                 },
             )
@@ -2869,5 +2871,95 @@ async fn a_partial_batch_is_admitted_while_the_season_is_still_airing() {
     assert!(
         evaluate_admission(&finished_subject, candidate, &policy).is_admitted(),
         "a finished season's pack is a normal pack"
+    );
+}
+
+/// Searches a 2028 movie named "Quillon" against one fixed release and returns
+/// the decision code the search recorded for it.
+async fn quillon_2028_decision(release: &str) -> Option<String> {
+    let settings = Arc::new(StoredSettingsRepo::default());
+    let indexer_client = Arc::new(FixedReleaseIndexerClient::new(release));
+    let (app, user) = bootstrap_with_search_settings_and_indexer(settings, indexer_client);
+    app.create_download_client_config(
+        &user,
+        NewDownloadClientConfig {
+            name: "NZBGet".to_string(),
+            client_type: "nzbget".to_string(),
+            config_json: "{}".to_string(),
+            client_priority: 1,
+            is_enabled: true,
+            proxy_config_id: None,
+        },
+    )
+    .await
+    .expect("create download client config");
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Quillon".into(),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                external_ids: vec![ExternalId::new("tmdb".to_string(), "990777".to_string())],
+                year: Some(2028),
+                min_availability: Some("announced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create title");
+    let results = app
+        .search_indexers_for_title(
+            &user,
+            title.id.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+    results
+        .iter()
+        .find(|result| result.title == release)
+        .and_then(|result| result.auto_decision_code.clone())
+}
+
+#[tokio::test]
+async fn a_season_pack_carrying_a_movies_bare_name_is_refused_for_the_movie() {
+    for release in [
+        "[SynthSubs] Quillon (01-12) [1080p]",
+        "[SynthSubs] Quillon S01 [1080p]",
+        "Quillon.S01.1080p.BluRay.x264-SYNTH",
+    ] {
+        assert_eq!(
+            quillon_2028_decision(release).await.as_deref(),
+            Some("episodic_release_for_movie"),
+            "{release}"
+        );
+    }
+    assert_eq!(
+        quillon_2028_decision("[SynthSubs] Quillon - 01 [1080p]")
+            .await
+            .as_deref(),
+        Some("eligible")
+    );
+}
+
+#[tokio::test]
+async fn another_years_film_sharing_the_name_is_refused_as_a_year_mismatch() {
+    for release in [
+        "Quillon 2000 1080p BluRay x264-SYNTH",
+        "Quillon.2000.1080p.WEB-DL.DDP5.1.H.264-SYNTH",
+        "Quillon (2000) [1080p] [BluRay]",
+    ] {
+        assert_eq!(
+            quillon_2028_decision(release).await.as_deref(),
+            Some("title_year_mismatch"),
+            "{release}"
+        );
+    }
+    assert_eq!(
+        quillon_2028_decision("Quillon.2028.1080p.WEB-DL-SYNTH")
+            .await
+            .as_deref(),
+        Some("eligible")
     );
 }

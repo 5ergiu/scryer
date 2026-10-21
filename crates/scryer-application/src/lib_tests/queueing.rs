@@ -3522,7 +3522,8 @@ async fn queue_replacement_release_from_candidate_token_marks_manual_replacement
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -3838,7 +3839,8 @@ async fn queue_best_release_prefers_first_auto_eligible_candidate() {
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -6101,7 +6103,8 @@ async fn a_grab_saves_every_remaining_eligible_search_result() {
                 monitored: true,
                 tags: vec![],
                 external_ids: vec![],
-                min_availability: None,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -7047,6 +7050,9 @@ async fn listing_token_fixture() -> ListingTokenFixture {
                 name: "Listing Ticket".into(),
                 facet: MediaFacet::Movie,
                 monitored: true,
+                // The fixture title is never hydrated, so it has no release
+                // dates; these tests are about listings, not availability.
+                min_availability: Some("announced".into()),
                 ..Default::default()
             },
         )
@@ -7117,6 +7123,65 @@ async fn persisted_listing(fixture: &ListingTokenFixture) -> Option<String> {
     let submissions = fixture.submissions.store.lock().await.clone();
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     submissions[0].release_listing_json.clone()
+}
+
+#[tokio::test]
+async fn manual_queue_accepts_a_movie_the_availability_gate_blocks_for_automation() {
+    let fixture = listing_token_fixture().await;
+    let updated = fixture
+        .app
+        .update_title_min_availability(
+            &fixture.operator,
+            &fixture.title.id,
+            Some("released".to_string()),
+        )
+        .await
+        .expect("set movie availability");
+    assert_eq!(updated.min_availability.as_deref(), Some("released"));
+
+    // Automatic admission still refuses: the never-hydrated title has no
+    // release dates, so its auto-decision reports the availability block.
+    let subject = fixture
+        .app
+        .resolve_release_search_subject_for_title(&updated)
+        .await
+        .expect("resolve search subject");
+    let evaluated = fixture
+        .app
+        .evaluate_search_results_for_subject(
+            &updated,
+            &subject,
+            vec![
+                FixedReleaseIndexerClient::new("Listing.Ticket.2026.1080p.WEB-DL-GRP")
+                    .with_listing_facts()
+                    .release(),
+            ],
+            true,
+        )
+        .await
+        .expect("evaluate search results");
+    assert_eq!(
+        evaluated[0].auto_decision_code.as_deref(),
+        Some("movie_availability_blocked"),
+        "{:?}",
+        evaluated[0]
+    );
+
+    // The operator's own grab of the same release is never refused.
+    let offered = offer_listing_with_token(&fixture, fixed_instant("2026-05-01T10:00:00Z")).await;
+    let outcome = fixture
+        .app
+        .queue_existing_title_download_from_candidate_token(
+            &fixture.operator,
+            &fixture.title.id,
+            offered.candidate_token.as_deref().expect("candidate token"),
+            SubmissionScope::Title,
+            SubmissionConflictPolicy::Abort,
+        )
+        .await
+        .expect("a manual queue is never gated by movie availability");
+    assert!(matches!(outcome, QueueDownloadOutcome::Queued(_)));
+    assert_eq!(fixture.submissions.store.lock().await.len(), 1);
 }
 
 #[tokio::test]

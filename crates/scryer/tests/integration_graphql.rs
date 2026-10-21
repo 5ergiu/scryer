@@ -52,6 +52,8 @@ mod security_settings;
 mod title_catalog;
 #[path = "integration_graphql/title_credits.rs"]
 mod title_credits;
+#[path = "integration_graphql/title_folder_recovery.rs"]
+mod title_folder_recovery;
 #[path = "integration_graphql/title_image_cache.rs"]
 mod title_image_cache;
 #[path = "integration_graphql/title_match.rs"]
@@ -1027,6 +1029,29 @@ async fn add_test_title(ctx: &TestContext, name: &str, facet: &str) -> String {
         .to_string()
 }
 
+async fn add_available_test_movie(ctx: &TestContext, name: &str) -> String {
+    let title_id = add_test_title(ctx, name, "MOVIE").await;
+    let release_dates = scryer_domain::MovieReleaseDates {
+        market: "US".to_string(),
+        fetched: true,
+        theatrical_dates: vec!["2020-01-01".to_string()],
+        digital_dates: vec!["2020-04-01".to_string()],
+        physical_dates: vec![],
+        ..Default::default()
+    };
+    sqlx::query(
+        "UPDATE titles
+            SET min_availability = 'released', movie_release_dates_json = ?
+          WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&release_dates).expect("serialize available movie release dates"))
+    .bind(&title_id)
+    .execute(ctx.db.pool())
+    .await
+    .expect("set available movie release dates");
+    title_id
+}
+
 async fn update_title_catalog_sort_fixture(
     ctx: &TestContext,
     title_id: &str,
@@ -1178,6 +1203,88 @@ async fn title_catalog_sort_names(ctx: &TestContext, key: &str, direction: &str)
         .iter()
         .map(|item| item["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+/// Saving library settings also touches the import, permission and routing
+/// keys, which the shared typed-settings seed does not cover.
+async fn seed_library_settings_definitions(ctx: &TestContext) {
+    ctx.settings_store
+        .batch_ensure_setting_definitions(vec![
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "import.mode".into(),
+                data_type: "string".into(),
+                default_value_json: "\"hardlink_or_copy\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.set_linux".into(),
+                data_type: "boolean".into(),
+                default_value_json: "false".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.file_chmod".into(),
+                data_type: "string".into(),
+                default_value_json: "null".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.folder_chmod".into(),
+                data_type: "string".into(),
+                default_value_json: "\"755\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "permissions.chown_group".into(),
+                data_type: "string".into(),
+                default_value_json: "null".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "download_client.routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "nzbget.client_routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "indexer.routing".into(),
+                data_type: "string".into(),
+                default_value_json: "{}".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+        ])
+        .await
+        .expect("seed library import settings definitions");
 }
 
 async fn seed_typed_settings_definitions(ctx: &TestContext) {
@@ -1373,11 +1480,29 @@ async fn seed_typed_settings_definitions(ctx: &TestContext) {
                 validation_json: None,
             },
             SettingDefinitionSeed {
-                category: "acquisition".into(),
+                category: "media".into(),
                 scope: "system".into(),
-                key_name: "acquisition.delay_profiles".into(),
-                data_type: "json".into(),
-                default_value_json: "[]".into(),
+                key_name: "movie.default_availability".into(),
+                data_type: "string".into(),
+                default_value_json: "\"released\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "movie.release_market".into(),
+                data_type: "string".into(),
+                default_value_json: "\"US\"".into(),
+                is_sensitive: false,
+                validation_json: None,
+            },
+            SettingDefinitionSeed {
+                category: "media".into(),
+                scope: "system".into(),
+                key_name: "movie.availability_delay_days".into(),
+                data_type: "number".into(),
+                default_value_json: "0".into(),
                 is_sensitive: false,
                 validation_json: None,
             },
@@ -2243,6 +2368,7 @@ async fn create_series_scan_title(
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: Some(title_dir.to_string_lossy().to_string()),
     };
     let title = ctx.titles.create(title).await.expect("create series title");
@@ -2314,6 +2440,7 @@ async fn create_catalog_title(
         metadata_fetched_at: Some(Utc::now()),
         min_availability: None,
         digital_release_date: Some("2020-01-01".to_string()),
+        movie_release_dates: None,
         folder_path: None,
     };
 

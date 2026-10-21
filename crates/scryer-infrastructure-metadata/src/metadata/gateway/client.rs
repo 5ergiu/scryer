@@ -1459,6 +1459,7 @@ impl MetadataGatewayClient {
         refs: &[TitleRefInput],
         kind: TitleFetchKind,
         language: &str,
+        release_date_region: &str,
         take: impl Fn(TitlesResult) -> Vec<(i64, T)>,
     ) -> AppResult<TitleRefFetch<T>> {
         let mut title_ids_by_ref = refs
@@ -1505,6 +1506,7 @@ impl MetadataGatewayClient {
             &unique_title_ids,
             kind,
             language,
+            release_date_region,
             &take,
             &mut items_by_smg_id,
             &mut redirects,
@@ -1558,6 +1560,7 @@ impl MetadataGatewayClient {
                 &refetched_title_ids,
                 kind,
                 language,
+                release_date_region,
                 &take,
                 &mut items_by_smg_id,
                 &mut redirects,
@@ -1625,6 +1628,7 @@ impl MetadataGatewayClient {
         title_ids: &[i64],
         kind: TitleFetchKind,
         language: &str,
+        release_date_region: &str,
         take: &impl Fn(TitlesResult) -> Vec<(i64, T)>,
         items_by_smg_id: &mut HashMap<i64, T>,
         redirects: &mut Vec<(i64, i64)>,
@@ -1637,7 +1641,7 @@ impl MetadataGatewayClient {
                     OP_TITLES,
                     graphql_docs::TITLES_QUERY,
                     &self.titles_hash,
-                    kind.titles_variables(ids, language),
+                    kind.titles_variables(ids, language, release_date_region),
                 )
                 .await?;
             for redirect in &data.titles.redirects {
@@ -2315,6 +2319,13 @@ fn normalize_gateway_year(year: Option<i32>) -> Option<i32> {
 }
 
 fn movie_metadata_from_item(m: MovieItem) -> MovieMetadata {
+    movie_metadata_from_item_for_release_market(m, None)
+}
+
+fn movie_metadata_from_item_for_release_market(
+    m: MovieItem,
+    release_date_market: Option<&str>,
+) -> MovieMetadata {
     let primary_source = if m.primary_source.trim().is_empty() {
         if m.tvdb_id.is_some() {
             "tvdb".to_string()
@@ -2324,6 +2335,17 @@ fn movie_metadata_from_item(m: MovieItem) -> MovieMetadata {
     } else {
         m.primary_source.clone()
     };
+    let movie_release_dates = release_date_market.map(|market| scryer_domain::MovieReleaseDates {
+        market: market.trim().to_ascii_uppercase(),
+        fetched: m.release_dates.fetched,
+        theatrical_dates: m.release_dates.theatrical_dates,
+        digital_dates: m.release_dates.digital_dates,
+        physical_dates: m.release_dates.physical_dates,
+        any_market_theatrical_dates: m.release_dates.any_market_theatrical_dates,
+        any_market_digital_dates: m.release_dates.any_market_digital_dates,
+        any_market_physical_dates: m.release_dates.any_market_physical_dates,
+        any_market_home_dates_unusable: m.release_dates.any_market_home_dates_unusable,
+    });
     MovieMetadata {
         target_key: None,
         smg_id: m.id.or(m.title_id),
@@ -2347,6 +2369,7 @@ fn movie_metadata_from_item(m: MovieItem) -> MovieMetadata {
         canonical_tags: canonical_tags_from_gateway(m.canonical_tags),
         studio: m.studio,
         tmdb_release_date: m.tmdb_release_date,
+        movie_release_dates,
         ratings: rating_summary_from_gateway(m.rating, m.rating_sources, m.external_ratings),
         credits: credits_from_gateway(m.credits),
         genres: genres_from_gateway(m.genres),
@@ -4935,6 +4958,132 @@ mod tests {
         assert_eq!(result.missing_ref_indexes, vec![1]);
     }
 
+    #[test]
+    fn the_titles_query_asks_for_release_dates_in_the_requested_region() {
+        let query = super::graphql_docs::TITLES_QUERY;
+        assert!(query.contains("$releaseDateRegion: String!"), "{query}");
+        assert!(
+            query.contains("releaseDateRegion: $releaseDateRegion"),
+            "{query}"
+        );
+        let release_dates = query
+            .split_once("release_dates {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(fields, _)| fields.split_whitespace().collect::<Vec<_>>())
+            .expect("release_dates selection");
+        assert_eq!(
+            release_dates,
+            vec![
+                "fetched",
+                "theatrical_dates",
+                "digital_dates",
+                "physical_dates",
+                "any_market_theatrical_dates",
+                "any_market_digital_dates",
+                "any_market_physical_dates",
+                "any_market_home_dates_unusable"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn movie_titles_carry_the_regional_release_dates_the_gateway_returns() {
+        let server = MockServer::start().await;
+        let dated = merge_json(
+            minimal_movie_item_fields(),
+            json!({
+                "id": 610,
+                "kind": "movie",
+                "primary_source": "tmdb",
+                "release_dates": {
+                    "fetched": true,
+                    "theatrical_dates": ["2028-03-10"],
+                    "digital_dates": ["2028-05-02"],
+                    "physical_dates": [],
+                    "any_market_theatrical_dates": ["2028-02-14", "2028-03-10"],
+                    "any_market_digital_dates": ["2028-04-20"],
+                    "any_market_physical_dates": [],
+                    "any_market_home_dates_unusable": true
+                }
+            }),
+        );
+        let undated = merge_json(
+            minimal_movie_item_fields(),
+            json!({ "id": 611, "kind": "movie", "primary_source": "tmdb" }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/graphql"))
+            .and(query_param("operationName", super::OP_TITLES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "titles": {
+                        "movies": [dated, undated],
+                        "missing_ids": [],
+                        "redirects": []
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = unsigned_gateway_client(format!("{}/graphql", server.uri()));
+        let refs = [610, 611].map(|smg_id| MovieTitleRef {
+            smg_id: Some(smg_id),
+            tvdb_id: None,
+            tmdb_id: None,
+            imdb_id: None,
+        });
+
+        let result = client
+            .get_movie_titles_for_release_market(&refs, "eng", "gb")
+            .await
+            .expect("title-id request should succeed");
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let variables = requests
+            .iter()
+            .find_map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find_map(|(name, value)| (name == "variables").then(|| value.into_owned()))
+            })
+            .map(|value| serde_json::from_str::<serde_json::Value>(&value).expect("variables"))
+            .expect("titles variables");
+        assert_eq!(variables["releaseDateRegion"], json!("gb"));
+
+        let dated = result
+            .by_ref_index
+            .get(&0)
+            .and_then(|movie| movie.movie_release_dates.clone())
+            .expect("dated movie carries its release dates");
+        assert_eq!(dated.market, "GB");
+        assert!(dated.fetched);
+        assert_eq!(dated.theatrical_dates, vec!["2028-03-10".to_string()]);
+        assert_eq!(dated.digital_dates, vec!["2028-05-02".to_string()]);
+        assert!(dated.physical_dates.is_empty());
+        assert_eq!(
+            dated.any_market_theatrical_dates,
+            vec!["2028-02-14".to_string(), "2028-03-10".to_string()]
+        );
+        assert_eq!(
+            dated.any_market_digital_dates,
+            vec!["2028-04-20".to_string()]
+        );
+        assert!(dated.any_market_physical_dates.is_empty());
+        assert!(dated.any_market_home_dates_unusable);
+
+        // A movie the gateway has not fetched dates for reads as unfetched,
+        // never as "no release anywhere".
+        let undated = result
+            .by_ref_index
+            .get(&1)
+            .and_then(|movie| movie.movie_release_dates.clone())
+            .expect("undated movie still records the market it was asked in");
+        assert!(!undated.fetched);
+        assert!(undated.theatrical_dates.is_empty());
+    }
+
     fn tmdb_primary_series_titles_payload() -> serde_json::Value {
         let series = merge_json(
             minimal_series_item_fields(),
@@ -5981,9 +6130,16 @@ impl TitleFetchKind {
         }
     }
 
-    fn titles_variables(self, ids: &[i64], language: &str) -> serde_json::Value {
+    fn titles_variables(
+        self,
+        ids: &[i64],
+        language: &str,
+        release_date_region: &str,
+    ) -> serde_json::Value {
         match self {
-            Self::Movie => json!({ "ids": ids, "language": language }),
+            Self::Movie => {
+                json!({ "ids": ids, "language": language, "releaseDateRegion": release_date_region })
+            }
             Self::Series {
                 include_episodes,
                 include_episode_orders,
@@ -5992,6 +6148,7 @@ impl TitleFetchKind {
                 "language": language,
                 "includeEpisodes": include_episodes,
                 "includeEpisodeOrders": include_episode_orders,
+                "releaseDateRegion": release_date_region,
             }),
         }
     }
@@ -6047,6 +6204,8 @@ struct MovieItem {
     studio: String,
     tmdb_release_date: Option<String>,
     #[serde(default)]
+    release_dates: MovieReleaseDatesItem,
+    #[serde(default)]
     rating: Option<f64>,
     #[serde(default)]
     rating_sources: Vec<String>,
@@ -6056,6 +6215,26 @@ struct MovieItem {
     credits: Vec<CreditItem>,
     #[serde(default)]
     artworks: Vec<ArtworkItem>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct MovieReleaseDatesItem {
+    #[serde(default)]
+    fetched: bool,
+    #[serde(default)]
+    theatrical_dates: Vec<String>,
+    #[serde(default)]
+    digital_dates: Vec<String>,
+    #[serde(default)]
+    physical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_theatrical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_digital_dates: Vec<String>,
+    #[serde(default)]
+    any_market_physical_dates: Vec<String>,
+    #[serde(default)]
+    any_market_home_dates_unusable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7108,6 +7287,16 @@ impl MetadataGateway for MetadataGatewayClient {
         refs: &[MovieTitleRef],
         language: &str,
     ) -> AppResult<MovieTitleBulkResult> {
+        self.get_movie_titles_for_release_market(refs, language, "US")
+            .await
+    }
+
+    async fn get_movie_titles_for_release_market(
+        &self,
+        refs: &[MovieTitleRef],
+        language: &str,
+        release_market: &str,
+    ) -> AppResult<MovieTitleBulkResult> {
         if refs.is_empty() {
             return Ok(MovieTitleBulkResult::default());
         }
@@ -7116,16 +7305,25 @@ impl MetadataGateway for MetadataGatewayClient {
             .map(title_ref_input_from_ref)
             .collect::<Vec<_>>();
         let fetched = self
-            .fetch_titles_by_ref(&inputs, TitleFetchKind::Movie, language, |titles| {
-                titles
-                    .movies
-                    .into_iter()
-                    .filter_map(|movie| {
-                        let metadata = movie_metadata_from_item(movie);
-                        metadata.smg_id.map(|smg_id| (smg_id, metadata))
-                    })
-                    .collect()
-            })
+            .fetch_titles_by_ref(
+                &inputs,
+                TitleFetchKind::Movie,
+                language,
+                release_market,
+                |titles| {
+                    titles
+                        .movies
+                        .into_iter()
+                        .filter_map(|movie| {
+                            let metadata = movie_metadata_from_item_for_release_market(
+                                movie,
+                                Some(release_market),
+                            );
+                            metadata.smg_id.map(|smg_id| (smg_id, metadata))
+                        })
+                        .collect()
+                },
+            )
             .await?;
         Ok(MovieTitleBulkResult {
             by_ref_index: fetched.by_ref_index,
@@ -7156,6 +7354,7 @@ impl MetadataGateway for MetadataGatewayClient {
                     include_episode_orders,
                 },
                 language,
+                "US",
                 |titles| {
                     titles
                         .series

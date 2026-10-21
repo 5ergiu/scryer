@@ -18,6 +18,81 @@ use crate::runtime_backing::PreopenSpec;
 /// via `PluginInstanceSpec::memory_max_bytes`.
 pub(crate) const DEFAULT_ARCHIVE_MEMORY_CAP_BYTES: usize = 1024 * 1024 * 1024;
 
+/// Default memory cap for one indexer component Store: 128 MiB.
+///
+/// An indexer guest holds at most one upstream HTTP body at a time, and the
+/// host caps each body at 50 MiB (`DEFAULT_MAX_HTTP_RESPONSE_BYTES` in
+/// `component_host`). Parsing a feed into results and serializing the response
+/// costs roughly another body's worth, so ~100 MiB covers the worst legitimate
+/// single page plus allocator slack; anything beyond that is accumulation, not
+/// a page. The archive 1 GiB cap is sized for solid-RAR dictionaries and must
+/// not be inherited by indexers: one Store is retained per configured indexer,
+/// so a 1 GiB ceiling let three indexers grow a 4 GiB host into the OOM killer.
+/// `SCRYER_INDEXER_PLUGIN_MEMORY_MAX_MIB` overrides it.
+pub(crate) const DEFAULT_INDEXER_MEMORY_CAP_BYTES: usize = 128 * 1024 * 1024;
+
+/// Default retention watermark for an indexer component Store: 32 MiB.
+///
+/// Wasm linear memory never shrinks, so a retained Store keeps its peak
+/// resident for the life of the process. A Store whose linear memory exceeds
+/// this after an invocation is dropped and re-instantiated on the next call;
+/// instantiation from the pre-linked component costs milliseconds.
+/// `SCRYER_INDEXER_PLUGIN_RETAIN_WATERMARK_MIB` overrides it.
+pub(crate) const DEFAULT_INDEXER_RETAIN_WATERMARK_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) const INDEXER_MEMORY_CAP_ENV: &str = "SCRYER_INDEXER_PLUGIN_MEMORY_MAX_MIB";
+const INDEXER_RETAIN_WATERMARK_ENV: &str = "SCRYER_INDEXER_PLUGIN_RETAIN_WATERMARK_MIB";
+
+/// Memory bounds for indexer component Stores: the hard per-Store cap enforced
+/// by [`HostLimits`] and the watermark above which the adapter releases a
+/// retained Store after an invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IndexerMemoryPolicy {
+    pub(crate) cap_bytes: usize,
+    pub(crate) retain_watermark_bytes: usize,
+}
+
+impl Default for IndexerMemoryPolicy {
+    fn default() -> Self {
+        Self {
+            cap_bytes: DEFAULT_INDEXER_MEMORY_CAP_BYTES,
+            retain_watermark_bytes: DEFAULT_INDEXER_RETAIN_WATERMARK_BYTES,
+        }
+    }
+}
+
+impl IndexerMemoryPolicy {
+    /// The process-wide policy, read once from the environment.
+    pub(crate) fn from_env() -> Self {
+        static POLICY: std::sync::OnceLock<IndexerMemoryPolicy> = std::sync::OnceLock::new();
+        *POLICY.get_or_init(|| {
+            Self::from_values(
+                std::env::var(INDEXER_MEMORY_CAP_ENV).ok().as_deref(),
+                std::env::var(INDEXER_RETAIN_WATERMARK_ENV).ok().as_deref(),
+            )
+        })
+    }
+
+    /// Parse MiB overrides; unset, empty, zero or malformed values keep the
+    /// default. The watermark never exceeds the cap.
+    pub(crate) fn from_values(cap_mib: Option<&str>, watermark_mib: Option<&str>) -> Self {
+        let parse = |value: Option<&str>| {
+            value
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|mib| *mib > 0)
+                .and_then(|mib| mib.checked_mul(1024 * 1024))
+        };
+        let cap_bytes = parse(cap_mib).unwrap_or(DEFAULT_INDEXER_MEMORY_CAP_BYTES);
+        let retain_watermark_bytes = parse(watermark_mib)
+            .unwrap_or(DEFAULT_INDEXER_RETAIN_WATERMARK_BYTES)
+            .min(cap_bytes);
+        Self {
+            cap_bytes,
+            retain_watermark_bytes,
+        }
+    }
+}
+
 /// Table-element ceiling for an archive instance. The shipped guest never grows
 /// its function table; a finite cap stops a buggy/hostile (still-signed) artifact
 /// from allocating host memory via `table.grow` in a loop — the dimension a
@@ -46,24 +121,51 @@ const STDERR_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 /// Memory-cap limiter that also records the first denial, so the error mapper
 /// can attribute an OOM/limit trap to the resource limit rather than a generic
 /// fault. A superset of `StoreLimits::memory_size`.
+///
+/// It also records how large the Store's linear memory got: wasmtime reports
+/// every memory's creation (`current == 0`) and growth here, and linear memory
+/// never shrinks, so the sum of granted growth is the Store's resident linear
+/// memory and also its peak.
 pub(crate) struct HostLimits {
     max_memory_bytes: usize,
     pub(crate) memory_denied: bool,
+    /// Largest single linear memory granted (the value the cap is checked on).
+    largest_memory_bytes: usize,
+    /// Linear memory granted across every memory in the Store.
+    resident_memory_bytes: usize,
 }
 
 impl HostLimits {
     pub(crate) fn new(max_memory_bytes: Option<usize>) -> Self {
+        Self::with_cap(max_memory_bytes.unwrap_or(DEFAULT_ARCHIVE_MEMORY_CAP_BYTES))
+    }
+
+    pub(crate) fn with_cap(max_memory_bytes: usize) -> Self {
         Self {
-            max_memory_bytes: max_memory_bytes.unwrap_or(DEFAULT_ARCHIVE_MEMORY_CAP_BYTES),
+            max_memory_bytes,
             memory_denied: false,
+            largest_memory_bytes: 0,
+            resident_memory_bytes: 0,
         }
+    }
+
+    pub(crate) const fn max_memory_bytes(&self) -> usize {
+        self.max_memory_bytes
+    }
+
+    pub(crate) const fn largest_memory_bytes(&self) -> usize {
+        self.largest_memory_bytes
+    }
+
+    pub(crate) const fn resident_memory_bytes(&self) -> usize {
+        self.resident_memory_bytes
     }
 }
 
 impl wasmtime::ResourceLimiter for HostLimits {
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
@@ -71,6 +173,10 @@ impl wasmtime::ResourceLimiter for HostLimits {
             self.memory_denied = true;
             return Ok(false);
         }
+        self.largest_memory_bytes = self.largest_memory_bytes.max(desired);
+        self.resident_memory_bytes = self
+            .resident_memory_bytes
+            .saturating_add(desired.saturating_sub(current));
         Ok(true)
     }
 
@@ -183,6 +289,72 @@ mod tests {
         let limits = HostLimits::new(None);
         assert_eq!(limits.max_memory_bytes, DEFAULT_ARCHIVE_MEMORY_CAP_BYTES);
         assert!(!limits.memory_denied);
+    }
+
+    #[test]
+    fn indexer_cap_is_separate_from_and_smaller_than_the_archive_cap() {
+        let policy = IndexerMemoryPolicy::default();
+        assert_eq!(policy.cap_bytes, DEFAULT_INDEXER_MEMORY_CAP_BYTES);
+        assert_eq!(policy.cap_bytes, 128 * 1024 * 1024);
+        assert_eq!(policy.retain_watermark_bytes, 32 * 1024 * 1024);
+        assert_ne!(policy.cap_bytes, DEFAULT_ARCHIVE_MEMORY_CAP_BYTES);
+        assert!(policy.cap_bytes < DEFAULT_ARCHIVE_MEMORY_CAP_BYTES);
+        assert!(policy.retain_watermark_bytes < policy.cap_bytes);
+        assert_eq!(
+            HostLimits::with_cap(policy.cap_bytes).max_memory_bytes(),
+            DEFAULT_INDEXER_MEMORY_CAP_BYTES
+        );
+        // The archive default is untouched.
+        assert_eq!(
+            HostLimits::new(None).max_memory_bytes(),
+            DEFAULT_ARCHIVE_MEMORY_CAP_BYTES
+        );
+    }
+
+    #[test]
+    fn indexer_memory_policy_parses_mib_overrides() {
+        assert_eq!(
+            IndexerMemoryPolicy::from_values(None, None),
+            IndexerMemoryPolicy::default()
+        );
+        assert_eq!(
+            IndexerMemoryPolicy::from_values(Some(" 256 "), Some("64")),
+            IndexerMemoryPolicy {
+                cap_bytes: 256 * 1024 * 1024,
+                retain_watermark_bytes: 64 * 1024 * 1024,
+            }
+        );
+        // Zero and garbage keep the defaults.
+        assert_eq!(
+            IndexerMemoryPolicy::from_values(Some("0"), Some("lots")),
+            IndexerMemoryPolicy::default()
+        );
+        // The watermark is clamped to the cap.
+        assert_eq!(
+            IndexerMemoryPolicy::from_values(Some("16"), None),
+            IndexerMemoryPolicy {
+                cap_bytes: 16 * 1024 * 1024,
+                retain_watermark_bytes: 16 * 1024 * 1024,
+            }
+        );
+    }
+
+    #[test]
+    fn limiter_tracks_peak_and_resident_memory() {
+        use wasmtime::ResourceLimiter;
+        let mut limits = HostLimits::with_cap(1 << 20);
+        assert_eq!(limits.resident_memory_bytes(), 0);
+        // Creation of two memories, then growth of the first.
+        assert!(limits.memory_growing(0, 65536, None).unwrap());
+        assert!(limits.memory_growing(0, 4096, None).unwrap());
+        assert!(limits.memory_growing(65536, 262_144, None).unwrap());
+        assert_eq!(limits.largest_memory_bytes(), 262_144);
+        assert_eq!(limits.resident_memory_bytes(), 262_144 + 4096);
+        // A denied growth changes neither figure but is recorded.
+        assert!(!limits.memory_growing(262_144, 2 << 20, None).unwrap());
+        assert!(limits.memory_denied);
+        assert_eq!(limits.largest_memory_bytes(), 262_144);
+        assert_eq!(limits.resident_memory_bytes(), 262_144 + 4096);
     }
 
     #[test]

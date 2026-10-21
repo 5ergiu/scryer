@@ -7,11 +7,10 @@
 //! 1. **The requester and the approver see different things.** A pre-flight has
 //!    no vote field at all, and a stored decision read back by its own requester
 //!    comes back with `votes` emptied and its `reasons` intact (FR-020).
-//! 2. **Arming is three deliberate steps.** A rule is created disabled, armed by
-//!    a second call, and the instance gate is a third — and each step is gated
-//!    on a different authority.
-//! 3. **A verdict reaches the request.** With the gate on and a rule in
-//!    `ENFORCE`, a submitted request comes back approved or rejected, the title
+//! 2. **Enabling is a deliberate step.** A rule is created disabled and enabled
+//!    by a second call that needs catalog administration.
+//! 3. **A verdict reaches the request.** With a rule enabled, a submitted
+//!    request comes back approved or rejected, the title
 //!    carries the policy tags, the lease is a real claim, and the trace explains
 //!    all of it.
 
@@ -137,7 +136,6 @@ const RULE_SET_FIELDS: &str = r#"
     name
     description
     enabled
-    evaluationMode
     libraryIds
     currentRevisionNumber
     decisionCount
@@ -169,12 +167,11 @@ fn create_mutation() -> String {
     )
 }
 
-fn set_mode_mutation() -> String {
+fn set_enabled_mutation() -> String {
     format!(
-        "mutation($input: SetRequestRuleModeInput!) {{
-            setRequestRuleMode(input: $input) {{{}}}
-        }}",
-        detail_fields()
+        "mutation($ruleSetId: ID!, $enabled: Boolean!) {{
+            setRequestRuleEnabled(ruleSetId: $ruleSetId, enabled: $enabled) {{{RULE_SET_FIELDS}}}
+        }}"
     )
 }
 
@@ -339,14 +336,18 @@ async fn create_rule(ctx: &TestContext, name: &str, rego: &str) -> String {
         .to_string()
 }
 
-async fn set_mode(ctx: &TestContext, rule_set_id: &str, mode: &str) {
+async fn set_enabled(ctx: &TestContext, rule_set_id: &str, enabled: bool) {
     let body = gql(
         ctx,
-        &set_mode_mutation(),
-        json!({ "input": { "ruleSetId": rule_set_id, "mode": mode } }),
+        &set_enabled_mutation(),
+        json!({ "ruleSetId": rule_set_id, "enabled": enabled }),
     )
     .await;
     assert_no_errors(&body);
+    assert_eq!(
+        body["data"]["setRequestRuleEnabled"]["enabled"],
+        json!(enabled)
+    );
 }
 
 /// Answer the title-id metadata query the request enrichment actually makes.
@@ -451,29 +452,6 @@ async fn mount_title_id_metadata(ctx: &TestContext) {
     }
 }
 
-/// Register the gate definition the way service bootstrap does.
-///
-/// The harness builds its stores directly rather than running bootstrap, and
-/// the settings store refuses a write against an unregistered key. The
-/// production seed lives beside the maintenance gates in
-/// `crates/scryer/src/settings_bootstrap.rs`.
-async fn seed_request_rule_gate_definition(ctx: &TestContext) {
-    ctx.settings_store
-        .batch_ensure_setting_definitions(vec![
-            scryer_infrastructure_sql::types::SettingDefinitionSeed {
-                category: "general".into(),
-                scope: "system".into(),
-                key_name: scryer_application::REQUEST_RULE_GATE_EVALUATION_KEY.into(),
-                data_type: "boolean".into(),
-                default_value_json: "false".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-        ])
-        .await
-        .expect("seed the request-rule gate definition");
-}
-
 /// Register `label` in the administrator tag registry, which is the only
 /// vocabulary a title may carry.
 async fn define_title_tag(ctx: &TestContext, label: &str) -> String {
@@ -492,36 +470,17 @@ async fn define_title_tag(ctx: &TestContext, label: &str) -> String {
         .to_string()
 }
 
-async fn arm_gate(ctx: &TestContext, enabled: bool) {
-    seed_request_rule_gate_definition(ctx).await;
-    let body = gql(
-        ctx,
-        "mutation($input: SetRequestRuleInstanceGatesInput!) {
-            setRequestRuleInstanceGates(input: $input) { evaluationEnabled }
-        }",
-        json!({ "input": { "evaluationEnabled": enabled } }),
-    )
-    .await;
-    assert_no_errors(&body);
-    assert_eq!(
-        body["data"]["setRequestRuleInstanceGates"]["evaluationEnabled"],
-        json!(enabled)
-    );
-}
-
-/// Arm one rule in `mode` with the instance gate on, then submit one request as
-/// `actor`, returning that requester's view of their own request.
+/// Enable one rule, then submit one request as `actor`, returning that
+/// requester's view of their own request.
 async fn submit_under(
     ctx: &TestContext,
     actor: &User,
     rego: &str,
-    mode: &str,
     lease_days: Option<i32>,
 ) -> Value {
     mount_title_id_metadata(ctx).await;
     let rule_set_id = create_rule(ctx, "Policy under test", rego).await;
-    set_mode(ctx, &rule_set_id, mode).await;
-    arm_gate(ctx, true).await;
+    set_enabled(ctx, &rule_set_id, true).await;
 
     let submitted = gql_as(
         ctx,
@@ -571,9 +530,8 @@ async fn request_rule_create_list_get_and_revisions_round_trip() {
     let id = rule_set["id"].as_str().expect("rule set id").to_string();
     assert_eq!(rule_set["name"], "Approve manual requests");
     assert_eq!(rule_set["description"], "Everything a person asked for");
-    // Created disabled: arming is a second, deliberate call.
+    // Created disabled: enabling is a second, deliberate call.
     assert_eq!(rule_set["enabled"], false);
-    assert_eq!(rule_set["evaluationMode"], "DISABLED");
     assert_eq!(rule_set["libraryIds"], json!([movie_library_id()]));
     assert_eq!(rule_set["currentRevisionNumber"], 1);
     assert_eq!(rule_set["decisionCount"], 0);
@@ -919,8 +877,7 @@ async fn the_requester_preflight_returns_an_outcome_without_any_rule_internals()
     let requester = requester(&ctx, "preflight-requester").await;
 
     let rule_set_id = create_rule(&ctx, "Deny everything", DENY_EVERYTHING).await;
-    set_mode(&ctx, &rule_set_id, "ENFORCE").await;
-    arm_gate(&ctx, true).await;
+    set_enabled(&ctx, &rule_set_id, true).await;
 
     let body = gql_as(
         &ctx,
@@ -986,70 +943,35 @@ async fn the_requester_preflight_returns_an_outcome_without_any_rule_internals()
 }
 
 // ===========================================================================
-// 6. The instance gate
+// 6. Enabling a rule
 // ===========================================================================
 
 #[tokio::test]
-async fn the_instance_gate_needs_system_settings_authority() {
+async fn enabling_a_rule_needs_catalog_settings_authority_and_round_trips() {
     let ctx = TestContext::new().await;
-    seed_request_rule_gate_definition(&ctx).await;
+    let rule_set_id = create_rule(&ctx, "Deny everything", DENY_EVERYTHING).await;
 
-    let catalog_only = user_with(
+    let viewer = user_with(
         &ctx,
-        "catalog-admin",
-        AppPermissionMask::from_permissions([AppPermission::ManageCatalogSettings]),
+        "rule-viewer",
+        AppPermissionMask::NONE,
         LibraryPermissionMask::NONE,
     )
     .await;
-
     let refused = gql_as(
         &ctx,
-        "mutation($input: SetRequestRuleInstanceGatesInput!) {
-            setRequestRuleInstanceGates(input: $input) { evaluationEnabled }
-        }",
-        json!({ "input": { "evaluationEnabled": true } }),
-        &catalog_only,
+        &set_enabled_mutation(),
+        json!({ "ruleSetId": rule_set_id, "enabled": true }),
+        &viewer,
     )
     .await;
     assert!(
         refused.get("errors").is_some(),
-        "arming the instance is a system setting, not catalog administration: {refused}"
+        "enabling a rule is catalog administration: {refused}"
     );
 
-    let read_refused = gql_as(
-        &ctx,
-        "query { requestRuleInstanceGates { evaluationEnabled } }",
-        json!({}),
-        &catalog_only,
-    )
-    .await;
-    assert!(read_refused.get("errors").is_some());
-
-    // Off by default.
-    let gates = gql(
-        &ctx,
-        "query { requestRuleInstanceGates { evaluationEnabled } }",
-        json!({}),
-    )
-    .await;
-    assert_no_errors(&gates);
-    assert_eq!(
-        gates["data"]["requestRuleInstanceGates"]["evaluationEnabled"],
-        false
-    );
-
-    arm_gate(&ctx, true).await;
-    let armed = gql(
-        &ctx,
-        "query { requestRuleInstanceGates { evaluationEnabled } }",
-        json!({}),
-    )
-    .await;
-    assert_no_errors(&armed);
-    assert_eq!(
-        armed["data"]["requestRuleInstanceGates"]["evaluationEnabled"],
-        true
-    );
+    set_enabled(&ctx, &rule_set_id, true).await;
+    set_enabled(&ctx, &rule_set_id, false).await;
 }
 
 // ===========================================================================
@@ -1064,7 +986,7 @@ async fn an_enforced_approval_leases_the_title_and_explains_itself() {
     // defined is dropped at approval, so the label under test is defined first.
     define_title_tag(&ctx, "auto-approved").await;
 
-    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, "ENFORCE", Some(30)).await;
+    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, Some(30)).await;
 
     assert_eq!(request["status"], "APPROVED");
     assert_eq!(request["requestedLeaseDays"], 30);
@@ -1147,7 +1069,7 @@ async fn an_enforced_denial_rejects_the_request_and_shows_the_requester_why() {
     let ctx = TestContext::new().await;
     let requester = requester(&ctx, "denied-requester").await;
 
-    let request = submit_under(&ctx, &requester, DENY_EVERYTHING, "ENFORCE", None).await;
+    let request = submit_under(&ctx, &requester, DENY_EVERYTHING, None).await;
 
     assert_eq!(request["status"], "REJECTED");
     assert!(
@@ -1168,22 +1090,33 @@ async fn an_enforced_denial_rejects_the_request_and_shows_the_requester_why() {
 }
 
 #[tokio::test]
-async fn a_shadow_rule_records_its_verdict_without_acting_on_it() {
+async fn a_disabled_rule_leaves_the_request_waiting_for_review() {
     let ctx = TestContext::new().await;
-    let requester = requester(&ctx, "shadow-requester").await;
+    let requester = requester(&ctx, "disabled-rule-requester").await;
+    mount_title_id_metadata(&ctx).await;
+    create_rule(&ctx, "Approve everything", APPROVE_EVERYTHING).await;
 
-    let request = submit_under(&ctx, &requester, DENY_EVERYTHING, "SHADOW", None).await;
+    let submitted = gql_as(
+        &ctx,
+        "mutation($input: SubmitMediaRequestInput!) {
+            submitMediaRequest(input: $input) { requestId }
+        }",
+        json!({ "input": submit_input(None) }),
+        &requester,
+    )
+    .await;
+    assert_no_errors(&submitted);
 
+    let mine = gql_as(&ctx, &my_requests_query(), json!({}), &requester).await;
+    assert_no_errors(&mine);
+    let request = &mine["data"]["myMediaRequests"][0];
     assert_eq!(
         request["status"], "PENDING",
-        "shadow decides nothing: {request}"
+        "a disabled rule decides nothing: {request}"
     );
-    let decision = &request["decision"];
-    assert_eq!(decision["mode"], "SHADOW");
-    assert_eq!(decision["policyOutcome"], "DENY");
-    assert_ne!(
-        decision["effectiveOutcome"], "DENY",
-        "the effective outcome stays what the permission alone would have produced"
+    assert!(
+        request["decision"].is_null(),
+        "no enabled rule took part, so nothing is traced: {request}"
     );
 }
 
@@ -1196,7 +1129,7 @@ async fn administrators_extend_convert_and_release_a_claim_and_requesters_cannot
     let ctx = TestContext::new().await;
     let requester = requester(&ctx, "claim-requester").await;
 
-    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, "ENFORCE", Some(30)).await;
+    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, Some(30)).await;
     let title_id = request["createdTitleId"]
         .as_str()
         .expect("title id")
@@ -1303,6 +1236,46 @@ async fn administrators_extend_convert_and_release_a_claim_and_requesters_cannot
     );
 }
 
+#[tokio::test]
+async fn keeping_a_title_is_one_operator_keep_however_often_it_is_asked() {
+    let ctx = TestContext::new().await;
+    let requester = requester(&ctx, "keep-requester").await;
+    let request = submit_under(&ctx, &requester, APPROVE_EVERYTHING, Some(30)).await;
+    let title_id = request["createdTitleId"].as_str().expect("title id");
+    let keep = format!(
+        "mutation($titleId: ID!) {{ createOperatorKeepClaim(titleId: $titleId) {{{CLAIM_FIELDS}}} }}"
+    );
+
+    let refused = gql_as(&ctx, &keep, json!({ "titleId": title_id }), &requester).await;
+    assert!(refused.get("errors").is_some(), "{refused}");
+
+    let first = gql(&ctx, &keep, json!({ "titleId": title_id })).await;
+    assert_no_errors(&first);
+    let kept = &first["data"]["createOperatorKeepClaim"];
+    assert_eq!(kept["producer"], "OPERATOR_KEEP");
+    assert_eq!(kept["kind"], "KEEP");
+    assert_eq!(kept["state"], "ACTIVE");
+
+    let second = gql(&ctx, &keep, json!({ "titleId": title_id })).await;
+    assert_no_errors(&second);
+    assert_eq!(second["data"]["createOperatorKeepClaim"]["id"], kept["id"]);
+
+    let claims = gql(
+        &ctx,
+        &format!("query($titleId: ID!) {{ titleClaims(titleId: $titleId) {{{CLAIM_FIELDS}}} }}"),
+        json!({ "titleId": title_id }),
+    )
+    .await;
+    assert_no_errors(&claims);
+    let operator_keeps = claims["data"]["titleClaims"]
+        .as_array()
+        .expect("claims")
+        .iter()
+        .filter(|claim| claim["producer"] == "OPERATOR_KEEP")
+        .count();
+    assert_eq!(operator_keeps, 1, "{claims}");
+}
+
 // ===========================================================================
 // 9. The decision browser
 // ===========================================================================
@@ -1312,7 +1285,7 @@ async fn recent_decisions_filter_by_outcome_and_need_catalog_authority() {
     let ctx = TestContext::new().await;
     let requester = requester(&ctx, "browsed-requester").await;
 
-    submit_under(&ctx, &requester, DENY_EVERYTHING, "ENFORCE", None).await;
+    submit_under(&ctx, &requester, DENY_EVERYTHING, None).await;
 
     let denials = gql(
         &ctx,
@@ -1396,7 +1369,7 @@ async fn renaming_a_title_tag_follows_pending_requests_and_names_the_request_rul
     let requester = requester(&ctx, "renamed-tag-requester").await;
     let definition_id = define_title_tag(&ctx, "family").await;
 
-    let request = submit_under(&ctx, &requester, MANUAL_WITH_TAG, "ENFORCE", None).await;
+    let request = submit_under(&ctx, &requester, MANUAL_WITH_TAG, None).await;
     assert_eq!(request["status"], "PENDING");
     assert_eq!(request["policyTags"], json!(["family"]));
 
@@ -1455,7 +1428,7 @@ async fn deleting_a_title_tag_strips_it_from_pending_requests() {
     let requester = requester(&ctx, "deleted-tag-requester").await;
     let definition_id = define_title_tag(&ctx, "family").await;
 
-    let request = submit_under(&ctx, &requester, MANUAL_WITH_TAG, "ENFORCE", None).await;
+    let request = submit_under(&ctx, &requester, MANUAL_WITH_TAG, None).await;
     assert_eq!(request["policyTags"], json!(["family"]));
 
     let deleted = gql(

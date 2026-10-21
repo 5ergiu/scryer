@@ -692,6 +692,38 @@ fn numeric_score(decision: &QualityProfileDecision) -> i32 {
     )
 }
 
+/// The parse every scoring pass reads: the release as named, with its audio
+/// languages filled in from the listing's indexer languages and the title.
+///
+/// Most release names say nothing about audio. Without this, a profile that
+/// requires a language rejects such a release as
+/// `required_audio_language_missing`. It runs inside [`run_term_pipeline`], so
+/// no lane can score without it; lanes hand the scorer the raw parse. The
+/// audio context is keyed on the title's facet (`ctx.category`), never a
+/// search category, which collapses anime movies to `"movie"` and breaks
+/// dual-audio inference. Idempotent: filling an already filled parse changes
+/// nothing.
+pub(crate) fn canonical_parse(
+    parsed: &ParsedReleaseMetadata,
+    listing: Option<&ListingFacts>,
+    ctx: &ScoringContext<'_>,
+) -> ParsedReleaseMetadata {
+    let language_context = crate::title_audio_language_context(
+        ctx.original_language,
+        ctx.original_country,
+        Some(ctx.category),
+        ctx.title_tags,
+    );
+    let mut enriched = parsed.clone();
+    enriched.languages_audio = crate::release_audio_language_hints_for_title(
+        parsed,
+        listing.map(|listing| listing.snapshot.indexer_languages.as_slice()),
+        Some(&language_context),
+        !ctx.required_audio_languages.is_empty(),
+    );
+    enriched
+}
+
 /// The one term sequence. Both evidence levels walk exactly this path; the only
 /// thing that varies is the facts handed in.
 fn run_term_pipeline(
@@ -702,6 +734,7 @@ fn run_term_pipeline(
     ctx: &ScoringContext<'_>,
     rules: &mut RuleEvaluationBatch,
 ) -> QualityProfileDecision {
+    let parsed = &canonical_parse(parsed, listing, ctx);
     let mut resolved_profile = ctx.profile.clone();
     resolved_profile.criteria.required_audio_languages = ctx.required_audio_languages.to_vec();
 

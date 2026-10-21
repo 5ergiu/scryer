@@ -15,6 +15,7 @@ export type LongValue = number | string;
 
 export type LocationOperationType =
   | "FOLDER_REASSIGNMENT"
+  | "TITLE_FOLDER_RECOVERY"
   | "ROOT_MOVE"
   | "ROOT_CHANGE"
   | "ROOT_CONSOLIDATION"
@@ -23,6 +24,7 @@ export type LocationOperationType =
 /** How the filesystem side of an operation is performed. */
 export type LocationExecutionMode =
   | "MOVE_WITH_SCRYER"
+  | "COPY_PRESERVE_SOURCES"
   | "USER_MOVED_FILES"
   | "CATALOG_ONLY";
 

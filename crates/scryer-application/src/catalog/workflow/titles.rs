@@ -729,6 +729,11 @@ impl AppUseCase {
                 episode_number: summary.episode_number,
                 current_tier: normalized_current_tier,
                 target_tier: normalized_cutoff_tier.clone(),
+                min_availability: title.min_availability.clone(),
+                first_aired: title.first_aired.clone(),
+                digital_release_date: title.digital_release_date.clone(),
+                metadata_fetched: title.metadata_fetched_at.is_some(),
+                movie_release_dates: title.movie_release_dates.clone(),
             });
         }
 
@@ -2273,6 +2278,7 @@ impl AppUseCase {
                 scryer_domain::LibraryPermission::View,
             )
             .await?;
+        let unscoped = library_id.is_none() && library_slug.is_none();
         if let Some(requested_library_id) = library_id {
             authorized_libraries.retain(|library| library.id == requested_library_id);
         }
@@ -2285,6 +2291,36 @@ impl AppUseCase {
             } else {
                 authorized_libraries
                     .retain(|library| library.slug.eq_ignore_ascii_case(normalized_slug));
+            }
+        }
+        // A route without a library segment (`/movies/<slug>`) is the default
+        // library's deep link: the path builder omits the segment only for the
+        // default library. The same slug can legitimately exist in another
+        // library (a vault copy of a film), so an unscoped lookup resolves the
+        // default library first and only widens to every authorized library
+        // when the default one has no such title. Widening past a unique
+        // default-library match would turn a valid deep link into an
+        // ambiguity error.
+        if unscoped {
+            let default_library_ids = authorized_libraries
+                .iter()
+                .filter(|library| library.is_default)
+                .map(|library| library.id.clone())
+                .collect::<Vec<_>>();
+            if let Some(title) = self
+                .services
+                .catalog
+                .titles
+                .get_by_facet_libraries_and_slug(facet.clone(), &default_library_ids, slug)
+                .await?
+            {
+                self.require_library_permission(
+                    actor,
+                    &title.library_id,
+                    scryer_domain::LibraryPermission::View,
+                )
+                .await?;
+                return Ok(Some(title));
             }
         }
         let library_ids = authorized_libraries

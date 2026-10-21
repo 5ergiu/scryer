@@ -12,7 +12,6 @@ import {
   maintenanceRulesSectionFromPath,
   resolveAppRoute,
   rulesSectionFromPath,
-  rulesSectionsFor,
   type ParsedAppRoute,
 } from "./routing.ts";
 import { isMediaSettingsSection } from "./routes.ts";
@@ -63,7 +62,6 @@ test("canonical route families resolve to typed application state", () => {
     "/automation/rules/maintenance",
     "/automation/rules/maintenance/candidates",
     "/automation/rules/maintenance/history",
-    "/automation/rules/maintenance/gates",
     "/automation/rules/request",
     "/automation/subtitles",
     "/automation/post-processing",
@@ -144,8 +142,9 @@ test("0.16 route aliases redirect to canonical 0.17 paths", () => {
     ["/automation/rules/maintenance-rules", "/automation/rules/maintenance"],
     ["/automation/rules/maintenance/rules", "/automation/rules/maintenance"],
     ["/automation/rules/request-rules", "/automation/rules/request"],
-    // Exclusions moved in with the gates.
-    ["/automation/rules/maintenance/exclusions", "/automation/rules/maintenance/gates"],
+    // Folded panes redirect: exclusions to the candidates, gates to the list.
+    ["/automation/rules/maintenance/exclusions", "/automation/rules/maintenance/candidates"],
+    ["/automation/rules/maintenance/gates", "/automation/rules/maintenance"],
     ["/automation/rules/maintenance/runs", "/automation/rules/maintenance/history"],
     ["/settings/subtitles", "/automation/subtitles"],
     ["/settings/post-processing", "/automation/post-processing"],
@@ -298,7 +297,6 @@ test("the rules page carries all three kinds of rule as panes", () => {
     "/automation/rules/maintenance",
     "/automation/rules/maintenance/candidates",
     "/automation/rules/maintenance/history",
-    "/automation/rules/maintenance/gates",
   ]) {
     const route = canonical(path);
     assert.equal(route.canonicalPath, path, path);
@@ -318,7 +316,7 @@ test("the rules page carries all three kinds of rule as panes", () => {
   assert.deepEqual(resolveAppRoute("/automation/rules/request/decisions"), {
     kind: "not-found",
   });
-  assert.deepEqual(resolveAppRoute("/automation/rules/maintenance/gates/extra"), {
+  assert.deepEqual(resolveAppRoute("/automation/rules/maintenance/history/extra"), {
     kind: "not-found",
   });
 });
@@ -327,7 +325,7 @@ test("rules pane paths round-trip through the section helpers", () => {
   for (const section of ["scoring", "maintenance", "request"] as const) {
     assert.equal(rulesSectionFromPath(buildRulesPath(section)), section, section);
   }
-  for (const section of ["rules", "candidates", "history", "gates"] as const) {
+  for (const section of ["rules", "candidates", "history"] as const) {
     const path = buildRulesPath("maintenance", section);
     assert.equal(maintenanceRulesSectionFromPath(path), section, section);
     assert.equal(rulesSectionFromPath(path), "maintenance", section);
@@ -350,16 +348,9 @@ test("indexerSettingsTabs always offers the search pane", () => {
   assert.equal(buildIndexerSettingsPath("indexers"), "/integrations/indexers");
 });
 
-test("rulesSectionsFor drops maintenance and request rules until experimental features are on", () => {
-  assert.deepEqual(rulesSectionsFor(true), ["scoring", "maintenance", "request"]);
-  // One entry left means there is no kind to switch between, which is how the
-  // Rules page decides to drop its kind rail.
-  assert.deepEqual(rulesSectionsFor(false), ["scoring"]);
-  // Scoring stays reachable either way, and its path is unchanged.
-  for (const enabled of [true, false]) {
-    assert.ok(rulesSectionsFor(enabled).includes("scoring"));
-  }
+test("each kind of rule has its own Rules pane path", () => {
   assert.equal(buildRulesPath("scoring"), "/automation/rules/scoring");
+  assert.equal(buildRulesPath("maintenance"), "/automation/rules/maintenance");
   assert.equal(buildRulesPath("request"), "/automation/rules/request");
 });
 

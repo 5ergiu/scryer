@@ -8,7 +8,7 @@
 //!
 //! # Chosen CRC algorithm: CRC-64/NVME
 //!
-//! [`MOVE_CRC_ALGORITHM`] is `crc_fast::CrcAlgorithm::Crc64Nvme`, persisted under
+//! [`MOVE_CRC_ALGORITHM`] is `crc_turbo::CrcAlgorithm::Crc64Nvme`, persisted under
 //! the tag [`MoveCrcAlgorithm::Crc64Nvme`] so a future default change can never
 //! be mistaken for corruption.
 //!
@@ -93,7 +93,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use crc_fast::CrcAlgorithm;
+use crc_turbo::CrcAlgorithm;
 
 use crate::location::model::{
     AppliedVerificationDepth, FileVerificationOutcome, FileVerificationRecord, MoveCrcAlgorithm,
@@ -101,7 +101,7 @@ use crate::location::model::{
 };
 use crate::{AppError, AppResult};
 
-/// The `crc-fast` algorithm used for the streaming move-corruption check.
+/// The `crc-turbo` algorithm used for the streaming move-corruption check.
 pub const MOVE_CRC_ALGORITHM: CrcAlgorithm = CrcAlgorithm::Crc64Nvme;
 
 /// The persisted tag written alongside every CRC produced by
@@ -113,7 +113,7 @@ pub const MOVE_CRC_ALGORITHM_TAG: MoveCrcAlgorithm = MoveCrcAlgorithm::Crc64Nvme
 /// read-back (FR-040); the BLAKE3 is the dedup identity persisted with the media
 /// file (FR-041, D4).
 pub struct StreamedContentHasher {
-    crc: crc_fast::Digest,
+    crc: crc_turbo::Digest,
     blake3: blake3::Hasher,
     size_bytes: u64,
 }
@@ -121,7 +121,7 @@ pub struct StreamedContentHasher {
 impl StreamedContentHasher {
     pub fn new() -> Self {
         Self {
-            crc: crc_fast::Digest::new(MOVE_CRC_ALGORITHM),
+            crc: crc_turbo::Digest::new(MOVE_CRC_ALGORITHM),
             blake3: blake3::Hasher::new(),
             size_bytes: 0,
         }
@@ -156,7 +156,7 @@ impl Default for StreamedContentHasher {
     }
 }
 
-/// The `crc-fast` algorithm a persisted tag names, so a stored CRC stays
+/// The `crc-turbo` algorithm a persisted tag names, so a stored CRC stays
 /// comparable after the default moves.
 pub fn crc_algorithm_for(tag: MoveCrcAlgorithm) -> CrcAlgorithm {
     match tag {
@@ -201,14 +201,31 @@ pub const PARTIAL_COPY_SUFFIX: &str = ".scryer-partial";
 /// Where a copy writes while it is still in progress: a sibling of
 /// `destination` in the same directory, so the promotion is a rename inside one
 /// filesystem and the fsynced directory entry covers both names.
+///
+/// A destination name too long to carry the suffix within
+/// [`FILE_NAME_MAX_BYTES`] is shortened and given a hash of the whole name, so
+/// the staging name stays deterministic and two long names that share a
+/// prefix still stage apart.
 pub fn partial_destination_path(destination: &Path) -> PathBuf {
     let name = destination
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!("{name}{PARTIAL_COPY_SUFFIX}"))
+    if name.len() + PARTIAL_COPY_SUFFIX.len() <= FILE_NAME_MAX_BYTES {
+        return parent.join(format!("{name}{PARTIAL_COPY_SUFFIX}"));
+    }
+    let hash = blake3::hash(name.as_bytes()).to_hex();
+    let hash = &hash.as_str()[..16];
+    let kept = crate::library::rename::truncate_utf8_bytes(
+        &name,
+        FILE_NAME_MAX_BYTES - PARTIAL_COPY_SUFFIX.len() - hash.len() - 1,
+    );
+    parent.join(format!("{kept}-{hash}{PARTIAL_COPY_SUFFIX}"))
 }
+
+/// The longest file name, in bytes, the filesystems Scryer writes to accept.
+pub(crate) const FILE_NAME_MAX_BYTES: usize = 255;
 
 /// Observes bytes as they are written, so a caller can show intra-file progress
 /// for a copy that runs for hours (FR-091).
@@ -563,6 +580,29 @@ impl VerifiedCopier {
         }
     }
 
+    /// Copy to a caller-journaled staging name with an exclusive claim.
+    /// Recovery retains failed staging attempts; this path never removes or
+    /// truncates a file, including one that races the exclusive create.
+    pub(crate) async fn copy_to_journaled_staging(
+        &self,
+        source: &Path,
+        staging: &Path,
+        progress: &CopyProgress,
+    ) -> AppResult<StreamedContentHashes> {
+        progress.phase(scryer_domain::ImportTransferPhase::Waiting, 0);
+        let _permit = super::transfer::CopyCoordinator::shared()
+            .acquire_destination(staging)
+            .await;
+        progress.phase(scryer_domain::ImportTransferPhase::Copying, 0);
+        let source = source.to_path_buf();
+        let staging = staging.to_path_buf();
+        let progress = progress.clone();
+        spawn_verify_blocking(move || {
+            copy_with_streamed_hashes(&source, &staging, DestinationClaim::ClaimHere, &progress)
+        })
+        .await?
+    }
+
     /// Write to the partial name, then promote it onto the destination.
     async fn copy_through_partial(
         &self,
@@ -779,7 +819,7 @@ async fn remove_partial_best_effort(partial: &Path) {
     }
 }
 
-async fn sync_parent_directory_after_promotion(destination: &Path) {
+pub(crate) async fn sync_parent_directory_after_promotion(destination: &Path) {
     let destination = destination.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || {
         sync_parent_directory_best_effort(&destination);
@@ -957,7 +997,7 @@ fn full_read_back(
     hashes: &StreamedContentHashes,
     progress: &CopyProgress,
 ) -> Result<(FileVerificationOutcome, Option<String>), String> {
-    let mut digest = crc_fast::Digest::new(crc_algorithm_for(hashes.crc_algorithm));
+    let mut digest = crc_turbo::Digest::new(crc_algorithm_for(hashes.crc_algorithm));
     let mut read_bytes: u64 = 0;
     let mut buffer = vec![0u8; READ_BACK_CHUNK_BYTES];
     loop {
@@ -1276,7 +1316,7 @@ mod tests {
         assert_eq!(hashes.crc_algorithm, MoveCrcAlgorithm::Crc64Nvme);
         assert_eq!(
             hashes.move_crc,
-            crc_fast::checksum(MOVE_CRC_ALGORITHM, &data)
+            crc_turbo::checksum(MOVE_CRC_ALGORITHM, &data)
         );
         assert_eq!(hashes.full_blake3, blake3::hash(&data).to_hex().to_string());
     }
@@ -1384,7 +1424,7 @@ mod tests {
         assert_eq!(hashes.crc_algorithm, MOVE_CRC_ALGORITHM_TAG);
         assert_eq!(
             hashes.move_crc,
-            crc_fast::checksum(MOVE_CRC_ALGORITHM, &data)
+            crc_turbo::checksum(MOVE_CRC_ALGORITHM, &data)
         );
         assert_eq!(hashes.full_blake3, blake3::hash(&data).to_hex().to_string());
         assert_eq!(
@@ -1978,5 +2018,53 @@ mod tests {
                 }
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod long_name_tests {
+    use super::*;
+
+    /// A destination name may be as long as the filesystem allows (255
+    /// bytes); the in-progress copy must fit too.
+    #[tokio::test]
+    async fn copy_to_a_destination_near_the_name_limit_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        std::fs::write(&source, b"episode payload").unwrap();
+        let destination = dir.path().join(format!("{}.mkv", "a".repeat(246)));
+        assert_eq!(destination.file_name().unwrap().len(), 250);
+
+        VerifiedCopier::new()
+            .copy(&source, &destination, DestinationClaim::ClaimHere)
+            .await
+            .expect("a 250-byte destination name is legal and must copy");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"episode payload");
+    }
+
+    #[test]
+    fn a_name_with_room_for_the_suffix_stages_beside_itself() {
+        let destination = Path::new("/library/Show/Episode 07.mkv");
+
+        assert_eq!(
+            partial_destination_path(destination),
+            Path::new("/library/Show/Episode 07.mkv.scryer-partial")
+        );
+    }
+
+    #[test]
+    fn a_long_name_stages_under_a_bounded_name_that_is_stable_and_distinct() {
+        let shared = "é".repeat(120);
+        let first = PathBuf::from(format!("/library/{shared} - 07.mkv"));
+        let second = PathBuf::from(format!("/library/{shared} - 08.mkv"));
+
+        let partial = partial_destination_path(&first);
+        let name = partial.file_name().unwrap().to_str().unwrap();
+
+        assert!(name.len() <= FILE_NAME_MAX_BYTES);
+        assert!(name.ends_with(PARTIAL_COPY_SUFFIX));
+        assert_eq!(partial.parent(), first.parent());
+        assert_eq!(partial, partial_destination_path(&first));
+        assert_ne!(partial, partial_destination_path(&second));
     }
 }

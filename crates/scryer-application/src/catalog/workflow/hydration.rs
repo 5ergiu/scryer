@@ -286,6 +286,7 @@ mod title_recommendation_refresh_queue_tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }
@@ -484,6 +485,7 @@ impl AppUseCase {
             metadata_fetched_at: None,
             min_availability: request.min_availability,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         })
     }
@@ -706,10 +708,7 @@ impl AppUseCase {
             TitleHydrationClaim::Claimed { _guard, title } => (_guard, title),
             TitleHydrationClaim::AlreadyHydrated(title) => return Ok(title),
         };
-        let series_smg_id = result
-            .raw_series
-            .as_ref()
-            .and_then(|series| series.smg_id);
+        let series_smg_id = result.raw_series.as_ref().and_then(|series| series.smg_id);
         let redirected_from = redirected_smg_id(&title, series_smg_id, redirects);
         let hydrated = self
             .apply_hydration_result(title, result, target.source)
@@ -978,12 +977,17 @@ impl AppUseCase {
                         .iter()
                         .map(|(_, movie_ref)| movie_ref.clone())
                         .collect::<Vec<_>>();
+                    let library_ids = movie_targets
+                        .iter()
+                        .map(|(target, _)| target.title.library_id.as_str())
+                        .collect::<Vec<_>>();
                     let movie_result = await_cancellable(
                         cancel_token,
-                        self.services
-                            .library
-                            .metadata_gateway
-                            .get_movie_titles(&refs, &language),
+                        self.get_movie_titles_for_library_release_markets(
+                            &refs,
+                            &library_ids,
+                            &language,
+                        ),
                     )
                     .await;
                     let Some(movie_result) = movie_result else {
@@ -1075,8 +1079,7 @@ impl AppUseCase {
                             warn!(error = %error, "linked movie metadata hydration failed");
                         })
                         .unwrap_or_default();
-                    for ((target, _), fetched) in series_targets.into_iter().zip(series_by_target)
-                    {
+                    for ((target, _), fetched) in series_targets.into_iter().zip(series_by_target) {
                         if crate::library::library::library_scan_cancel_requested(cancel_token) {
                             break 'languages;
                         }
@@ -1116,10 +1119,9 @@ impl AppUseCase {
                                 .hydrated_titles
                                 .insert(refreshed.id.clone(), refreshed);
                         } else {
-                            outcome.failed_titles.insert(
-                                title_id,
-                                "metadata could not be persisted".to_string(),
-                            );
+                            outcome
+                                .failed_titles
+                                .insert(title_id, "metadata could not be persisted".to_string());
                         }
                     }
                 }
@@ -1168,10 +1170,11 @@ impl AppUseCase {
                         AppError::Repository("no movie external id found".to_string())
                     })?;
                 let result = self
-                    .services
-                    .library
-                    .metadata_gateway
-                    .get_movie_titles(std::slice::from_ref(&movie_ref), language)
+                    .get_movie_titles_for_library_release_markets(
+                        std::slice::from_ref(&movie_ref),
+                        &[target.title.library_id.as_str()],
+                        language,
+                    )
                     .await?;
                 let movie = result.by_ref_index.get(&0).cloned().ok_or_else(|| {
                     AppError::NotFound("movie metadata response missing title".to_string())
@@ -1512,6 +1515,19 @@ impl AppUseCase {
                 title.external_ids.clone(),
                 &metadata_update,
             );
+        let movie_availability_metadata_changed = title.facet == MediaFacet::Movie
+            && (metadata_update
+                .movie_release_dates
+                .as_ref()
+                .is_some_and(|dates| title.movie_release_dates.as_ref() != Some(dates))
+                || metadata_update
+                    .digital_release_date
+                    .as_ref()
+                    .is_some_and(|date| title.digital_release_date.as_ref() != Some(date))
+                || metadata_update
+                    .first_aired
+                    .as_ref()
+                    .is_some_and(|date| title.first_aired.as_ref() != Some(date)));
         let persistence_started_at = Instant::now();
 
         let title = match self
@@ -1526,6 +1542,25 @@ impl AppUseCase {
                 // external ids; without this the matcher would keep serving
                 // pre-hydration identities until some other write dirtied it.
                 self.invalidate_monitored_title_matcher().await;
+                if movie_availability_metadata_changed {
+                    self.runtime.acquisition.acquisition_wake.notify_one();
+                }
+                // A settings change may have queued a refresh while this
+                // request was in flight. The metadata write clears retry
+                // state, so restore it after persisting an old-market result.
+                if updated.facet == MediaFacet::Movie
+                    && let Some(dates) = updated.movie_release_dates.as_ref()
+                    && !dates.market.eq_ignore_ascii_case(
+                        &self
+                            .movie_availability_settings_for_library(&updated.library_id)
+                            .await?
+                            .release_market,
+                    )
+                {
+                    self.services.catalog.titles
+                        .mark_title_metadata_hydration_due_now(&updated.id).await?;
+                    self.runtime.catalog.title_hydration_wake.notify_one();
+                }
                 updated
             }
             Err(err) => {
@@ -2146,9 +2181,10 @@ mod numbering_bridge_from_orders_tests {
 #[cfg(test)]
 mod numbering_bridge_replacement_tests {
     use crate::lib_tests::bootstrap;
+    use futures_util::FutureExt;
     use scryer_domain::{
         AnimeCommunitySeason, AnimeCommunitySeasonRange, AnimeNumberingBridge, MediaFacet,
-        NewTitle, NumberingBridgeSource, RELEASE_NUMBERING_TAG_PREFIX,
+        MovieReleaseDates, NewTitle, NumberingBridgeSource, RELEASE_NUMBERING_TAG_PREFIX,
     };
 
     fn bridge(source: NumberingBridgeSource) -> AnimeNumberingBridge {
@@ -2168,6 +2204,62 @@ mod numbering_bridge_replacement_tests {
                 ..Default::default()
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn persisting_revised_movie_release_dates_wakes_acquisition() {
+        let (app, user) = bootstrap();
+        let title = app
+            .add_title(
+                &user,
+                NewTitle {
+                    name: "Revised Release Schedule".into(),
+                    facet: MediaFacet::Movie,
+                    monitored: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create movie title");
+        let _ = app
+            .runtime
+            .acquisition
+            .acquisition_wake
+            .notified()
+            .now_or_never();
+
+        let hydrated = app
+            .apply_hydration_result(
+                title,
+                crate::catalog::facets::handler::HydrationResult {
+                    metadata_update: crate::TitleMetadataUpdate {
+                        metadata_fetched_at: Some("2026-10-06T00:00:00Z".into()),
+                        movie_release_dates: Some(MovieReleaseDates {
+                            market: "US".into(),
+                            fetched: true,
+                            theatrical_dates: vec!["2026-02-01".into()],
+                            digital_dates: vec!["2026-11-01".into()],
+                            physical_dates: vec!["2026-11-15".into()],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                super::HydrationSource::Interactive,
+            )
+            .await
+            .expect("persist revised movie dates");
+        assert!(hydrated.movie_release_dates.is_some());
+        assert!(
+            app.runtime
+                .acquisition
+                .acquisition_wake
+                .notified()
+                .now_or_never()
+                .is_some(),
+            "persisted availability changes must wake the acquisition scheduler"
+        );
     }
 
     /// The preserve case: an ordinary bulk sweep must leave a TVDB-derived row

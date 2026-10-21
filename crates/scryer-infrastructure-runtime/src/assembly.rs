@@ -1189,14 +1189,12 @@ impl DatastoreAssembly {
     }
 
     /// Built on demand for the same reason as the maintenance stores: request
-    /// rules ship dark behind the experimental gate, so nothing constructs the
-    /// store eagerly (spec 0003 FR-013).
+    /// rules start with none enabled, so nothing constructs the store eagerly.
     pub fn request_rule_set_store(&self) -> Arc<RequestRuleSetStore> {
         Arc::new(RequestRuleSetStore::new(self.datastore()))
     }
 
-    /// Traces are written only when a rule set evaluates, which the gate keeps
-    /// off by default.
+    /// Traces are written only when an enabled rule set evaluates.
     pub fn request_rule_decision_store(&self) -> Arc<RequestRuleDecisionStore> {
         Arc::new(RequestRuleDecisionStore::new(self.datastore()))
     }
@@ -1402,6 +1400,10 @@ impl DatastoreAssembly {
                 ..
             } => download_registry_store.clone(),
         }
+    }
+
+    pub fn delay_profiles(&self) -> Arc<dyn scryer_application::DelayProfileRepository> {
+        Arc::new(crate::DelayProfileStore::new(self.datastore()))
     }
 
     pub fn seeding_profiles(&self) -> Arc<dyn scryer_application::SeedingProfileRepository> {
@@ -1679,6 +1681,7 @@ impl DatastoreAssembly {
                 .with_oauth_store(oauth)
                 .with_proxy_config_store(self.proxy_configs())
                 .with_seeding_profiles(self.seeding_profiles())
+                .with_delay_profiles(self.delay_profiles())
                 .with_external_identity_verifier(Arc::new(HttpExternalIdentityVerifier::new()))
                 .with_media_server_connection_store(media_server_connection_store.clone())
                 // Maintenance safety: live playback observation (RFC 137 §9.10, WP-G).
@@ -1812,6 +1815,7 @@ impl DatastoreAssembly {
                 .with_oauth_store(oauth)
                 .with_proxy_config_store(self.proxy_configs())
                 .with_seeding_profiles(self.seeding_profiles())
+                .with_delay_profiles(self.delay_profiles())
                 .with_external_identity_verifier(Arc::new(HttpExternalIdentityVerifier::new()))
                 .with_media_server_connection_store(media_server_connection_store.clone())
                 // Maintenance safety: live playback observation (RFC 137 §9.10, WP-G).
@@ -3717,6 +3721,7 @@ mod tests {
             metadata_fetched_at: Some(chrono::Utc::now()),
             min_availability: None,
             digital_release_date: Some("2026-01-02".to_string()),
+            movie_release_dates: None,
             folder_path: Some("/data/movies/Backup Lattice Movie (2026)".to_string()),
         }
     }

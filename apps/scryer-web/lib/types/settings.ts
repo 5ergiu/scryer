@@ -19,6 +19,20 @@ export type SubtitleSettings = {
   syncMaxOffsetSeconds: number;
 };
 
+export const MOVIE_AVAILABILITY_VALUES = ["announced", "in_cinemas", "released"] as const;
+
+export function isMovieAvailabilityValue(value: string | null | undefined): value is string {
+  return MOVIE_AVAILABILITY_VALUES.some((candidate) => candidate === value);
+}
+
+/** The Movie facet's availability gate settings, from `mediaSettings(scope: MOVIE)`. */
+export type MovieAvailabilitySettings = {
+  scope?: string;
+  defaultMovieAvailability: string | null;
+  movieReleaseMarket: string | null;
+  movieAvailabilityDelayDays: number | null;
+};
+
 export type AcquisitionSettings = {
   enabled: boolean;
   sameTierMinDelta: number;

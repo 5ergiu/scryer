@@ -112,7 +112,7 @@ fn crc32_iso_hdlc_streams_multiple_buffers_like_a_one_shot_digest() {
     let (crc, size) = crc32_iso_hdlc_of_file(&file).expect("crc");
     assert_eq!(size as usize, payload.len());
 
-    let mut one_shot = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32IsoHdlc);
+    let mut one_shot = crc_turbo::Digest::new(crc_turbo::CrcAlgorithm::Crc32IsoHdlc);
     one_shot.update(&payload);
     assert_eq!(crc, one_shot.finalize() as u32);
 }

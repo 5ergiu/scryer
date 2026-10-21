@@ -123,6 +123,7 @@ impl Drop for IndexerDispatchAdmission {
 /// clears an override, and `Some(Some(_))` applies an explicit override.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TitleOptionsPatch {
+    pub min_availability: Option<Option<String>>,
     pub search_languages: Option<Option<Vec<String>>>,
     pub search_aliases: Option<Option<Vec<String>>>,
     pub quality_profile_id: Option<Option<String>>,
@@ -1798,6 +1799,22 @@ pub trait TitleRepository: Send + Sync {
         ))
     }
 
+    /// [`Self::find_titles_by_lookup_key_shapes`] for several key sets,
+    /// answered in order: entry `n` holds exactly the titles a single call
+    /// with `key_sets[n]` would return. The RSS cycle asks this once for every
+    /// feed item it matches instead of once per item. The default fans out;
+    /// the SQL store answers every set from one read of the projection.
+    async fn find_titles_by_lookup_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        let mut results = Vec::with_capacity(key_sets.len());
+        for keys in key_sets {
+            results.push(self.find_titles_by_lookup_key_shapes(keys).await?);
+        }
+        Ok(results)
+    }
+
     /// The distinct (library, facet) scopes that hold at least one monitored
     /// title. The RSS cycle resolves indexer routing per scope, and used to
     /// derive them by reading every title row in the catalog.
@@ -1841,6 +1858,39 @@ pub trait TitleRepository: Send + Sync {
             title_id,
             keys,
         ))
+    }
+
+    /// [`Self::find_titles_by_external_id`] for several `(source, value)`
+    /// pairs, answered in order: entry `n` holds exactly the titles a single
+    /// call with `lookups[n]` would return. The default fans out; the SQL
+    /// store reads every pair in one statement.
+    async fn find_titles_by_external_ids_batch(
+        &self,
+        lookups: &[(String, String)],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        let mut results = Vec::with_capacity(lookups.len());
+        for (source, value) in lookups {
+            results.push(self.find_titles_by_external_id(source, value).await?);
+        }
+        Ok(results)
+    }
+
+    /// [`Self::lookup_keys_claimed_by_other_titles`] for several
+    /// `(title_id, keys)` requests, answered in order: entry `n` is exactly
+    /// what a single call with `requests[n]` would return. The default fans
+    /// out; the SQL store reads every key shape in one statement.
+    async fn lookup_keys_claimed_by_other_titles_batch(
+        &self,
+        requests: &[(String, Vec<String>)],
+    ) -> AppResult<Vec<Vec<String>>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for (title_id, keys) in requests {
+            results.push(
+                self.lookup_keys_claimed_by_other_titles(title_id, keys)
+                    .await?,
+            );
+        }
+        Ok(results)
     }
 
     /// One bucket of the persisted name index, for the relaxed spelling lane.
@@ -1889,6 +1939,21 @@ pub trait TitleRepository: Send + Sync {
             .filter(|title| title.id == title_id)
             .flat_map(title_name_candidates)
             .collect())
+    }
+
+    /// [`Self::list_title_index_names`] for several titles, answered in
+    /// order: entry `n` is exactly what a single call with `title_ids[n]`
+    /// would return. The default fans out; the SQL store reads every title's
+    /// names in one statement.
+    async fn list_title_index_names_batch(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<Vec<TitleNameCandidate>>> {
+        let mut results = Vec::with_capacity(title_ids.len());
+        for title_id in title_ids {
+            results.push(self.list_title_index_names(title_id).await?);
+        }
+        Ok(results)
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>>;
@@ -2704,6 +2769,36 @@ pub trait MediaRequestRepository: Send + Sync {
         &self,
         title_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<String>>>;
+
+    /// The origin of the oldest request that created each of `title_ids`,
+    /// over the same requests [`Self::requester_user_ids_by_title_ids`] reads.
+    /// A title is a key exactly when it is a key there.
+    async fn request_origins_by_title_ids(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<HashMap<String, scryer_domain::MediaRequestOrigin>> {
+        let mut requests: Vec<MediaRequest> = self
+            .list(MediaRequestQuery::default())
+            .await?
+            .into_iter()
+            .filter(|request| {
+                !request.identity_fingerprint.starts_with("list-movie:")
+                    && request
+                        .created_title_id
+                        .as_ref()
+                        .is_some_and(|title_id| title_ids.contains(title_id))
+            })
+            .collect();
+        requests
+            .sort_by(|left, right| (left.created_at, &left.id).cmp(&(right.created_at, &right.id)));
+        let mut by_title = HashMap::new();
+        for request in requests {
+            if let Some(title_id) = request.created_title_id {
+                by_title.entry(title_id).or_insert(request.origin);
+            }
+        }
+        Ok(by_title)
+    }
 
     /// Commit the title, monitoring selection, approval, claim and events as
     /// one unit. The caller holds the mutation guard for title.id.
@@ -4785,6 +4880,18 @@ pub trait SeedingProfileRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait DelayProfileRepository: Send + Sync {
+    /// Every profile with its facet, tag and library sets, ordered by priority
+    /// and then id.
+    async fn list(&self) -> AppResult<Vec<crate::DelayProfile>>;
+    /// Insert each profile, or replace the stored profile with the same id,
+    /// in one transaction.
+    async fn save_many(&self, profiles: Vec<crate::DelayProfile>) -> AppResult<()>;
+    /// Returns false when no profile has the id.
+    async fn delete(&self, id: &str) -> AppResult<bool>;
+}
+
+#[async_trait]
 pub trait SubtitleProviderConfigRepository: Send + Sync {
     async fn list(&self, provider_type: Option<String>) -> AppResult<Vec<SubtitleProviderConfig>>;
     async fn get_by_id(&self, id: &str) -> AppResult<Option<SubtitleProviderConfig>>;
@@ -5707,6 +5814,25 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         Ok(())
     }
 
+    /// Keep the long file names a grab's NZB or torrent carried with its
+    /// submission row.
+    async fn record_grabbed_file_names(
+        &self,
+        _canonical_download_id: &DownloadId,
+        _names: &[crate::GrabbedFileName],
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// The long file names kept for the grab behind this client job: its
+    /// active binding's submission, else the submission recorded for the job.
+    async fn grabbed_file_names(
+        &self,
+        _identity: &ClientJobLocator,
+    ) -> AppResult<Vec<crate::GrabbedFileName>> {
+        Ok(Vec::new())
+    }
+
     /// Read the goals a torrent was grabbed under, by download-client identity.
     async fn get_seed_goals(
         &self,
@@ -6033,6 +6159,26 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every Scryer submission, across titles, whose canonical client binding
+    /// is still active without a native client item and that was submitted
+    /// before `submitted_before`: grab intents no client job ever confirmed.
+    /// Defaults to empty for stores without canonical bindings.
+    async fn list_active_unbound_submitted_before(
+        &self,
+        _submitted_before: DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        Ok(Vec::new())
+    }
+
+    /// End the still-active, still-unbound binding of an unconfirmed grab
+    /// intent, stamping the download terminal exactly as `end_binding` does.
+    /// Returns `false` without changing anything when the binding is already
+    /// bound to a client job or already ended, so a job the queue observer
+    /// bound in the meantime keeps its download.
+    async fn release_unconfirmed_submission(&self, _download_id: &DownloadId) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn find_by_title_and_request_signature(
         &self,
         title_id: &str,
@@ -6341,6 +6487,48 @@ pub struct LocationOperationProgress {
 /// of the ownership rows outside the runner.
 #[async_trait]
 pub trait LocationOperationRepository: Send + Sync {
+    /// Bounded ownership evidence for automatic recovery; unsupported stores fail closed.
+    async fn recovery_catalog(
+        &self,
+    ) -> AppResult<crate::location::title_folder_recovery::RecoveryCatalog> {
+        Err(AppError::Repository(
+            "title folder recovery storage is not configured".into(),
+        ))
+    }
+    async fn reserve_recovery_staging(
+        &self,
+        _operation_id: &str,
+        _file: &crate::location::title_folder_recovery::RecoveryFile,
+        _staging_path: &str,
+    ) -> AppResult<()> {
+        Err(AppError::Repository(
+            "recovery staging storage is not configured".into(),
+        ))
+    }
+    async fn recovery_staging_paths(&self, _operation_id: &str) -> AppResult<Vec<String>> {
+        Err(AppError::Repository(
+            "recovery staging storage is not configured".into(),
+        ))
+    }
+    async fn replace_recovery_plan(&self, _operation_id: &str, _plan_json: &str) -> AppResult<()> {
+        Err(AppError::Repository(
+            "recovery replanning is not configured".into(),
+        ))
+    }
+    async fn recovery_committed(&self, _operation_id: &str) -> AppResult<bool> {
+        Ok(false)
+    }
+    async fn commit_title_folder_recovery(
+        &self,
+        _operation_id: &str,
+        _plan: &crate::location::title_folder_recovery::RecoveryPlan,
+        _event: &scryer_domain::NewDomainEvent,
+    ) -> AppResult<Option<scryer_domain::DomainEvent>> {
+        Err(AppError::Repository(
+            "title folder recovery storage is not configured".into(),
+        ))
+    }
+
     async fn save_file_resolution(
         &self,
         _record: &crate::location::resolution::FileResolution,
@@ -8345,7 +8533,8 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
 
     /// Append `revision`, repoint the rule set at it, and reset its
     /// `effect_arming` to [`scryer_domain::MaintenanceEffectArming::None`] — all
-    /// three atomically. Existing revisions are never rewritten.
+    /// three atomically, flagging a rule that was armed as edited since it was
+    /// enabled. Existing revisions are never rewritten.
     ///
     /// The disarm is part of the same write on purpose: arming acknowledges the
     /// blast radius of one specific matcher and action, so it must never outlive
@@ -8371,7 +8560,8 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
     /// revision — the matcher, action, and grace period are untouched.
     ///
     /// `disarm` resets `effect_arming` to
-    /// [`scryer_domain::MaintenanceEffectArming::None`] in the *same* write. The
+    /// [`scryer_domain::MaintenanceEffectArming::None`] in the *same* write,
+    /// with the same edited-since-enabled flag as `add_revision`. The
     /// caller sets it when the library scope actually changed: scope is the
     /// rule's blast radius, so a re-scoped rule is no longer the rule an
     /// operator acknowledged, exactly as a new revision is not. Writing the two
@@ -8398,23 +8588,14 @@ pub trait MaintenanceRuleSetRepository: Send + Sync {
         ))
     }
 
-    /// Move a rule set between evaluation modes. `enabled` is derived by the
-    /// caller from the mode so the two columns can never disagree; no revision
-    /// is created, because the matcher is untouched.
-    async fn update_rule_set_evaluation_mode(
+    /// Atomically write a rule's mode and arming, derive `enabled` from the
+    /// mode, and clear the edited-since-enabled flag. Destructive arming first
+    /// checks the reviewed configuration under the row lock; a stale or missing
+    /// confirmation, or a missing row, returns false without changing the rule.
+    async fn update_rule_set_state(
         &self,
         id: &str,
         mode: scryer_domain::MaintenanceEvaluationMode,
-        enabled: bool,
-        updated_at: DateTime<Utc>,
-    ) -> AppResult<()>;
-
-    /// Atomically checks the reviewed configuration and changes arming.
-    /// Destructive arming requires a confirmation. A stale or missing
-    /// confirmation returns false without changing the rule.
-    async fn update_rule_set_arming(
-        &self,
-        id: &str,
         arming: scryer_domain::MaintenanceEffectArming,
         confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
@@ -9111,13 +9292,15 @@ pub trait LifecycleClaimRepository: Send + Sync {
     ) -> AppResult<()>;
 
     /// Mark `id` converted and insert `replacement` (a keep) in one transaction,
-    /// so there is no instant in which the title carries neither.
+    /// so there is no instant in which the title carries neither. A title holds
+    /// at most one live operator keep, so when it already has one that keep
+    /// stands in for `replacement`. Returns the id of the keep now in force.
     async fn convert_to_permanent(
         &self,
         id: &str,
         replacement: &scryer_domain::LifecycleClaim,
         now: DateTime<Utc>,
-    ) -> AppResult<()>;
+    ) -> AppResult<String>;
 
     /// Live claims produced by requests this user submitted, for the
     /// `active_lease_count` fact.
@@ -11155,6 +11338,17 @@ pub trait DownloadClient: Send + Sync {
                 download,
                 native_delete_paths: Vec::new(),
             }))
+    }
+
+    /// The names a completed download's renamed files were posted with, for a
+    /// client that records them. Empty for every other client.
+    async fn posted_file_names_for_source(
+        &self,
+        _client_id: &str,
+        _client_type: &str,
+        _download_client_item_id: &str,
+    ) -> AppResult<Vec<scryer_domain::PostedFileName>> {
+        Ok(Vec::new())
     }
 
     /// Fetch a single completed download by its client-scoped source

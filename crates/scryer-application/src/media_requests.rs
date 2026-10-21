@@ -102,6 +102,8 @@ pub struct SubmitMediaRequestInput {
     /// Where the request came from. Only the list engine sets anything other
     /// than `Manual`; GraphQL submissions are always manual.
     pub origin: MediaRequestOrigin,
+    /// The item's rank on the list that submitted it, when the list ranks it.
+    pub list_rank: Option<i64>,
     pub admission: MediaRequestAdmission,
 }
 
@@ -394,7 +396,7 @@ impl AppUseCase {
             .evaluate_request_draft(
                 actor,
                 &library,
-                &request_draft_from_new_media_request(&request),
+                &request_draft_from_new_media_request(&request, input.list_rank),
                 &metadata_snapshot,
                 crate::request_rules::RequestEvaluationPurpose::Submit {
                     request_id: request_id.clone(),
@@ -1417,6 +1419,51 @@ impl AppUseCase {
             .await
     }
 
+    /// Keep a title: place an operator keep on it, or return the one already
+    /// live, so a second click never stacks a second hold to release.
+    pub async fn create_operator_keep_claim(
+        &self,
+        actor: &User,
+        title_id: &str,
+    ) -> AppResult<LifecycleClaim> {
+        let title = self
+            .services
+            .catalog
+            .titles
+            .get_by_id_without_external_ids(title_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("title not found".into()))?;
+        self.require_library_permission(actor, &title.library_id, LibraryPermission::ManageTitles)
+            .await?;
+        if let Some(existing) = self.live_operator_keep(title_id).await? {
+            return Ok(existing);
+        }
+        let now = chrono::Utc::now();
+        let keep = operator_keep(title.id, title.library_id, &actor.id, now);
+        if let Err(error) = self.services.catalog.lifecycle_claims.create(&keep).await {
+            // A title holds one live operator keep. A concurrent Keep that won
+            // the race is the keep this click asked for.
+            return match self.live_operator_keep(title_id).await? {
+                Some(existing) => Ok(existing),
+                None => Err(error),
+            };
+        }
+        self.reload_claim(&keep.id).await
+    }
+
+    async fn live_operator_keep(&self, title_id: &str) -> AppResult<Option<LifecycleClaim>> {
+        Ok(self
+            .services
+            .catalog
+            .lifecycle_claims
+            .list_for_title(title_id)
+            .await?
+            .into_iter()
+            .find(|claim| {
+                claim.producer == LifecycleClaimProducer::OperatorKeep && claim.is_live()
+            }))
+    }
+
     /// Push a live claim's window out to `expires_at`.
     ///
     /// The repository refuses this for a claim that is not live — an expired
@@ -1461,31 +1508,14 @@ impl AppUseCase {
     ) -> AppResult<LifecycleClaim> {
         let claim = self.require_manageable_claim(actor, claim_id).await?;
         let now = chrono::Utc::now();
-        let replacement = LifecycleClaim {
-            id: Id::new().0,
-            title_id: claim.title_id.clone(),
-            library_id: claim.library_id.clone(),
-            producer: LifecycleClaimProducer::OperatorKeep,
-            // No `producer_ref`: an operator pin has nothing upstream to release
-            // against, and it is what keeps two pins on one title from
-            // colliding on the live-claim unique index.
-            producer_ref: None,
-            kind: LifecycleClaimKind::Keep,
-            state: LifecycleClaimState::Active,
-            duration_days: None,
-            starts_at: Some(now),
-            expires_at: None,
-            created_by: Some(actor.id.clone()),
-            created_at: now,
-            updated_at: now,
-            released_reason: None,
-        };
-        self.services
+        let replacement = operator_keep(claim.title_id, claim.library_id, &actor.id, now);
+        let keep_id = self
+            .services
             .catalog
             .lifecycle_claims
             .convert_to_permanent(&claim.id, &replacement, now)
             .await?;
-        self.reload_claim(&replacement.id).await
+        self.reload_claim(&keep_id).await
     }
 
     /// Withdraw a claim by hand.
@@ -1919,6 +1949,8 @@ pub(crate) fn request_draft_from_media_request(
         monitor_type: request.requested_monitor_type.clone(),
         monitor_selection: request.requested_monitor_selection.clone(),
         requested_lease_days: request.requested_lease_days,
+        origin: request.origin.clone(),
+        list_rank: None,
     }
 }
 
@@ -1928,6 +1960,7 @@ pub(crate) fn request_draft_from_media_request(
 /// for its decision trace.
 fn request_draft_from_new_media_request(
     request: &crate::ports::NewMediaRequest,
+    list_rank: Option<i64>,
 ) -> crate::request_rules::RequestDraft {
     crate::request_rules::RequestDraft {
         facet: request.facet.clone(),
@@ -1940,6 +1973,8 @@ fn request_draft_from_new_media_request(
         monitor_type: request.requested_monitor_type.clone(),
         monitor_selection: request.requested_monitor_selection.clone(),
         requested_lease_days: request.requested_lease_days,
+        origin: request.origin.clone(),
+        list_rank,
     }
 }
 
@@ -1979,6 +2014,33 @@ fn new_request_lifecycle_claim(
         state,
         duration_days: lease_days,
         starts_at,
+        expires_at: None,
+        created_by: Some(created_by.to_string()),
+        created_at: now,
+        updated_at: now,
+        released_reason: None,
+    }
+}
+
+/// A live operator keep. No `producer_ref`: an operator keep has nothing
+/// upstream to release against, and it is what keeps two keeps on one title
+/// from colliding on the live-claim unique index.
+fn operator_keep(
+    title_id: String,
+    library_id: String,
+    created_by: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> LifecycleClaim {
+    LifecycleClaim {
+        id: Id::new().0,
+        title_id,
+        library_id,
+        producer: LifecycleClaimProducer::OperatorKeep,
+        producer_ref: None,
+        kind: LifecycleClaimKind::Keep,
+        state: LifecycleClaimState::Active,
+        duration_days: None,
+        starts_at: Some(now),
         expires_at: None,
         created_by: Some(created_by.to_string()),
         created_at: now,
@@ -2213,10 +2275,10 @@ impl AppUseCase {
                     );
                 };
                 match self
-                    .services
-                    .library
-                    .metadata_gateway
-                    .get_movie_titles(std::slice::from_ref(&movie_ref), &language)
+                    .get_movie_titles_for_current_release_market(
+                        std::slice::from_ref(&movie_ref),
+                        &language,
+                    )
                     .await
                 {
                     Ok(result) => result

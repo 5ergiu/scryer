@@ -3738,15 +3738,8 @@ impl AcquisitionQueries {
 
     /// List lifecycle candidates the maintenance evaluator has recorded; requires catalog-settings management permission.
     ///
-    /// Two independent things hide rows, and they are not the same thing. A
-    /// rule in shadow mode is dark by definition, so its candidates are
-    /// returned only when `includeShadow` is true. Separately, the instance
-    /// result-display gate hides everything while it is off.
-    ///
-    /// `includeShadow` overrides the gate as well as the mode filter, on
-    /// purpose: an operator deciding whether to arm result display has to be
-    /// able to see what shadow evaluation actually found first, and reaching
-    /// this query already requires catalog-settings management.
+    /// Candidates are ordered by due time across rules, soonest first, and
+    /// none are returned while maintenance is switched off for the instance.
     async fn maintenance_candidates(
         &self,
         ctx: &Context<'_>,
@@ -3756,8 +3749,7 @@ impl AcquisitionQueries {
         >,
         #[graphql(desc = "Return candidates whose subject belongs to this library only.")]
         library_id: Option<ID>,
-        #[graphql(desc = "Include candidates produced by rules running in shadow mode.")]
-        include_shadow: Option<bool>,
+
         #[graphql(desc = "Maximum number of candidates to return.")] limit: Option<i32>,
     ) -> GqlResult<Vec<MaintenanceCandidate>> {
         let app = app_from_ctx(ctx)?;
@@ -3774,7 +3766,7 @@ impl AcquisitionQueries {
                         .map(crate::mappers::maintenance_candidate_state_into_application)
                         .collect(),
                     library_id: library_id.map(String::from),
-                    include_shadow: include_shadow.unwrap_or(false),
+
                     limit: limit.filter(|limit| *limit > 0).map(|limit| limit as usize),
                 },
             )
@@ -3814,7 +3806,7 @@ impl AcquisitionQueries {
             .collect())
     }
 
-    /// Read the five instance-wide maintenance gates; requires system-settings management permission.
+    /// Read the two instance-wide maintenance switches; requires system-settings management permission.
     async fn maintenance_instance_gates(
         &self,
         ctx: &Context<'_>,
@@ -3952,21 +3944,6 @@ impl AcquisitionQueries {
             .into_iter()
             .map(crate::mappers::from_request_rule_revision)
             .collect())
-    }
-
-    /// Read the instance-wide request-rule gate; requires system-settings management permission.
-    async fn request_rule_instance_gates(
-        &self,
-        ctx: &Context<'_>,
-    ) -> GqlResult<RequestRuleInstanceGates> {
-        let app = app_from_ctx(ctx)?;
-        let actor = actor_from_ctx(ctx)?;
-
-        let gates = app
-            .request_rule_instance_gates(&actor)
-            .await
-            .map_err(to_gql_error)?;
-        Ok(crate::mappers::from_request_rule_instance_gates(gates))
     }
 
     /// Read the decision recorded for one media request, or null when it was never evaluated.

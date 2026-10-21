@@ -3780,22 +3780,24 @@ mod tests {
         );
     }
 
-    // The copy writes under a longer staging name first, so a file whose name
-    // is already near the limit cannot be copied.
+    // A sidecar the copy cannot read fails the entry part-way through.
     #[cfg(unix)]
     #[tokio::test]
     async fn relocation_copy_failure_keeps_entry_and_removes_partial_copy() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
         let old_bin = tmp.path().join("old-bin");
         let new_bin = tmp.path().join("new-bin");
         let entry_id = "20310102_030405000_cfl111";
         let old_entry = seed_relocation_bin(&old_bin, entry_id).await;
-        tokio::fs::write(old_entry.join("z".repeat(250)), b"sidecar")
-            .await
-            .unwrap();
+        let sidecar = old_entry.join("zz-unreadable.nfo");
+        tokio::fs::write(&sidecar, b"sidecar").await.unwrap();
         let before = tree_snapshot(&old_bin);
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let report = relocate_plan(&single_target_plan(&old_bin, &new_bin), copy_only_ops()).await;
+
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         assert_eq!(report.moved_count, 0);
         assert_eq!(report.failures.len(), 1);

@@ -152,8 +152,7 @@ impl MaintenanceRuleSetRepository for InMemoryMaintenanceRuleRepo {
         // The SQL store disarms in the same transaction as the pointer move; a
         // permissive double here would hide an arming that survived a matcher
         // swap.
-        rule_set.effect_arming = scryer_domain::MaintenanceEffectArming::None;
-        rule_set.destructive_rearm_required = false;
+        rule_set.disarm_after_edit();
         rule_set.updated_at = updated_at;
         self.revisions.lock().await.push(revision.clone());
         Ok(())
@@ -208,7 +207,7 @@ impl MaintenanceRuleSetRepository for InMemoryMaintenanceRuleRepo {
         // The SQL store disarms inside the same UPDATE; a permissive double here
         // would hide an arming that survived a scope change.
         if disarm {
-            rule_set.effect_arming = scryer_domain::MaintenanceEffectArming::None;
+            rule_set.disarm_after_edit();
         }
         rule_set.updated_at = updated_at;
         Ok(())
@@ -232,45 +231,27 @@ impl MaintenanceRuleSetRepository for InMemoryMaintenanceRuleRepo {
         self.delete_rule_set(id).await
     }
 
-    async fn update_rule_set_evaluation_mode(
+    async fn update_rule_set_state(
         &self,
         id: &str,
         mode: MaintenanceEvaluationMode,
-        enabled: bool,
-        updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
-        let mut rule_sets = self.rule_sets.lock().await;
-        let rule_set = rule_sets
-            .iter_mut()
-            .find(|rule_set| rule_set.id == id)
-            .ok_or_else(|| AppError::NotFound(id.to_string()))?;
-        rule_set.evaluation_mode = mode;
-        rule_set.enabled = enabled;
-        rule_set.updated_at = updated_at;
-        Ok(())
-    }
-
-    async fn update_rule_set_arming(
-        &self,
-        id: &str,
         arming: scryer_domain::MaintenanceEffectArming,
         confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
     ) -> AppResult<bool> {
         let mut rule_sets = self.rule_sets.lock().await;
-        let rule_set = rule_sets
-            .iter_mut()
-            .find(|rule_set| rule_set.id == id)
-            .ok_or_else(|| AppError::NotFound(id.to_string()))?;
+        let Some(rule_set) = rule_sets.iter_mut().find(|rule_set| rule_set.id == id) else {
+            return Ok(false);
+        };
         if arming == scryer_domain::MaintenanceEffectArming::Destructive
             && !confirmation.is_some_and(|reviewed| reviewed.matches(rule_set))
         {
             return Ok(false);
         }
+        rule_set.evaluation_mode = mode;
+        rule_set.enabled = mode != MaintenanceEvaluationMode::Disabled;
         rule_set.effect_arming = arming;
-        if arming == scryer_domain::MaintenanceEffectArming::Destructive {
-            rule_set.destructive_rearm_required = false;
-        }
+        rule_set.destructive_rearm_required = false;
         rule_set.updated_at = updated_at;
         Ok(true)
     }
@@ -380,7 +361,6 @@ fn draft(rego_source: &str) -> MaintenanceRuleDraft {
         grace_days: 7,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -426,6 +406,91 @@ pub(super) async fn arming_confirmation(
         .unwrap()
         .unwrap();
     Some((&rule).into())
+}
+
+/// Moves a rule through the operator state control with the confirmation the
+/// web dialog sends: the current revision and scope, and `ack` as the count.
+pub(super) async fn set_rule_state(
+    app: &AppUseCase,
+    user: &User,
+    id: &str,
+    state: scryer_domain::MaintenanceRuleState,
+    ack: Option<i64>,
+) -> crate::maintenance_rules::MaintenanceRuleSetDetail {
+    app.set_maintenance_rule_state(user, id, state, arming_confirmation(app, id).await, ack)
+        .await
+        .expect("set rule state")
+}
+
+/// Arms a rule through the state control and checks the arming it derived is
+/// the one the test meant to grant.
+pub(super) async fn arm_rule(
+    app: &AppUseCase,
+    user: &User,
+    id: &str,
+    arming: MaintenanceEffectArming,
+    ack: Option<i64>,
+) {
+    let state = if arming == MaintenanceEffectArming::None {
+        scryer_domain::MaintenanceRuleState::DryRun
+    } else {
+        scryer_domain::MaintenanceRuleState::Enabled
+    };
+    let detail = set_rule_state(app, user, id, state, ack).await;
+    assert_eq!(detail.rule_set.effect_arming, arming, "derived arming");
+}
+
+/// Writes every stored gate directly. Operators move them in pairs through the
+/// two switches; executor tests open one effect class without the other.
+pub(super) async fn store_maintenance_gates(
+    app: &AppUseCase,
+    gates: crate::maintenance_rules::MaintenanceGates,
+) {
+    use crate::settings::keys::{
+        MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY, MAINTENANCE_GATE_EVALUATION_KEY,
+        MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+    };
+    let values = [
+        (MAINTENANCE_GATE_EVALUATION_KEY, gates.evaluation_enabled),
+        (
+            MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+            gates.result_display_enabled,
+        ),
+        (
+            MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
+            gates.reversible_effects_enabled,
+        ),
+        (
+            MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
+            gates.destructive_effects_enabled,
+        ),
+    ]
+    .map(|(key, value)| (key.to_string(), value.to_string()));
+    app.services
+        .config
+        .settings
+        .upsert_global_settings_json(
+            crate::SETTINGS_SCOPE_SYSTEM,
+            &values,
+            crate::settings::keys::SETTINGS_SOURCE_TYPED_GRAPHQL,
+            None,
+        )
+        .await
+        .expect("store gates");
+}
+
+/// Evaluation and result display on, with each effect gate as given.
+pub(super) async fn open_maintenance_gates(app: &AppUseCase, reversible: bool, destructive: bool) {
+    store_maintenance_gates(
+        app,
+        crate::maintenance_rules::MaintenanceGates {
+            evaluation_enabled: true,
+            result_display_enabled: true,
+            reversible_effects_enabled: reversible,
+            destructive_effects_enabled: destructive,
+        },
+    )
+    .await;
 }
 
 // ── Authoring ───────────────────────────────────────────────────────────────
@@ -641,15 +706,14 @@ async fn changing_the_library_scope_disarms_the_rule() {
         .create_maintenance_rule_set(&user, draft(MONITORED_MATCHER))
         .await
         .expect("create rule set");
-    app.set_maintenance_rule_arming(
+    super::maintenance_rules::arm_rule(
+        &app,
         &user,
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
         None,
-        None,
     )
-    .await
-    .expect("arm the rule");
+    .await;
 
     let updated = app
         .update_maintenance_rule_metadata(
@@ -695,15 +759,14 @@ async fn renaming_or_reordering_the_same_scope_leaves_arming_alone() {
         )
         .await
         .expect("create rule set");
-    app.set_maintenance_rule_arming(
+    super::maintenance_rules::arm_rule(
+        &app,
         &user,
         &created.rule_set.id,
         MaintenanceEffectArming::Reversible,
         None,
-        None,
     )
-    .await
-    .expect("arm the rule");
+    .await;
 
     let updated = app
         .update_maintenance_rule_metadata(
@@ -757,7 +820,7 @@ async fn deleting_a_rule_that_has_executed_is_refused() {
 
     assert!(matches!(error, AppError::Validation(_)), "{error:?}");
     assert!(
-        error.to_string().contains("disabled"),
+        error.to_string().contains("Set it to Disabled"),
         "the refusal must name the way out: {error}"
     );
     assert_eq!(
@@ -785,13 +848,14 @@ async fn a_disabled_rule_with_a_history_is_still_refused() {
         .start_action_run(&action_run(&created.rule_set.id, "title-1"))
         .await
         .expect("record an executed action");
-    app.set_maintenance_rule_evaluation_mode(
+    super::maintenance_rules::set_rule_state(
+        &app,
         &user,
         &created.rule_set.id,
-        MaintenanceEvaluationMode::Disabled,
+        scryer_domain::MaintenanceRuleState::Disabled,
+        None,
     )
-    .await
-    .expect("disable the rule");
+    .await;
 
     let error = app
         .delete_maintenance_rule_set(&user, &created.rule_set.id)
@@ -1040,30 +1104,6 @@ async fn the_grace_period_is_bounded_at_ten_years() {
         .await
         .expect_err("the bound applies to matcher replacements too");
     assert!(matches!(refused, AppError::Validation(_)), "{refused:?}");
-}
-
-#[tokio::test]
-async fn shadow_and_observe_modes_are_not_yet_available() {
-    let MaintenanceFixture { app, user, .. } = maintenance_app();
-
-    for mode in [
-        MaintenanceEvaluationMode::Shadow,
-        MaintenanceEvaluationMode::Observe,
-    ] {
-        let error = app
-            .create_maintenance_rule_set(
-                &user,
-                MaintenanceRuleDraft {
-                    evaluation_mode: Some(mode),
-                    ..draft(MONITORED_MATCHER)
-                },
-            )
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{mode:?} must be rejected while nothing evaluates rules"));
-        assert!(matches!(error, AppError::Validation(_)), "{error:?}");
-        assert!(error.to_string().contains("not yet available"), "{error}");
-    }
 }
 
 #[tokio::test]

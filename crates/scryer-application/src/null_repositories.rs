@@ -80,6 +80,44 @@ use crate::{
 #[derive(Default)]
 pub struct NullSeedingProfileRepository;
 
+/// Delay profiles held in memory. The default for assemblies that do not wire
+/// the datastore, so profiles saved through the use case are still read back.
+#[derive(Default)]
+pub struct InMemoryDelayProfileRepository {
+    profiles: tokio::sync::Mutex<Vec<crate::DelayProfile>>,
+}
+
+#[async_trait]
+impl crate::ports::DelayProfileRepository for InMemoryDelayProfileRepository {
+    async fn list(&self) -> AppResult<Vec<crate::DelayProfile>> {
+        let mut profiles = self.profiles.lock().await.clone();
+        profiles.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(profiles)
+    }
+
+    async fn save_many(&self, profiles: Vec<crate::DelayProfile>) -> AppResult<()> {
+        let mut stored = self.profiles.lock().await;
+        for profile in profiles {
+            match stored.iter_mut().find(|existing| existing.id == profile.id) {
+                Some(existing) => *existing = profile,
+                None => stored.push(profile),
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> AppResult<bool> {
+        let mut stored = self.profiles.lock().await;
+        let before = stored.len();
+        stored.retain(|profile| profile.id != id);
+        Ok(stored.len() != before)
+    }
+}
+
 #[async_trait]
 impl SeedingProfileRepository for NullSeedingProfileRepository {
     async fn list(&self) -> AppResult<Vec<scryer_domain::SeedingProfile>> {
@@ -1601,20 +1639,10 @@ impl MaintenanceRuleSetRepository for NullMaintenanceRuleSetRepository {
             "maintenance rule repository is not configured".to_string(),
         ))
     }
-    async fn update_rule_set_evaluation_mode(
+    async fn update_rule_set_state(
         &self,
         _id: &str,
         _mode: scryer_domain::MaintenanceEvaluationMode,
-        _enabled: bool,
-        _updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
-        Err(AppError::Repository(
-            "maintenance rule repository is not configured".to_string(),
-        ))
-    }
-    async fn update_rule_set_arming(
-        &self,
-        _id: &str,
         _arming: scryer_domain::MaintenanceEffectArming,
         _confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         _updated_at: DateTime<Utc>,
@@ -3622,7 +3650,7 @@ impl crate::ports::LifecycleClaimRepository for NullLifecycleClaimRepository {
         _id: &str,
         _replacement: &scryer_domain::LifecycleClaim,
         _now: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<String> {
         Err(AppError::Repository(
             LIFECYCLE_CLAIM_NOT_CONFIGURED.to_string(),
         ))

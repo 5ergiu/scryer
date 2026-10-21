@@ -860,6 +860,11 @@ impl AppUseCase {
         if deleted {
             self.refresh_download_client_category_admission_best_effort()
                 .await;
+            // The delete drops this library from every delay profile scope and
+            // disables a profile left with none, so the settings page reloads.
+            let _ = self.runtime.events.settings_changed_broadcast.send(vec![
+                crate::delay_profile::DELAY_PROFILE_CATALOG_KEY.to_string(),
+            ]);
         }
         Ok(deleted)
     }

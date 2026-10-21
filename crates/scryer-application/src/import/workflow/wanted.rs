@@ -154,11 +154,46 @@ async fn execute_resolved_episode_import(
             .or_else(|| parsed.quality.clone());
         let effective_parsed =
             parsed_with_quality_override(parsed, effective_quality_label.as_deref());
+        let prepared =
+            match crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+                app,
+                title,
+                &effective_parsed,
+                quality_profile,
+                source_video,
+                source_size,
+                !existing_files.is_empty(),
+                None,
+                is_filler,
+                crate::post_download_gate::RuntimeSampleValidation::manual_override(
+                    expected_runtime_seconds_for_episode_import(title, target_episodes),
+                ),
+                disc_selection,
+                release_listing_json,
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(rejection) => {
+                    return Ok(EpisodeImportOutcome::Rejected {
+                        reason_code: Some(rejection.recycle_reason.to_string()),
+                        rejection,
+                        disposition: crate::import_decide::RejectionDisposition::Hold,
+                        episode_ids: target_episode_ids.clone(),
+                    });
+                }
+            };
+        let effective_quality_label = quality_override
+            .as_deref()
+            .and_then(|value| non_empty_string(Some(value.to_string())))
+            .or_else(|| prepared.parsed.quality.clone());
+        let effective_parsed =
+            parsed_with_quality_override(&prepared.parsed, effective_quality_label.as_deref());
         let canonical_dest_path = episode_import_dest_path(
             title,
             use_season_folders,
             &effective_parsed,
-            None,
+            prepared.accepted.analysis.as_ref(),
             &ext,
             source_video,
             title_folder_path,
@@ -235,7 +270,7 @@ async fn execute_resolved_episode_import(
             source_video,
             &dest_path,
             import_mode,
-            None,
+            Some(&prepared.source_snapshot),
             completed,
         )
         .await?;
@@ -266,7 +301,12 @@ async fn execute_resolved_episode_import(
             .insert_or_reuse_media_file(app, &media_file_input)
             .await?
             .media_file_id;
-        analyze_and_persist_imported_media_file(app, &title.id, &media_file_id, &dest_path).await;
+        crate::post_download_gate::persist_media_analysis_result(
+            &app.services.library.media_files,
+            &media_file_id,
+            &prepared.accepted,
+        )
+        .await?;
         if let Err(error) = crate::subtitles::reconcile_external_subtitles_for_media_file(
             app,
             &title.id,
@@ -598,6 +638,7 @@ async fn execute_resolved_episode_import(
         crate::import_decide::ImportDecisionOutcome::Reject {
             rejection,
             disposition,
+            better_library_copy,
         } => {
             tracing::info!(
                 title_id = %title.id,
@@ -607,6 +648,22 @@ async fn execute_resolved_episode_import(
                 rejection.message
             );
             let reason_code = Some(rejection.recycle_reason.to_string());
+            if disposition == crate::import_decide::RejectionDisposition::Skip
+                && let Some(copy) = better_library_copy.as_ref()
+                && library_copy_holds_episodes(copy, &existing_incumbents, &target_episode_ids)
+                    .await
+            {
+                // The library already holds every episode this file covers at
+                // least as well, so the episodes are in place and the file has
+                // nothing to add. The existing file is left exactly as it is.
+                return Ok(EpisodeImportOutcome::Skipped {
+                    message: rejection.message,
+                    reason_code,
+                    skip_reason: rejection.skip_reason,
+                    episode_ids: target_episode_ids.clone(),
+                    already_present_destination: None,
+                });
+            }
             return Ok(EpisodeImportOutcome::Rejected {
                 rejection,
                 disposition,
@@ -880,4 +937,82 @@ pub(crate) async fn mark_wanted_completed(
             tracing::warn!(error = %err, title_id = %title_id, "failed to mark wanted item completed");
         }
     }
+}
+
+/// Completes the episode scopes a download settled without importing, because
+/// the library already holds them. Only a row still `grabbed` for this
+/// download's release is completed: a row grabbed for another release belongs
+/// to that download, and a download whose release name cannot be read releases
+/// only rows whose own recorded grab cannot be read either.
+pub(crate) async fn complete_already_present_episode_scopes(
+    app: &AppUseCase,
+    title_id: &str,
+    episode_ids: &[String],
+    release_title: Option<&str>,
+) {
+    let download_key = release_title.and_then(crate::admission::release_key);
+    for episode_id in episode_ids {
+        let row = match app
+            .services
+            .workflow
+            .acquisition_scope_states
+            .get_acquisition_scope_state_for_title(title_id, Some(episode_id))
+            .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    title_id = %title_id,
+                    episode_id = %episode_id,
+                    "failed to read episode scope for an already-present episode"
+                );
+                continue;
+            }
+        };
+        if row.status != crate::AcquisitionScopeStatus::Grabbed {
+            continue;
+        }
+        let recorded_key = crate::quality::canonical_context::grabbed_release_record(&row)
+            .and_then(|record| crate::admission::release_key(&record.title));
+        let claimed_by_this_download = match (download_key, recorded_key) {
+            (Some(download), Some(recorded)) => download == recorded,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        };
+        if claimed_by_this_download {
+            mark_wanted_completed(app, title_id, Some(episode_id), true).await;
+        }
+    }
+}
+
+/// Whether `copy` is still on disk and covers every one of `target_episode_ids`.
+///
+/// Admission refuses a multi-episode file when any one member already has a
+/// better copy, so the refusal alone says nothing about the other members; only
+/// a copy that covers them all shows the library holds the whole scope.
+async fn library_copy_holds_episodes(
+    copy: &crate::import_decide::BetterLibraryCopy,
+    incumbents: &[crate::EpisodeScopedMediaFile],
+    target_episode_ids: &[String],
+) -> bool {
+    if target_episode_ids.is_empty() {
+        return false;
+    }
+    let Some(incumbent) = incumbents
+        .iter()
+        .find(|incumbent| incumbent.media_file.id == copy.file_id)
+    else {
+        return false;
+    };
+    if !target_episode_ids
+        .iter()
+        .all(|episode_id| incumbent.episode_ids.contains(episode_id))
+    {
+        return false;
+    }
+    tokio::fs::try_exists(crate::stored_paths::stored_path_to_path_buf(&copy.path))
+        .await
+        .unwrap_or(false)
 }

@@ -656,6 +656,8 @@ const ru: LocaleDictionary = {
     "jobs.triggerSource.systemInternal": "Внутренний системный процесс",
     "deletePreview.counting": "Подсчёт файлов для удаления...",
     "deletePreview.error": "Не удалось подготовить предварительный просмотр удаления.",
+    "deletePreview.folderUnknown": "Scryer не может определить, в какой папке лежат файлы этого тайтла, поэтому ничего не удалит с диска.",
+    "deletePreview.removeFromCatalogOnly": "Убрать только из каталога",
     "deletePreview.files": "Файлы",
     "deletePreview.media": "Медиафайлы",
     "deletePreview.subtitles": "Субтитры",
@@ -768,6 +770,9 @@ const ru: LocaleDictionary = {
     "settings.delayProfileFacetsLabel": "Применяется к",
     "settings.delayProfileFacetsHelp":
         "Типы контента, к которым применяется этот профиль. Оставьте все флажки снятыми, чтобы применять ко всем типам.",
+    "settings.delayProfileLibrariesLabel": "Библиотеки",
+    "settings.delayProfileLibrariesHelp": "Библиотеки, к которым применяется этот профиль. Оставьте выбранными все, чтобы применять его ко всем библиотекам. При удалении последней библиотеки профиля профиль отключается.",
+    "settings.delayProfileUnknownLibrary": "Неизвестная библиотека",
     "settings.delayProfileAllFacets": "Все",
     "settings.delayProfileTagsLabel": "Теги",
     "settings.delayProfileTagsPlaceholder":
@@ -2125,6 +2130,8 @@ const ru: LocaleDictionary = {
     "settings.refReleaseLangsAudio":
         "Коды языков аудио ISO 639-3 (например, eng, jpn). Включают языки из листинга индексатора, зафиксированные при захвате релиза; файлы, найденные сканированием, принятые или импортированные до того, как начали сохраняться снимки листинга, дают только то, что видно по имени и самому файлу",
 
+    "settings.refReleaseIndexerLanguages":
+        "Коды языков аудио ISO 639-3, которые сообщил сам листинг индексатора, зафиксированные при захвате релиза. Никогда не выводятся из имени или тайтла; пусто, если индексатор ничего не сообщил",
     "settings.refReleaseLangsSub":
         "Коды языков субтитров ISO 639-3",
 
@@ -4988,7 +4995,6 @@ const ru: LocaleDictionary = {
   "settings.rulesScoring": "Правила оценки",
   "settings.maintenanceNavRules": "Правила",
   "settings.maintenanceNavHistory": "История",
-  "settings.maintenanceNavGates": "Разрешения",
     "settings.maintenanceRuleAction": "Действие",
     "settings.maintenanceRuleActionHelp": "Что сделало бы это правило, когда действия обслуживания будут включены.",
     "settings.maintenanceRuleActionPlaceholder": "Выберите действие",
@@ -5005,17 +5011,12 @@ const ru: LocaleDictionary = {
     "settings.maintenanceRuleUpdate": "Обновить правило обслуживания",
     "settings.maintenanceRuleCopy": "Скопировать как новое правило",
     "settings.maintenanceRuleCreateNew": "Создать новое правило обслуживания",
-    "settings.maintenanceRuleSaveDisabledNote": "Сохранённые правила остаются отключёнными до выхода выполнения обслуживания.",
     "settings.maintenanceRuleValidationRequired": "Имя, исходный код правила и действие обязательны.",
     "settings.maintenanceRuleConfirmDiscardTitle": "Отменить несохранённые изменения?",
     "settings.maintenanceRuleConfirmDiscardDescription": "В редакторе правил обслуживания есть несохранённые изменения, которые будут потеряны.",
     "settings.maintenanceRuleDeleting": "Удалить правило обслуживания {{name}}?",
     "settings.noMaintenanceRulesFound": "Правил обслуживания пока нет.",
     "settings.maintenanceRuleRevision": "Ревизия",
-    "settings.maintenanceRuleMode": "Режим",
-    "settings.maintenanceModeDisabled": "Отключено",
-    "settings.maintenanceModeShadow": "Теневой",
-    "settings.maintenanceModeObserve": "Наблюдение",
     "settings.maintenanceRuleRisk": "Риск",
     "settings.maintenanceRiskNone": "Без риска",
     "settings.maintenanceRiskLow": "Низкий риск",
@@ -5057,62 +5058,20 @@ const ru: LocaleDictionary = {
     "settings.maintenanceRuleDeleted": "Правило обслуживания {{name}} удалено.",
 
     // ── Правила обслуживания — состояние экземпляра ──
-    "settings.maintenanceStatusUnknownTitle": "Состояние экземпляра скрыто",
-    "settings.maintenanceStatusUnknownBody": "Здесь можно писать правила обслуживания и смотреть предпросмотр, но чтение общесистемных предохранителей обслуживания требует права на системные настройки, поэтому эта страница не может сказать, включены ли оценка и действия.",
-    "settings.maintenanceStatusEvaluationOffTitle": "Оценка отключена для всего экземпляра",
-    "settings.maintenanceStatusEvaluationOffBody": "На этом экземпляре не оценивается ни одно правило обслуживания, в каком бы режиме оно ни было. Откройте предохранитель оценки ниже, чтобы начать записывать кандидатов.",
-    "settings.maintenanceStatusNoRulesTitle": "Активных правил нет",
-    "settings.maintenanceStatusNoRulesBody": "Оценка включена, но все правила по-прежнему отключены. Переведите правило в режим «Теневой» или «Наблюдение», чтобы оно оценивалось.",
-    "settings.maintenanceStatusEffectsOffTitle": "Правила оцениваются, но действия не выполняются",
-    "settings.maintenanceStatusEffectsOffBody": "Кандидаты записываются, их отсчёт льготного периода идёт, но все предохранители эффектов закрыты: ничего не снимается с отслеживания, не меняется и не удаляется.",
-    "settings.maintenanceStatusReversibleTitle": "Обратимые действия могут выполняться",
-    "settings.maintenanceStatusReversibleBody": "Правила, взведённые на обратимые эффекты, могут действовать на своих кандидатов. Для удаления файлов по-прежнему нужен разрушительный предохранитель.",
-    "settings.maintenanceStatusDestructiveTitle": "Разрушительные действия могут выполняться",
-    "settings.maintenanceStatusDestructiveBody": "Разрушительный предохранитель открыт. Правило, взведённое на разрушительные эффекты, удалит файлы подходящих тайтлов, как только истечёт его льготный период.",
 
     // ── Правила обслуживания — предохранители экземпляра ──
-    "settings.maintenanceGatesTitle": "Предохранители экземпляра",
-    "settings.maintenanceGatesSubtitle": "Пять независимых переключателей для всего экземпляра. Правило действует только там, где его собственное взведение и соответствующий предохранитель совпадают.",
-    "settings.maintenanceGatesLocked": "Чтение предохранителей обслуживания требует права на системные настройки. Спросите администратора, включены ли оценка и действия.",
-    "settings.maintenanceGatesUpdated": "Предохранители обслуживания обновлены.",
-    "settings.maintenanceGateEvaluation": "Оценка",
-    "settings.maintenanceGateEvaluationHelp": "Может ли планировщик оценки работать вообще. Когда закрыт, ни одно правило не оценивается и ни один кандидат не создаётся.",
-    "settings.maintenanceGateResultDisplay": "Показ результатов",
-    "settings.maintenanceGateResultDisplayHelp": "Возвращаются ли кандидаты обычным клиентам. Эта страница в любом случае видит теневых кандидатов.",
-    "settings.maintenanceGatePresentationEffects": "Эффекты представления",
-    "settings.maintenanceGatePresentationEffectsHelp": "Проекция коллекций и уведомления о жизненном цикле. На диске ничего не меняется.",
-    "settings.maintenanceGateReversibleEffects": "Обратимые эффекты",
-    "settings.maintenanceGateReversibleEffectsHelp": "Действия низкого и среднего риска: снятие с отслеживания или смена профиля качества. Файлы сохраняются.",
-    "settings.maintenanceGateDestructiveEffects": "Разрушительные эффекты",
-    "settings.maintenanceGateDestructiveEffectsHelp": "Действия высокого риска, удаляющие файлы с диска. Оставьте закрытым, если не уверены.",
-    "settings.maintenanceGateDestructiveConfirmTitle": "Разрешить разрушительные действия?",
-    "settings.maintenanceGateDestructiveConfirmBody": "Открытие этого предохранителя позволяет каждому правилу, взведённому на разрушительные эффекты, удалять файлы по истечении льготного периода. Правила без эффектов и обратимые не затрагиваются.",
-    "settings.maintenanceGateDestructiveConfirmAction": "Открыть разрушительный предохранитель",
 
     // ── Правила обслуживания — режим и взведение ──
-    "settings.maintenanceModeDisabledHelp": "Никогда не оценивается.",
-    "settings.maintenanceModeShadowHelp": "Оценивается и записывается; результаты остаются на этой странице.",
-    "settings.maintenanceModeObserveHelp": "Оценивается, записывается и выносится на утверждение.",
-    "settings.maintenanceRuleArming": "Взведение",
-    "settings.maintenanceRuleArmingHelp": "Взведение задаётся для каждого правила и не зависит от режима. Ничего не выполняется, пока не открыт и соответствующий предохранитель экземпляра.",
-    "settings.maintenanceRuleModeUpdated": "Режим обновлён для {{name}}.",
-    "settings.maintenanceRuleArmingUpdated": "Взведение обновлено для {{name}}.",
     "settings.maintenanceArmingNone": "Без эффектов",
     "settings.maintenanceArmingReversible": "Обратимое",
     "settings.maintenanceArmingDestructive": "Разрушительное",
-    "settings.maintenanceArmDestructiveTitle": "Взвести разрушительные эффекты?",
-    "settings.maintenanceArmDestructiveBody": "{{name}} удаляет файлы. Разрушительное взведение позволит правилу действовать на уже созданных кандидатов, как только откроется разрушительный предохранитель и истечёт каждый льготный период.",
     "settings.maintenanceArmDestructiveLoading": "Подсчёт кандидатов, которые уже удерживает это правило…",
     "settings.maintenanceArmDestructiveCount": "Действие может затронуть {{count}} кандидатов.",
     "settings.maintenanceArmDestructiveNoCandidates": "Сейчас у этого правила нет кандидатов, которых могло бы затронуть действие.",
     "settings.maintenanceArmDestructiveCountChanged": "Пока вы читали, число изменилось: теперь правило удерживает {{count}}. Проверьте число и подтвердите ещё раз.",
     "settings.maintenanceArmDestructiveAcknowledge": "Я понимаю, что это правило может удалить файлы {{count}} тайтлов.",
-    "settings.maintenanceArmDestructiveConfirm": "Взвести разрушительные эффекты",
 
     // ── Правила обслуживания — кандидаты ──
-    "settings.maintenanceCandidatesTitle": "Кандидаты",
-    "settings.maintenanceCandidatesSubtitle": "Тайтлы, совпавшие с правилом, с идущим льготным периодом. Ни с одним из них ничего ещё не сделано.",
-    "settings.maintenanceCandidatesShadowBadge": "Теневой",
     "settings.maintenanceCandidatesFilterRule": "Правило",
     "settings.maintenanceCandidatesFilterState": "Состояние",
     "settings.maintenanceCandidatesFilterLibrary": "Библиотека",
@@ -5125,8 +5084,6 @@ const ru: LocaleDictionary = {
     "settings.maintenanceCandidatesColDue": "Срок",
     "settings.maintenanceCandidatesHeldSince": "Удерживается с {{time}}",
     "settings.maintenanceCandidatesEmpty": "Ни один кандидат не подходит под эти фильтры.",
-    "settings.maintenanceCandidatesEmptyEvaluationOff": "Оценка отключена для всего экземпляра, поэтому кандидаты не создавались.",
-    "settings.maintenanceCandidatesEmptyNoActiveRules": "Все правила отключены, поэтому ничего не оценивается. Сначала переведите правило в «Теневой» или «Наблюдение».",
     "settings.maintenanceCandidateExclude": "Исключить этот тайтл",
     "settings.maintenanceCandidateStateObserving": "Наблюдение",
     "settings.maintenanceCandidateStatePendingAction": "Ожидает действия",
@@ -5368,20 +5325,16 @@ const ru: LocaleDictionary = {
     "settings.maintenanceTemplateNewestEpisodesDescription": "Caution: this episode-scoped template unmonitors and deletes downloaded episodes ranked older than the newest three by air date. Specials, future episodes, missing files, and unresolved dates receive no rank, so they do not match. Protected episodes still occupy the newest-three slots.",
     "settings.maintenanceTemplateNewestSeasonsTitle": "Оставить 2 новейших загруженных сезона",
     "settings.maintenanceTemplateNewestSeasonsDescription": "Caution: this season-scoped template unmonitors and deletes files from seasons ranked older than the newest two by each season's newest eligible downloaded episode. Specials, future episodes, missing files, and unresolved dates receive no rank; protected seasons still occupy slots.",
+    "settings.maintenanceTemplateLeftEveryListTitle": "Выбыло из всех списков",
+    "settings.maintenanceTemplateLeftEveryListDescription":
+      "Тайтлы, из которых выбыли все списки, публичные и личные, когда каждое выбытие обработано и последнее произошло более 30 дней назад. Область снимается с отслеживания, а файлы остаются на месте.",
+    "settings.maintenanceTemplateListAddedUnwatchedTitle": "Добавлено списком и ни разу не просмотрено",
+    "settings.maintenanceTemplateListAddedUnwatchedDescription":
+      "Добавляет тег needs-review к тайтлам, которые список добавил более 90 дней назад и которые никто не смотрел. Удерживается, пока картина просмотров неполная. Ничего не удаляется.",
 
   // ── Правила запросов ────────────────────────────────────────────────
   "settings.requestRules": "Правила запросов",
   "settings.noRequestRulesFound": "Правил запросов пока нет.",
-  "settings.requestRuleMode": "Режим",
-  "settings.requestRuleModeDisabled": "Отключено",
-  "settings.requestRuleModeShadow": "Теневой",
-  "settings.requestRuleModeEnforce": "Применять",
-  "settings.requestRuleModeDisabledHelp": "Никогда не выполняется.",
-  "settings.requestRuleModeShadowHelp": "Записывает своё решение. С запросом ничего не происходит.",
-  "settings.requestRuleModeEnforceHelp":
-    "Его вердикт решает судьбу запроса: одобрен, отклонён или отправлен на рассмотрение.",
-  "settings.requestRuleModeHelp":
-    "Правило действует, только когда совпадают три вещи: здесь выбран режим «Применять», включён общий переключатель ниже, и у запросившего есть право запрашивать из этой библиотеки. Во всех остальных случаях правило всё равно записывает, что оно сделало бы.",
   "settings.requestRuleLibraries": "Библиотеки",
   "settings.requestRuleLibrariesAll": "Все библиотеки",
   "settings.requestRuleLibrariesHelp":
@@ -5396,10 +5349,7 @@ const ru: LocaleDictionary = {
   "settings.requestRuleUpdated": "Правило запросов обновлено.",
   "settings.requestRuleDeleted": "Правило запросов {{name}} удалено.",
   "settings.requestRuleDeleting": "Удалить правило запросов {{name}}? Записанные им решения сохранятся.",
-  "settings.requestRuleModeUpdated": "Режим правила {{name}} изменён.",
   "settings.requestRuleValidationRequired": "Правилу запросов нужны имя и сопоставитель.",
-  "settings.requestRuleSaveDisabledNote":
-    "При сохранении правило остаётся отключённым. Включение — отдельный шаг, и общий переключатель тоже должен быть включён.",
   "settings.requestRuleConfirmDiscardTitle": "Отменить несохранённые изменения?",
   "settings.requestRuleConfirmDiscardDescription":
     "Сопоставитель в редакторе не сохранён. Продолжение заменит его.",
@@ -5411,29 +5361,6 @@ const ru: LocaleDictionary = {
     "Для списка учётных записей нужны права, которых у этой страницы нет, поэтому имена придётся вписать в сопоставитель вручную.",
   "settings.requestRuleRequestersNoTarget":
     "Этот сопоставитель никого не называет, поэтому выбранные учётные записи некуда вписать. Сначала добавьте набор requesters или сравнение по имени пользователя.",
-
-  "settings.requestRulesStatusGateClosedTitle": "Ничего не решается автоматически",
-  "settings.requestRulesStatusGateClosedBody":
-    "Общий переключатель выключен, поэтому каждый запрос по-прежнему ждёт человека. Включённые здесь правила будут записывать, что они решили бы.",
-  "settings.requestRulesStatusIdleTitle": "Переключатель включён, но ни одно правило не активно",
-  "settings.requestRulesStatusIdleBody":
-    "Запросы идут обычным путём, пока хотя бы одно правило не переведено в режим «Теневой» или «Применять».",
-  "settings.requestRulesStatusShadowingTitle": "Правила записывают, но не действуют",
-  "settings.requestRulesStatusShadowingBody":
-    "Все включённые правила работают в теневом режиме: их вердикты попадают в журнал решений, а с запросом ничего не происходит.",
-  "settings.requestRulesStatusEnforcingTitle": "Запросы решаются автоматически",
-  "settings.requestRulesStatusEnforcingBody":
-    "Хотя бы одно правило применяется, поэтому подходящие запросы одобряются или отклоняются без участия человека.",
-
-  "settings.requestGateTitle": "Общий переключатель",
-  "settings.requestGateSubtitle":
-    "Переключатель уровня экземпляра, который позволяет правилам запросов действовать. Он не зависит от режима каждого правила и защищён другим правом доступа.",
-  "settings.requestGateEvaluation": "Выполнять правила запросов",
-  "settings.requestGateEvaluationHelp":
-    "Пока он выключен, ни одно правило не решает судьбу запроса, как бы оно ни было включено. Правила всё равно записывают свои решения.",
-  "settings.requestGateLocked":
-    "Для изменения общего переключателя нужны права управления системными настройками, которых у этой учётной записи нет. Режимы правил выше вам доступны.",
-  "settings.requestGateUpdated": "Общий переключатель обновлён.",
 
   "settings.requestPreviewTitle": "Проверить правило на запросе",
   "settings.requestPreviewSubtitle":
@@ -5467,13 +5394,10 @@ const ru: LocaleDictionary = {
     "Определите их в «Настройки › Теги», прежде чем их можно будет применить.",
 
   "settings.requestDecisionsTitle": "Недавние решения",
-  "settings.requestDecisionsSubtitle":
-    "Что правила запросов решили в последнее время, включая вердикты, которые теневые правила только записали.",
   "settings.requestDecisionsOutcomeFilter": "Итог",
   "settings.requestDecisionsOutcomeAll": "Любой итог",
   "settings.requestDecisionsColTime": "Оценено",
   "settings.requestDecisionsColOutcome": "Итог",
-  "settings.requestDecisionsColMode": "Режим",
   "settings.requestDecisionsColVotes": "Голоса",
   "settings.requestDecisionsColReasons": "Причины",
   "settings.requestDecisionsEmpty": "Решений пока не записано.",
@@ -5503,6 +5427,12 @@ const ru: LocaleDictionary = {
   "settings.requestTemplateMonthlyQuotaTitle": "Месячная квота одобрений",
   "settings.requestTemplateMonthlyQuotaDescription":
     "Отправляет запрос на рассмотрение, когда у запросившего уже пять одобрений за последние тридцать дней. Никогда не отклоняет — просит человека посмотреть.",
+  "settings.requestTemplateHoldApprovalListsTitle": "Удерживать запросы из списков участников с политикой «Одобрение»",
+  "settings.requestTemplateHoldApprovalListsDescription":
+    "Отправляет запрос из списка на рассмотрение, когда у владельца списка политика списков «Одобрение». Ручные запросы не затрагиваются.",
+  "settings.requestTemplateDenyPersonalListAbove1080pTitle": "Отклонять запросы из личных списков выше 1080p",
+  "settings.requestTemplateDenyPersonalListAbove1080pDescription":
+    "Отклоняет запрос из личного списка участника, когда его профиль качества выше 1080p. Публичные списки и ручные запросы не затрагиваются.",
 
   "settings.refReqTitle": "Справочник входных данных запросов",
   "settings.refReqSubtitle": "Все значения, которые может прочитать сопоставитель запроса, и что каждое из них означает.",
@@ -5535,7 +5465,6 @@ const ru: LocaleDictionary = {
   "requests.preflightReason": "Причина: {{reason}}.",
   "requests.preflightMetadataPartial":
     "Scryer не смог прочитать всё об этом тайтле, поэтому решение примет человек.",
-  "requests.preflightPreviewOnly": "только предпросмотр",
 
   "requests.leaseForever": "Хранится вечно",
   "requests.leaseRequested": "Запрошено {{count}} дней",
@@ -5545,7 +5474,6 @@ const ru: LocaleDictionary = {
   "requests.leaseReleased": "Хранение снято",
 
   "requests.decisionTitle": "Как это было решено",
-  "requests.decisionShadow": "только записано",
   "requests.decisionPolicySaid": "Правила сказали {{outcome}}; запрос решило что-то другое.",
   "requests.decisionVotes": "Голоса правил",
   "requests.decisionNothingToShow": "Ни одно правило ничего не сказало об этом запросе.",
@@ -6315,13 +6243,11 @@ const ru: LocaleDictionary = {
   "lists.kind.movie": "Фильмы",
   "lists.kind.series": "Сериалы",
   "lists.kind.anime": "Аниме",
-  "lists.mode.search": "Добавить и искать",
-  "lists.mode.add": "Только добавить",
+  "lists.mode.add": "Добавить",
   "lists.mode.hold": "Отложить до одобрения",
   "lists.mode.request": "Запросить",
   "lists.mode.discover": "Показывать только в «Обзоре»",
-  "lists.modeHelp.search": "Добавляет новые тайтлы с отслеживанием и сразу ищет их.",
-  "lists.modeHelp.add": "Добавляет новые тайтлы с отслеживанием без поиска.",
+  "lists.modeHelp.add": "Добавляет новые тайтлы с отслеживанием, выбранным для каждого типа. Отслеживаемые тайтлы ищутся, неотслеживаемые — нет.",
   "lists.modeHelp.hold": "Создаёт ожидающий запрос для каждого нового тайтла, чтобы его кто-то одобрил.",
   "lists.modeHelp.request": "Запрашивает новые тайтлы от имени участника.",
   "lists.modeHelp.discover": "Записывает тайтлы списка, ничего не добавляя.",

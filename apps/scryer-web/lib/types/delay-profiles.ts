@@ -22,6 +22,8 @@ export type DelayProfileDraft = {
   bypass_if_highest_quality: boolean;
   applies_to_facets: DelayProfileFacet[];
   tags: string[];
+  /** Libraries the profile is limited to. Empty applies to every library. */
+  library_ids: string[];
   priority: number;
   enabled: boolean;
 };

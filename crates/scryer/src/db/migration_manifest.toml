@@ -3146,6 +3146,234 @@ file = "postgres/migrations/0290_media_file_score_evaluation.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 291
+description = "merge list search mode into add"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0291_merge_list_search_mode_into_add.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 292
+description = "grabbed file names on download submissions"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0292_download_submission_grabbed_file_names.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 293
+description = "delay profile tables"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0293_delay_profile_tables.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0293_delay_profile_tables.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration.steps]]
+kind = "rust"
+hook_id = "import_delay_profile_catalog"
+engine = "all"
+scope = "all"
+
+[[migration]]
+version = 294
+description = "movie release dates"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0294_movie_release_dates.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0294_movie_release_dates.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 295
+description = "movie default availability"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0295_movie_default_availability.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0295_movie_default_availability.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 296
+description = "title folder recovery"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0296_title_folder_recovery.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0296_title_folder_recovery.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 297
+description = "movie release dates refresh"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0297_movie_release_dates_refresh.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0297_movie_release_dates_refresh.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 298
+description = "maintenance rule state"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0298_maintenance_rule_state.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0298_maintenance_rule_state.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 299
+description = "request rules enable only"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0299_request_rules_enable_only.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0299_request_rules_enable_only.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 300
+description = "maintenance rule system owned"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0300_maintenance_rule_system_owned.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0300_maintenance_rule_system_owned.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 301
+description = "title external id value lookup"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0301_title_external_id_value_lookup.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0301_title_external_id_value_lookup.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 302
+description = "movie availability facet settings"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0302_movie_availability_facet_settings.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0302_movie_availability_facet_settings.sql"
+engine = "postgres"
+scope = "all"
+
+[[migration]]
+version = 303
+description = "lifecycle claims one operator keep"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0303_lifecycle_claims_one_operator_keep.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0303_lifecycle_claims_one_operator_keep.sql"
+engine = "postgres"
+scope = "all"
+
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

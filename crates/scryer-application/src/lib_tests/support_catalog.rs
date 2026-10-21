@@ -28,6 +28,7 @@ pub(super) struct MockTitleRepo {
     pub(super) title_tag_definitions: Arc<Mutex<Vec<scryer_domain::TitleTagDefinition>>>,
     pub(super) fail_tag_reads: AtomicBool,
     pub(super) smg_identity_backfill_attempts: Arc<Mutex<HashMap<String, i64>>>,
+    pub(super) metadata_hydration_due: Mutex<HashSet<String>>,
     pub(super) create_or_get_existing_error: Arc<Mutex<Option<String>>>,
     /// `(title_id, message)`: fail folder-ownership writes for one title, so a
     /// compensating transaction can be exercised at the exact commit that fails.
@@ -39,6 +40,11 @@ pub(super) struct MockTitleRepo {
     /// Scheduled pollers must not pay for this before they know they have
     /// somewhere to send a result.
     pub(super) list_for_matching_calls: AtomicUsize,
+    /// Every read title matching makes through the index port: key shapes,
+    /// external ids, spelling buckets, index names, collision keys and title
+    /// rows by id. A batched call is one read, as it is one round trip (per
+    /// chunk) in the SQL store.
+    pub(super) matching_reads: AtomicUsize,
     pub(super) list_calls: AtomicUsize,
     pub(super) discovery_context_reads: AtomicUsize,
     pub(super) discovery_read_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
@@ -59,6 +65,9 @@ pub(crate) struct RecordingJobRunRepo {
     /// Stands in for the sqlite writer gate: set it and every job-run write
     /// takes the same process-wide mutex a real sqlite write would.
     writer_gate: Option<Arc<Mutex<()>>>,
+    /// Set it and every update that ends a run fails, as a store that is
+    /// locked or unreachable at that moment would. Other writes still land.
+    pub(super) reject_terminal_updates: AtomicBool,
 }
 
 impl RecordingJobRunRepo {
@@ -150,6 +159,11 @@ impl JobRunRepository for RecordingJobRunRepo {
     }
 
     async fn update_job_run(&self, run: &JobRunRecord) -> AppResult<JobRunRecord> {
+        if run.status.is_terminal() && self.reject_terminal_updates.load(Ordering::SeqCst) {
+            return Err(AppError::Repository(
+                "job run store refused the terminal write".to_string(),
+            ));
+        }
         let _writer = match &self.writer_gate {
             Some(gate) => Some(gate.lock().await),
             None => None,
@@ -268,6 +282,30 @@ impl MockTitleRepo {
             .iter()
             .filter_map(|found| store.iter().find(|title| title.id == found.id).cloned())
             .collect())
+    }
+
+    async fn titles_naming_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = crate::ports::titles_matching_lookup_key_shapes(
+            self.list_for_matching(None, None).await?,
+            keys,
+        );
+        self.rows_of(found).await
+    }
+
+    async fn index_names(
+        &self,
+        title_id: &str,
+    ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
+        let Some(mut title) = self.get_by_id(title_id).await? else {
+            return Ok(Vec::new());
+        };
+        if let Some(names) = self.index_only_names.lock().await.get(title_id) {
+            title.tagged_aliases.extend(names.iter().cloned());
+        }
+        Ok(crate::ports::title_name_candidates(&title))
     }
 
     pub(super) async fn fail_create_or_get_existing(&self, message: &str) {
@@ -723,27 +761,127 @@ impl TitleRepository for MockTitleRepo {
     }
 
     async fn find_titles_by_lookup_key_shapes(&self, keys: &[String]) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        self.titles_naming_key_shapes(keys).await
+    }
+
+    async fn find_titles_by_lookup_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(key_sets.len());
+        for keys in key_sets {
+            results.push(self.titles_naming_key_shapes(keys).await?);
+        }
+        Ok(results)
+    }
+
+    async fn find_titles_by_external_id(&self, source: &str, value: &str) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::ports::titles_matching_external_id(
+            self.list_for_matching(None, None).await?,
+            source,
+            value,
+        ))
+    }
+
+    async fn find_titles_by_external_ids_batch(
+        &self,
+        lookups: &[(String, String)],
+    ) -> AppResult<Vec<Vec<Title>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(lookups.len());
+        for (source, value) in lookups {
+            results.push(crate::ports::titles_matching_external_id(
+                self.list_for_matching(None, None).await?,
+                source,
+                value,
+            ));
+        }
+        Ok(results)
+    }
+
+    async fn lookup_keys_claimed_by_other_titles(
+        &self,
+        title_id: &str,
+        keys: &[String],
+    ) -> AppResult<Vec<String>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let found = crate::ports::titles_matching_lookup_key_shapes(
-            self.list_for_matching(None, None).await?,
+        Ok(crate::ports::lookup_keys_claimed_by_others(
+            &self.list_for_matching(None, None).await?,
+            title_id,
             keys,
-        );
-        self.rows_of(found).await
+        ))
+    }
+
+    async fn lookup_keys_claimed_by_other_titles_batch(
+        &self,
+        requests: &[(String, Vec<String>)],
+    ) -> AppResult<Vec<Vec<String>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let titles = self.list_for_matching(None, None).await?;
+        Ok(requests
+            .iter()
+            .map(|(title_id, keys)| {
+                crate::ports::lookup_keys_claimed_by_others(&titles, title_id, keys)
+            })
+            .collect())
+    }
+
+    async fn find_title_name_candidates(
+        &self,
+        query: crate::ports::TitleNameBucketQuery<'_>,
+    ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::ports::name_candidates_in_bucket(
+            &self.list_for_matching(None, None).await?,
+            &query,
+        ))
+    }
+
+    async fn find_title_name_candidates_batch(
+        &self,
+        queries: &[crate::ports::TitleNameBucketQuery<'_>],
+    ) -> AppResult<Vec<Vec<crate::ports::TitleNameCandidate>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let titles = self.list_for_matching(None, None).await?;
+        Ok(queries
+            .iter()
+            .map(|query| crate::ports::name_candidates_in_bucket(&titles, query))
+            .collect())
     }
 
     async fn list_title_index_names(
         &self,
         title_id: &str,
     ) -> AppResult<Vec<crate::ports::TitleNameCandidate>> {
-        let Some(mut title) = self.get_by_id(title_id).await? else {
-            return Ok(Vec::new());
-        };
-        if let Some(names) = self.index_only_names.lock().await.get(title_id) {
-            title.tagged_aliases.extend(names.iter().cloned());
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        self.index_names(title_id).await
+    }
+
+    async fn list_title_index_names_batch(
+        &self,
+        title_ids: &[String],
+    ) -> AppResult<Vec<Vec<crate::ports::TitleNameCandidate>>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let mut results = Vec::with_capacity(title_ids.len());
+        for title_id in title_ids {
+            results.push(self.index_names(title_id).await?);
         }
-        Ok(crate::ports::title_name_candidates(&title))
+        Ok(results)
+    }
+
+    async fn get_by_ids(&self, ids: &[String]) -> AppResult<Vec<Title>> {
+        self.matching_reads.fetch_add(1, Ordering::SeqCst);
+        let list = self.store.lock().await;
+        Ok(ids
+            .iter()
+            .filter_map(|id| list.iter().find(|title| &title.id == id).cloned())
+            .collect())
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
@@ -1077,7 +1215,11 @@ impl TitleRepository for MockTitleRepo {
         Ok(())
     }
 
-    async fn mark_title_metadata_hydration_due_now(&self, _: &str) -> AppResult<()> {
+    async fn mark_title_metadata_hydration_due_now(&self, title_id: &str) -> AppResult<()> {
+        self.metadata_hydration_due
+            .lock()
+            .await
+            .insert(title_id.to_string());
         Ok(())
     }
 
@@ -1217,6 +1359,13 @@ impl TitleRepository for MockTitleRepo {
         title.tagged_aliases = metadata.tagged_aliases;
         title.metadata_language = metadata.metadata_language;
         title.metadata_fetched_at = Some(chrono::Utc::now());
+        self.metadata_hydration_due.lock().await.remove(id);
+        if let Some(min_availability) = metadata.min_availability {
+            title.min_availability = min_availability;
+        }
+        if let Some(movie_release_dates) = metadata.movie_release_dates {
+            title.movie_release_dates = Some(movie_release_dates);
+        }
         for external_id in metadata.extra_external_ids {
             title
                 .external_ids

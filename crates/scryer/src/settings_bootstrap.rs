@@ -10,24 +10,23 @@ use scryer_application::{
     HISTORY_KEEP_FOREVER_KEY, HISTORY_RETENTION_DAYS_KEY, IMAGE_CACHE_MAX_SIZE_MB_KEY,
     IMPORT_MODE_KEY, INDEXER_ROUTING_SETTINGS_KEY, LEGACY_NZBGET_CATEGORY_SETTING_KEY,
     LEGACY_NZBGET_CLIENT_ROUTING_SETTINGS_KEY, MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
-    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
-    MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
-    METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY, MFA_REQUIRE_PASSWORD_LOGIN_KEY,
-    MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON, MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_ROOT_FOLDERS_KEY,
-    NZBGET_OLDER_PRIORITY_SETTING_KEY, NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY,
-    POST_PROCESSING_SCRIPT_ANIME_KEY, POST_PROCESSING_SCRIPT_MOVIE_KEY,
-    POST_PROCESSING_SCRIPT_SERIES_KEY, POST_PROCESSING_TIMEOUT_KEY, QUALITY_PROFILE_CATALOG_KEY,
-    QUALITY_PROFILE_ID_KEY, QUALITY_PROFILE_INHERIT_VALUE, QualityProfile,
-    QualityProfileRepository, RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY,
-    RECYCLE_BIN_RETENTION_DAYS_KEY, RENAME_COLLISION_POLICY_GLOBAL_KEY,
-    RENAME_COLLISION_POLICY_KEY, RENAME_COLLISION_POLICY_MOVIE_GLOBAL_KEY, RENAME_ENABLED_KEY,
+    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+    MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY, METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY,
+    MFA_REQUIRE_PASSWORD_LOGIN_KEY, MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON,
+    MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_ROOT_FOLDERS_KEY, NZBGET_OLDER_PRIORITY_SETTING_KEY,
+    NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY, POST_PROCESSING_SCRIPT_ANIME_KEY,
+    POST_PROCESSING_SCRIPT_MOVIE_KEY, POST_PROCESSING_SCRIPT_SERIES_KEY,
+    POST_PROCESSING_TIMEOUT_KEY, QUALITY_PROFILE_CATALOG_KEY, QUALITY_PROFILE_ID_KEY,
+    QUALITY_PROFILE_INHERIT_VALUE, QualityProfile, QualityProfileRepository,
+    RECYCLE_BIN_ENABLED_KEY, RECYCLE_BIN_PATH_KEY, RECYCLE_BIN_RETENTION_DAYS_KEY,
+    RENAME_COLLISION_POLICY_GLOBAL_KEY, RENAME_COLLISION_POLICY_KEY,
+    RENAME_COLLISION_POLICY_MOVIE_GLOBAL_KEY, RENAME_ENABLED_KEY,
     RENAME_MISSING_METADATA_POLICY_GLOBAL_KEY, RENAME_MISSING_METADATA_POLICY_KEY,
     RENAME_MISSING_METADATA_POLICY_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_ANIME_GLOBAL_KEY,
     RENAME_TEMPLATE_KEY, RENAME_TEMPLATE_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_SERIES_GLOBAL_KEY,
-    REQUEST_QUALITY_PROFILE_IDS_KEY, REQUEST_RULE_GATE_EVALUATION_KEY,
-    REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY, SEASON_FOLDER_TEMPLATE_KEY,
-    SERIES_ROOT_FOLDERS_KEY, SET_PERMISSIONS_LINUX_KEY, SETUP_COMPLETE_KEY,
-    SKIP_LOGIN_FOR_LOCAL_IPS_KEY, SPECIALS_FOLDER_TEMPLATE_KEY,
+    REQUEST_QUALITY_PROFILE_IDS_KEY, REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY,
+    SEASON_FOLDER_TEMPLATE_KEY, SERIES_ROOT_FOLDERS_KEY, SET_PERMISSIONS_LINUX_KEY,
+    SETUP_COMPLETE_KEY, SKIP_LOGIN_FOR_LOCAL_IPS_KEY, SPECIALS_FOLDER_TEMPLATE_KEY,
     TITLE_METADATA_LANGUAGE_OVERRIDE_KEY, TITLE_REQUIRED_AUDIO_OVERRIDE_KEY,
     TLS_CERT_PATH_KEY as TLS_CERT_KEY, TLS_KEY_PATH_KEY as TLS_KEY_KEY,
     TOTP_REQUIRE_EMBY_LOGIN_KEY, TOTP_REQUIRE_JELLYFIN_LOGIN_KEY, USE_SEASON_FOLDERS_KEY,
@@ -985,6 +984,31 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             default_value_json: "\"true\"",
             is_sensitive: false,
         },
+        // Movie availability gate, set on the Movie facet and per library
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "movie.default_availability",
+            data_type: "string",
+            default_value_json: "\"released\"",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "movie.release_market",
+            data_type: "string",
+            default_value_json: "\"US\"",
+            is_sensitive: false,
+        },
+        ServiceSettingSeed {
+            category: SETTINGS_CATEGORY_MEDIA,
+            scope: SETTINGS_SCOPE_SYSTEM,
+            key_name: "movie.availability_delay_days",
+            data_type: "number",
+            default_value_json: "0",
+            is_sensitive: false,
+        },
         // Acquisition settings
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_ACQUISITION,
@@ -1064,14 +1088,6 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             key_name: "acquisition.convergence_hot_resume_after",
             data_type: "json",
             default_value_json: "null",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_ACQUISITION,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: "acquisition.delay_profiles",
-            data_type: "json",
-            default_value_json: "[]",
             is_sensitive: false,
         },
         // NFO sidecar writing on import
@@ -1365,9 +1381,9 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             default_value_json: "\"none\"",
             is_sensitive: false,
         },
-        // The five maintenance gates (RFC 137 section 10). Every default is
-        // false, and they are seeded separately rather than as one blob so a
-        // partial write can never arm a gate the operator did not ask for.
+        // The maintenance gates. Every default is false, and they are seeded
+        // separately rather than as one blob so a partial write can never arm
+        // a gate the operator did not ask for.
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_GENERAL,
             scope: SETTINGS_SCOPE_SYSTEM,
@@ -1387,14 +1403,6 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
         ServiceSettingSeed {
             category: SETTINGS_CATEGORY_GENERAL,
             scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
-            data_type: "boolean",
-            default_value_json: "false",
-            is_sensitive: false,
-        },
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_GENERAL,
-            scope: SETTINGS_SCOPE_SYSTEM,
             key_name: MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
             data_type: "boolean",
             default_value_json: "false",
@@ -1404,18 +1412,6 @@ pub(crate) fn service_setting_seeds() -> &'static [ServiceSettingSeed] {
             category: SETTINGS_CATEGORY_GENERAL,
             scope: SETTINGS_SCOPE_SYSTEM,
             key_name: MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
-            data_type: "boolean",
-            default_value_json: "false",
-            is_sensitive: false,
-        },
-        // The single request-rule gate (spec 0003 FR-013). One switch where
-        // maintenance has five: a request rule votes and executes nothing, so
-        // there is one blast radius. It ships disarmed for the same reason the
-        // maintenance gates do.
-        ServiceSettingSeed {
-            category: SETTINGS_CATEGORY_GENERAL,
-            scope: SETTINGS_SCOPE_SYSTEM,
-            key_name: REQUEST_RULE_GATE_EVALUATION_KEY,
             data_type: "boolean",
             default_value_json: "false",
             is_sensitive: false,
@@ -3064,7 +3060,6 @@ mod tests {
         for key_name in [
             MAINTENANCE_GATE_EVALUATION_KEY,
             MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
-            MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
             MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
             MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
         ] {
@@ -3079,6 +3074,34 @@ mod tests {
                 "{key_name} must be registered and default to false"
             );
         }
+    }
+
+    #[test]
+    fn service_setting_seeds_include_movie_availability_defaults() {
+        for (key, data_type, default_value) in [
+            ("movie.default_availability", "string", "\"released\""),
+            ("movie.release_market", "string", "\"US\""),
+            ("movie.availability_delay_days", "number", "0"),
+        ] {
+            assert!(
+                service_setting_seeds().iter().any(|seed| {
+                    seed.category == SETTINGS_CATEGORY_MEDIA
+                        && seed.scope == SETTINGS_SCOPE_SYSTEM
+                        && seed.key_name == key
+                        && seed.data_type == data_type
+                        && seed.default_value_json == default_value
+                        && !seed.is_sensitive
+                }),
+                "missing movie availability definition: {key}"
+            );
+        }
+        assert!(
+            !service_setting_seeds()
+                .iter()
+                .any(|seed| seed.key_name.starts_with("acquisition.")
+                    && seed.key_name.contains("movie")),
+            "the acquisition movie availability keys are retired"
+        );
     }
 
     #[test]

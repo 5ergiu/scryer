@@ -98,8 +98,9 @@ const DETAIL_FIELDS: &str = r#"
         id
         name
         description
-        enabled
-        evaluationMode
+        state
+        enabledArming
+        editedSinceEnabled
         libraryIds
         subjectKind
         currentRevisionNumber
@@ -153,8 +154,7 @@ const LIST_QUERY: &str = r#"query {
     maintenanceRuleSets {
         id
         name
-        enabled
-        evaluationMode
+        state
         subjectKind
         libraryIds
         currentRevisionNumber
@@ -258,6 +258,7 @@ async fn seed_title(ctx: &TestContext, id: &str, name: &str, monitored: bool) ->
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: None,
     };
     TitleRepository::create(&ctx.titles, title)
@@ -320,8 +321,9 @@ async fn maintenance_rule_create_list_and_get_round_trip() {
     assert_eq!(rule_set["name"], "Stale movies");
     assert_eq!(rule_set["description"], "Movies nobody monitors");
     // Ships dark: nothing evaluates stored rules yet.
-    assert_eq!(rule_set["enabled"], false);
-    assert_eq!(rule_set["evaluationMode"], "DISABLED");
+    assert_eq!(rule_set["state"], "DISABLED");
+    assert_eq!(rule_set["enabledArming"], "DESTRUCTIVE");
+    assert_eq!(rule_set["editedSinceEnabled"], false);
     assert_eq!(rule_set["subjectKind"], "TITLE");
     assert_eq!(rule_set["libraryIds"], json!([movie_library_id()]));
     assert_eq!(rule_set["currentRevisionNumber"], 1);
@@ -1038,10 +1040,9 @@ const CANDIDATE_FIELDS: &str = r#"
 
 fn candidates_query() -> String {
     format!(
-        "query($ruleSetId: ID, $includeShadow: Boolean, $states: [MaintenanceCandidateState!]) {{
+        "query($ruleSetId: ID, $states: [MaintenanceCandidateState!]) {{
             maintenanceCandidates(
                 ruleSetId: $ruleSetId
-                includeShadow: $includeShadow
                 states: $states
             ) {{{CANDIDATE_FIELDS}}}
         }}"
@@ -1049,11 +1050,8 @@ fn candidates_query() -> String {
 }
 
 const GATES_FIELDS: &str = r#"
-    evaluationEnabled
-    resultDisplayEnabled
-    presentationEffectsEnabled
-    reversibleEffectsEnabled
-    destructiveEffectsEnabled
+    enabled
+    actionsPaused
 "#;
 
 fn gates_query() -> String {
@@ -1068,14 +1066,36 @@ fn set_gates_mutation() -> String {
     )
 }
 
-const SET_MODE_MUTATION: &str = r#"mutation($input: SetMaintenanceRuleModeInput!) {
-    setMaintenanceRuleMode(input: $input) {
+const SET_STATE_MUTATION: &str = r#"mutation(
+    $ruleSetId: ID!
+    $state: MaintenanceRuleState!
+    $confirmation: MaintenanceRuleArmingConfirmationInput
+) {
+    setMaintenanceRuleState(ruleSetId: $ruleSetId, state: $state, confirmation: $confirmation) {
         id
-        enabled
-        evaluationMode
+        state
+        enabledArming
+        editedSinceEnabled
         currentRevisionNumber
     }
 }"#;
+
+/// Set one rule's state, checking the response carries no errors.
+async fn set_rule_state(
+    ctx: &TestContext,
+    rule_set_id: &str,
+    state: &str,
+    confirmation: Value,
+) -> Value {
+    let body = gql(
+        ctx,
+        SET_STATE_MUTATION,
+        json!({ "ruleSetId": rule_set_id, "state": state, "confirmation": confirmation }),
+    )
+    .await;
+    assert_no_errors(&body);
+    body["data"]["setMaintenanceRuleState"].clone()
+}
 
 const RUN_NOW_MUTATION: &str = r#"mutation($ruleSetId: ID) {
     runMaintenanceEvaluationNow(ruleSetId: $ruleSetId) { started message }
@@ -1129,14 +1149,13 @@ const EVALUATION_RUNS_QUERY: &str = r#"query($ruleSetId: ID) {
     }
 }"#;
 
-/// Register the five gate definitions the way service bootstrap does. The test
+/// Register the four gate definitions the way service bootstrap does. The test
 /// harness builds its stores directly rather than running bootstrap, and a
 /// settings write against an unregistered key is refused by the store.
 async fn seed_maintenance_gate_definitions(ctx: &TestContext) {
     let seeds = [
         "maintenance.gate.evaluation",
         "maintenance.gate.result_display",
-        "maintenance.gate.presentation_effects",
         "maintenance.gate.reversible_effects",
         "maintenance.gate.destructive_effects",
     ]
@@ -1160,33 +1179,25 @@ async fn seed_maintenance_gate_definitions(ctx: &TestContext) {
         .expect("seed maintenance gate definitions");
 }
 
-/// Arm one rule and the instance evaluation gate: both are always deliberate,
-/// separate steps, which is the whole point of the dark-activation design.
+/// Put one rule in dry run and switch maintenance on: both are always
+/// deliberate, separate steps, which is the whole point of shipping dark.
 async fn arm_rule_and_gate(ctx: &TestContext, rule_set_id: &str) {
     seed_maintenance_gate_definitions(ctx).await;
-    let armed = gql(
-        ctx,
-        SET_MODE_MUTATION,
-        json!({ "input": { "id": rule_set_id, "mode": "SHADOW" } }),
-    )
-    .await;
-    assert_no_errors(&armed);
-    assert_eq!(armed["data"]["setMaintenanceRuleMode"]["enabled"], true);
-    assert_eq!(
-        armed["data"]["setMaintenanceRuleMode"]["evaluationMode"],
-        "SHADOW"
-    );
+    let dry_run = set_rule_state(ctx, rule_set_id, "DRY_RUN", Value::Null).await;
+    assert_eq!(dry_run["state"], "DRY_RUN");
 
     let gates = gql(
         ctx,
         &set_gates_mutation(),
-        json!({ "input": { "evaluationEnabled": true } }),
+        json!({ "input": { "enabled": true } }),
     )
     .await;
     assert_no_errors(&gates);
+    let switched = &gates["data"]["setMaintenanceInstanceGates"];
+    assert_eq!(switched["enabled"], true);
     assert_eq!(
-        gates["data"]["setMaintenanceInstanceGates"]["evaluationEnabled"],
-        true
+        switched["actionsPaused"], true,
+        "enabling never unpauses actions"
     );
 }
 
@@ -1216,11 +1227,11 @@ async fn maintenance_evaluation_is_dark_until_both_the_rule_and_the_gate_are_arm
             .contains("gate is off")
     );
 
-    // Gate on, rule still disabled: still nothing.
+    // Maintenance on, rule still disabled: still nothing.
     let gates = gql(
         &ctx,
         &set_gates_mutation(),
-        json!({ "input": { "evaluationEnabled": true } }),
+        json!({ "input": { "enabled": true } }),
     )
     .await;
     assert_no_errors(&gates);
@@ -1231,7 +1242,7 @@ async fn maintenance_evaluation_is_dark_until_both_the_rule_and_the_gate_are_arm
         false
     );
 
-    let candidates = gql(&ctx, &candidates_query(), json!({ "includeShadow": true })).await;
+    let candidates = gql(&ctx, &candidates_query(), json!({})).await;
     assert_no_errors(&candidates);
     assert!(
         candidates["data"]["maintenanceCandidates"]
@@ -1243,7 +1254,7 @@ async fn maintenance_evaluation_is_dark_until_both_the_rule_and_the_gate_are_arm
 }
 
 #[tokio::test]
-async fn an_armed_rule_records_a_candidate_that_shadow_hides_by_default() {
+async fn a_dry_run_rule_records_a_candidate_shown_only_while_maintenance_is_on() {
     let ctx = TestContext::new().await;
     seed_title(&ctx, "title-shadow-1", "Monitored Movie", true).await;
     seed_title(&ctx, "title-shadow-2", "Unmonitored Movie", false).await;
@@ -1261,21 +1272,10 @@ async fn an_armed_rule_records_a_candidate_that_shadow_hides_by_default() {
         true
     );
 
-    // Shadow is dark by default even for a caller that may manage catalog
-    // settings.
-    let hidden = gql(&ctx, &candidates_query(), json!({})).await;
-    assert_no_errors(&hidden);
-    assert!(
-        hidden["data"]["maintenanceCandidates"]
-            .as_array()
-            .expect("candidates")
-            .is_empty()
-    );
-
     let shown = gql(
         &ctx,
         &candidates_query(),
-        json!({ "ruleSetId": rule_set_id, "includeShadow": true }),
+        json!({ "ruleSetId": rule_set_id }),
     )
     .await;
     assert_no_errors(&shown);
@@ -1306,7 +1306,7 @@ async fn an_armed_rule_records_a_candidate_that_shadow_hides_by_default() {
     let after = gql(
         &ctx,
         &candidates_query(),
-        json!({ "ruleSetId": rule_set_id, "includeShadow": true }),
+        json!({ "ruleSetId": rule_set_id }),
     )
     .await;
     assert_no_errors(&after);
@@ -1324,7 +1324,7 @@ async fn an_armed_rule_records_a_candidate_that_shadow_hides_by_default() {
     let by_state = gql(
         &ctx,
         &candidates_query(),
-        json!({ "includeShadow": true, "states": ["OBSERVING"] }),
+        json!({ "states": ["OBSERVING"] }),
     )
     .await;
     assert_no_errors(&by_state);
@@ -1357,6 +1357,24 @@ async fn an_armed_rule_records_a_candidate_that_shadow_hides_by_default() {
     assert_eq!(newest["errorCount"], 0);
     assert_eq!(newest["error"], Value::Null);
     assert_ne!(newest["finishedAt"], Value::Null);
+
+    // Switching maintenance off hides the results even from a caller that may
+    // manage catalog settings.
+    let off = gql(
+        &ctx,
+        &set_gates_mutation(),
+        json!({ "input": { "enabled": false } }),
+    )
+    .await;
+    assert_no_errors(&off);
+    let hidden = gql(&ctx, &candidates_query(), json!({})).await;
+    assert_no_errors(&hidden);
+    assert!(
+        hidden["data"]["maintenanceCandidates"]
+            .as_array()
+            .expect("candidates")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1414,7 +1432,7 @@ async fn an_exclusion_round_trips_and_closes_the_candidate_it_covers() {
     let candidates = gql(
         &ctx,
         &candidates_query(),
-        json!({ "ruleSetId": rule_set_id, "includeShadow": true }),
+        json!({ "ruleSetId": rule_set_id }),
     )
     .await;
     assert_no_errors(&candidates);
@@ -1447,50 +1465,41 @@ async fn an_exclusion_round_trips_and_closes_the_candidate_it_covers() {
 }
 
 #[tokio::test]
-async fn the_instance_gates_round_trip_and_default_to_off() {
+async fn the_instance_switches_round_trip_and_default_to_off() {
     let ctx = TestContext::new().await;
     seed_maintenance_gate_definitions(&ctx).await;
 
     let initial = gql(&ctx, &gates_query(), json!({})).await;
     assert_no_errors(&initial);
     let gates = &initial["data"]["maintenanceInstanceGates"];
-    for field in [
-        "evaluationEnabled",
-        "resultDisplayEnabled",
-        "presentationEffectsEnabled",
-        "reversibleEffectsEnabled",
-        "destructiveEffectsEnabled",
-    ] {
-        assert_eq!(gates[field], false, "{field} must ship disarmed");
-    }
+    assert_eq!(gates["enabled"], false, "maintenance must ship off");
+    assert_eq!(gates["actionsPaused"], true, "actions must ship paused");
 
-    let armed = gql(
+    let unpaused = gql(
         &ctx,
         &set_gates_mutation(),
-        json!({ "input": { "evaluationEnabled": true, "destructiveEffectsEnabled": true } }),
+        json!({ "input": { "actionsPaused": false } }),
     )
     .await;
-    assert_no_errors(&armed);
+    assert_no_errors(&unpaused);
 
-    // An omitted field leaves that gate exactly as stored.
-    let partial = gql(
+    // An omitted switch stays exactly as stored.
+    let enabled = gql(
         &ctx,
         &set_gates_mutation(),
-        json!({ "input": { "resultDisplayEnabled": true } }),
+        json!({ "input": { "enabled": true } }),
     )
     .await;
-    assert_no_errors(&partial);
-    let updated = &partial["data"]["setMaintenanceInstanceGates"];
-    assert_eq!(updated["evaluationEnabled"], true);
-    assert_eq!(updated["destructiveEffectsEnabled"], true);
-    assert_eq!(updated["resultDisplayEnabled"], true);
-    assert_eq!(updated["presentationEffectsEnabled"], false);
+    assert_no_errors(&enabled);
+    let updated = &enabled["data"]["setMaintenanceInstanceGates"];
+    assert_eq!(updated["enabled"], true);
+    assert_eq!(updated["actionsPaused"], false);
 
     let reread = gql(&ctx, &gates_query(), json!({})).await;
     assert_no_errors(&reread);
     assert_eq!(
         reread["data"]["maintenanceInstanceGates"],
-        partial["data"]["setMaintenanceInstanceGates"]
+        enabled["data"]["setMaintenanceInstanceGates"]
     );
 }
 
@@ -1500,7 +1509,7 @@ async fn the_evaluation_surface_is_permission_gated() {
     let denied = create_unprivileged_user(&ctx, "maintenance-evaluation-denied").await;
 
     for (query, variables) in [
-        (candidates_query(), json!({ "includeShadow": true })),
+        (candidates_query(), json!({})),
         (exclusions_query(), json!({})),
         (gates_query(), json!({})),
     ] {
@@ -1530,14 +1539,6 @@ fn unmonitor_action() -> Value {
     json!({ "kind": "UNMONITOR_SCOPE_KEEP_FILES" })
 }
 
-const SET_ARMING_MUTATION: &str = r#"mutation($input: SetMaintenanceRuleArmingInput!) {
-    setMaintenanceRuleArming(input: $input) {
-        id
-        effectArming
-        currentRevisionNumber
-    }
-}"#;
-
 const RUN_HANDLER_MUTATION: &str = r#"mutation {
     runMaintenanceActionHandlerNow { started message }
 }"#;
@@ -1559,31 +1560,16 @@ const ACTION_RUNS_QUERY: &str = r#"query($ruleSetId: ID) {
     }
 }"#;
 
-/// Move a rule to observe mode and open the named gates. Every step is its own
-/// deliberate mutation, mirroring how an operator arms the real thing.
-async fn observe_rule_with_gates(
-    ctx: &TestContext,
-    rule_set_id: &str,
-    reversible: bool,
-    destructive: bool,
-) {
+/// Put a rule in dry run, switch maintenance on and unpause actions. Every
+/// step is its own deliberate mutation, mirroring how an operator arms the
+/// real thing.
+async fn observe_rule_with_gates(ctx: &TestContext, rule_set_id: &str) {
     seed_maintenance_gate_definitions(ctx).await;
-    let observed = gql(
-        ctx,
-        SET_MODE_MUTATION,
-        json!({ "input": { "id": rule_set_id, "mode": "OBSERVE" } }),
-    )
-    .await;
-    assert_no_errors(&observed);
+    set_rule_state(ctx, rule_set_id, "DRY_RUN", Value::Null).await;
     let gates = gql(
         ctx,
         &set_gates_mutation(),
-        json!({ "input": {
-            "evaluationEnabled": true,
-            "resultDisplayEnabled": true,
-            "reversibleEffectsEnabled": reversible,
-            "destructiveEffectsEnabled": destructive,
-        }}),
+        json!({ "input": { "enabled": true, "actionsPaused": false } }),
     )
     .await;
     assert_no_errors(&gates);
@@ -1597,7 +1583,7 @@ async fn wait_for_candidate_state(ctx: &TestContext, rule_set_id: &str, state: &
         let shown = gql(
             ctx,
             &candidates_query(),
-            json!({ "ruleSetId": rule_set_id, "includeShadow": true, "states": [state] }),
+            json!({ "ruleSetId": rule_set_id, "states": [state] }),
         )
         .await;
         assert_no_errors(&shown);
@@ -1613,7 +1599,7 @@ async fn wait_for_candidate_state(ctx: &TestContext, rule_set_id: &str, state: &
     let last = gql(
         ctx,
         &candidates_query(),
-        json!({"ruleSetId": rule_set_id, "includeShadow": true}),
+        json!({ "ruleSetId": rule_set_id }),
     )
     .await;
     let runs = gql(ctx, ACTION_RUNS_QUERY, json!({"ruleSetId": rule_set_id})).await;
@@ -1621,23 +1607,21 @@ async fn wait_for_candidate_state(ctx: &TestContext, rule_set_id: &str, state: &
 }
 
 #[tokio::test]
-async fn destructive_arming_requires_the_reviewed_revision_and_explicit_library_scope() {
+async fn enabling_a_delete_rule_requires_the_reviewed_revision_and_explicit_library_scope() {
     let ctx = TestContext::new().await;
     let detail = create_rule(&ctx, "Review deletion", MONITORED_MATCHER, delete_action()).await;
     let id = detail["ruleSet"]["id"].as_str().unwrap();
-    for extra in [
-        json!({}),
-        json!({ "acknowledgedRevisionNumber": 1 }),
-        json!({ "acknowledgedRevisionNumber": 2, "acknowledgedLibraryIds": [] }),
-        json!({ "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": ["different-library"] }),
+    for confirmation in [
+        Value::Null,
+        json!({ "revisionNumber": 2, "libraryIds": [], "candidateCount": 0 }),
+        json!({ "revisionNumber": 1, "libraryIds": ["different-library"], "candidateCount": 0 }),
     ] {
-        let mut input =
-            json!({ "id": id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 0 });
-        input
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        let response = gql(&ctx, SET_ARMING_MUTATION, json!({ "input": input })).await;
+        let response = gql(
+            &ctx,
+            SET_STATE_MUTATION,
+            json!({ "ruleSetId": id, "state": "ENABLED", "confirmation": confirmation }),
+        )
+        .await;
         assert!(
             response["errors"][0]["message"]
                 .as_str()
@@ -1646,27 +1630,41 @@ async fn destructive_arming_requires_the_reviewed_revision_and_explicit_library_
             "{response}"
         );
     }
-    let armed = gql(
+    let enabled = set_rule_state(
         &ctx,
-        SET_ARMING_MUTATION,
+        id,
+        "ENABLED",
+        json!({ "revisionNumber": 1, "libraryIds": [], "candidateCount": 0 }),
+    )
+    .await;
+    assert_eq!(enabled["state"], "ENABLED");
+    assert_eq!(enabled["enabledArming"], "DESTRUCTIVE");
+    let dry_run = set_rule_state(&ctx, id, "DRY_RUN", Value::Null).await;
+    assert_eq!(dry_run["state"], "DRY_RUN");
+
+    // Editing an enabled rule drops it back to dry run and says why.
+    set_rule_state(
+        &ctx,
+        id,
+        "ENABLED",
+        json!({ "revisionNumber": 1, "libraryIds": [], "candidateCount": 0 }),
+    )
+    .await;
+    let edited = gql(
+        &ctx,
+        &update_matcher_mutation(),
         json!({ "input": {
-            "id": id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 0,
-            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [],
+            "id": id,
+            "regoSource": MONITORED_MATCHER,
+            "action": delete_action(),
+            "graceDays": 3,
         }}),
     )
     .await;
-    assert_no_errors(&armed);
-    let disarmed = gql(
-        &ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": id, "arming": "NONE" }}),
-    )
-    .await;
-    assert_no_errors(&disarmed);
-    assert_eq!(
-        disarmed["data"]["setMaintenanceRuleArming"]["effectArming"],
-        "NONE"
-    );
+    assert_no_errors(&edited);
+    let rule = &edited["data"]["updateMaintenanceRuleMatcher"]["ruleSet"];
+    assert_eq!(rule["state"], "DRY_RUN");
+    assert_eq!(rule["editedSinceEnabled"], true);
 }
 
 #[tokio::test]
@@ -1717,18 +1715,18 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
         .as_str()
         .expect("rule id")
         .to_string();
-    observe_rule_with_gates(&ctx, &rule_set_id, false, true).await;
+    observe_rule_with_gates(&ctx, &rule_set_id).await;
 
     let started = gql(&ctx, RUN_NOW_MUTATION, json!({ "ruleSetId": rule_set_id })).await;
     assert_no_errors(&started);
 
-    // Destructive arming demands the acknowledged candidate count, and a
+    // Enabling a delete rule demands the acknowledged candidate count, and a
     // mismatch names the real count so the client can re-present it.
     let mismatch = gql(
         &ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 7,
-            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
+        SET_STATE_MUTATION,
+        json!({ "ruleSetId": rule_set_id, "state": "ENABLED",
+            "confirmation": { "revisionNumber": 1, "libraryIds": [], "candidateCount": 7 } }),
     )
     .await;
     let message = mismatch["errors"][0]["message"]
@@ -1739,18 +1737,14 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
         "{message}"
     );
 
-    let armed = gql(
+    let armed = set_rule_state(
         &ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1,
-            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
+        &rule_set_id,
+        "ENABLED",
+        json!({ "revisionNumber": 1, "libraryIds": [], "candidateCount": 1 }),
     )
     .await;
-    assert_no_errors(&armed);
-    assert_eq!(
-        armed["data"]["setMaintenanceRuleArming"]["effectArming"],
-        "DESTRUCTIVE"
-    );
+    assert_eq!(armed["state"], "ENABLED");
 
     let handled = gql(&ctx, RUN_HANDLER_MUTATION, json!({})).await;
     assert_no_errors(&handled);
@@ -1784,7 +1778,7 @@ async fn the_full_destructive_journey_removes_a_matching_title() {
 }
 
 #[tokio::test]
-async fn a_reversible_unmonitor_journey_needs_only_the_reversible_gate() {
+async fn a_reversible_unmonitor_journey_needs_no_confirmation() {
     let ctx = TestContext::new().await;
     seed_title(&ctx, "title-unmon", "Stale Movie", true).await;
     let detail = create_rule(
@@ -1798,15 +1792,10 @@ async fn a_reversible_unmonitor_journey_needs_only_the_reversible_gate() {
         .as_str()
         .expect("rule id")
         .to_string();
-    observe_rule_with_gates(&ctx, &rule_set_id, true, false).await;
+    observe_rule_with_gates(&ctx, &rule_set_id).await;
 
-    let armed = gql(
-        &ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "REVERSIBLE" } }),
-    )
-    .await;
-    assert_no_errors(&armed);
+    let armed = set_rule_state(&ctx, &rule_set_id, "ENABLED", Value::Null).await;
+    assert_eq!(armed["enabledArming"], "REVERSIBLE");
 
     let started = gql(&ctx, RUN_NOW_MUTATION, json!({ "ruleSetId": rule_set_id })).await;
     assert_no_errors(&started);
@@ -1834,17 +1823,16 @@ async fn a_subject_that_stopped_matching_is_canceled_at_execution_time() {
         .as_str()
         .expect("rule id")
         .to_string();
-    observe_rule_with_gates(&ctx, &rule_set_id, false, true).await;
+    observe_rule_with_gates(&ctx, &rule_set_id).await;
     let started = gql(&ctx, RUN_NOW_MUTATION, json!({ "ruleSetId": rule_set_id })).await;
     assert_no_errors(&started);
-    let armed = gql(
+    set_rule_state(
         &ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "DESTRUCTIVE", "acknowledgedCandidateCount": 1,
-            "acknowledgedRevisionNumber": 1, "acknowledgedLibraryIds": [] } }),
+        &rule_set_id,
+        "ENABLED",
+        json!({ "revisionNumber": 1, "libraryIds": [], "candidateCount": 1 }),
     )
     .await;
-    assert_no_errors(&armed);
 
     // The subject stops matching between evaluation and handling; the fresh
     // re-evaluation at execution time must cancel rather than delete.
@@ -1919,16 +1907,10 @@ async fn seed_tagged_title(ctx: &TestContext, id: &str, name: &str, tags: &[&str
 
 /// Arm one tag rule and run a full evaluate-then-handle pass over it.
 async fn run_tag_rule(ctx: &TestContext, rule_set_id: &str) {
-    observe_rule_with_gates(ctx, rule_set_id, true, false).await;
+    observe_rule_with_gates(ctx, rule_set_id).await;
     let started = gql(ctx, RUN_NOW_MUTATION, json!({ "ruleSetId": rule_set_id })).await;
     assert_no_errors(&started);
-    let armed = gql(
-        ctx,
-        SET_ARMING_MUTATION,
-        json!({ "input": { "id": rule_set_id, "arming": "REVERSIBLE" } }),
-    )
-    .await;
-    assert_no_errors(&armed);
+    set_rule_state(ctx, rule_set_id, "ENABLED", Value::Null).await;
 }
 
 #[tokio::test]

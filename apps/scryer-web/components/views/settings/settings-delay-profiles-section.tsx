@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { RenderBooleanIcon } from "@/components/common/boolean-icon";
 import { FacetSelect, FacetTags } from "@/components/common/facet-select";
+import { LibraryMultiSelect } from "@/components/common/library-multi-select";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { Input, integerInputProps, sanitizeDigits } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +22,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useTranslate } from "@/lib/context/translate-context";
+import type { LibraryRecord } from "@/lib/types";
 import type {
   DelayProfileDraft,
   ParsedDelayProfile,
@@ -38,6 +40,7 @@ type SettingsDelayProfilesSectionProps = {
   loading: boolean;
   saving: boolean;
   profiles: ParsedDelayProfile[];
+  libraries: LibraryRecord[];
   parseError: string;
   draft: DelayProfileDraft;
   setDraft: React.Dispatch<React.SetStateAction<DelayProfileDraft>>;
@@ -90,6 +93,7 @@ export function SettingsDelayProfilesSection({
   loading,
   saving,
   profiles,
+  libraries,
   parseError,
   draft,
   setDraft,
@@ -104,6 +108,24 @@ export function SettingsDelayProfilesSection({
   const t = useTranslate();
 
   const isEditing = editorMode === "edit";
+  const libraryNameById = React.useMemo(
+    () => new Map(libraries.map((library) => [library.id, library.name])),
+    [libraries],
+  );
+  // Only libraries the profile's facets can reach are offered.
+  const pickableLibraries = React.useMemo(
+    () =>
+      draft.applies_to_facets.length === 0
+        ? libraries
+        : libraries.filter((library) => draft.applies_to_facets.includes(library.facet)),
+    [draft.applies_to_facets, libraries],
+  );
+  const libraryLabel = (libraryIds: string[]) =>
+    libraryIds.length === 0
+      ? t("libraryFilter.all")
+      : libraryIds
+          .map((libraryId) => libraryNameById.get(libraryId) ?? t("settings.delayProfileUnknownLibrary"))
+          .join(", ");
 
   function updateField<K extends keyof DelayProfileDraft>(field: K, value: DelayProfileDraft[K]) {
     setDraft((prev) => ({ ...prev, [field]: value }));
@@ -144,13 +166,14 @@ export function SettingsDelayProfilesSection({
               <Table overflow="clip" layout="fixed" density="dense">
                 <TableHeader>
                   <TableRow className="border-[var(--scry-border3)] bg-[var(--scry-inset)] hover:bg-[var(--scry-inset)]">
-                    <TableHead className={`w-[18%] font-semibold ${DELAY_MUTED_TEXT_CLASS}`}>{t("settings.delayProfileNameLabel")}</TableHead>
+                    <TableHead className={`w-[14%] font-semibold ${DELAY_MUTED_TEXT_CLASS}`}>{t("settings.delayProfileNameLabel")}</TableHead>
                     <TableHead className={`w-28 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileUsenetDelay")}</TableHead>
                     <TableHead className={`w-28 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileTorrentDelay")}</TableHead>
                     <TableHead className={`w-32 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileProtocolModeLabel")}</TableHead>
                     <TableHead className={`w-24 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileMinAge")}</TableHead>
                     <TableHead className={`w-32 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileBypassLabel")}</TableHead>
-                    <TableHead className={`w-[16%] ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileFacetsLabel")}</TableHead>
+                    <TableHead className={`w-[14%] ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileFacetsLabel")}</TableHead>
+                    <TableHead className={`w-[14%] ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileLibrariesLabel")}</TableHead>
                     <TableHead className={`w-24 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfilePriorityLabel")}</TableHead>
                     <TableHead className={`w-24 ${DELAY_TABLE_HEADER_CELL_CLASS}`}>{t("settings.delayProfileEnabledLabel")}</TableHead>
                     <TableActionsHead className="w-24">{t("label.actions")}</TableActionsHead>
@@ -182,6 +205,9 @@ export function SettingsDelayProfilesSection({
                           values={profile.applies_to_facets}
                           emptyLabel={t("settings.delayProfileAllFacets")}
                         />
+                      </TableCell>
+                      <TableCell className={`truncate text-center ${DELAY_MUTED_TEXT_CLASS}`} title={libraryLabel(profile.library_ids)}>
+                        {libraryLabel(profile.library_ids)}
                       </TableCell>
                       <TableCell className="text-center">{profile.priority}</TableCell>
                       <TableCell className="text-center">
@@ -383,8 +409,37 @@ export function SettingsDelayProfilesSection({
                 values={FACET_OPTIONS}
                 selected={draft.applies_to_facets}
                 onChange={(next) => {
-                  setDraft((prev) => ({ ...prev, applies_to_facets: next }));
+                  setDraft((prev) => ({
+                    ...prev,
+                    applies_to_facets: next,
+                    library_ids:
+                      next.length === 0
+                        ? prev.library_ids
+                        : prev.library_ids.filter((libraryId) => {
+                            const library = libraries.find((entry) => entry.id === libraryId);
+                            return library ? next.includes(library.facet) : false;
+                          }),
+                  }));
                 }}
+              />
+            </div>
+
+            {/* Libraries */}
+            <div className="space-y-1.5">
+              <DelayProfileHelpLabel
+                htmlFor="dp-libraries"
+                label={t("settings.delayProfileLibrariesLabel")}
+                help={t("settings.delayProfileLibrariesHelp")}
+              />
+              <LibraryMultiSelect
+                triggerId="dp-libraries"
+                allLibrariesButtonId="dp-libraries-all"
+                libraries={pickableLibraries}
+                selectedLibraryIds={draft.library_ids}
+                onSelectedLibraryIdsChange={(next) => {
+                  setDraft((prev) => ({ ...prev, library_ids: next }));
+                }}
+                triggerClassName="w-full justify-between"
               />
             </div>
 

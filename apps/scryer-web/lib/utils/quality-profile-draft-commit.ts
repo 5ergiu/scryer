@@ -3,6 +3,19 @@ import type {
   ParsedQualityProfileEntry,
   QualityProfileDraft,
 } from "../types/quality-profiles.ts";
+import { qualityProfileEntryToMutationInput } from "./quality-profiles.ts";
+
+export function qualityProfileEditorSaveInput(entry: ParsedQualityProfileEntry) {
+  // Other entries and defaults in the editor's catalog may be stale.
+  return {
+    profiles: [qualityProfileEntryToMutationInput(entry)],
+    globalProfileId: null,
+    globalScoringPersona: null,
+    categorySelections: [],
+    categoryPersonaSelections: [],
+    replaceExisting: false,
+  };
+}
 
 function normalizeProfileIdFromName(name: string): string {
   const slug = name

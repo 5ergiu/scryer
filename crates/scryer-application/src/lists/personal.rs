@@ -177,13 +177,10 @@ impl AppUseCase {
             &input.routes,
             input.max_per_sync,
         )?;
-        if !matches!(
-            input.mode,
-            ListMode::Add | ListMode::Search | ListMode::Request
-        ) {
+        if !matches!(input.mode, ListMode::Add | ListMode::Request) {
             return Err(refused(
                 refusal::MODE_NOT_ALLOWED,
-                "a personal list can add, search, or request",
+                "a personal list can add or request",
             ));
         }
         if kinds

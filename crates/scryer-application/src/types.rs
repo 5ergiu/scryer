@@ -30,6 +30,31 @@ pub enum MetadataFieldUpdate<T> {
     Clear,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovieAvailabilityStatus {
+    Available,
+    Waiting,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovieAvailabilityDecision {
+    pub status: MovieAvailabilityStatus,
+    pub effective_date: Option<String>,
+    pub estimated: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovieAvailabilityProjection {
+    pub status: String,
+    pub effective_date: Option<String>,
+    pub estimated: bool,
+    pub reason: String,
+    pub release_market: String,
+    pub minimum_availability: String,
+}
+
 /// One certification published by a rating board for a country, e.g. `PG-13` from `tmdb`.
 ///
 /// Shared by discovery (`DiscoveryContentCertification` is an alias for this type) and by the
@@ -103,6 +128,8 @@ pub struct TitleMetadataUpdate {
     pub metadata_language: Option<String>,
     pub metadata_fetched_at: Option<String>,
     pub digital_release_date: Option<String>,
+    pub min_availability: Option<Option<String>>,
+    pub movie_release_dates: Option<scryer_domain::MovieReleaseDates>,
     /// Ratings returned by SMG/MDBList. `Some(default)` clears stale stored ratings.
     pub ratings: Option<TitleRatingSummary>,
     /// Complete credit set returned by SMG. `Some(vec![])` clears the stale cache;
@@ -167,6 +194,11 @@ pub struct CutoffUnmetItem {
     pub episode_number: Option<String>,
     pub current_tier: String,
     pub target_tier: String,
+    pub min_availability: Option<String>,
+    pub first_aired: Option<String>,
+    pub digital_release_date: Option<String>,
+    pub metadata_fetched: bool,
+    pub movie_release_dates: Option<scryer_domain::MovieReleaseDates>,
 }
 
 /// One bounded page of cutoff-unmet targets. `total` is
@@ -1951,6 +1983,9 @@ pub struct DownloadGrabResult {
     /// Torrent seed goals resolved by the selected client route. The canonical
     /// submission coordinator freezes them with the accepted identity.
     pub seed_goals: Option<crate::PersistedSeedGoals>,
+    /// The file names in the grabbed NZB or torrent long enough that a client
+    /// may cut them, read by the router before the artifact is handed off.
+    pub grabbed_file_names: Vec<crate::GrabbedFileName>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2222,6 +2257,43 @@ pub struct IndexerSearchResult {
     /// snapshot that was scored; a replayed pending row arrives with its own.
     /// `None` on a result no scoring pass has seen.
     pub release_listing_json: Option<String>,
+}
+
+impl IndexerSearchResult {
+    /// A rough size of this result's variable-length payload: its strings,
+    /// the frozen listing JSON, and the `extra` map. Diagnostic only, for
+    /// logging how much a batch of results holds; it walks `extra` without
+    /// serializing it, so counting a page allocates nothing.
+    pub fn approximate_size_bytes(&self) -> usize {
+        fn json_value_size(value: &serde_json::Value) -> usize {
+            match value {
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_) => std::mem::size_of::<serde_json::Value>(),
+                serde_json::Value::String(text) => text.len(),
+                serde_json::Value::Array(items) => items.iter().map(json_value_size).sum(),
+                serde_json::Value::Object(map) => map
+                    .iter()
+                    .map(|(key, value)| key.len() + json_value_size(value))
+                    .sum(),
+            }
+        }
+        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+        let extra = self
+            .extra
+            .iter()
+            .map(|(key, value)| key.len() + json_value_size(value))
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            + self.title.len()
+            + self.source.len()
+            + optional(&self.link)
+            + optional(&self.download_url)
+            + optional(&self.guid)
+            + optional(&self.info_url)
+            + optional(&self.release_listing_json)
+            + extra
+    }
 }
 
 /// Returns whether a plugin-provided magnet contains a usable BitTorrent
@@ -3657,6 +3729,8 @@ pub struct MissingTitleCandidate {
     pub min_availability: Option<String>,
     pub first_aired: Option<String>,
     pub digital_release_date: Option<String>,
+    pub metadata_fetched: bool,
+    pub movie_release_dates: Option<scryer_domain::MovieReleaseDates>,
     pub created_at: String,
 }
 

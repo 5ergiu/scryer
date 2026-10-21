@@ -271,6 +271,7 @@ mod tests {
 
 fn from_acquisition_settings(
     settings: scryer_application::AcquisitionSettings,
+    movie_availability: scryer_application::MovieAvailabilitySettings,
 ) -> AcquisitionSettingsPayload {
     AcquisitionSettingsPayload {
         enabled: settings.enabled,
@@ -283,6 +284,10 @@ fn from_acquisition_settings(
         walk_interval_seconds: settings.walk_interval_seconds,
         long_tail_backfill_max_scopes_per_cycle: settings.long_tail_backfill_max_scopes_per_cycle,
         long_tail_reconverge_days: settings.long_tail_reconverge_days,
+        // Deprecated: these report the Movie facet values they moved to.
+        default_movie_availability: movie_availability.default_availability,
+        movie_release_market: movie_availability.release_market,
+        movie_availability_delay_days: movie_availability.delay_days,
     }
 }
 
@@ -710,6 +715,7 @@ fn from_delay_profile(profile: scryer_application::DelayProfile) -> DelayProfile
             .filter_map(|facet| MediaFacetValue::parse(&facet))
             .collect(),
         tags: profile.tags,
+        library_ids: profile.library_ids.into_iter().map(ID::from).collect(),
         priority: profile.priority,
         enabled: profile.enabled,
     }
@@ -787,7 +793,11 @@ impl SettingsQueries {
             .get_acquisition_settings(&actor)
             .await
             .map_err(to_gql_error)?;
-        Ok(from_acquisition_settings(settings))
+        let movie_availability = app
+            .get_movie_availability_facet_settings(&actor)
+            .await
+            .map_err(to_gql_error)?;
+        Ok(from_acquisition_settings(settings, movie_availability))
     }
 
     /// Returns system settings, effective image-cache limits, and trusted plugin certificates.

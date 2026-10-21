@@ -2691,23 +2691,32 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_declared_responses_larger_than_the_capture_limit() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("oversized response listener");
         let address = listener.local_addr().expect("listener address");
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("request connection");
-            let headers = format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                PROWLARR_RESPONSE_MAX_BYTES + 1
-            );
-            stream
-                .write_all(headers.as_bytes())
-                .await
-                .expect("oversized response headers");
-        });
+        let server = tokio::spawn(tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async move {
+                let (mut stream, _) = listener.accept().await.expect("request connection");
+                // Read the request before closing the socket to avoid resetting unread bytes.
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 8192, "request headers exceed fixture limit");
+                    request.push(stream.read_u8().await.expect("request headers"));
+                }
+                let headers = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    PROWLARR_RESPONSE_MAX_BYTES + 1
+                );
+                stream
+                    .write_all(headers.as_bytes())
+                    .await
+                    .expect("oversized response headers");
+            },
+        ));
 
         let response = indexer_reqwest_client()
             .get(format!("http://{address}/oversized"))
@@ -2719,7 +2728,10 @@ mod tests {
             .expect_err("response exceeds capture limit");
 
         assert!(matches!(error, CapturedProwlarrResponseError::TooLarge));
-        server.await.expect("oversized response server");
+        server
+            .await
+            .expect("oversized response server")
+            .expect("oversized response server timed out");
     }
 
     #[tokio::test]

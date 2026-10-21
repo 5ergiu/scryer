@@ -1524,7 +1524,10 @@ impl AppUseCase {
             .record_submission_with_identity(submission.clone(), identity, grab.seed_goals.clone())
             .await
         {
-            Ok(disposition) => disposition,
+            Ok(disposition) => {
+                self.record_grabbed_file_names(&download_id, &grab).await;
+                disposition
+            }
             Err(error) => {
                 return Err(AppError::DownloadSubmitAmbiguous(format!(
                     "accepted unlinked download {download_id} could not be made durable: {error}"
@@ -2065,6 +2068,7 @@ fn unlinked_grab_title(release_title: &str, facet: MediaFacet, now: DateTime<Utc
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: None,
     }
 }

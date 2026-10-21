@@ -5685,6 +5685,7 @@ mod tests {
             size_bytes: None,
             completed_at: None,
             parameters: vec![],
+            posted_file_names: Vec::new(),
         }
     }
 
@@ -5725,6 +5726,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }

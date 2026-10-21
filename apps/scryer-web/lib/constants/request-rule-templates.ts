@@ -71,4 +71,20 @@ export const REQUEST_RULE_TEMPLATES: RequestRuleTemplate[] = [
     regoSource:
       "package rules\nimport rego.v1\n\nmanual if {\n\tinput.facts.approved_last_30d >= 5\n}\n",
   },
+  {
+    id: "hold-approval-policy-list-requests",
+    name: "hold_approval_policy_list_requests",
+    titleKey: "settings.requestTemplateHoldApprovalListsTitle",
+    descriptionKey: "settings.requestTemplateHoldApprovalListsDescription",
+    regoSource:
+      "package rules\nimport rego.v1\n\nmanual if {\n\tinput.request.list.owner_list_policy == \"approval\"\n}\n",
+  },
+  {
+    id: "deny-personal-list-above-1080p",
+    name: "deny_personal_list_above_1080p",
+    titleKey: "settings.requestTemplateDenyPersonalListAbove1080pTitle",
+    descriptionKey: "settings.requestTemplateDenyPersonalListAbove1080pDescription",
+    regoSource:
+      "package rules\nimport rego.v1\n\ndeny if {\n\tinput.request.list.scope == \"personal\"\n\tinput.facts.quality_profile_max_resolution > 1080\n}\n",
+  },
 ];

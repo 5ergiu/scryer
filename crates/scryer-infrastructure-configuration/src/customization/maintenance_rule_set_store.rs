@@ -76,13 +76,12 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
         // arming acknowledges one specific matcher's blast radius, so there must
         // be no instant at which the new revision is in force under the old
         // revision's arming.
-        let pointer_args = vec![
-            SqlArg::I64(revision.revision_number),
-            SqlArg::Text(MaintenanceEffectArming::None.as_storage_str().to_string()),
-            SqlArg::Bool(false),
+        let mut pointer_args = vec![SqlArg::I64(revision.revision_number)];
+        pointer_args.extend(disarm_args());
+        pointer_args.extend([
             SqlArg::Timestamp(updated_at),
             SqlArg::Text(revision.rule_set_id.clone()),
-        ];
+        ]);
 
         SqlRuntime::run_in_transaction(
             &self.datastore,
@@ -95,9 +94,11 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
                         .await?;
                     SqlRuntime::execute(
                         SqlExec::Tx(tx),
-                        "UPDATE maintenance_rule_sets
-                            SET current_revision_number = {}, effect_arming = {}, destructive_rearm_required = {}, updated_at = {}
-                          WHERE id = {}",
+                        &format!(
+                            "UPDATE maintenance_rule_sets
+                                SET current_revision_number = {{}}, {DISARM_AFTER_EDIT_SET}, updated_at = {{}}
+                              WHERE id = {{}}"
+                        ),
                         &pointer_args,
                     )
                     .await?;
@@ -167,17 +168,18 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
         // exactly as `add_revision` carries its own: there must be no instant at
         // which a re-scoped rule is in force under the previous scope's arming.
         let sql = if disarm {
-            args.push(SqlArg::Text(
-                MaintenanceEffectArming::None.as_storage_str().to_string(),
-            ));
-            "UPDATE maintenance_rule_sets
-                SET name = {}, description = {}, effect_arming = {},
-                    updated_at = {}
-              WHERE id = {}"
+            args.extend(disarm_args());
+            format!(
+                "UPDATE maintenance_rule_sets
+                    SET name = {{}}, description = {{}}, {DISARM_AFTER_EDIT_SET},
+                        updated_at = {{}}
+                  WHERE id = {{}}"
+            )
         } else {
             "UPDATE maintenance_rule_sets
                 SET name = {}, description = {}, updated_at = {}
               WHERE id = {}"
+                .to_string()
         };
         args.push(SqlArg::Timestamp(updated_at));
         args.push(SqlArg::Text(id.to_string()));
@@ -190,8 +192,9 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
                 let args = args.clone();
                 let id = id.clone();
                 let library_ids = library_ids.clone();
+                let sql = sql.clone();
                 Box::pin(async move {
-                    SqlRuntime::execute(SqlExec::Tx(tx), sql, &args).await?;
+                    SqlRuntime::execute(SqlExec::Tx(tx), &sql, &args).await?;
                     replace_library_scope(tx, &id, &library_ids).await
                 })
             },
@@ -235,59 +238,33 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
         }).await
     }
 
-    async fn update_rule_set_evaluation_mode(
+    async fn update_rule_set_state(
         &self,
         id: &str,
         mode: MaintenanceEvaluationMode,
-        enabled: bool,
-        updated_at: DateTime<Utc>,
-    ) -> AppResult<()> {
-        // Both columns move in one statement: a row that is enabled while its
-        // mode says disabled has no reading the evaluator could act on.
-        execute_write(
-            &self.datastore,
-            "update_maintenance_rule_set_evaluation_mode",
-            "UPDATE maintenance_rule_sets
-                SET evaluation_mode = {}, enabled = {}, updated_at = {}
-              WHERE id = {}",
-            vec![
-                SqlArg::Text(mode.as_storage_str().to_string()),
-                SqlArg::Bool(enabled),
-                SqlArg::Timestamp(updated_at),
-                SqlArg::Text(id.to_string()),
-            ],
-        )
-        .await
-    }
-
-    async fn update_rule_set_arming(
-        &self,
-        id: &str,
         arming: MaintenanceEffectArming,
         confirmation: Option<&scryer_domain::MaintenanceRuleArmingConfirmation>,
         updated_at: DateTime<Utc>,
     ) -> AppResult<bool> {
-        let clears_compatibility_rearm = arming == MaintenanceEffectArming::Destructive;
-        let sql = if clears_compatibility_rearm {
-            "UPDATE maintenance_rule_sets
-                SET effect_arming = {}, destructive_rearm_required = {}, updated_at = {}
-              WHERE id = {}"
-        } else {
-            "UPDATE maintenance_rule_sets
-                SET effect_arming = {}, updated_at = {}
-              WHERE id = {}"
-        };
-        let mut args = vec![SqlArg::Text(arming.as_storage_str().to_string())];
-        if clears_compatibility_rearm {
-            args.push(SqlArg::Bool(false));
-        }
-        args.push(SqlArg::Timestamp(updated_at));
-        args.push(SqlArg::Text(id.to_string()));
+        // Every column moves in one statement: a row that is enabled while its
+        // mode says disabled has no reading the evaluator could act on.
+        let sql = "UPDATE maintenance_rule_sets
+                SET evaluation_mode = {}, enabled = {}, effect_arming = {},
+                    destructive_rearm_required = {}, updated_at = {}
+              WHERE id = {}";
+        let args = vec![
+            SqlArg::Text(mode.as_storage_str().to_string()),
+            SqlArg::Bool(mode != MaintenanceEvaluationMode::Disabled),
+            SqlArg::Text(arming.as_storage_str().to_string()),
+            SqlArg::Bool(false),
+            SqlArg::Timestamp(updated_at),
+            SqlArg::Text(id.to_string()),
+        ];
         let id = id.to_string();
         let confirmation = confirmation.cloned();
         SqlRuntime::run_in_transaction(
             &self.datastore,
-            "update_maintenance_rule_set_arming",
+            "update_maintenance_rule_set_state",
             move |tx| {
                 let id = id.clone();
                 let confirmation = confirmation.clone();
@@ -333,9 +310,22 @@ impl MaintenanceRuleSetRepository for MaintenanceRuleSetStore {
     }
 }
 
+// Disarms a rule after an edit, flagging it for review when it was armed. SET
+// expressions read the row as it was before the update on both engines.
+const DISARM_AFTER_EDIT_SET: &str = "destructive_rearm_required = CASE WHEN effect_arming <> {} THEN {} ELSE destructive_rearm_required END, effect_arming = {}";
+
+fn disarm_args() -> [SqlArg; 3] {
+    let none = MaintenanceEffectArming::None.as_storage_str();
+    [
+        SqlArg::Text(none.to_string()),
+        SqlArg::Bool(true),
+        SqlArg::Text(none.to_string()),
+    ]
+}
+
 // Fetch metadata and scope in one snapshot, including global rules with no scope rows.
 const RULE_SET_SELECT: &str = "SELECT id, name, description, enabled, evaluation_mode, effect_arming, destructive_rearm_required,
-    subject_kind, current_revision_number, created_at, updated_at, scope.library_id AS scope_library_id
+    subject_kind, system_owned, current_revision_number, created_at, updated_at, scope.library_id AS scope_library_id
     FROM maintenance_rule_sets
     LEFT JOIN maintenance_rule_set_libraries scope ON scope.rule_set_id = maintenance_rule_sets.id";
 
@@ -344,8 +334,8 @@ const REVISION_COLUMNS: &str = "id, rule_set_id, revision_number, rego_source, a
 
 const INSERT_RULE_SET_SQL: &str = "INSERT INTO maintenance_rule_sets
         (id, name, description, enabled, evaluation_mode, effect_arming, destructive_rearm_required, subject_kind,
-         current_revision_number, created_at, updated_at)
-     VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
+         system_owned, current_revision_number, created_at, updated_at)
+     VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})";
 
 const INSERT_REVISION_SQL: &str = "INSERT INTO maintenance_rule_revisions
         (id, rule_set_id, revision_number, rego_source, action_spec,
@@ -378,6 +368,7 @@ fn rule_set_args(rule_set: &MaintenanceRuleSet) -> Vec<SqlArg> {
         SqlArg::Text(rule_set.effect_arming.as_storage_str().to_string()),
         SqlArg::Bool(rule_set.destructive_rearm_required),
         SqlArg::Text(rule_set.subject_kind.as_storage_str().to_string()),
+        SqlArg::Bool(rule_set.system_owned),
         SqlArg::I64(rule_set.current_revision_number),
         SqlArg::Timestamp(rule_set.created_at),
         SqlArg::Timestamp(rule_set.updated_at),
@@ -418,6 +409,7 @@ fn row_to_rule_set(row: &SqlRow) -> AppResult<MaintenanceRuleSet> {
         library_ids: row.opt_text("scope_library_id")?.into_iter().collect(),
         subject_kind: MaintenanceRuleSubjectKind::parse_storage(&row.text("subject_kind")?)
             .unwrap_or_default(),
+        system_owned: row.bool("system_owned")?,
         current_revision_number: row.i64("current_revision_number")?,
         created_at: timestamp_or_now(row, "created_at")?,
         updated_at: timestamp_or_now(row, "updated_at")?,

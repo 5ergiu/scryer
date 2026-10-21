@@ -82,6 +82,81 @@ async fn seed_episode_delete_fixture_for(facet: MediaFacet) -> EpisodeDeleteFixt
 }
 
 #[tokio::test]
+async fn rejected_title_delete_does_not_record_an_inferred_folder() {
+    for refusal in ["stale", "confirmation", "offline"] {
+        let fixture = seed_episode_delete_fixture().await;
+        fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .clear_folder_path(&fixture.title_id)
+            .await
+            .unwrap();
+        let count = if refusal == "confirmation" { 101 } else { 1 };
+        for index in 0..count {
+            fixture
+                .add_episode_file(
+                    &format!("Emberfall/Season 01/episode-{index}.mkv"),
+                    "episode-1",
+                )
+                .await;
+        }
+        let preview = fixture
+            .app
+            .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+            .await
+            .unwrap();
+        let fingerprint = if refusal == "stale" {
+            "stale"
+        } else {
+            &preview.fingerprint
+        };
+        let offline = fixture.root.with_extension("offline");
+        if refusal == "offline" {
+            std::fs::rename(&fixture.root, &offline).unwrap();
+        }
+        let error = fixture
+            .app
+            .execute_delete_title_files(&fixture.title_id, fingerprint, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AppError::Validation(_) | AppError::ValidationRefused { .. }
+            ),
+            "{error}"
+        );
+        let title = fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .get_by_id(&fixture.title_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(title.folder_path, None, "{refusal}");
+        assert_eq!(fixture.remaining_file_ids().await.len(), count);
+        if refusal == "offline" {
+            std::fs::rename(&offline, &fixture.root).unwrap();
+        }
+        for index in 0..count {
+            assert_eq!(
+                std::fs::read(
+                    fixture
+                        .root
+                        .join(format!("Emberfall/Season 01/episode-{index}.mkv"))
+                )
+                .unwrap(),
+                b"video"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn nested_title_delete_preserves_shared_bucket_and_sibling_bytes() {
     let fixture = seed_episode_delete_fixture().await;
     let title_folder = fixture.root.join("E/Emberfall");
@@ -1171,7 +1246,6 @@ impl ScopedMaintenanceFixture {
                     grace_days: grace,
                     storage_root_id: None,
                     library_ids: vec![],
-                    evaluation_mode: None,
                 },
             )
             .await
@@ -1181,24 +1255,15 @@ impl ScopedMaintenanceFixture {
             rule.rule_set.effect_arming,
             scryer_domain::MaintenanceEffectArming::None
         );
-        app.set_maintenance_rule_evaluation_mode(
+        super::maintenance_rules::set_rule_state(
+            app,
             actor,
             &rule.rule_set.id,
-            scryer_domain::MaintenanceEvaluationMode::Observe,
+            scryer_domain::MaintenanceRuleState::DryRun,
+            None,
         )
-        .await
-        .expect("observe");
-        app.set_maintenance_instance_gates(
-            actor,
-            MaintenanceGatesUpdate {
-                evaluation_enabled: Some(true),
-                destructive_effects_enabled: Some(true),
-                result_display_enabled: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("gates");
+        .await;
+        super::maintenance_rules::open_maintenance_gates(app, false, true).await;
         app.run_maintenance_rule_evaluation_job()
             .await
             .expect("evaluate");
@@ -1211,15 +1276,14 @@ impl ScopedMaintenanceFixture {
                 candidate.rule_set_id == rule.rule_set.id && !candidate.state.is_terminal()
             })
             .count();
-        app.set_maintenance_rule_arming(
+        super::maintenance_rules::arm_rule(
+            app,
             actor,
             &rule.rule_set.id,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(count as i64),
-            Some((&rule.rule_set).into()),
         )
-        .await
-        .expect("arm");
+        .await;
         rule.rule_set.id
     }
 }

@@ -22,8 +22,7 @@ use crate::request_rules::arbitration::{
     FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER, ScopedError, ScopedVote, arbitrate,
 };
 use crate::request_rules::{
-    RequestRuleDraft, RequestRuleGatesUpdate, RequestRulePreviewMatcher, RequestRulePreviewRequest,
-    RequestRuleSample,
+    RequestRuleDraft, RequestRulePreviewMatcher, RequestRulePreviewRequest, RequestRuleSample,
 };
 
 // ── Matchers used throughout ────────────────────────────────────────────────
@@ -289,46 +288,6 @@ fn tags_are_collected_from_every_rule_that_ran_in_first_appearance_order() {
     assert_eq!(arbitration.tags, vec!["kids", "family", "flagged"]);
 }
 
-#[test]
-fn a_shadow_verdict_is_not_enforceable_and_falls_back_to_the_permission() {
-    let mut shadow = vote("s", RequestVote::Approve, false, &[]);
-    shadow.mode = RequestRuleEvaluationMode::Shadow;
-    let votes = vec![shadow];
-    let arbitration = arbitrate(&votes, &[], false);
-
-    assert_eq!(
-        arbitration.policy_outcome,
-        RequestDecisionOutcome::AutoApprove
-    );
-    assert!(!arbitration.is_enforceable(&votes, &[]));
-    assert_eq!(
-        arbitration.effective_outcome(true, false, false),
-        RequestDecisionOutcome::ManualReview
-    );
-    // The same shadow verdict on a library whose requester holds Auto-Approve
-    // still auto-approves, because that is what happened before rules existed.
-    assert_eq!(
-        arbitration.effective_outcome(true, false, true),
-        RequestDecisionOutcome::AutoApprove
-    );
-}
-
-#[test]
-fn the_gate_being_off_suspends_an_enforceable_verdict() {
-    let votes = vec![vote("d", RequestVote::Deny, false, &[])];
-    let arbitration = arbitrate(&votes, &[], false);
-
-    assert!(arbitration.is_enforceable(&votes, &[]));
-    assert_eq!(
-        arbitration.effective_outcome(false, true, false),
-        RequestDecisionOutcome::ManualReview
-    );
-    assert_eq!(
-        arbitration.effective_outcome(true, true, false),
-        RequestDecisionOutcome::Deny
-    );
-}
-
 // ── Authoring ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -360,39 +319,59 @@ async fn a_new_rule_set_is_stored_disabled_and_loads_nothing() {
 }
 
 #[tokio::test]
-async fn arming_a_rule_set_rebuilds_the_engine() {
+async fn enabling_a_rule_set_rebuilds_the_engine() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
 
-    harness
+    let enabled = harness
         .app
-        .set_request_rule_mode(
-            &harness.manager,
-            &detail.rule_set.id,
-            RequestRuleEvaluationMode::Enforce,
-        )
+        .set_request_rule_enabled(&harness.manager, &detail.rule_set.id, true)
         .await
-        .expect("mode change should succeed");
+        .expect("enabling should succeed");
+    assert!(enabled.enabled);
+    assert_eq!(enabled.evaluation_mode, RequestRuleEvaluationMode::Enforce);
 
     let snapshot = harness.app.request_rules_engine_snapshot();
     assert!(!snapshot.is_empty());
     let scope = snapshot
         .scopes
         .get(&detail.rule_set.id)
-        .expect("the armed rule is loaded");
+        .expect("the enabled rule is loaded");
     assert_eq!(scope.mode, RequestRuleEvaluationMode::Enforce);
     assert_eq!(scope.revision_number, 1);
 
-    // …and disarming it takes it back out.
-    harness
+    // …and disabling it takes it back out.
+    let disabled = harness
         .app
-        .set_request_rule_mode(
-            &harness.manager,
-            &detail.rule_set.id,
-            RequestRuleEvaluationMode::Disabled,
-        )
+        .set_request_rule_enabled(&harness.manager, &detail.rule_set.id, false)
         .await
-        .expect("mode change should succeed");
+        .expect("disabling should succeed");
+    assert!(!disabled.enabled);
+    assert_eq!(
+        disabled.evaluation_mode,
+        RequestRuleEvaluationMode::Disabled
+    );
+    assert!(harness.app.request_rules_engine_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn enabling_a_rule_set_needs_catalog_settings_authority() {
+    let harness = bootstrap_media_request_app();
+    let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
+    let mut viewer = test_admin_user();
+    viewer.id = "viewer".to_string();
+    viewer.authorization = scryer_domain::UserAuthorization {
+        app: scryer_domain::AppPermissionMask::NONE,
+        loaded: true,
+        ..Default::default()
+    };
+
+    let refusal = harness
+        .app
+        .set_request_rule_enabled(&viewer, &detail.rule_set.id, true)
+        .await
+        .expect_err("enabling a rule is catalog administration");
+    assert!(matches!(refusal, AppError::Unauthorized(_)));
     assert!(harness.app.request_rules_engine_snapshot().is_empty());
 }
 
@@ -509,13 +488,7 @@ async fn editing_a_matcher_appends_a_revision_and_leaves_its_predecessor_alone()
 async fn deleting_a_rule_set_keeps_the_decisions_it_made() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     submit(&harness, &library_id, 9040, None).await;
@@ -631,56 +604,13 @@ async fn validating_a_source_reports_errors_without_storing_anything() {
     );
 }
 
-// ── The gate ────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn the_evaluation_gate_defaults_off_and_needs_system_settings_authority() {
-    let harness = bootstrap_media_request_app();
-    let gates = harness
-        .app
-        .request_rule_instance_gates(&harness.manager)
-        .await
-        .expect("gates should read");
-    assert!(!gates.evaluation_enabled);
-
-    let refusal = harness
-        .app
-        .set_request_rule_instance_gates(
-            &harness.user,
-            RequestRuleGatesUpdate {
-                evaluation_enabled: Some(true),
-            },
-        )
-        .await
-        .expect_err("catalog settings authority is not system settings authority");
-    assert!(matches!(refusal, AppError::Unauthorized(_)));
-
-    let gates = harness
-        .app
-        .set_request_rule_instance_gates(
-            &harness.manager,
-            RequestRuleGatesUpdate {
-                evaluation_enabled: Some(true),
-            },
-        )
-        .await
-        .expect("an administrator may arm the gate");
-    assert!(gates.evaluation_enabled);
-}
-
 // ── The flow ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn an_unauthorized_requester_is_refused_before_any_rule_runs() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let mut stranger = test_admin_user();
     stranger.id = "stranger".to_string();
@@ -708,111 +638,53 @@ async fn an_unauthorized_requester_is_refused_before_any_rule_runs() {
 }
 
 #[tokio::test]
-async fn with_the_gate_off_the_verdict_is_recorded_but_nothing_acts_on_it() {
-    let harness = bootstrap_media_request_app();
-    let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-
-    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
-    submit(&harness, &library_id, 9043, None).await;
-
-    let requests = harness.media_requests.requests.lock().await;
-    assert_eq!(requests[0].status, MediaRequestStatus::Pending);
-    drop(requests);
-    assert!(harness.titles.store.lock().await.is_empty());
-
-    let traces = harness.request_rule_decisions.recorded().await;
-    assert_eq!(
-        traces.len(),
-        1,
-        "the trace is written even with the gate off"
-    );
-    assert_eq!(
-        traces[0].policy_outcome,
-        RequestDecisionOutcome::AutoApprove
-    );
-    assert_eq!(
-        traces[0].effective_outcome,
-        RequestDecisionOutcome::ManualReview
-    );
-    assert_eq!(traces[0].tags, vec!["auto-approved"]);
-}
-
-#[tokio::test]
-async fn a_shadow_rule_records_its_verdict_and_changes_nothing() {
+async fn an_enabled_rule_decides_with_no_instance_switch_and_stops_once_disabled() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Shadow,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
-    submit(&harness, &library_id, 9044, None).await;
+    let first = submit(&harness, &library_id, 9043, None).await;
 
     let requests = harness.media_requests.requests.lock().await;
-    assert_eq!(requests[0].status, MediaRequestStatus::Pending);
+    let request = requests
+        .iter()
+        .find(|request| request.id == first)
+        .expect("the first request row exists");
+    assert_eq!(request.status, MediaRequestStatus::Rejected);
+    assert_eq!(
+        request.decided_by_rule_set_ids,
+        vec![detail.rule_set.id.clone()]
+    );
     drop(requests);
 
     let traces = harness.request_rule_decisions.recorded().await;
-    assert_eq!(traces[0].policy_outcome, RequestDecisionOutcome::Deny);
-    assert_eq!(
-        traces[0].effective_outcome,
-        RequestDecisionOutcome::ManualReview
-    );
-    assert_eq!(traces[0].mode, RequestRuleEvaluationMode::Shadow);
-}
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].mode, RequestRuleEvaluationMode::Enforce);
+    assert_eq!(traces[0].effective_outcome, RequestDecisionOutcome::Deny);
 
-#[tokio::test]
-async fn shadow_denials_and_tags_do_not_override_an_enforcing_approval() {
-    let harness = bootstrap_media_request_app();
-    let enforcing = create_rule(&harness, "Enforced approval", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &enforcing.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    let shadow_source = format!("{DENY_EVERYTHING}\ntags contains \"shadow-only\" if {{ true }}\n");
-    let shadow = create_rule(&harness, "Shadow denial", &shadow_source).await;
     harness
         .app
-        .create_title_tag_definition(&harness.manager, "shadow-only", None)
+        .set_request_rule_enabled(&harness.manager, &detail.rule_set.id, false)
         .await
-        .expect("shadow tag is a real registry label");
-    arm(
-        &harness,
-        &shadow.rule_set.id,
-        RequestRuleEvaluationMode::Shadow,
-    )
-    .await;
-    enable_gate(&harness).await;
-    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
-    submit(&harness, &library_id, 9901, Some(30)).await;
+        .expect("disabling should succeed");
+    let second = submit(&harness, &library_id, 9045, None).await;
+
     let requests = harness.media_requests.requests.lock().await;
-    assert_eq!(requests[0].status, MediaRequestStatus::Approved);
-    assert!(
-        !requests[0]
-            .policy_tags
-            .iter()
-            .any(|tag| tag == "shadow-only")
-    );
+    let request = requests
+        .iter()
+        .find(|request| request.id == second)
+        .expect("the second request row exists");
     assert_eq!(
-        requests[0].decided_by_rule_set_ids,
-        vec![enforcing.rule_set.id]
+        request.status,
+        MediaRequestStatus::Pending,
+        "a disabled rule decides nothing, so the request waits for review"
     );
-    let traces = harness.request_rule_decisions.recorded().await;
+    drop(requests);
     assert_eq!(
-        traces[0].effective_outcome,
-        RequestDecisionOutcome::AutoApprove
+        harness.request_rule_decisions.recorded().await.len(),
+        1,
+        "no enabled rule covers the library, so nothing new is traced"
     );
 }
 
@@ -820,13 +692,7 @@ async fn shadow_denials_and_tags_do_not_override_an_enforcing_approval() {
 async fn an_enforced_approval_creates_the_title_with_the_policy_tags_and_a_dormant_lease() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     harness
@@ -877,13 +743,7 @@ async fn an_enforced_approval_creates_the_title_with_the_policy_tags_and_a_dorma
 async fn a_forever_request_becomes_an_active_keep_claim() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     submit(&harness, &library_id, 9046, None).await;
@@ -900,13 +760,7 @@ async fn a_forever_request_becomes_an_active_keep_claim() {
 async fn an_enforced_denial_rejects_the_request_with_no_human_resolver() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     submit(&harness, &library_id, 9047, Some(7)).await;
@@ -949,13 +803,7 @@ async fn an_enforced_denial_rejects_the_request_with_no_human_resolver() {
 async fn trace_write_failure_does_not_disarm_an_enforced_denial() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness
         .request_rule_decisions
         .fail_writes
@@ -983,13 +831,7 @@ async fn a_held_rule_never_approves() {
         "package rules\nimport rego.v1\n\napprove if {\n\tinput.facts.active_lease_count < 5\n}\n",
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness.lifecycle_claims.set_unreadable(true);
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
@@ -1031,13 +873,7 @@ async fn a_metadata_outage_holds_the_rules_that_read_metadata() {
         "package rules\nimport rego.v1\n\napprove if {\n\tinput.facts.certification_rank <= 1\n}\n",
     )
     .await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     // A subject SMG cannot identify: the snapshot is explicitly partial, so
     // every metadata fact is unknown rather than empty.
@@ -1082,13 +918,7 @@ async fn a_library_scoped_rule_does_not_vote_on_another_librarys_request() {
         )
         .await
         .expect("rule set should be created");
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let movie_library = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     submit(&harness, &movie_library, 9050, None).await;
@@ -1102,24 +932,15 @@ async fn a_library_scoped_rule_does_not_vote_on_another_librarys_request() {
     drop(requests);
 
     // No rule could speak, so the evaluation short-circuits to the legacy
-    // answer — and the trace still says so, because the gate is armed.
-    let traces = harness.request_rule_decisions.recorded().await;
-    assert_eq!(traces.len(), 1);
-    assert_eq!(traces[0].votes_json, "[]");
-    assert_eq!(traces[0].mode, RequestRuleEvaluationMode::Disabled);
+    // answer without a trace.
+    assert!(harness.request_rule_decisions.recorded().await.is_empty());
 }
 
 #[tokio::test]
 async fn editing_a_pending_request_re_evaluates_it() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Short leases only", APPROVE_SHORT_LEASE).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     // A forever request carries no lease_days, so the rule abstains and the
@@ -1167,13 +988,7 @@ async fn editing_a_pending_request_re_evaluates_it() {
 async fn preflight_and_submit_agree_and_read_the_gateway_once() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     harness
         .app
@@ -1286,7 +1101,6 @@ fn approved_event_data(
 #[tokio::test]
 async fn the_auto_approve_permission_approves_a_real_request_and_says_so() {
     let harness = bootstrap_media_request_app();
-    enable_gate(&harness).await;
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let requester = auto_approve_requester(&library_id);
 
@@ -1335,29 +1149,15 @@ async fn the_auto_approve_permission_approves_a_real_request_and_says_so() {
     );
     drop(events);
 
-    let traces = harness.request_rule_decisions.recorded().await;
-    let trace = traces
-        .iter()
-        .find(|trace| trace.request_id == request_id)
-        .expect("the submit is traced while the gate is armed");
-    assert_eq!(trace.effective_outcome, RequestDecisionOutcome::AutoApprove);
-    assert_eq!(
-        trace.fallback_reason.as_deref(),
-        Some(FALLBACK_LIBRARY_PERMISSION)
-    );
+    // No rule took part, so nothing is traced.
+    assert!(harness.request_rule_decisions.recorded().await.is_empty());
 }
 
 #[tokio::test]
 async fn an_enforced_denial_beats_the_auto_approve_permission() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let requester = auto_approve_requester(&library_id);
 
@@ -1381,27 +1181,21 @@ async fn an_enforced_denial_beats_the_auto_approve_permission() {
 }
 
 #[tokio::test]
-async fn a_shadow_denial_leaves_the_permission_approval_credited_to_the_permission() {
+async fn a_disabled_denial_leaves_the_permission_approval_credited_to_the_permission() {
     let harness = bootstrap_media_request_app();
-    let detail = create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Shadow,
-    )
-    .await;
-    enable_gate(&harness).await;
+    create_rule(&harness, "Deny everything", DENY_EVERYTHING).await;
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let requester = auto_approve_requester(&library_id);
 
     let request_id = submit_as(&harness, &requester, &library_id, 9962).await;
 
     let requests = harness.media_requests.requests.lock().await;
+    assert_eq!(requests[0].id, request_id);
     assert_eq!(requests[0].status, MediaRequestStatus::Approved);
     assert_eq!(
         requests[0].decided_by_rule_set_ids,
         vec![LIBRARY_PERMISSION_DECIDER.to_string()],
-        "a shadow rule acted on nothing, so it is not the decider"
+        "a disabled rule acted on nothing, so it is not the decider"
     );
     drop(requests);
 
@@ -1413,27 +1207,19 @@ async fn a_shadow_denial_leaves_the_permission_approval_credited_to_the_permissi
     );
     assert!(
         approved.decision_reason_codes.is_empty(),
-        "the shadow denial's reason must not ride on the approval"
+        "the disabled denial's reason must not ride on the approval"
     );
     drop(events);
 
-    let traces = harness.request_rule_decisions.recorded().await;
-    let trace = traces
-        .iter()
-        .find(|trace| trace.request_id == request_id)
-        .expect("the submit is traced");
-    assert_eq!(trace.policy_outcome, RequestDecisionOutcome::Deny);
-    assert_eq!(trace.effective_outcome, RequestDecisionOutcome::AutoApprove);
-    assert_eq!(
-        trace.fallback_reason.as_deref(),
-        Some(FALLBACK_LIBRARY_PERMISSION)
+    assert!(
+        harness.request_rule_decisions.recorded().await.is_empty(),
+        "a disabled rule is never evaluated"
     );
 }
 
 #[tokio::test]
 async fn a_held_admission_waits_for_review_despite_the_auto_approve_permission() {
     let harness = bootstrap_media_request_app();
-    enable_gate(&harness).await;
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let requester = auto_approve_requester(&library_id);
     let mut input = media_request_input(library_id, 9963);
@@ -1526,13 +1312,7 @@ async fn an_approver_may_not_mint_a_reserved_tag() {
 async fn an_undefined_policy_tag_is_dropped_without_failing_the_approval() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Approve everything", APPROVE_EVERYTHING).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
 
     let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
     let preflight = harness
@@ -1582,13 +1362,7 @@ async fn an_undefined_policy_tag_is_dropped_without_failing_the_approval() {
 async fn a_pending_request_records_only_the_tags_that_can_land() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Send to a human", MANUAL_WITH_TWO_TAGS).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     harness
         .app
         .create_title_tag_definition(&harness.manager, "auto-approved", None)
@@ -1639,13 +1413,7 @@ async fn a_pending_request_records_only_the_tags_that_can_land() {
 async fn renaming_a_tag_follows_a_pending_request_and_counts_the_request_rule() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Send to a human", MANUAL_WITH_TWO_TAGS).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     let definition = harness
         .app
         .create_title_tag_definition(&harness.manager, "auto-approved", None)
@@ -1685,13 +1453,7 @@ async fn renaming_a_tag_follows_a_pending_request_and_counts_the_request_rule() 
 async fn deleting_a_tag_strips_it_from_a_pending_request() {
     let harness = bootstrap_media_request_app();
     let detail = create_rule(&harness, "Send to a human", MANUAL_WITH_TWO_TAGS).await;
-    arm(
-        &harness,
-        &detail.rule_set.id,
-        RequestRuleEvaluationMode::Enforce,
-    )
-    .await;
-    enable_gate(&harness).await;
+    enable(&harness, &detail.rule_set.id).await;
     let definition = harness
         .app
         .create_title_tag_definition(&harness.manager, "auto-approved", None)
@@ -1924,6 +1686,11 @@ async fn administrator_claim_operations_require_manage_titles() {
             .release_title_claim(&harness.user, &claim_id, "no")
             .await
             .err(),
+        harness
+            .app
+            .create_operator_keep_claim(&harness.user, &title_id)
+            .await
+            .err(),
     ] {
         assert!(
             matches!(error, Some(AppError::Unauthorized(_))),
@@ -2012,6 +1779,79 @@ async fn an_administrator_can_extend_convert_and_release_a_claim() {
     assert!(matches!(blank, AppError::Validation(_)));
 }
 
+#[tokio::test]
+async fn keeping_a_title_twice_returns_the_live_keep_instead_of_stacking_another() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let request_id = submit(&harness, &library_id, 9063, Some(30)).await;
+    harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &request_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("approval should succeed");
+    let title_id = harness.titles.store.lock().await[0].id.clone();
+
+    let kept = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("a title manager may keep a title");
+    assert_eq!(kept.title_id, title_id);
+    assert_eq!(kept.producer, LifecycleClaimProducer::OperatorKeep);
+    assert_eq!(kept.kind, LifecycleClaimKind::Keep);
+    assert_eq!(kept.state, LifecycleClaimState::Active);
+    assert_eq!(kept.producer_ref, None);
+    assert_eq!(
+        kept.created_by.as_deref(),
+        Some(harness.manager.id.as_str())
+    );
+
+    let again = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("keeping a kept title succeeds");
+    assert_eq!(again.id, kept.id, "a second keep returns the first");
+    let operator_keeps = |claims: Vec<scryer_domain::LifecycleClaim>| {
+        claims
+            .into_iter()
+            .filter(|claim| claim.producer == LifecycleClaimProducer::OperatorKeep)
+            .count()
+    };
+    assert_eq!(operator_keeps(harness.lifecycle_claims.all().await), 1);
+
+    // Releasing goes through the existing release path; keeping again after
+    // that is a fresh hold, and the released one stays as history.
+    harness
+        .app
+        .release_title_claim(&harness.manager, &kept.id, "no longer needed")
+        .await
+        .expect("release should succeed");
+    let renewed = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, &title_id)
+        .await
+        .expect("keep after release");
+    assert_ne!(renewed.id, kept.id);
+    assert_eq!(renewed.state, LifecycleClaimState::Active);
+    assert_eq!(operator_keeps(harness.lifecycle_claims.all().await), 2);
+
+    let missing = harness
+        .app
+        .create_operator_keep_claim(&harness.manager, "no-such-title")
+        .await
+        .expect_err("an unknown title cannot be kept");
+    assert!(matches!(missing, AppError::NotFound(_)), "{missing:?}");
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async fn create_rule(
@@ -2034,29 +1874,12 @@ async fn create_rule(
         .expect("rule set should be created")
 }
 
-async fn arm(
-    harness: &MediaRequestTestHarness,
-    rule_set_id: &str,
-    mode: RequestRuleEvaluationMode,
-) {
+async fn enable(harness: &MediaRequestTestHarness, rule_set_id: &str) {
     harness
         .app
-        .set_request_rule_mode(&harness.manager, rule_set_id, mode)
+        .set_request_rule_enabled(&harness.manager, rule_set_id, true)
         .await
-        .expect("mode change should succeed");
-}
-
-async fn enable_gate(harness: &MediaRequestTestHarness) {
-    harness
-        .app
-        .set_request_rule_instance_gates(
-            &harness.manager,
-            RequestRuleGatesUpdate {
-                evaluation_enabled: Some(true),
-            },
-        )
-        .await
-        .expect("the gate should arm");
+        .expect("enabling should succeed");
 }
 
 /// Submit as the plain requester — who holds `request` but **not**

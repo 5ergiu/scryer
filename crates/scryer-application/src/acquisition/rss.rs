@@ -26,28 +26,89 @@ use crate::types::{PendingReleaseObservation, PendingReleaseRole};
 use chrono::{DateTime, Utc};
 use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-const RSS_SYNC_MAX_GUIDS: usize = 2000;
+/// How many GUIDs each indexer's seen set keeps between its own polls: five
+/// feed pages of the usual hundred items. A poll that returns more than this,
+/// such as a caught-up poll paging back to its marker, keeps all of them.
+const RSS_SEEN_GUIDS_PER_INDEXER: usize = 500;
 
-/// Bounds the seen-GUID set. A caught-up poll can return more releases than
-/// the cap, so this cycle's GUIDs are never evicted: dropping one would let the
-/// next poll, which reads back to the same marker, treat it as new again.
-fn cap_rss_seen_guids(seen_guids: &mut HashSet<String>, current_guids: &HashSet<String>) {
-    let limit = RSS_SYNC_MAX_GUIDS.max(current_guids.len());
-    if seen_guids.len() <= limit {
-        return;
+/// The process-local record of feed GUIDs already taken through matching, so
+/// an unchanged feed item is not matched again on a later poll.
+///
+/// Each indexer keeps its own bounded set, and a set is trimmed only when its
+/// indexer is polled. A cycle polls only the indexers that are due, so one
+/// shared cap evicted the GUIDs of every indexer not polled that cycle, and
+/// their unchanged items went back through matching on their next poll. Memory
+/// stays bounded by the per-indexer cap times the indexers polled since
+/// startup.
+#[derive(Debug, Default)]
+pub(crate) struct RssSeenGuids {
+    /// Advanced once per cycle; each GUID records the cycle that last saw it.
+    cycle: u64,
+    by_indexer: HashMap<String, HashMap<String, u64>>,
+}
+
+impl RssSeenGuids {
+    fn begin_cycle(&mut self) {
+        self.cycle += 1;
     }
-    let excess = seen_guids.len() - limit;
-    let to_remove: Vec<String> = seen_guids
-        .iter()
-        .filter(|guid| !current_guids.contains(*guid))
-        .take(excess)
-        .cloned()
-        .collect();
-    for key in to_remove {
-        seen_guids.remove(&key);
+
+    pub(crate) fn len(&self) -> usize {
+        self.by_indexer.values().map(HashMap::len).sum()
     }
+
+    /// Records `guid` as returned by `indexer` this cycle. True when no
+    /// indexer had returned it before, which is the old shared-set meaning: an
+    /// item two indexers both carry is matched once.
+    fn observe(&mut self, indexer: &str, guid: &str) -> bool {
+        let is_new = !self.by_indexer.values().any(|seen| seen.contains_key(guid));
+        let cycle = self.cycle;
+        self.by_indexer
+            .entry(indexer.to_string())
+            .or_default()
+            .insert(guid.to_string(), cycle);
+        is_new
+    }
+
+    /// Trims each indexer polled this cycle back to its bound, dropping its
+    /// least recently returned GUIDs first. This cycle's GUIDs are never
+    /// evicted: dropping one would let the next poll, which reads back to the
+    /// same marker, treat it as new again. Indexers not polled this cycle are
+    /// left alone.
+    fn cap_polled_indexers(&mut self) {
+        let cycle = self.cycle;
+        for seen in self.by_indexer.values_mut() {
+            let current = seen.values().filter(|&&last| last == cycle).count();
+            if current == 0 {
+                continue;
+            }
+            let limit = RSS_SEEN_GUIDS_PER_INDEXER.max(current);
+            if seen.len() <= limit {
+                continue;
+            }
+            let excess = seen.len() - limit;
+            let mut earlier: Vec<(u64, String)> = seen
+                .iter()
+                .filter(|(_, last)| **last != cycle)
+                .map(|(guid, last)| (*last, guid.clone()))
+                .collect();
+            earlier.sort_unstable();
+            for (_, guid) in earlier.into_iter().take(excess) {
+                seen.remove(&guid);
+            }
+        }
+    }
+}
+
+/// The key a feed item's GUID is remembered under: the indexer that returned
+/// it, or its source name when the result carries no indexer id.
+fn rss_seen_guid_indexer(result: &IndexerSearchResult) -> &str {
+    result
+        .indexer_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&result.source)
 }
 
 /// The shipped healthy-quota RSS cadence.
@@ -484,6 +545,8 @@ fn rss_is_permanent_rejection(code: ReleaseAutoDecisionCode) -> bool {
             | ReleaseAutoDecisionCode::EpisodeMismatch
             | ReleaseAutoDecisionCode::EpisodeNotMonitored
             | ReleaseAutoDecisionCode::SubtitlesOnly
+            | ReleaseAutoDecisionCode::EpisodicReleaseForMovie
+            | ReleaseAutoDecisionCode::TitleYearMismatch
     )
 }
 
@@ -616,13 +679,26 @@ impl TitleContextBank {
         // Discovery read the index, so the proof reads the same names: a cour
         // name lives in the index and on no title row.
         let evidence_title = self.matcher.evidence_title(title).await?;
-        let evidence = canonical_title_evidence(&evidence_title).with_ambiguity(
-            self.matcher
-                .identity_ambiguity(&evidence_title)
-                .await?
-                .with_spelling_candidates(spelling.clone()),
-        );
-        Ok(TitleContextCandidate {
+        let ambiguity = self.matcher.identity_ambiguity(&evidence_title).await?;
+        Ok(TitleContextCandidate::new(
+            title,
+            &evidence_title,
+            ambiguity,
+            spelling,
+        ))
+    }
+}
+
+impl TitleContextCandidate {
+    fn new(
+        title: &Title,
+        evidence_title: &Title,
+        ambiguity: crate::acquisition_release_search::TitleIdentityAmbiguity,
+        spelling: &Arc<crate::title_matching::relaxed::SpellingCandidates>,
+    ) -> Self {
+        let evidence = canonical_title_evidence(evidence_title)
+            .with_ambiguity(ambiguity.with_spelling_candidates(spelling.clone()));
+        Self {
             info: TitleMatchInfo {
                 title_id: title.id.clone(),
                 year: title.year,
@@ -631,7 +707,7 @@ impl TitleContextBank {
                 imdb_id: imdb_id_from_title(title),
             },
             evidence,
-        })
+        }
     }
 }
 
@@ -724,6 +800,18 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
         })
 }
 
+/// How many feed items one batched match reads the title index for at once.
+/// It bounds the binds per statement and the candidates a pass holds; nothing
+/// read for one pass outlives it.
+const RSS_MATCH_BATCH_SIZE: usize = 256;
+
+/// One feed item to match: its release name and the indexer's own id
+/// assertions for it.
+struct ReleaseMatchRequest<'a> {
+    release_title: &'a str,
+    response_attributes: &'a IndexerResponseAttributes,
+}
+
 /// Match an RSS release against monitored titles using real title contexts.
 /// Candidates come from exact lookups of the release's context-free anchor
 /// keys (plus the indexer's own id assertions) — there is no lexical
@@ -731,17 +819,59 @@ fn extract_titles_from_release(parsed: &ParsedReleaseMetadata) -> Vec<String> {
 /// contextual proof in [`crate::acquisition_release_search::match_parsed_release_to_title_evidence`].
 /// `response_attributes` carries the indexer's own id assertions so a collision
 /// on a shared canonical key can still be resolved (A2(2)).
+///
+/// This is the batched match with a batch of one, so a single release and a
+/// release matched inside an RSS cycle take exactly the same path.
 async fn match_release_to_title_context(
     release_title: &str,
     response_attributes: &IndexerResponseAttributes,
     context_bank: &TitleContextBank,
 ) -> AppResult<Option<TitleMatchInfo>> {
-    let anchor_keys = context_free_identity_anchor_keys(release_title);
-    // A stacked-alias name extracts as one glued title no single key equals, so
-    // candidacy also probes every token prefix of each anchor key. Discovery
-    // only — each candidate still faces the full anchored proof below.
+    Ok(match_releases_to_title_context(
+        &[ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        }],
+        context_bank,
+    )
+    .await?
+    .pop()
+    .flatten())
+}
+
+/// [`match_release_to_title_context`] for every feed item of a cycle,
+/// answered in order.
+///
+/// Matching one item used to cost one round trip per lookup lane and two per
+/// candidate, so a cycle paid for each new feed item in turn. Here each lane
+/// is read once for a whole batch of items — the key shapes, the asserted
+/// ids, the spelling buckets, the spelling candidates' rows, the candidates'
+/// index names and their collision keys — and the per-item decision then
+/// runs over those answers.
+///
+/// Every item is still decided on exactly its own evidence: its own
+/// discovered titles, admitted in the same lane order, and its own spelling
+/// buckets for the collision guard. A batch shares reads, never answers, so
+/// an item resolves to the same title, or stays ambiguous, whatever else is
+/// in the batch. Nothing read here is kept past the call.
+async fn match_releases_to_title_context(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let mut matches = Vec::with_capacity(requests.len());
+    for chunk in requests.chunks(RSS_MATCH_BATCH_SIZE) {
+        matches.extend(match_release_batch(chunk, context_bank).await?);
+    }
+    Ok(matches)
+}
+
+/// The anchor probes of one release name: every token prefix of each
+/// context-free anchor key. A stacked-alias name extracts as one glued title
+/// no single key equals, so candidacy probes the prefixes too. Discovery
+/// only — each candidate still faces the full anchored proof.
+fn identity_anchor_probes(release_title: &str) -> Vec<String> {
     let mut probes = Vec::<String>::new();
-    for key in &anchor_keys {
+    for key in &context_free_identity_anchor_keys(release_title) {
         let tokens = key.split_whitespace().collect::<Vec<_>>();
         for end in 1..=tokens.len() {
             let probe = tokens[..end].join(" ");
@@ -750,69 +880,162 @@ async fn match_release_to_title_context(
             }
         }
     }
+    probes
+}
 
-    let mut discovered = Vec::<Title>::new();
-    let mut seen = HashSet::<String>::new();
-    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
-        for title in titles {
-            if title.monitored && (context_bank.in_scope)(&title) && seen.insert(title.id.clone()) {
-                discovered.push(title);
-            }
+/// The ids an indexer asserted for a feed item, in the order discovery
+/// admits them.
+fn asserted_external_ids(attributes: &IndexerResponseAttributes) -> Vec<(&'static str, &str)> {
+    [
+        ("tvdb", attributes.tvdb_id.as_deref()),
+        ("tmdb", attributes.tmdb_id.as_deref()),
+        ("imdb", attributes.imdb_id.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(source, asserted_id)| asserted_id.map(|asserted_id| (source, asserted_id)))
+    .collect()
+}
+
+async fn match_release_batch(
+    requests: &[ReleaseMatchRequest<'_>],
+    context_bank: &TitleContextBank,
+) -> AppResult<Vec<Option<TitleMatchInfo>>> {
+    let matcher = &context_bank.matcher;
+
+    let probe_sets = requests
+        .iter()
+        .map(|request| identity_anchor_probes(request.release_title))
+        .collect::<Vec<_>>();
+    let asserted = requests
+        .iter()
+        .map(|request| asserted_external_ids(request.response_attributes))
+        .collect::<Vec<_>>();
+    let spelling_anchor_sets = requests
+        .iter()
+        .map(|request| {
+            crate::title_matching::relaxed::neutral_spelling_forms(request.release_title).0
+        })
+        .collect::<Vec<_>>();
+
+    // One read per lookup lane for the whole batch.
+    let mut shape_titles = matcher
+        .titles_naming_key_shapes_batch(&probe_sets)
+        .await?
+        .into_iter();
+    let lookups = asserted.iter().flatten().copied().collect::<Vec<_>>();
+    let mut external_titles = matcher
+        .monitored_titles_by_external_ids(&lookups)
+        .await?
+        .into_iter();
+    let anchor_sets = spelling_anchor_sets
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let spellings = matcher
+        .spelling_candidates_batch(&anchor_sets, None)
+        .await?;
+    let spelling_id_sets = spellings
+        .iter()
+        .zip(&spelling_anchor_sets)
+        .map(|(spelling, anchors)| spelling.candidates(anchors, None))
+        .collect::<Vec<_>>();
+    let mut spelling_ids = Vec::<String>::new();
+    let mut requested = HashSet::<&str>::new();
+    for id in spelling_id_sets.iter().flatten() {
+        if requested.insert(id.as_str()) {
+            spelling_ids.push(id.clone());
         }
-    };
+    }
+    let spelling_titles = matcher.titles_by_ids(&spelling_ids).await?;
 
-    admit(
-        context_bank
-            .matcher
-            .titles_naming_key_shapes(&probes)
-            .await?,
-        &mut discovered,
-    );
-
-    for (source, asserted_id) in [
-        ("tvdb", response_attributes.tvdb_id.as_ref()),
-        ("tmdb", response_attributes.tmdb_id.as_ref()),
-        ("imdb", response_attributes.imdb_id.as_ref()),
-    ] {
-        let Some(asserted_id) = asserted_id else {
-            continue;
+    // Each item admits its own titles, lane by lane, exactly as it would
+    // alone: key shapes, then the asserted ids, then spelling.
+    let mut discovered_sets = Vec::with_capacity(requests.len());
+    for (index, asserted_ids) in asserted.iter().enumerate() {
+        let mut discovered = Vec::<Title>::new();
+        let mut seen = HashSet::<String>::new();
+        let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+            for title in titles {
+                if title.monitored
+                    && (context_bank.in_scope)(&title)
+                    && seen.insert(title.id.clone())
+                {
+                    discovered.push(title);
+                }
+            }
         };
+        admit(shape_titles.next().unwrap_or_default(), &mut discovered);
+        for _ in asserted_ids {
+            admit(external_titles.next().unwrap_or_default(), &mut discovered);
+        }
         admit(
-            context_bank
-                .matcher
-                .monitored_titles_by_external_id(source, asserted_id)
-                .await?,
+            spelling_titles
+                .iter()
+                .filter(|title| spelling_id_sets[index].contains(&title.id))
+                .cloned()
+                .collect(),
             &mut discovered,
         );
+        discovered_sets.push(discovered);
     }
 
-    let (spelling_anchors, _) =
-        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
-    let spelling = context_bank
-        .matcher
-        .spelling_candidates(&spelling_anchors, None)
-        .await?;
-    let spelling_ids = spelling
-        .candidates(&spelling_anchors, None)
-        .into_iter()
+    // Every item's candidates face the proof on the index's names and the
+    // global collision guard, both read once for the batch.
+    let discovered = discovered_sets
+        .iter()
+        .enumerate()
+        .flat_map(|(index, titles)| titles.iter().map(move |title| (index, title)))
         .collect::<Vec<_>>();
-    admit(
-        context_bank.matcher.titles_by_ids(&spelling_ids).await?,
-        &mut discovered,
-    );
-
-    if discovered.is_empty() {
-        return Ok(None);
+    let evidence_titles = matcher
+        .evidence_titles(
+            &discovered
+                .iter()
+                .map(|(_, title)| *title)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let ambiguities = matcher
+        .identity_ambiguities(&evidence_titles.iter().collect::<Vec<_>>())
+        .await?;
+    let mut candidate_sets = vec![Vec::<TitleContextCandidate>::new(); requests.len()];
+    for (((index, title), evidence_title), ambiguity) in
+        discovered.iter().zip(&evidence_titles).zip(ambiguities)
+    {
+        candidate_sets[*index].push(TitleContextCandidate::new(
+            title,
+            evidence_title,
+            ambiguity,
+            &spellings[*index],
+        ));
     }
 
-    let mut candidates = Vec::with_capacity(discovered.len());
-    for title in &discovered {
-        candidates.push(context_bank.candidate(title, &spelling).await?);
+    Ok(requests
+        .iter()
+        .zip(candidate_sets)
+        .map(|(request, candidates)| {
+            decide_release_match(
+                request.release_title,
+                request.response_attributes,
+                &candidates,
+            )
+        })
+        .collect())
+}
+
+/// One release's decision over its own candidates: the year gate, the
+/// anchored proof, the key-specificity ranking and the collision guard.
+fn decide_release_match(
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+    candidates: &[TitleContextCandidate],
+) -> Option<TitleMatchInfo> {
+    if candidates.is_empty() {
+        return None;
     }
 
     let mut best: Option<(&TitleMatchInfo, i32, bool)> = None;
     let mut titles_per_matched_key: HashMap<String, HashSet<&str>> = HashMap::new();
-    for candidate in &candidates {
+    for candidate in candidates {
         // The target-biased parse supplies year/projection semantics (it knows
         // when a year token is part of the title, as in `Signal Runner 2049`);
         // identity still anchors on the context-free extraction inside
@@ -906,10 +1129,10 @@ async fn match_release_to_title_context(
             title_count = colliding_titles.len(),
             "RSS sync: skipping release — shared canonical key matches multiple titles with no disambiguator"
         );
-        return Ok(None);
+        return None;
     }
 
-    Ok(best.map(|(info, _, _)| info.clone()))
+    best.map(|(info, _, _)| info.clone())
 }
 
 /// The RSS cycle's title match over a repository-backed matcher, every title
@@ -927,6 +1150,102 @@ pub(crate) async fn rss_title_id_for_release(
     )
 }
 
+/// [`rss_title_id_for_release`] with the indexer's own id assertions: one
+/// feed item matched on its own, as the single-item path matches it.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_asserted_release(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    Ok(
+        match_release_to_title_context(release_title, response_attributes, &bank)
+            .await?
+            .map(|info| info.title_id),
+    )
+}
+
+/// One feed item matched lane by lane with the matcher's single-item reads:
+/// a read per lookup lane and two per candidate, then the same decision. It
+/// is the per-item matching a batched cycle must agree with, kept as an
+/// independent oracle for the batched pass.
+#[cfg(test)]
+pub(crate) async fn rss_title_id_for_release_read_item_by_item(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    release_title: &str,
+    response_attributes: &IndexerResponseAttributes,
+) -> AppResult<Option<String>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let mut discovered = Vec::<Title>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut admit = |titles: Vec<Title>, discovered: &mut Vec<Title>| {
+        for title in titles {
+            if title.monitored && (bank.in_scope)(&title) && seen.insert(title.id.clone()) {
+                discovered.push(title);
+            }
+        }
+    };
+    admit(
+        bank.matcher
+            .titles_naming_key_shapes(&identity_anchor_probes(release_title))
+            .await?,
+        &mut discovered,
+    );
+    for (source, asserted_id) in asserted_external_ids(response_attributes) {
+        admit(
+            bank.matcher
+                .monitored_titles_by_external_id(source, asserted_id)
+                .await?,
+            &mut discovered,
+        );
+    }
+    let (spelling_anchors, _) =
+        crate::title_matching::relaxed::neutral_spelling_forms(release_title);
+    let spelling = bank
+        .matcher
+        .spelling_candidates(&spelling_anchors, None)
+        .await?;
+    let spelling_ids = spelling
+        .candidates(&spelling_anchors, None)
+        .into_iter()
+        .collect::<Vec<_>>();
+    admit(
+        bank.matcher.titles_by_ids(&spelling_ids).await?,
+        &mut discovered,
+    );
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for title in &discovered {
+        candidates.push(bank.candidate(title, &spelling).await?);
+    }
+    Ok(
+        decide_release_match(release_title, response_attributes, &candidates)
+            .map(|info| info.title_id),
+    )
+}
+
+/// Every feed item of one cycle matched in a single batched pass, as the
+/// poll matches them, every title in scope.
+#[cfg(test)]
+pub(crate) async fn rss_title_ids_for_cycle(
+    matcher: crate::import_title_resolution::MonitoredTitleMatcher,
+    releases: &[(&str, IndexerResponseAttributes)],
+) -> AppResult<Vec<Option<String>>> {
+    let bank = TitleContextBank::new(matcher, |_: &Title| true);
+    let requests = releases
+        .iter()
+        .map(|(release_title, response_attributes)| ReleaseMatchRequest {
+            release_title,
+            response_attributes,
+        })
+        .collect::<Vec<_>>();
+    Ok(match_releases_to_title_context(&requests, &bank)
+        .await?
+        .into_iter()
+        .map(|matched| matched.map(|info| info.title_id))
+        .collect())
+}
+
 #[cfg(test)]
 pub(crate) fn parsed_release_matches_title(parsed: &ParsedReleaseMetadata, title: &Title) -> bool {
     parsed_release_matches_title_evidence(parsed, &canonical_title_evidence(title))
@@ -939,6 +1258,65 @@ struct TitleQueueSnapshot {
         crate::contracts::ClientJobLocator,
         scryer_domain::TrackedDownloadState,
     >,
+}
+
+/// Feed pages an RSS cycle lets the search client queue ahead of the one it
+/// is ingesting. A page is one poll's response, so with one in flight the
+/// live feed is the page being matched, the page waiting behind it, and the
+/// polls still running in the search client's bounded RSS lane.
+const RSS_FEED_PAGES_IN_FLIGHT: usize = 1;
+
+/// Active unknown-age pending rows, by the identities a feed item can match
+/// them on. A matching item bypasses the process-local seen filter.
+struct RssUnknownAgeBypass {
+    identities: HashSet<String>,
+    listing_prefixes: HashSet<String>,
+}
+
+/// What one RSS cycle keeps from its feed: the releases that matched a
+/// monitored title, and the counts its intake log reports.
+#[derive(Default)]
+struct RssCycleIntake {
+    matched_by_title: HashMap<String, Vec<IndexerSearchResult>>,
+    matched_identities: HashMap<String, HashSet<String>>,
+    /// Feed pages ingested.
+    pages: usize,
+    /// Feed items received, before the seen filter.
+    fetched: usize,
+    /// [`IndexerSearchResult::approximate_size_bytes`] over every received
+    /// item.
+    fetched_bytes: usize,
+    /// Items that passed the seen filter.
+    new: usize,
+    /// New items that matched a monitored title.
+    matched: usize,
+    /// Matched items kept for title processing (after identity dedup).
+    retained: usize,
+    /// The most feed results this cycle held at once: the retained matches
+    /// plus the page being ingested.
+    peak_live: usize,
+}
+
+/// This process's current and peak resident set size in KiB, where the
+/// platform reports them (`/proc/self/status` on Linux), for the RSS cycle
+/// logs. `None` elsewhere or when the file cannot be read.
+fn process_resident_kib() -> (Option<u64>, Option<u64>) {
+    match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => (
+            proc_status_kib(&status, "VmRSS:"),
+            proc_status_kib(&status, "VmHWM:"),
+        ),
+        Err(_) => (None, None),
+    }
+}
+
+/// One `kB` field of a `/proc/<pid>/status` file.
+fn proc_status_kib(status: &str, field: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
 }
 
 impl AppUseCase {
@@ -1065,6 +1443,112 @@ impl AppUseCase {
             .unwrap_or(true)
     }
 
+    /// Takes one page of feed results through the cycle: records every GUID
+    /// in the seen set, keeps the new ones (and any an unknown-age row is
+    /// waiting on), matches them in the usual batches, keeps the matches and
+    /// drops the rest.
+    async fn ingest_rss_feed_page(
+        &self,
+        results: Vec<IndexerSearchResult>,
+        unknown_age: &RssUnknownAgeBypass,
+        title_context_bank: &TitleContextBank,
+        intake: &mut RssCycleIntake,
+    ) -> AppResult<()> {
+        let page_len = results.len();
+        let page_bytes = results
+            .iter()
+            .map(IndexerSearchResult::approximate_size_bytes)
+            .sum::<usize>();
+        intake.pages += 1;
+        intake.fetched += page_len;
+        intake.fetched_bytes = intake.fetched_bytes.saturating_add(page_bytes);
+        intake.peak_live = intake.peak_live.max(intake.retained + page_len);
+
+        let new_results = {
+            // Held only for the in-memory filter, never across I/O.
+            let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
+            let mut new_results: Vec<IndexerSearchResult> = Vec::new();
+            for result in results {
+                let release_identity = rss_release_identity(&result);
+                let guid = result
+                    .guid
+                    .as_deref()
+                    .or(result.download_url.as_deref())
+                    .or(result.link.as_deref())
+                    .unwrap_or(&result.title);
+
+                // Record every fresh GUID, then give an active unknown-age row
+                // one more look even if it was already seen this process
+                // lifetime.
+                let is_new_guid = seen_guids.observe(rss_seen_guid_indexer(&result), guid);
+                if unknown_age.identities.contains(&release_identity)
+                    || unknown_age
+                        .listing_prefixes
+                        .contains(&rss_listing_identity_prefix(&result))
+                    || is_new_guid
+                {
+                    new_results.push(result);
+                }
+            }
+            new_results
+        };
+        let page_new = new_results.len();
+        intake.new += page_new;
+        if new_results.is_empty() {
+            debug!(
+                page_results = page_len,
+                "RSS sync: feed page held nothing new"
+            );
+            return Ok(());
+        }
+
+        // Parse fresh releases and match them against monitored titles, each
+        // lookup lane read once per batch rather than once per item.
+        let match_requests = new_results
+            .iter()
+            .map(|result| ReleaseMatchRequest {
+                release_title: &result.title,
+                response_attributes: &result.response_attributes,
+            })
+            .collect::<Vec<_>>();
+        let title_matches =
+            match_releases_to_title_context(&match_requests, title_context_bank).await?;
+        drop(match_requests);
+
+        let mut page_matched = 0usize;
+        for (result, title_info) in new_results.into_iter().zip(title_matches) {
+            if let Some(title_info) = title_info {
+                page_matched += 1;
+                intake
+                    .matched_by_title
+                    .entry(title_info.title_id.clone())
+                    .or_default();
+                let identities = intake
+                    .matched_identities
+                    .entry(title_info.title_id.clone())
+                    .or_default();
+                if identities.insert(rss_release_identity(&result)) {
+                    intake
+                        .matched_by_title
+                        .entry(title_info.title_id.clone())
+                        .or_default()
+                        .push(result);
+                    intake.retained += 1;
+                }
+            }
+        }
+        intake.matched += page_matched;
+        debug!(
+            page_results = page_len,
+            page_approx_bytes = page_bytes,
+            new_count = page_new,
+            matched = page_matched,
+            retained_matched = intake.retained,
+            "RSS sync: matched one feed page"
+        );
+        Ok(())
+    }
+
     pub(crate) async fn run_scheduled_rss_sync(&self) -> AppResult<RssSyncReport> {
         let now = Utc::now();
         let sync_start = std::time::Instant::now();
@@ -1113,6 +1597,8 @@ impl AppUseCase {
         known_indexers.extend(due_indexers.deferred);
 
         debug!("starting RSS sync cycle");
+
+        let availability_settings = self.movie_availability_policies().await?;
 
         // The scopes that hold monitored titles, as one grouped read. This
         // used to be every title row in the catalog, kept for the whole cycle
@@ -1167,75 +1653,13 @@ impl AppUseCase {
             return Ok(RssSyncReport::default());
         }
 
-        // Fetch RSS feed (empty query = latest releases) from all indexers
-        let rss_results = self
-            .services
-            .integrations
-            .indexer_client
-            .search(
-                String::new(), // empty query = RSS feed
-                HashMap::new(),
-                None, // no category filter
-                None, // no facet hint
-                None, // no ID-search facet override
-                None, // categories are owned by each indexer's routing entry
-                rss_routing,
-                SearchMode::Auto,
-                IndexerErrorOperation::RssSync,
-                None,
-                None,
-                None,
-                None, // an RSS poll has no subject, so no year
-                vec![],
-                None,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await;
-
-        let fresh_results = match rss_results {
-            Ok(r) => r,
-            Err(err) => {
-                // A temporary feed failure must not suppress already-held
-                // releases. They are re-evaluated through this same pass.
-                warn!(error = %err, "RSS sync: failed to fetch RSS feed from indexers; evaluating active pending releases");
-                IndexerSearchResponse { next_cursor: None,
-                    results: Vec::new(),
-
-                    completion: IndexerSearchCompletion::Partial {
-                        reason: Some(IndexerSearchIncompleteReason::UpstreamFailure),
-                        retry_after: None,
-                    },
-                    api_current: None,
-                    api_max: None,
-                    grab_current: None,
-                    grab_max: None,
-                    indexer_outcomes: Vec::new(),
-                }
-            }
-        }
-        .results;
-
-        debug!(
-            result_count = fresh_results.len(),
-            "RSS sync: fetched releases from indexers"
-        );
-
-        // Load the active set before applying the process-local GUID filter.
-        // In particular, an unknown-age row must accept a later observation of
-        // the same release when the indexer finally supplies its publish time.
-        let active_pending = self
-            .services
-            .workflow
-            .pending_releases
-            .list_waiting_pending_releases()
-            .await
-            .unwrap_or_else(|error| {
-                warn!(error = %error, "RSS sync: failed to load active pending releases");
-                Vec::new()
-            });
-        // Manual-review rows do not re-enter the automatic candidate set by
-        // themselves, but a later valid feed observation must still bypass
-        // the process-local seen filter so it can hydrate and re-evaluate one.
+        // Load the unknown-age set before applying the process-local GUID
+        // filter, which now runs on each feed page as it arrives: an
+        // unknown-age row must accept a later observation of the same release
+        // when the indexer finally supplies its publish time. Manual-review
+        // rows do not re-enter the automatic candidate set by themselves, but
+        // a later valid feed observation must still bypass the seen filter so
+        // it can hydrate and re-evaluate one.
         let active_unknown_age = self
             .services
             .workflow
@@ -1246,86 +1670,162 @@ impl AppUseCase {
                 warn!(error = %error, "RSS sync: failed to load unknown-age pending releases");
                 Vec::new()
             });
-        let unknown_age_identities = active_unknown_age
-            .iter()
-            .map(|pending| pending.release_identity.clone())
-            .collect::<HashSet<_>>();
-        let unknown_age_listing_prefixes = active_unknown_age
-            .iter()
-            .filter(|pending| pending.release_identity.starts_with("listing:"))
-            .map(pending_release_as_rss_result)
-            .map(|release| rss_listing_identity_prefix(&release))
-            .collect::<HashSet<_>>();
+        let unknown_age = RssUnknownAgeBypass {
+            identities: active_unknown_age
+                .iter()
+                .map(|pending| pending.release_identity.clone())
+                .collect(),
+            listing_prefixes: active_unknown_age
+                .iter()
+                .filter(|pending| pending.release_identity.starts_with("listing:"))
+                .map(pending_release_as_rss_result)
+                .map(|release| rss_listing_identity_prefix(&release))
+                .collect(),
+        };
+        drop(active_unknown_age);
 
-        // Dedup against previously seen GUIDs (in-memory, resets on restart)
-        let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
-        let initial_seen_count = seen_guids.len();
+        // Dedup against previously seen GUIDs (in-memory, resets on restart).
+        // The cycle opens here; every page is observed into it as it arrives,
+        // and the polled indexers are capped once the feed is drained.
+        let initial_seen_count = {
+            let mut seen_guids = self.runtime.acquisition.rss_seen_guids.write().await;
+            let initial_seen_count = seen_guids.len();
+            seen_guids.begin_cycle();
+            initial_seen_count
+        };
 
-        let mut new_results: Vec<IndexerSearchResult> = Vec::new();
-        let mut current_guids: HashSet<String> = HashSet::new();
-        for result in fresh_results {
-            let release_identity = rss_release_identity(&result);
-            let guid = result
-                .guid
-                .as_deref()
-                .or(result.download_url.as_deref())
-                .or(result.link.as_deref())
-                .unwrap_or(&result.title);
-
-            // Record every fresh GUID, then give an active unknown-age row one
-            // more look even if it was already seen this process lifetime.
-            let is_new_guid = seen_guids.insert(guid.to_string());
-            current_guids.insert(guid.to_string());
-            if unknown_age_identities.contains(&release_identity)
-                || unknown_age_listing_prefixes.contains(&rss_listing_identity_prefix(&result))
-                || is_new_guid
-            {
-                new_results.push(result);
-            }
-        }
-
-        cap_rss_seen_guids(&mut seen_guids, &current_guids);
-
-        // Release the write lock before doing any I/O
-        drop(seen_guids);
-
-        debug!(
-            new_count = new_results.len(),
-            previously_seen = initial_seen_count,
-            "RSS sync: filtered to new releases"
+        // Fetch RSS feed (empty query = latest releases) from all indexers,
+        // one page at a time. Each page is filtered, matched in batches and
+        // dropped before the next is taken, so a cycle holds one page plus
+        // the releases that matched a monitored title, not every indexer's
+        // whole feed. The bounded sink makes a finished poll wait for the
+        // page ahead of it to be consumed.
+        let (page_tx, mut page_rx) = tokio::sync::mpsc::channel(RSS_FEED_PAGES_IN_FLIGHT);
+        let page_sink = crate::IndexerSearchPageSink::new(page_tx, RSS_FEED_PAGES_IN_FLIGHT);
+        let feed_cancel = tokio_util::sync::CancellationToken::new();
+        let mut producer = self.services.integrations.indexer_client.search_stream(
+            String::new(), // empty query = RSS feed
+            HashMap::new(),
+            None, // no category filter
+            None, // no facet hint
+            None, // no ID-search facet override
+            None, // categories are owned by each indexer's routing entry
+            rss_routing,
+            SearchMode::Auto,
+            IndexerErrorOperation::RssSync,
+            None,
+            None,
+            None,
+            None, // an RSS poll has no subject, so no year
+            vec![],
+            None,
+            feed_cancel.clone(),
+            page_sink,
         );
 
-        // Parse fresh releases and match them against monitored titles. Active
-        // pending rows are merged below by their durable title association, so
-        // a changed title parser cannot strand a previously accepted release.
-        let mut matched_by_title: HashMap<String, Vec<IndexerSearchResult>> = HashMap::new();
-        let mut matched_identities: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut matched_count = 0usize;
-        let total_new = new_results.len();
-
-        for result in new_results {
-            if let Some(title_info) = match_release_to_title_context(
-                &result.title,
-                &result.response_attributes,
-                &title_context_bank,
-            )
-            .await?
-            {
-                matched_count += 1;
-                matched_by_title
-                    .entry(title_info.title_id.clone())
-                    .or_default();
-                let identities = matched_identities
-                    .entry(title_info.title_id.clone())
-                    .or_default();
-                if identities.insert(rss_release_identity(&result)) {
-                    matched_by_title
-                        .entry(title_info.title_id.clone())
-                        .or_default()
-                        .push(result);
+        let mut intake = RssCycleIntake::default();
+        let mut feed_response = None;
+        let mut page_source_open = true;
+        let mut intake_error = None;
+        while feed_response.is_none() || page_source_open {
+            tokio::select! {
+                response = &mut producer, if feed_response.is_none() => {
+                    feed_response = Some(response);
+                }
+                page = page_rx.recv(), if page_source_open => match page {
+                    // The page (and its sink reservation) lives until it is
+                    // ingested, so the producer is held back meanwhile.
+                    Some(mut page) => {
+                        let results = std::mem::take(&mut page.results);
+                        if let Err(error) = self
+                            .ingest_rss_feed_page(results, &unknown_age, &title_context_bank, &mut intake)
+                            .await
+                        {
+                            intake_error = Some(error);
+                            break;
+                        }
+                        drop(page);
+                    }
+                    None => page_source_open = false,
+                },
+            }
+        }
+        if intake_error.is_none() {
+            match feed_response {
+                // Results the client returned instead of streaming them.
+                Some(Ok(response)) if !response.results.is_empty() => {
+                    if let Err(error) = self
+                        .ingest_rss_feed_page(
+                            response.results,
+                            &unknown_age,
+                            &title_context_bank,
+                            &mut intake,
+                        )
+                        .await
+                    {
+                        intake_error = Some(error);
+                    }
+                }
+                Some(Ok(_)) | None => {}
+                Some(Err(err)) => {
+                    // A temporary feed failure must not suppress already-held
+                    // releases. They are re-evaluated through this same pass.
+                    warn!(error = %err, "RSS sync: failed to fetch RSS feed from indexers; evaluating active pending releases");
                 }
             }
         }
+        // A failed intake stops every poll still running before the cycle
+        // closes, exactly as the feed read used to end before matching began.
+        feed_cancel.cancel();
+        drop(producer);
+        drop(page_rx);
+
+        self.runtime
+            .acquisition
+            .rss_seen_guids
+            .write()
+            .await
+            .cap_polled_indexers();
+
+        let (resident_kib, peak_resident_kib) = process_resident_kib();
+        info!(
+            pages = intake.pages,
+            fetched = intake.fetched,
+            fetched_approx_bytes = intake.fetched_bytes,
+            new_count = intake.new,
+            previously_seen = initial_seen_count,
+            matched = intake.matched,
+            retained_matched = intake.retained,
+            peak_live_results = intake.peak_live,
+            resident_kib,
+            peak_resident_kib,
+            "RSS sync: feed intake finished"
+        );
+        if let Some(error) = intake_error {
+            return Err(error);
+        }
+
+        // Active pending rows are merged below by their durable title
+        // association, so a changed title parser cannot strand a previously
+        // accepted release. Loaded after the feed, as before streaming.
+        let active_pending = self
+            .services
+            .workflow
+            .pending_releases
+            .list_waiting_pending_releases()
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "RSS sync: failed to load active pending releases");
+                Vec::new()
+            });
+
+        let RssCycleIntake {
+            mut matched_by_title,
+            mut matched_identities,
+            matched: matched_count,
+            new: total_new,
+            ..
+        } = intake;
 
         let pending_count = active_pending.len();
         for pending in active_pending {
@@ -1420,12 +1920,14 @@ impl AppUseCase {
                 // For movies: the monitored title is a target while it has no
                 // primary file or sits below cutoff. Availability gates active
                 // grabs the same way the derived movie target set does (§D1).
-                if !super::targets::movie_is_available_for_acquisition(
-                    title.first_aired.as_deref(),
-                    title.digital_release_date.as_deref(),
-                    title.min_availability.as_deref().unwrap_or("announced"),
+                if super::targets::movie_availability_decision_for_title(
+                    &title,
+                    &availability_settings,
                     &now,
-                ) {
+                )
+                .status
+                    != crate::types::MovieAvailabilityStatus::Available
+                {
                     continue;
                 }
                 self.process_rss_title_releases(
@@ -1444,11 +1946,15 @@ impl AppUseCase {
 
         self.reconcile_release_age_unknown_pending(&now).await;
 
-        debug!(
+        let (resident_kib, peak_resident_kib) = process_resident_kib();
+        info!(
             fetched = report.releases_fetched,
             matched = report.releases_matched,
             grabbed = report.releases_grabbed,
             held = report.releases_held,
+            titles_processed = matched_by_title.len(),
+            resident_kib,
+            peak_resident_kib,
             "RSS sync cycle completed"
         );
 
@@ -1510,9 +2016,12 @@ impl AppUseCase {
             else {
                 continue;
             };
-            let Some(profile) =
-                crate::delay_profile::resolve_delay_profile(&profiles, &title.tags, &title.facet)
-            else {
+            let Some(profile) = crate::delay_profile::resolve_delay_profile(
+                &profiles,
+                &title.tags,
+                &title.facet,
+                &title.library_id,
+            ) else {
                 continue;
             };
             if *now
@@ -2703,7 +3212,12 @@ impl AppUseCase {
                 )
                 .unwrap_or(ReleaseAutoDecisionCode::AnimeNumberingAmbiguous)
             } else if !is_allowed {
-                ReleaseAutoDecisionCode::QualityBlocked
+                // Identity first: a pack or another year's film is refused as
+                // what it is, not as a quality the profile happens to dislike.
+                crate::acquisition_release_search::movie_subject_refusal_unmatched(
+                    candidate, &subject,
+                )
+                .unwrap_or(ReleaseAutoDecisionCode::QualityBlocked)
             } else if route_key
                 .as_ref()
                 .is_some_and(|route| grabbed_urls.contains(route))
@@ -2819,6 +3333,7 @@ impl AppUseCase {
                             delay_profiles,
                             &title.tags,
                             &title.facet,
+                            &title.library_id,
                         )
                         .map(|profile| {
                             profile.release_age_unknown_escalation_deadline(
@@ -3485,36 +4000,107 @@ mod tests {
     use super::*;
     use scryer_domain::{MediaFacet, Title};
 
-    #[test]
-    fn capping_seen_guids_never_evicts_the_current_poll() {
-        let current: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 500)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..300)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn feed_guids(indexer: &str, page: usize, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| format!("{indexer}-page-{page}-guid-{index}"))
+            .collect()
+    }
 
-        cap_rss_seen_guids(&mut seen, &current);
-
-        assert!(current.iter().all(|guid| seen.contains(guid)));
-        assert_eq!(seen.len(), current.len());
+    /// Runs one cycle that polls each listed indexer, returning how many of
+    /// the observed GUIDs were new.
+    fn poll_cycle(seen: &mut RssSeenGuids, polls: &[(&str, Vec<String>)]) -> usize {
+        seen.begin_cycle();
+        let mut new_count = 0;
+        for (indexer, guids) in polls {
+            for guid in guids {
+                if seen.observe(indexer, guid) {
+                    new_count += 1;
+                }
+            }
+        }
+        seen.cap_polled_indexers();
+        new_count
     }
 
     #[test]
-    fn capping_seen_guids_evicts_only_earlier_polls_down_to_the_cap() {
-        let current: HashSet<String> = (0..10)
-            .map(|index| format!("current-guid-{index}"))
-            .collect();
-        let mut seen: HashSet<String> = (0..RSS_SYNC_MAX_GUIDS + 50)
-            .map(|index| format!("earlier-guid-{index}"))
-            .collect();
-        seen.extend(current.iter().cloned());
+    fn capping_seen_guids_never_evicts_the_current_poll() {
+        let mut seen = RssSeenGuids::default();
+        poll_cycle(
+            &mut seen,
+            &[("fixture-indexer", feed_guids("fixture-indexer", 0, 300))],
+        );
+        let current = feed_guids("fixture-indexer", 1, RSS_SEEN_GUIDS_PER_INDEXER + 500);
 
-        cap_rss_seen_guids(&mut seen, &current);
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
 
-        assert_eq!(seen.len(), RSS_SYNC_MAX_GUIDS);
-        assert!(current.iter().all(|guid| seen.contains(guid)));
+        assert_eq!(seen.len(), current.len());
+        assert_eq!(
+            poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]),
+            0,
+            "a caught-up poll larger than the cap must not re-match its own items"
+        );
+    }
+
+    #[test]
+    fn capping_seen_guids_evicts_only_earlier_polls_oldest_first() {
+        let mut seen = RssSeenGuids::default();
+        let oldest = feed_guids("fixture-indexer", 0, RSS_SEEN_GUIDS_PER_INDEXER);
+        let older = feed_guids("fixture-indexer", 1, 50);
+        let current = feed_guids("fixture-indexer", 2, 10);
+        poll_cycle(&mut seen, &[("fixture-indexer", oldest.clone())]);
+        poll_cycle(&mut seen, &[("fixture-indexer", older.clone())]);
+
+        poll_cycle(&mut seen, &[("fixture-indexer", current.clone())]);
+
+        assert_eq!(seen.len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        let kept = |guids: &[String]| {
+            let by_indexer = &seen.by_indexer["fixture-indexer"];
+            guids
+                .iter()
+                .filter(|guid| by_indexer.contains_key(*guid))
+                .count()
+        };
+        assert_eq!(kept(&current), current.len());
+        assert_eq!(kept(&older), older.len());
+        assert_eq!(kept(&oldest), RSS_SEEN_GUIDS_PER_INDEXER - 60);
+    }
+
+    #[test]
+    fn capping_seen_guids_keeps_indexers_not_polled_this_cycle() {
+        // Forty indexers with a full hundred-item page each hold more live
+        // GUIDs than one shared cap ever allowed.
+        let indexers: Vec<String> = (0..40).map(|index| format!("indexer-{index}")).collect();
+        let first_pages: Vec<(&str, Vec<String>)> = indexers
+            .iter()
+            .map(|indexer| (indexer.as_str(), feed_guids(indexer, 0, 100)))
+            .collect();
+        let mut seen = RssSeenGuids::default();
+        assert_eq!(poll_cycle(&mut seen, &first_pages), 4000);
+
+        // Only the first half is due, and each of their feeds has rolled
+        // over completely, several times.
+        for page in 1..=10 {
+            let rolled: Vec<(&str, Vec<String>)> = indexers[..20]
+                .iter()
+                .map(|indexer| (indexer.as_str(), feed_guids(indexer, page, 100)))
+                .collect();
+            assert_eq!(poll_cycle(&mut seen, &rolled), 2000);
+        }
+
+        // The second half's feeds are unchanged, so nothing in them is new.
+        assert_eq!(poll_cycle(&mut seen, &first_pages[20..]), 0);
+        for indexer in &indexers[..20] {
+            assert_eq!(seen.by_indexer[indexer].len(), RSS_SEEN_GUIDS_PER_INDEXER);
+        }
+        assert_eq!(seen.len(), 20 * RSS_SEEN_GUIDS_PER_INDEXER + 20 * 100);
+    }
+
+    #[test]
+    fn a_guid_another_indexer_returned_is_not_new() {
+        let mut seen = RssSeenGuids::default();
+        let shared = vec!["shared-fixture-guid".to_string()];
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-a", shared.clone())]), 1);
+        assert_eq!(poll_cycle(&mut seen, &[("indexer-b", shared.clone())]), 0);
     }
 
     #[test]
@@ -3930,6 +4516,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }
@@ -5315,5 +5902,14 @@ mod tests {
             Some("pending-legacy"),
             "a fresh listing keeps the row it matched"
         );
+    }
+
+    #[test]
+    fn proc_status_kib_reads_resident_fields() {
+        let status = "Name:\tscryer\nVmHWM:\t  812344 kB\nVmRSS:\t  402112 kB\nThreads:\t42\n";
+        assert_eq!(proc_status_kib(status, "VmRSS:"), Some(402_112));
+        assert_eq!(proc_status_kib(status, "VmHWM:"), Some(812_344));
+        assert_eq!(proc_status_kib(status, "VmSwap:"), None);
+        assert_eq!(proc_status_kib("VmRSS:\tlots kB\n", "VmRSS:"), None);
     }
 }

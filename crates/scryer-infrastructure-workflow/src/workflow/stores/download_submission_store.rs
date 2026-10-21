@@ -6,7 +6,7 @@ use scryer_application::{
     AppError, AppResult, CanonicalDownloadIdentityDisposition, ClientJobLocator, DownloadOrigin,
     DownloadSubmission, DownloadSubmissionActorSnapshot, DownloadSubmissionIdentity,
     DownloadSubmissionRepository, DownloadTitleReassignment, DownloadTitleReferences,
-    IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
+    GrabbedFileName, IdentityTrackedStateTarget, PersistedSeedGoals, SeedGoalResolutionSource,
     TerminalDownloadHistoryRow,
 };
 use scryer_domain::{Id, TrackedDownloadState, download_identity::DownloadId};
@@ -2024,6 +2024,77 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn list_active_unbound_submitted_before(
+        &self,
+        submitted_before: chrono::DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        let sql = download_submission_select_sql(
+            &self.datastore,
+            "WHERE submitted_at < {}
+               AND download_client_item_id IS NULL
+               AND EXISTS (
+                   SELECT 1
+                     FROM download_client_bindings binding
+                    WHERE binding.download_id = download_submissions.id
+                      AND binding.native_item_id IS NULL
+                      AND binding.ended_at IS NULL
+               )
+             ORDER BY submitted_at, id",
+        );
+        fetch_download_submissions(
+            self.datastore.read_exec(),
+            &sql,
+            &[SqlArg::Timestamp(submitted_before)],
+        )
+        .await
+    }
+
+    async fn release_unconfirmed_submission(&self, download_id: &DownloadId) -> AppResult<bool> {
+        let download_id = *download_id;
+        SqlRuntime::run_in_transaction(
+            &self.datastore,
+            "release_unconfirmed_download_submission",
+            move |tx| {
+                Box::pin(async move {
+                    let ended_at = Utc::now();
+                    // Only an intent no client job has bound may be released;
+                    // the observer binding it first keeps the download live.
+                    let ended = SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE download_client_bindings
+                         SET ended_at = {}
+                         WHERE download_id = {}
+                           AND native_item_id IS NULL
+                           AND ended_at IS NULL",
+                        &[
+                            SqlArg::Timestamp(ended_at),
+                            SqlArg::Text(download_id.to_string()),
+                        ],
+                    )
+                    .await?;
+                    if ended == 0 {
+                        return Ok(false);
+                    }
+                    // Same exit as `end_binding_tx`: an ended download is over.
+                    SqlRuntime::execute(
+                        SqlExec::Tx(tx),
+                        "UPDATE downloads
+                         SET terminal_at = {}
+                         WHERE id = {}
+                           AND terminal_at IS NULL",
+                        &[
+                            SqlArg::Timestamp(ended_at),
+                            SqlArg::Text(download_id.to_string()),
+                        ],
+                    )
+                    .await?;
+                    Ok(true)
+                })
+            },
+        )
+        .await
+    }
+
     async fn find_by_title_and_request_signature(
         &self,
         title_id: &str,
@@ -2350,6 +2421,70 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         row.map(|row| row.opt_text("tracked_state"))
             .transpose()
             .map(Option::flatten)
+    }
+
+    async fn record_grabbed_file_names(
+        &self,
+        canonical_download_id: &DownloadId,
+        names: &[GrabbedFileName],
+    ) -> AppResult<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(names).map_err(|error| {
+            AppError::Repository(format!("failed to encode grabbed file names: {error}"))
+        })?;
+        SqlRuntime::execute_write(
+            &self.datastore,
+            "record_grabbed_file_names",
+            "UPDATE download_submissions SET grabbed_file_names_json = {} WHERE id = {}",
+            vec![
+                SqlArg::Text(json),
+                SqlArg::Text(canonical_download_id.to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn grabbed_file_names(
+        &self,
+        identity: &ClientJobLocator,
+    ) -> AppResult<Vec<GrabbedFileName>> {
+        let row = match self.active_binding_download_id(identity).await? {
+            Some(canonical_download_id) => SqlRuntime::fetch_optional(
+                self.datastore.read_exec(),
+                "SELECT grabbed_file_names_json FROM download_submissions WHERE id = {} LIMIT 1",
+                &[SqlArg::Text(canonical_download_id.to_string())],
+            )
+            .await?,
+            None => {
+                SqlRuntime::fetch_optional(
+                    self.datastore.read_exec(),
+                    "SELECT grabbed_file_names_json
+                     FROM download_submissions
+                     WHERE download_client_type = {}
+                       AND download_client_item_id = {}
+                       AND download_client_id = {}
+                     LIMIT 1",
+                    &[
+                        SqlArg::Text(identity.client_type.clone()),
+                        SqlArg::Text(identity.item_id.clone()),
+                        SqlArg::Text(normalize_download_client_id(identity.client_id.as_deref())),
+                    ],
+                )
+                .await?
+            }
+        };
+        let Some(json) = row
+            .map(|row| row.opt_text("grabbed_file_names_json"))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(Vec::new());
+        };
+        // A record that does not decode is a lost hint, not a failed import.
+        Ok(serde_json::from_str(&json).unwrap_or_default())
     }
 
     async fn get_seed_goals(
@@ -2705,6 +2840,12 @@ mod seed_goal_tests {
                 .await
                 .expect("cleanup seed migration should apply");
         }
+        sqlx::raw_sql(include_str!(
+            "../../../../scryer/src/db/migrations/0292_download_submission_grabbed_file_names.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("grabbed file names migration should apply");
         DownloadSubmissionStore::new(StoreDatastore::Sqlite {
             pool,
             writer_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -3820,6 +3961,90 @@ mod seed_goal_tests {
         assert_eq!(loaded, Some(expected));
     }
 
+    fn grabbed(name: &str) -> GrabbedFileName {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "posted_size_bytes": 4096,
+        }))
+        .expect("grabbed name fixture should decode")
+    }
+
+    #[tokio::test]
+    async fn grabbed_file_names_read_back_by_the_client_job() {
+        let store = store().await;
+        let canonical_download_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(canonical_download_id, "job-1", "title-1"),
+                submission_identity(canonical_download_id),
+                None,
+            )
+            .await
+            .expect("submission should persist");
+        let names = vec![grabbed(&format!("{}.mkv", "a".repeat(250)))];
+
+        store
+            .record_grabbed_file_names(&canonical_download_id, &[])
+            .await
+            .expect("recording no names should succeed");
+        assert!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed")
+                .is_empty(),
+            "a grab with no long names keeps nothing"
+        );
+
+        store
+            .record_grabbed_file_names(&canonical_download_id, &names)
+            .await
+            .expect("names should persist");
+
+        assert_eq!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed"),
+            names
+        );
+        assert!(
+            store
+                .grabbed_file_names(&ClientJobLocator::new(
+                    Some("primary"),
+                    "qbittorrent",
+                    "job-2"
+                ))
+                .await
+                .expect("read should succeed")
+                .is_empty(),
+            "another job never sees this grab's names"
+        );
+    }
+
+    #[tokio::test]
+    async fn grabbed_file_names_read_back_without_a_client_binding() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_submission(submission(download_id, "job-1", "title-1"))
+            .await
+            .expect("submission should persist");
+        let names = vec![grabbed(&format!("{}.mkv", "b".repeat(250)))];
+        store
+            .record_grabbed_file_names(&download_id, &names)
+            .await
+            .expect("names should persist");
+
+        assert_eq!(
+            store
+                .grabbed_file_names(&identity())
+                .await
+                .expect("read should succeed"),
+            names
+        );
+    }
+
     fn ambiguous_submission(
         download_id: scryer_domain::download_identity::DownloadId,
     ) -> DownloadSubmission {
@@ -4151,6 +4376,179 @@ mod seed_goal_tests {
         .expect("binding should exist")
         .opt_text("native_item_id")
         .expect("native item id should decode")
+    }
+
+    async fn backdate_submission(
+        store: &DownloadSubmissionStore,
+        download_id: DownloadId,
+        submitted_at: chrono::DateTime<Utc>,
+    ) {
+        SqlRuntime::execute_write(
+            &store.datastore,
+            "backdate_fixture_submission",
+            "UPDATE download_submissions SET submitted_at = {} WHERE id = {}",
+            vec![
+                SqlArg::Timestamp(submitted_at),
+                SqlArg::Text(download_id.to_string()),
+            ],
+        )
+        .await
+        .expect("the fixture submission should backdate");
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_intents_list_across_titles_by_submission_age() {
+        let store = store().await;
+        let now = Utc::now();
+        let stale_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(stale_id))
+            .await
+            .expect("the stale intent should persist");
+        backdate_submission(&store, stale_id, now - chrono::Duration::hours(1)).await;
+        let ambiguous_id = DownloadId::new();
+        store
+            .record_ambiguous_submission(submission(ambiguous_id, "", "title-2"))
+            .await
+            .expect("the ambiguous submit should persist");
+        backdate_submission(&store, ambiguous_id, now - chrono::Duration::minutes(30)).await;
+        let fresh_id = DownloadId::new();
+        store
+            .record_pending_submission(DownloadSubmission {
+                title_id: "title-3".to_string(),
+                ..pending_intent(fresh_id)
+            })
+            .await
+            .expect("the fresh intent should persist");
+        let accepted_id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(accepted_id, "job-9", "title-1"),
+                submission_identity(accepted_id),
+                None,
+            )
+            .await
+            .expect("the accepted grab should persist");
+        backdate_submission(&store, accepted_id, now - chrono::Duration::hours(2)).await;
+
+        let listed = store
+            .list_active_unbound_submitted_before(now - chrono::Duration::minutes(15))
+            .await
+            .expect("unconfirmed intents should list")
+            .into_iter()
+            .map(|submission| (submission.download_id, submission.title_id))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            listed,
+            vec![
+                (stale_id, "title-1".to_string()),
+                (ambiguous_id, "title-2".to_string()),
+            ],
+            "only unbound intents older than the cutoff list, oldest first; a fresh intent and a bound grab do not"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_an_unconfirmed_intent_ends_its_binding_and_stamps_the_download_terminal() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+
+        assert!(
+            store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("the release should succeed"),
+            "an unbound intent is released"
+        );
+
+        assert!(
+            store
+                .list_active_unbound_for_title("title-1")
+                .await
+                .expect("unbound intents should list")
+                .is_empty(),
+            "a released intent no longer holds its title"
+        );
+        assert!(
+            store
+                .list_active_unbound_submitted_before(Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .expect("unconfirmed intents should list")
+                .is_empty()
+        );
+        let binding = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT ended_at FROM download_client_bindings WHERE download_id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("binding should read")
+        .expect("the ended binding is kept");
+        assert!(
+            binding
+                .opt_text("ended_at")
+                .expect("ended_at should decode")
+                .is_some()
+        );
+        let download = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT terminal_at FROM downloads WHERE id = {}",
+            &[SqlArg::Text(download_id.to_string())],
+        )
+        .await
+        .expect("download should read")
+        .expect("the download row is kept");
+        assert!(
+            download
+                .opt_text("terminal_at")
+                .expect("terminal_at should decode")
+                .is_some(),
+            "ending the binding finishes the download, as end_binding does"
+        );
+        assert!(
+            !store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("a repeated release should succeed"),
+            "a second release changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_intent_the_observer_bound_is_neither_unconfirmed_nor_released() {
+        let store = store().await;
+        let download_id = DownloadId::new();
+        store
+            .record_pending_submission(pending_intent(download_id))
+            .await
+            .expect("the intent should persist");
+        backdate_submission(&store, download_id, Utc::now() - chrono::Duration::hours(1)).await;
+        observe_by_token(&store, download_id, "job-1").await;
+
+        assert!(
+            store
+                .list_active_unbound_submitted_before(Utc::now())
+                .await
+                .expect("unconfirmed intents should list")
+                .is_empty(),
+            "a bound intent is confirmed"
+        );
+        assert!(
+            !store
+                .release_unconfirmed_submission(&download_id)
+                .await
+                .expect("the release should succeed"),
+            "a bound intent is never released"
+        );
+        assert_eq!(
+            binding_native_item_id(&store, download_id).await.as_deref(),
+            Some("job-1")
+        );
     }
 
     #[tokio::test]

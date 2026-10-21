@@ -10,7 +10,7 @@ import {
 } from "../utils/request-rule-sets.ts";
 import { REQUEST_RULE_TEMPLATES } from "./request-rule-templates.ts";
 
-/// The five worked examples, byte-for-byte as `REQUEST_RULE_EXAMPLES` pins them
+/// The seven worked examples, byte-for-byte as `REQUEST_RULE_EXAMPLES` pins them
 /// in `crates/scryer-rules/src/request.rs`. They are repeated here rather than
 /// derived from the gallery so that editing the gallery cannot quietly edit the
 /// expectation too: the API's own fixture test validates exactly these strings,
@@ -26,9 +26,13 @@ const PINNED_SOURCES: Record<string, string> = {
     "package rules\nimport rego.v1\n\ndeny if {\n\tinput.facts.is_adult\n}\n\nreasons contains \"adult_content\" if {\n\tinput.facts.is_adult\n}\n",
   "monthly-approval-quota":
     "package rules\nimport rego.v1\n\nmanual if {\n\tinput.facts.approved_last_30d >= 5\n}\n",
+  "hold-approval-policy-list-requests":
+    "package rules\nimport rego.v1\n\nmanual if {\n\tinput.request.list.owner_list_policy == \"approval\"\n}\n",
+  "deny-personal-list-above-1080p":
+    "package rules\nimport rego.v1\n\ndeny if {\n\tinput.request.list.scope == \"personal\"\n\tinput.facts.quality_profile_max_resolution > 1080\n}\n",
 };
 
-test("the gallery ships the five worked examples exactly once, in order", () => {
+test("the gallery ships the seven worked examples exactly once, in order", () => {
   assert.deepEqual(
     REQUEST_RULE_TEMPLATES.map((template) => template.id),
     [
@@ -37,6 +41,8 @@ test("the gallery ships the five worked examples exactly once, in order", () => 
       "low-resolution-approval",
       "deny-adult-content",
       "monthly-approval-quota",
+      "hold-approval-policy-list-requests",
+      "deny-personal-list-above-1080p",
     ],
   );
 

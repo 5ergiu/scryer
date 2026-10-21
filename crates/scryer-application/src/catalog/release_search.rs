@@ -1043,9 +1043,8 @@ impl AppUseCase {
         // does, so passing them separately could only make the two disagree.
         indexer_routing: Option<&IndexerRoutingPlan>,
         // The search `category` and the title's tags used to be read here for
-        // audio-language inference; that now lives in
-        // `canonical_context::announced_metadata_for_title`, keyed on the
-        // title's own facet and tags so every lane infers identically.
+        // audio-language inference; the canonical scorer now infers it from
+        // the title's own facet and tags, so every lane infers identically.
         runtime_minutes: Option<i32>,
         parse_context: &ReleaseParseContext,
         season: Option<u32>,
@@ -1084,6 +1083,7 @@ impl AppUseCase {
                 &delay_profiles,
                 &scored_title.tags,
                 &scored_title.facet,
+                &scored_title.library_id,
             );
             let preferred_source_kind = delay_profile
                 .map(|profile| match profile.preferred_protocol {
@@ -1184,13 +1184,7 @@ impl AppUseCase {
 
             let parsed_release_metadata =
                 parse_release_metadata_for_target(&result.title, parse_context);
-            let mut scored_release_metadata =
-                crate::quality::canonical_context::announced_metadata_for_title(
-                    &prepared.title,
-                    &parsed_release_metadata,
-                    prepared.canonical_context.required_audio_languages(),
-                    result.indexer_languages.as_deref(),
-                );
+            let mut scored_release_metadata = parsed_release_metadata;
 
             // Anime released in community (per-cour) numbering is rewritten
             // into the catalog's TVDB numbering before anything reads it, so
@@ -1337,14 +1331,19 @@ impl AppUseCase {
                 .canonical_context
                 .view(candidate_size_basis, false)
                 .without_rules();
+            let listing = crate::canonical_scoring::ListingFacts::candidate(listing, prepared.now);
+            // Shown with the result; the scorer fills the same languages in itself.
+            let displayed_release_metadata = crate::canonical_scoring::canonical_parse(
+                &scored_release_metadata,
+                Some(&listing),
+                &scoring_context,
+            );
             let scored_release = crate::canonical_scoring::score_release_in_batch(
                 &crate::canonical_scoring::ReleaseEvidence::announced(
                     scored_release_metadata.clone(),
                     result.size_bytes,
                 )
-                .with_listing(Some(
-                    crate::canonical_scoring::ListingFacts::candidate(listing, prepared.now),
-                )),
+                .with_listing(Some(listing)),
                 &scoring_context,
                 &mut prepared.rule_evaluation_batch,
             );
@@ -1410,7 +1409,7 @@ impl AppUseCase {
             );
 
             let mut scored_result = IndexerSearchResult {
-                parsed_release_metadata: Some(scored_release_metadata),
+                parsed_release_metadata: Some(displayed_release_metadata),
                 quality_profile_decision: Some(decision),
                 // Carry the coverage the scoring pass already resolved (D21);
                 // the auto evaluator has no catalog of its own and cannot

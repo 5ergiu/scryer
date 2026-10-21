@@ -6699,3 +6699,49 @@ async fn migration_0279_postgres_carries_text_learning_into_v3_and_applies_the_c
     })?;
     result
 }
+
+#[tokio::test]
+async fn migration_0295_preserves_inherited_movie_availability() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("migration test database should open");
+    sqlx::raw_sql(
+        r#"CREATE TABLE titles (
+               id TEXT PRIMARY KEY,
+               facet TEXT NOT NULL,
+               min_availability TEXT
+           );
+           INSERT INTO titles VALUES
+             ('movie-unset', 'movie', NULL),
+             ('movie-announced', 'movie', 'announced'),
+             ('movie-cinemas', 'movie', 'in_cinemas'),
+             ('series-unset', 'series', NULL);"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("title fixture should initialize");
+
+    sqlx::raw_sql(include_str!(
+        "../../../scryer/src/db/migrations/0295_movie_default_availability.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("migration 0295 should apply");
+
+    let states: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, min_availability FROM titles ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("title availability should load");
+    assert_eq!(
+        states,
+        vec![
+            ("movie-announced".to_string(), Some("announced".to_string())),
+            ("movie-cinemas".to_string(), Some("in_cinemas".to_string())),
+            ("movie-unset".to_string(), None),
+            ("series-unset".to_string(), None),
+        ]
+    );
+}

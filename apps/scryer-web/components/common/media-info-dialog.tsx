@@ -118,7 +118,7 @@ export function MediaInfoDialog({
       </DialogHeader>
 
       <div className="space-y-5 text-sm">
-        <FileScoreSummary evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} />
+        <FileScoreSummary idPrefix="media-info" evaluation={file.currentScoreEvaluation} acquisitionScore={file.acquisitionScore} scoringLog={file.scoringLog} />
         <FieldTable section={fieldSection("media-info-file")} t={t} />
         <FieldTable section={fieldSection("media-info-video")} t={t} />
 
@@ -209,14 +209,7 @@ export function MediaInfoDialog({
           </Section>
         ) : null}
 
-        <FieldTable section={fieldSection("media-info-release")} t={t}>
-          {file.scoringLog ? (
-            <details id="media-info-scoring-log" className="mt-2 text-xs">
-              <summary className="cursor-pointer text-muted-foreground">{t("mediaInfo.scoringLog")}</summary>
-              <pre className="mt-1 whitespace-pre-wrap font-[var(--font-code)] text-muted-foreground">{file.scoringLog}</pre>
-            </details>
-          ) : null}
-        </FieldTable>
+        <FieldTable section={fieldSection("media-info-release")} t={t} />
 
         <FieldTable section={fieldSection("media-info-release-listing")} t={t} />
 

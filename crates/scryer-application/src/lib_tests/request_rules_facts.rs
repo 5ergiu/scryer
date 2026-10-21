@@ -142,6 +142,7 @@ fn context_with(snapshot: MediaRequestMetadataSnapshot) -> RequestInputContext {
             monitor_selection_season_count: None,
             lease_forever: false,
             lease_days: Some(14),
+            list: None,
         },
         snapshot,
         quality: Some(RequestQualityContext {
@@ -487,4 +488,150 @@ fn the_lease_the_requester_asked_for_reaches_the_document() {
     let document = document(context_with(full_snapshot()));
     assert_eq!(document["request"]["lease_forever"], false);
     assert_eq!(document["request"]["lease_days"], 14);
+}
+
+fn list_draft(origin: scryer_domain::MediaRequestOrigin) -> crate::request_rules::RequestDraft {
+    crate::request_rules::RequestDraft {
+        facet: scryer_domain::MediaFacet::Movie,
+        title: "Glass Harbor".to_string(),
+        year: Some(2023),
+        external_ids: Vec::new(),
+        identity_fingerprint: "fixture-fingerprint".to_string(),
+        quality_profile_id: None,
+        quality_profile_name: None,
+        monitor_type: None,
+        monitor_selection: None,
+        requested_lease_days: None,
+        origin,
+        list_rank: Some(3),
+    }
+}
+
+/// The `request` section a draft assembles into against the harness's list
+/// store.
+async fn assembled_request(
+    harness: &super::MediaRequestTestHarness,
+    origin: scryer_domain::MediaRequestOrigin,
+) -> serde_json::Value {
+    let context = harness
+        .app
+        .assemble_request_input_context(
+            &harness.user,
+            &super::custom_movie_library("library-movies", "Movies"),
+            &list_draft(origin),
+            full_snapshot(),
+            evaluation_time(),
+            None,
+        )
+        .await
+        .expect("a list read failure must not stop the request from evaluating");
+    document(context)["request"].clone()
+}
+
+#[tokio::test]
+async fn a_public_list_request_names_its_list() {
+    let harness = super::bootstrap_media_request_app();
+    let mut public = crate::lists::test_support::subscription("list-public");
+    public.owner_user_id = harness.user.id.clone();
+    *harness.lists.subscriptions.lock().unwrap() = vec![public];
+    harness
+        .lists
+        .policies
+        .lock()
+        .unwrap()
+        .push(scryer_domain::UserListPolicy {
+            user_id: harness.user.id.clone(),
+            policy: scryer_domain::ListPolicy::Auto,
+            updated_by_user_id: None,
+            updated_at: evaluation_time(),
+        });
+
+    let request = assembled_request(
+        &harness,
+        scryer_domain::MediaRequestOrigin::PublicList {
+            subscription_id: "list-public".to_string(),
+        },
+    )
+    .await;
+
+    assert_eq!(request["origin"], "public_list");
+    assert_eq!(
+        request["list"],
+        serde_json::json!({
+            "subscription_id": "list-public",
+            "name": "Fixture list list-public",
+            "scope": "public",
+            "mode": "add",
+            "provider": crate::lists::test_support::PROVIDER,
+            "owner_is_requester": true,
+            "owner_list_policy": "auto",
+            "rank": 3,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_personal_list_request_never_names_its_list() {
+    let harness = super::bootstrap_media_request_app();
+    let mut personal = crate::lists::test_support::subscription("list-personal");
+    personal.scope = scryer_domain::ListScope::Personal;
+    personal.name = "Private picks of a member".to_string();
+    *harness.lists.subscriptions.lock().unwrap() = vec![personal];
+
+    let request = assembled_request(
+        &harness,
+        scryer_domain::MediaRequestOrigin::PersonalList {
+            subscription_id: "list-personal".to_string(),
+        },
+    )
+    .await;
+
+    assert_eq!(request["origin"], "personal_list");
+    let list = request["list"].as_object().expect("a list section");
+    assert!(!list.contains_key("name"), "a personal list is never named");
+    assert!(
+        !request.to_string().contains("Private picks of a member"),
+        "the personal list name leaked into the request section"
+    );
+    assert_eq!(list["scope"], "personal");
+    assert_eq!(
+        list["owner_is_requester"], false,
+        "the fixture list belongs to another member"
+    );
+    assert_eq!(
+        list["owner_list_policy"], "approval",
+        "an owner with no stored policy is on the default"
+    );
+}
+
+#[tokio::test]
+async fn a_manual_request_has_no_list_section() {
+    let harness = super::bootstrap_media_request_app();
+
+    let request = assembled_request(&harness, scryer_domain::MediaRequestOrigin::Manual).await;
+
+    assert_eq!(request["origin"], "manual");
+    assert!(
+        request.get("list").is_none(),
+        "the section is absent, not null"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_list_store_drops_the_section_and_still_evaluates() {
+    let harness = super::bootstrap_media_request_app();
+    *harness.lists.subscriptions.lock().unwrap() =
+        vec![crate::lists::test_support::subscription("list-public")];
+    *harness.lists.subscription_reads_left.lock().unwrap() = Some(0);
+
+    let request = assembled_request(
+        &harness,
+        scryer_domain::MediaRequestOrigin::PublicList {
+            subscription_id: "list-public".to_string(),
+        },
+    )
+    .await;
+
+    assert_eq!(request["origin"], "public_list");
+    assert!(request.get("list").is_none());
 }

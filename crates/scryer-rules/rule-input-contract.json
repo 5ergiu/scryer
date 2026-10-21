@@ -45,6 +45,11 @@
           "descKey": "settings.refReleaseLangsAudio"
         },
         {
+          "field": "indexer_languages",
+          "type": "string[]",
+          "descKey": "settings.refReleaseIndexerLanguages"
+        },
+        {
           "field": "languages_subtitles",
           "type": "string[]",
           "descKey": "settings.refReleaseLangsSub"

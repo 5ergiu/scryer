@@ -4184,6 +4184,63 @@ fn run_scryer_web_validation(ctx: &TaskContext, prefix: &'static str) -> Result<
     Ok(())
 }
 
+/// RUSTSEC-2026-0381 also flags the 0.26.11 compatibility crate, whose entire
+/// certificate implementation re-exports its v1 dependency. Only exempt that
+/// exact crates.io artifact when every resolved roots package is patched.
+fn webpki_roots_compat_audit_exception(lockfile: &str) -> Result<bool> {
+    let lock: TomlValue = toml::from_str(lockfile).context("parse audit lockfile")?;
+    let Some(packages) = lock.get("package").and_then(TomlValue::as_array) else {
+        return Ok(false);
+    };
+    let roots: Vec<_> = packages
+        .iter()
+        .filter(|package| package.get("name").and_then(TomlValue::as_str) == Some("webpki-roots"))
+        .collect();
+    let crates_io = |package: &TomlValue| {
+        package.get("source").and_then(TomlValue::as_str)
+            == Some("registry+https://github.com/rust-lang/crates.io-index")
+    };
+    let known_shim = |package: &TomlValue| {
+        crates_io(package)
+            && package.get("version").and_then(TomlValue::as_str) == Some("0.26.11")
+            && package.get("checksum").and_then(TomlValue::as_str)
+                == Some("521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9")
+    };
+    let patched_versions =
+        semver::VersionReq::parse(">=1.0.10").expect("valid patched roots range");
+    let patched = |package: &TomlValue| {
+        crates_io(package)
+            && package
+                .get("version")
+                .and_then(TomlValue::as_str)
+                .and_then(|version| Version::parse(version).ok())
+                .is_some_and(|version| patched_versions.matches(&version))
+    };
+    Ok(roots.iter().any(|package| known_shim(package))
+        && roots.iter().all(|package| {
+            if patched(package) {
+                return true;
+            }
+            if !known_shim(package) {
+                return false;
+            }
+            let Some(dependencies) = package.get("dependencies").and_then(TomlValue::as_array)
+            else {
+                return false;
+            };
+            dependencies.len() == 1
+                && roots.iter().any(|parent| {
+                    patched(parent)
+                        && dependencies[0].as_str()
+                            == parent
+                                .get("version")
+                                .and_then(TomlValue::as_str)
+                                .map(|version| format!("webpki-roots {version}"))
+                                .as_deref()
+                })
+        }))
+}
+
 fn run_scryer_rust_validation(ctx: &TaskContext, prefix: &'static str) -> Result<()> {
     prefixed_step(prefix, "Running cargo fmt --all");
     let mut fmt_fix = ctx.release_command_in("cargo", &ctx.repo_root);
@@ -4282,6 +4339,12 @@ fn run_scryer_rust_validation(ctx: &TaskContext, prefix: &'static str) -> Result
             audit.arg(cargo_lock);
             for advisory in ignores {
                 audit.args(["--ignore", advisory]);
+            }
+            if webpki_roots_compat_audit_exception(&fs::read_to_string(cargo_lock)?)? {
+                warn(format!(
+                    "{display_path}: RUSTSEC-2026-0381 compatibility-wrapper false positive; verified crates.io 0.26.11 delegates to patched roots"
+                ));
+                audit.args(["--ignore", "RUSTSEC-2026-0381"]);
             }
             run_streaming(&mut audit, prefix)?;
             prefixed_ok(prefix, format!("cargo audit passed ({display_path})"));
@@ -4581,6 +4644,90 @@ fn run_scryer_nextest_validation(ctx: &TaskContext, prefix: &'static str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn webpki_roots_compat_lock(parent_version: &str) -> String {
+        format!(
+            r#"version = 4
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = ["webpki-roots {parent_version}"]
+[[package]]
+name = "webpki-roots"
+version = "{parent_version}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"#
+        )
+    }
+
+    #[test]
+    fn audit_webpki_compat_accepts_only_patched_parent_versions() {
+        for version in ["1.0.10", "1.0.11", "1.1.0"] {
+            assert!(
+                webpki_roots_compat_audit_exception(&webpki_roots_compat_lock(version)).unwrap()
+            );
+        }
+        for version in ["1.0.9", "0.26.10", "1.0.10-rc.1", "invalid"] {
+            assert!(
+                !webpki_roots_compat_audit_exception(&webpki_roots_compat_lock(version)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn audit_webpki_compat_rejects_unrecognized_wrapper_artifacts() {
+        let lock = webpki_roots_compat_lock("1.0.10");
+        for changed in [
+            lock.replace("0.26.11", "0.26.10"),
+            lock.replace("521bc38a", "00000000"),
+            lock.replace(
+                "registry+https://github.com/rust-lang/crates.io-index",
+                "registry+https://example.invalid/index",
+            ),
+        ] {
+            assert!(!webpki_roots_compat_audit_exception(&changed).unwrap());
+        }
+    }
+
+    #[test]
+    fn audit_webpki_compat_requires_the_resolved_parent_edge() {
+        let lock = webpki_roots_compat_lock("1.0.10");
+        for changed in [
+            lock.replace(
+                "dependencies = [\"webpki-roots 1.0.10\"]",
+                "dependencies = []",
+            ),
+            lock.replace(
+                "dependencies = [\"webpki-roots 1.0.10\"]",
+                "dependencies = [\"webpki-roots 1.0.9\"]",
+            ),
+            lock.replace("version = \"1.0.10\"", "version = \"1.0.11\""),
+        ] {
+            assert!(!webpki_roots_compat_audit_exception(&changed).unwrap());
+        }
+    }
+
+    #[test]
+    fn audit_webpki_compat_never_exempts_another_vulnerable_roots_copy() {
+        let mut lock = webpki_roots_compat_lock("1.0.10");
+        lock.push_str("\n[[package]]\nname = \"webpki-roots\"\nversion = \"0.25.4\"\n");
+        assert!(!webpki_roots_compat_audit_exception(&lock).unwrap());
+    }
+
+    #[test]
+    fn audit_webpki_compat_does_not_exempt_lockfiles_without_the_wrapper() {
+        assert!(!webpki_roots_compat_audit_exception("version = 4").unwrap());
+        let lock = webpki_roots_compat_lock("1.0.10");
+        let (_, parent) = lock.rsplit_once("[[package]]").unwrap();
+        assert!(!webpki_roots_compat_audit_exception(&format!("[[package]]{parent}")).unwrap());
+    }
+
+    #[test]
+    fn audit_webpki_compat_rejects_malformed_lockfiles() {
+        assert!(webpki_roots_compat_audit_exception("[[package]").is_err());
+    }
 
     fn write_upgrade_manifest_fixture(artifacts_dir: &Path) {
         write_upgrade_manifest_fixture_for(artifacts_dir, &UPGRADE_MANIFEST_ASSETS);

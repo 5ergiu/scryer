@@ -205,6 +205,7 @@ impl DownloadMutations {
             scope: _,
             replace_in_progress,
             purpose,
+            override_movie_availability: _,
         } = input;
         let title_id = title_id.to_string();
         let outcome = app
@@ -280,6 +281,7 @@ impl DownloadMutations {
             scope,
             replace_in_progress,
             purpose,
+            override_movie_availability: _,
         } = input;
         let title_id = title_id.to_string();
         let outcome = app
@@ -347,6 +349,7 @@ impl DownloadMutations {
             scope: _,
             replace_in_progress,
             purpose: _,
+            override_movie_availability: _,
         } = input;
         let title_id = title_id.to_string();
         let outcome = app

@@ -142,6 +142,12 @@ const MIGRATIONS: &[MigrationSpec] = &[
         phase: MigrationPhase::ApplicationReady,
         legacy_state_key: None,
     },
+    MigrationSpec {
+        id: super::_0018_title_folder_recovery::ID,
+        description: "recover root title ownership while preserving original files",
+        phase: MigrationPhase::ApplicationReady,
+        legacy_state_key: None,
+    },
 ];
 
 #[derive(Clone)]
@@ -451,11 +457,27 @@ impl ApplicationMigrator {
                 }
                 // Starts from `spawn_empty_duplicate_title_folder_cleanup`, once
                 // the library roots are reconciled.
-                migration_0017::ID => {}
+                migration_0017::ID | super::_0018_title_folder_recovery::ID => {}
                 _ => unreachable!("application-ready migration registry and dispatcher must agree"),
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn spawn_title_folder_recovery(&self, app: &AppUseCase) {
+        let spec = *MIGRATIONS
+            .iter()
+            .find(|spec| spec.id == super::_0018_title_folder_recovery::ID)
+            .unwrap();
+        if self.applied.contains(spec.id) {
+            return;
+        }
+        let app = app.clone();
+        std::mem::drop(self.spawn_retryable(spec, async move {
+            app.enroll_title_folder_recovery()
+                .await
+                .map_err(|error| error.to_string())
+        }));
     }
 
     /// The one-time removal of empty title folders an old rename left behind.

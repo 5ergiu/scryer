@@ -163,6 +163,9 @@ pub struct ReleaseDoc {
     pub audio_codecs: Vec<String>,
     pub audio_channels: Option<String>,
     pub languages_audio: Vec<String>,
+    /// Audio languages the indexer listing itself reported, as ISO 639 codes.
+    /// Unlike `languages_audio`, never filled from the name or the title.
+    pub indexer_languages: Vec<String>,
     pub languages_subtitles: Vec<String>,
     pub is_dual_audio: bool,
     pub is_atmos: bool,
@@ -1667,39 +1670,58 @@ score_entry["nzbgeek_thumbs_down"] := penalty if {
     }
 
     #[test]
-    fn plugin_language_bonus_policy() {
+    fn plugin_indexer_language_policy_needs_every_required_language_reported() {
         let rego = r#"package scryer.rules.user.original_doesnt_matter
 import rego.v1
 
-score_entry["nzbgeek_english_confirmed"] := 200 if {
-    langs := input.release.extra.languages
-    count(langs) > 0
-    some lang in langs
-    lower(lang) == "english"
+score_entry["indexer_language_confirmed"] := 80 if {
+    count(input.profile.required_audio_languages) > 0
+    reported := {lower(lang) | some lang in input.release.indexer_languages}
+    every lang in input.profile.required_audio_languages {
+        lower(lang) in reported
+    }
 }
 "#;
-        let id = "plugin_nzbgeek_nzbgeek_language_bonus";
-        let rewritten = rewrite_package_declaration(rego, id);
-
+        let id = "plugin_newznab_indexer_language_confirmed";
         let policy = UserPolicy {
             id: id.to_string(),
             name: id.to_string(),
-            rego_source: rewritten,
+            rego_source: rewrite_package_declaration(rego, id),
             origin: PolicyOrigin::User,
             applied_facets: vec![],
         };
-
         let engine = UserRulesEngine::build(&[policy]).unwrap();
         let mut evaluator = engine.evaluator();
+
         let mut input = test_input();
-        input.release.extra.insert(
-            "languages".to_string(),
-            serde_json::json!(["English", "French"]),
-        );
-        let result = evaluator.evaluate(&input, "movie").unwrap();
-        assert_eq!(result.entries.len(), 1);
-        assert_eq!(result.entries[0].code, "nzbgeek_english_confirmed");
-        assert_eq!(result.entries[0].delta, 200);
+        input.profile.required_audio_languages = vec!["eng".to_string()];
+        input.release.languages_audio = vec!["eng".to_string()];
+        input.release.indexer_languages = vec![];
+        let inferred = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(inferred.entries.is_empty(), "{:?}", inferred.entries);
+
+        input.release.indexer_languages = vec!["fra".to_string()];
+        let other = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(other.entries.is_empty(), "{:?}", other.entries);
+
+        input.release.indexer_languages = vec!["fra".to_string(), "eng".to_string()];
+        let reported = evaluator.evaluate(&input, "movie").unwrap();
+        assert_eq!(reported.entries.len(), 1);
+        assert_eq!(reported.entries[0].code, "indexer_language_confirmed");
+        assert_eq!(reported.entries[0].delta, 80);
+
+        input.profile.required_audio_languages = vec!["jpn".to_string(), "eng".to_string()];
+        input.release.indexer_languages = vec!["eng".to_string()];
+        let partial = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(partial.entries.is_empty(), "{:?}", partial.entries);
+
+        input.release.indexer_languages = vec!["eng".to_string(), "jpn".to_string()];
+        let complete = evaluator.evaluate(&input, "movie").unwrap();
+        assert_eq!(complete.entries.len(), 1);
+
+        input.profile.required_audio_languages = vec![];
+        let unrequired = evaluator.evaluate(&input, "movie").unwrap();
+        assert!(unrequired.entries.is_empty(), "{:?}", unrequired.entries);
     }
 
     #[test]
@@ -2066,6 +2088,7 @@ score_entry["internal"] := 300 if {
                 audio_codecs: vec!["DDP".to_string()],
                 audio_channels: Some("5.1".to_string()),
                 languages_audio: vec!["eng".to_string()],
+                indexer_languages: vec![],
                 languages_subtitles: vec![],
                 is_dual_audio: false,
                 is_atmos: false,

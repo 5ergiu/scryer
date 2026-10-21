@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 const CONTEXT_CANDIDATE_LIMIT: usize = 8;
 
+/// Ids per `get_by_ids` read, under sqlite's historical 999-variable ceiling.
+const TITLES_BY_IDS_CHUNK: usize = 900;
+
 pub(crate) struct ResolvedMonitoredTitle {
     pub title: Title,
     pub match_type: TitleMatchType,
@@ -341,7 +344,15 @@ impl MonitoredTitleMatcher {
 
     pub(crate) async fn titles_by_ids(&self, ids: &[String]) -> crate::AppResult<Vec<Title>> {
         match &self.titles {
-            TitleSource::Repository(titles) => titles.get_by_ids(ids).await,
+            TitleSource::Repository(titles) => {
+                // Bounded binds per read: a batched cycle may ask for the
+                // union of many releases' candidates at once.
+                let mut found = Vec::new();
+                for chunk in ids.chunks(TITLES_BY_IDS_CHUNK) {
+                    found.extend(titles.get_by_ids(chunk).await?);
+                }
+                Ok(found)
+            }
             TitleSource::Fixed(titles) => Ok(titles
                 .iter()
                 .filter(|title| ids.contains(&title.id))
@@ -367,53 +378,240 @@ impl MonitoredTitleMatcher {
         source: &str,
         value: &str,
     ) -> crate::AppResult<Vec<Title>> {
-        let (queries, expected) = if source.eq_ignore_ascii_case("imdb") {
-            let Some(normalized) = normalize_imdb_id(value) else {
-                return Ok(Vec::new());
-            };
-            let bare = normalized.trim_start_matches("tt").to_string();
-            (vec![normalized.clone(), bare], normalized)
-        } else {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                return Ok(Vec::new());
-            }
-            (vec![trimmed.clone()], trimmed)
+        let Some((queries, expected)) = external_id_queries(source, value) else {
+            return Ok(Vec::new());
         };
 
-        let mut titles = Vec::new();
-        let mut seen = HashSet::new();
-        for query in queries {
-            let found = match &self.titles {
+        let mut found = Vec::with_capacity(queries.len());
+        for query in &queries {
+            found.push(match &self.titles {
                 TitleSource::Repository(titles) => {
-                    titles.find_titles_by_external_id(source, &query).await?
+                    titles.find_titles_by_external_id(source, query).await?
                 }
                 TitleSource::Fixed(titles) => crate::ports::titles_matching_external_id(
                     titles.as_ref().clone(),
                     source,
-                    &query,
+                    query,
                 ),
-            };
-            for title in found {
-                if !title.monitored || !seen.insert(title.id.clone()) {
-                    continue;
-                }
-                let claims = title.external_ids.iter().any(|external_id| {
-                    if !external_id.source.eq_ignore_ascii_case(source) {
-                        return false;
-                    }
-                    if source.eq_ignore_ascii_case("imdb") {
-                        normalize_imdb_id(&external_id.value).as_deref() == Some(&expected)
-                    } else {
-                        external_id.value.trim() == expected
-                    }
+            });
+        }
+        Ok(monitored_external_id_claimants(source, &expected, found))
+    }
+
+    /// [`Self::monitored_titles_by_external_id`] for several `(source, value)`
+    /// lookups at once: entry `n` holds exactly the titles a single call with
+    /// `lookups[n]` returns. The repository is asked once for every distinct
+    /// id the lookups expand to, however many lookups share it.
+    pub(crate) async fn monitored_titles_by_external_ids(
+        &self,
+        lookups: &[(&str, &str)],
+    ) -> crate::AppResult<Vec<Vec<Title>>> {
+        let plans = lookups
+            .iter()
+            .map(|(source, value)| external_id_queries(source, value))
+            .collect::<Vec<_>>();
+        let mut distinct = Vec::<(String, String)>::new();
+        let mut position_of = std::collections::HashMap::<(String, String), usize>::new();
+        let mut positions = Vec::with_capacity(plans.len());
+        for ((source, _), plan) in lookups.iter().zip(&plans) {
+            let mut plan_positions = Vec::new();
+            for query in plan.iter().flat_map(|(queries, _)| queries) {
+                let key = ((*source).to_string(), query.clone());
+                let position = *position_of.entry(key.clone()).or_insert_with(|| {
+                    distinct.push(key);
+                    distinct.len() - 1
                 });
-                if claims {
-                    titles.push(title);
+                plan_positions.push(position);
+            }
+            positions.push(plan_positions);
+        }
+
+        let found = match &self.titles {
+            TitleSource::Repository(titles) if !distinct.is_empty() => {
+                titles.find_titles_by_external_ids_batch(&distinct).await?
+            }
+            TitleSource::Repository(_) => Vec::new(),
+            TitleSource::Fixed(titles) => distinct
+                .iter()
+                .map(|(source, query)| {
+                    crate::ports::titles_matching_external_id(
+                        titles.as_ref().clone(),
+                        source,
+                        query,
+                    )
+                })
+                .collect(),
+        };
+
+        Ok(lookups
+            .iter()
+            .zip(plans)
+            .zip(positions)
+            .map(|(((source, _), plan), plan_positions)| {
+                let Some((_, expected)) = plan else {
+                    return Vec::new();
+                };
+                let found = plan_positions
+                    .iter()
+                    .map(|&position| found.get(position).cloned().unwrap_or_default())
+                    .collect();
+                monitored_external_id_claimants(source, &expected, found)
+            })
+            .collect())
+    }
+
+    /// [`Self::titles_naming_key_shapes`] for several key sets at once:
+    /// entry `n` holds exactly the titles a single call with `key_sets[n]`
+    /// returns, answered by one repository call.
+    pub(crate) async fn titles_naming_key_shapes_batch(
+        &self,
+        key_sets: &[Vec<String>],
+    ) -> crate::AppResult<Vec<Vec<Title>>> {
+        match &self.titles {
+            TitleSource::Repository(titles) => {
+                if key_sets.iter().all(Vec::is_empty) {
+                    return Ok(vec![Vec::new(); key_sets.len()]);
                 }
+                titles
+                    .find_titles_by_lookup_key_shapes_batch(key_sets)
+                    .await
+            }
+            TitleSource::Fixed(titles) => Ok(key_sets
+                .iter()
+                .map(|keys| {
+                    crate::ports::titles_matching_lookup_key_shapes(titles.as_ref().clone(), keys)
+                })
+                .collect()),
+        }
+    }
+
+    /// [`Self::spelling_candidates`] for several releases' anchors at once:
+    /// entry `n` holds exactly what a single call with `anchor_sets[n]`
+    /// holds, and nothing another set's anchors fetched. One repository call.
+    pub(crate) async fn spelling_candidates_batch(
+        &self,
+        anchor_sets: &[&[(String, String)]],
+        facet: Option<&str>,
+    ) -> crate::AppResult<Vec<Arc<crate::title_matching::relaxed::SpellingCandidates>>> {
+        match &self.titles {
+            TitleSource::Repository(titles) => Ok(
+                crate::title_matching::relaxed::SpellingCandidates::load_many(
+                    titles.as_ref(),
+                    anchor_sets,
+                    facet,
+                )
+                .await?
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+            ),
+            TitleSource::Fixed(titles) => Ok(anchor_sets
+                .iter()
+                .map(|_| {
+                    Arc::new(
+                        crate::title_matching::relaxed::SpellingCandidates::from_titles(titles),
+                    )
+                })
+                .collect()),
+        }
+    }
+
+    /// [`Self::evidence_title`] for several titles at once, answered in
+    /// order. The index names of every distinct title are read in one
+    /// repository call.
+    pub(crate) async fn evidence_titles(&self, titles: &[&Title]) -> crate::AppResult<Vec<Title>> {
+        let TitleSource::Repository(repository) = &self.titles else {
+            // A fixed set is the caller's own and already whole.
+            return Ok(titles.iter().map(|title| (*title).clone()).collect());
+        };
+        let mut ids = Vec::<String>::new();
+        let mut seen = HashSet::new();
+        for title in titles {
+            if seen.insert(title.id.as_str()) {
+                ids.push(title.id.clone());
             }
         }
-        Ok(titles)
+        let names = if ids.is_empty() {
+            Vec::new()
+        } else {
+            repository.list_title_index_names_batch(&ids).await?
+        };
+        let names_by_id = ids
+            .into_iter()
+            .zip(names)
+            .collect::<std::collections::HashMap<_, _>>();
+        Ok(titles
+            .iter()
+            .map(|title| {
+                title_with_index_names(
+                    title,
+                    names_by_id.get(&title.id).cloned().unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
+    /// [`Self::identity_ambiguity`] for several titles at once, answered in
+    /// order: one repository call for every distinct (title, keys) pair.
+    pub(crate) async fn identity_ambiguities(
+        &self,
+        titles: &[&Title],
+    ) -> crate::AppResult<Vec<crate::acquisition_release_search::TitleIdentityAmbiguity>> {
+        let requests = titles
+            .iter()
+            .map(|title| {
+                (
+                    title.id.clone(),
+                    crate::acquisition_release_search::canonical_title_lookup_keys(title),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shared = match &self.titles {
+            TitleSource::Repository(repository) => {
+                let mut distinct = Vec::<(String, Vec<String>)>::new();
+                let mut position_of =
+                    std::collections::HashMap::<(String, Vec<String>), usize>::new();
+                let mut positions = Vec::with_capacity(requests.len());
+                for request in &requests {
+                    if request.1.is_empty() {
+                        // An empty key set claims nothing; a single call
+                        // answers it without reading the store.
+                        positions.push(None);
+                        continue;
+                    }
+                    let position = *position_of.entry(request.clone()).or_insert_with(|| {
+                        distinct.push(request.clone());
+                        distinct.len() - 1
+                    });
+                    positions.push(Some(position));
+                }
+                let answers = if distinct.is_empty() {
+                    Vec::new()
+                } else {
+                    repository
+                        .lookup_keys_claimed_by_other_titles_batch(&distinct)
+                        .await?
+                };
+                positions
+                    .into_iter()
+                    .map(|position| {
+                        position
+                            .and_then(|position| answers.get(position).cloned())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+            }
+            TitleSource::Fixed(fixed) => requests
+                .iter()
+                .map(|(title_id, keys)| {
+                    crate::ports::lookup_keys_claimed_by_others(fixed, title_id, keys)
+                })
+                .collect(),
+        };
+        Ok(shared
+            .into_iter()
+            .map(crate::acquisition_release_search::TitleIdentityAmbiguity::from_shared_keys)
+            .collect())
     }
 
     pub(crate) async fn resolve_movie(
@@ -705,6 +903,53 @@ pub(crate) fn normalize_imdb_id(raw_imdb_id: &str) -> Option<String> {
     crate::normalize::normalize_imdb_id(raw_imdb_id)
 }
 
+/// The repository values one external-id lookup asks for, in order, and the
+/// value a title must carry to claim it: both IMDb spellings against the
+/// normalized id, the trimmed value otherwise. `None` asks for nothing.
+fn external_id_queries(source: &str, value: &str) -> Option<(Vec<String>, String)> {
+    if source.eq_ignore_ascii_case("imdb") {
+        let normalized = normalize_imdb_id(value)?;
+        let bare = normalized.trim_start_matches("tt").to_string();
+        Some((vec![normalized.clone(), bare], normalized))
+    } else {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some((vec![trimmed.clone()], trimmed))
+    }
+}
+
+/// The monitored titles among `found` (one list per query, in query order)
+/// that really carry `expected` for `source`, first answer first.
+fn monitored_external_id_claimants(
+    source: &str,
+    expected: &str,
+    found: Vec<Vec<Title>>,
+) -> Vec<Title> {
+    let mut titles = Vec::new();
+    let mut seen = HashSet::new();
+    for title in found.into_iter().flatten() {
+        if !title.monitored || !seen.insert(title.id.clone()) {
+            continue;
+        }
+        let claims = title.external_ids.iter().any(|external_id| {
+            if !external_id.source.eq_ignore_ascii_case(source) {
+                return false;
+            }
+            if source.eq_ignore_ascii_case("imdb") {
+                normalize_imdb_id(&external_id.value).as_deref() == Some(expected)
+            } else {
+                external_id.value.trim() == expected
+            }
+        });
+        if claims {
+            titles.push(title);
+        }
+    }
+    titles
+}
+
 fn episodic_facet_matches_hint(facet: MediaFacet, facet_hint: Option<&str>) -> bool {
     match facet_hint.map(|value| value.trim().to_ascii_lowercase()) {
         Some(hint) if hint == "anime" => facet == MediaFacet::Anime,
@@ -990,6 +1235,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }

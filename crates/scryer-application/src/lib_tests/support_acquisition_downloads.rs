@@ -315,6 +315,14 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     /// in order; a record only, it never feeds `claim_download_cleanup`.
     pub(super) finished_cleanup:
         Arc<Mutex<Vec<(scryer_domain::download_identity::DownloadId, String, bool)>>>,
+    /// Durable cleanup rows that are due: `list_due_download_cleanup` returns
+    /// them in order and `claim_download_cleanup` hands each one out as a claim.
+    pub(super) claimable_cleanup: Arc<Mutex<Vec<crate::DownloadCleanupRecord>>>,
+    /// Stands in for the sqlite writer gate, as on
+    /// `TrackingAcquisitionScopeStateRepo`: when set, the cleanup claim and the
+    /// writes the cleanup tick reaches take this one mutex for the whole call
+    /// and yield while holding it, the way a real transaction awaits sqlite.
+    pub(super) writer_gate: Option<Arc<Mutex<()>>>,
     pub(super) deleted_title_ids: Arc<Mutex<Vec<String>>>,
     /// Every download id passed to `delete_identity_tracked_states_for_downloads`,
     /// in call order.
@@ -333,6 +341,14 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     /// Downloads whose `reassign_download_to_title` fails with an error.
     pub(super) failing_reassignments:
         Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
+    /// When each unbound intent was submitted, as the real store's
+    /// `submitted_at`. An unbound row with no entry reads as submitted just
+    /// now, so it is never old enough to release.
+    pub(super) unbound_submitted_at:
+        Arc<Mutex<HashMap<scryer_domain::download_identity::DownloadId, chrono::DateTime<Utc>>>>,
+    /// Every unconfirmed intent `release_unconfirmed_submission` released, in
+    /// order.
+    pub(super) released_unconfirmed: Arc<Mutex<Vec<scryer_domain::download_identity::DownloadId>>>,
     /// Release password candidates persisted per download, as the real store
     /// keeps them for archive extraction and password retry.
     pub(super) password_candidates: Arc<
@@ -828,6 +844,17 @@ pub(super) fn test_tracked_state_key(
     ))
 }
 
+impl TrackingDownloadSubmissionRepo {
+    /// Enter a modeled write transaction: take the gate and yield while holding
+    /// it, the way a real transaction awaits sqlite with the gate in hand.
+    async fn writer_transaction(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        let gate = self.writer_gate.as_ref()?;
+        let guard = gate.lock().await;
+        tokio::task::yield_now().await;
+        Some(guard)
+    }
+}
+
 #[async_trait]
 impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
     async fn set_password_candidates(
@@ -864,12 +891,38 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
         &self,
         id: &scryer_domain::download_identity::DownloadId,
     ) -> AppResult<crate::DownloadCleanupClaim> {
-        Ok(match self.settled_cleanup.lock().await.get(id) {
-            Some(outcome) => crate::DownloadCleanupClaim::Settled {
+        let _gate = self.writer_transaction().await;
+        if let Some(outcome) = self.settled_cleanup.lock().await.get(id) {
+            return Ok(crate::DownloadCleanupClaim::Settled {
                 outcome: outcome.clone(),
+            });
+        }
+        Ok(
+            match self
+                .claimable_cleanup
+                .lock()
+                .await
+                .iter()
+                .find(|record| &record.download_id == id)
+            {
+                Some(record) => crate::DownloadCleanupClaim::Claimed(Box::new(record.clone())),
+                None => crate::DownloadCleanupClaim::Unmanaged,
             },
-            None => crate::DownloadCleanupClaim::Unmanaged,
-        })
+        )
+    }
+
+    async fn list_due_download_cleanup(
+        &self,
+        limit: usize,
+    ) -> AppResult<Vec<crate::DownloadCleanupRecord>> {
+        Ok(self
+            .claimable_cleanup
+            .lock()
+            .await
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     async fn checkpoint_download_cleanup_payload(
@@ -900,6 +953,7 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
         _history_offset: usize,
         _error: Option<&str>,
     ) -> AppResult<()> {
+        let _gate = self.writer_transaction().await;
         self.finished_cleanup
             .lock()
             .await
@@ -1048,6 +1102,7 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
         reason: Option<&str>,
         detail: Option<&str>,
     ) -> AppResult<()> {
+        let _gate = self.writer_transaction().await;
         if let Some(key) = test_tracked_state_key(identity, source_identity) {
             self.identity_states
                 .lock()
@@ -1294,6 +1349,41 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
             .collect())
     }
 
+    async fn list_active_unbound_submitted_before(
+        &self,
+        submitted_before: chrono::DateTime<Utc>,
+    ) -> AppResult<Vec<DownloadSubmission>> {
+        let submitted_at = self.unbound_submitted_at.lock().await.clone();
+        let entries = self.store.lock().await;
+        Ok(entries
+            .iter()
+            .filter(|entry| {
+                entry.download_client_item_id.trim().is_empty()
+                    && submitted_at
+                        .get(&entry.download_id)
+                        .is_some_and(|at| *at < submitted_before)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn release_unconfirmed_submission(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<bool> {
+        let mut entries = self.store.lock().await;
+        let before = entries.len();
+        entries.retain(|entry| {
+            entry.download_id != *download_id || !entry.download_client_item_id.trim().is_empty()
+        });
+        let released = entries.len() != before;
+        drop(entries);
+        if released {
+            self.released_unconfirmed.lock().await.push(*download_id);
+        }
+        Ok(released)
+    }
+
     async fn find_by_title_and_request_signature(
         &self,
         title_id: &str,
@@ -1359,6 +1449,7 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
         identity: &ClientJobLocator,
         tracked_state: &str,
     ) -> AppResult<()> {
+        let _gate = self.writer_transaction().await;
         let key = download_source_identity_key(identity);
         self.tracked_states
             .lock()
@@ -2362,6 +2453,7 @@ impl DownloadClient for StubDownloadClient {
             client_type: "nzbget".to_string(),
             info_hash: self.grab_info_hash.lock().await.clone(),
             seed_goals: None,
+            grabbed_file_names: Vec::new(),
         })
     }
 

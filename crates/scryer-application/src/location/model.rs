@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub enum LocationOperationType {
     /// Correct which folder a title owns; never touches file content (US1).
     FolderReassignment,
+    /// Recover invalid ownership without disposing of original files.
+    TitleFolderRecovery,
     /// Move selected titles to another root inside the same library (US2).
     RootMove,
     /// Replace one root's path with a new, unconfigured path (US4).
@@ -29,6 +31,7 @@ impl LocationOperationType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::FolderReassignment => "folder_reassignment",
+            Self::TitleFolderRecovery => "title_folder_recovery",
             Self::RootMove => "root_move",
             Self::RootChange => "root_change",
             Self::RootConsolidation => "root_consolidation",
@@ -41,6 +44,7 @@ impl LocationOperationType {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "folder_reassignment" => Some(Self::FolderReassignment),
+            "title_folder_recovery" => Some(Self::TitleFolderRecovery),
             "root_move" => Some(Self::RootMove),
             "root_change" => Some(Self::RootChange),
             "root_consolidation" => Some(Self::RootConsolidation),
@@ -65,6 +69,8 @@ impl LocationOperationType {
 pub enum LocationExecutionMode {
     /// Scryer performs and verifies the filesystem operation.
     MoveWithScryer,
+    /// Internal recovery only: independently copy and retain every source.
+    CopyPreserveSources,
     /// Trust the user's external move and update catalog mappings only.
     UserMovedFiles,
     /// No filesystem work at all: fileless titles (FR-076) and folder-match
@@ -76,6 +82,7 @@ impl LocationExecutionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MoveWithScryer => "move_with_scryer",
+            Self::CopyPreserveSources => "copy_preserve_sources",
             Self::UserMovedFiles => "user_moved_files",
             Self::CatalogOnly => "catalog_only",
         }
@@ -86,6 +93,7 @@ impl LocationExecutionMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "move_with_scryer" => Some(Self::MoveWithScryer),
+            "copy_preserve_sources" => Some(Self::CopyPreserveSources),
             "user_moved_files" => Some(Self::UserMovedFiles),
             "catalog_only" => Some(Self::CatalogOnly),
             _ => None,
@@ -94,7 +102,7 @@ impl LocationExecutionMode {
 
     /// Whether this mode can copy bytes and therefore needs verification.
     pub fn moves_files(&self) -> bool {
-        matches!(self, Self::MoveWithScryer)
+        matches!(self, Self::MoveWithScryer | Self::CopyPreserveSources)
     }
 }
 

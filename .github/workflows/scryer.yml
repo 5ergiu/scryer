@@ -1267,7 +1267,8 @@ jobs:
           # appends these flags after AWS-LC's own -O0 for them. Give AWS-LC
           # the flags without a level: the profile's opt-level still optimizes
           # the library, and nothing overrides the entropy sources' -O0.
-          export AWS_LC_SYS_CFLAGS="${native_flags/-O3 /}"
+          entropy_headers="$(bash .github/scripts/prepare-musl-entropy.sh "$RUNNER_TEMP")"
+          export AWS_LC_SYS_CFLAGS="${native_flags/-O3 /} -idirafter ${entropy_headers}"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. -C link-arg=-fuse-ld=mold -W linker-messages"
           if [ -n "${{ matrix.extra_rustflags }}" ]; then
             export RUSTFLAGS="${RUSTFLAGS} ${{ matrix.extra_rustflags }}"
@@ -1294,6 +1295,16 @@ jobs:
               --interval-seconds "${{ matrix.arch == 'arm64' && '1' || '60' }}" \
               -- cargo build --timings -p scryer --profile "${SCRYER_CARGO_PROFILE}" --locked --target "${{ matrix.target }}"
           fi
+
+      - name: Validate portable Linux entropy
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-linux-entropy.py \
+            "$CARGO_TARGET_DIR/${{ matrix.target }}/$SCRYER_CARGO_PROFILE/build" \
+            --headers "$(bash .github/scripts/prepare-musl-entropy.sh "$RUNNER_TEMP")" \
+            --output-dir "$RUNNER_TEMP/entropy-regression"
 
       - name: Validate native linkage
         if: steps.scope.outputs.run == 'true'

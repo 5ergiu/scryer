@@ -44,6 +44,8 @@ pub mod file_source_signature;
 mod folder_ownership;
 pub mod fs_integrity;
 pub mod fs_safety;
+pub mod grabbed_file_names;
+pub use grabbed_file_names::GrabbedFileName;
 mod health;
 mod helpers;
 mod image_proxy;
@@ -281,8 +283,8 @@ pub type AppResult<T> = Result<T, AppError>;
 use crate::quality_profile::resolve_profile_id_for_title;
 pub use acquisition::delay_profile::{
     DELAY_PROFILE_CATALOG_KEY, DelayDecision, DelayProfile, PreferredProtocol, is_usenet_source,
-    parse_delay_profile_catalog, resolve_delay_decision, resolve_delay_profile,
-    validate_delay_profile_catalog,
+    normalize_delay_profile, parse_delay_profile_catalog, resolve_delay_decision,
+    resolve_delay_profile, validate_delay_profile_catalog,
 };
 pub use acquisition::policy::AcquisitionThresholds;
 pub use acquisition::seed_goals::{
@@ -314,9 +316,9 @@ pub(crate) use audio_requirements::missing_required_audio_languages;
 #[cfg(feature = "runtime-media-analysis")]
 pub(crate) use audio_requirements::{RequiredAudioVerdict, classify_required_audio};
 pub(crate) use audio_requirements::{
-    normalize_required_audio_requirements, release_audio_language_hints_for_title,
-    required_audio_languages_match, resolve_required_audio_requirements,
-    title_audio_language_context,
+    normalize_required_audio_languages, normalize_required_audio_requirements,
+    release_audio_language_hints_for_title, required_audio_languages_match,
+    resolve_required_audio_requirements, title_audio_language_context,
 };
 pub use catalog::facets::handler::{
     FacetHandler, HydrationResult, movie_to_hydration_result, series_to_hydration_result,
@@ -438,10 +440,10 @@ pub use request_rules::{
     FALLBACK_NO_RULE_MATCHED, FALLBACK_RULE_MANUAL, LIBRARY_PERMISSION_DECIDER,
     PREFLIGHT_REQUEST_ID_PREFIX, REQUEST_MAX_LEASE_DAYS, RecordedVote, RequestDecisionReason,
     RequestDraft, RequestEvaluation, RequestEvaluationPurpose, RequestPreflight, RequestRuleDraft,
-    RequestRuleGates, RequestRuleGatesUpdate, RequestRulePreviewMatcher, RequestRulePreviewRequest,
-    RequestRulePreviewResult, RequestRuleSample, RequestRuleScope, RequestRuleSetDetail,
-    RequestRulesEngineCache, RequestRulesEngineHandle, ScopedError, ScopedVote, arbitrate,
-    validate_lease_days, validate_tag_list,
+    RequestRulePreviewMatcher, RequestRulePreviewRequest, RequestRulePreviewResult,
+    RequestRuleSample, RequestRuleScope, RequestRuleSetDetail, RequestRulesEngineCache,
+    RequestRulesEngineHandle, ScopedError, ScopedVote, arbitrate, validate_lease_days,
+    validate_tag_list,
 };
 pub use security::backup::{AutoBackupRunOutcome, start_background_auto_backup_scheduler};
 pub use security::backup_bundle::{
@@ -462,13 +464,14 @@ pub use settings::settings::{
     ExternalImportLibrarySettingsAutoApplyResult, ExternalImportSettingsAutoApplySkip,
     FacetScoringPersonaSelection, GeneralSettings, IndexerRoutingSettingsEntry, InstanceFeatures,
     LibraryPathsSettings, LibrarySettings, LibrarySettingsOverrideDraft, MediaSettings,
-    PluginAutoUpdateSettings, PublicUrlChangePreview, PublicUrlSettings, QualityProfileSelection,
-    QualityProfileSettings, RequestQualityProfileSettings, SaveQualityProfileSettings,
-    SecuritySettings, ServiceSettings, SubtitleSettings, UpdateAutoBackupSettings,
-    UpdateBackupSettings, UpdateFacetScoringPersonaSelection, UpdateGeneralSettings,
-    UpdateLibraryPaths, UpdateMediaSettings, UpdatePluginAutoUpdateSettings,
-    UpdateQualityProfileSelection, UpdateScriptInterpreterSettings, UpdateSecuritySettings,
-    UpdateServiceSettings, UpdateSubtitleSettings,
+    MovieAvailabilityOverrides, MovieAvailabilitySettings, PluginAutoUpdateSettings,
+    PublicUrlChangePreview, PublicUrlSettings, QualityProfileSelection, QualityProfileSettings,
+    RequestQualityProfileSettings, SaveQualityProfileSettings, SecuritySettings, ServiceSettings,
+    SubtitleSettings, UpdateAutoBackupSettings, UpdateBackupSettings,
+    UpdateFacetScoringPersonaSelection, UpdateGeneralSettings, UpdateLibraryPaths,
+    UpdateMediaSettings, UpdatePluginAutoUpdateSettings, UpdateQualityProfileSelection,
+    UpdateScriptInterpreterSettings, UpdateSecuritySettings, UpdateServiceSettings,
+    UpdateSubtitleSettings,
 };
 pub use subtitles::orchestration::{
     DownloadSubtitleForMediaFileRequest, SubtitleSearchOutcome, SubtitleSearchStatus,
@@ -589,8 +592,8 @@ pub use ports::{
     AcquisitionScopeStateRepository, AcquisitionStateRepository, ArchiveExtractorClient,
     ArchiveExtractorPluginProvider, ArchiveExtractorSelection,
     BackgroundIndexerSearchStrategyState, BlocklistRepository,
-    BuiltinDownloadClientConnectionTester, DatastoreInfo, DiscoveryContextTitle,
-    DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
+    BuiltinDownloadClientConnectionTester, DatastoreInfo, DelayProfileRepository,
+    DiscoveryContextTitle, DomainEventRepository, DownloadClient, DownloadClientConfigRepository,
     DownloadClientFeedbackScope, DownloadClientListing, DownloadClientPluginProvider,
     DownloadClientSnapshotOutcome, DownloadClientStatusRepository, DownloadQueueCommandRepository,
     DownloadRegistryRepository, DownloadSubmissionRepository, EmbyApiKeyExchange,
@@ -703,12 +706,13 @@ pub use settings::keys::{
     HISTORY_RETENTION_DAYS_KEY, IMAGE_CACHE_MAX_BYTES_ENV, IMAGE_CACHE_MAX_SIZE_MB_KEY,
     IMPORT_MODE_KEY, INDEXER_ROUTING_SETTINGS_KEY, LEGACY_NZBGET_CATEGORY_SETTING_KEY,
     LEGACY_NZBGET_CLIENT_ROUTING_SETTINGS_KEY, MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY,
-    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY,
-    MAINTENANCE_GATE_RESULT_DISPLAY_KEY, MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY,
-    METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY, MFA_REQUIRE_PASSWORD_LOGIN_KEY,
-    MINIMUM_SEEDERS_FLOOR_DEFAULT, MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON,
-    MINIMUM_SEEDERS_FLOOR_SETTING_KEY, MOVIES_PATH_KEY, MOVIES_ROOT_FOLDERS_KEY,
-    NFO_WRITE_ON_IMPORT_ANIME_KEY, NFO_WRITE_ON_IMPORT_MOVIE_KEY, NFO_WRITE_ON_IMPORT_SERIES_KEY,
+    MAINTENANCE_GATE_EVALUATION_KEY, MAINTENANCE_GATE_RESULT_DISPLAY_KEY,
+    MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY, METADATA_LANGUAGE_KEY, MFA_REQUIRE_CONFIG_STEP_UP_KEY,
+    MFA_REQUIRE_PASSWORD_LOGIN_KEY, MINIMUM_SEEDERS_FLOOR_DEFAULT,
+    MINIMUM_SEEDERS_FLOOR_DEFAULT_JSON, MINIMUM_SEEDERS_FLOOR_SETTING_KEY,
+    MOVIE_AVAILABILITY_DELAY_DAYS_KEY, MOVIE_DEFAULT_AVAILABILITY_KEY, MOVIE_RELEASE_MARKET_KEY,
+    MOVIES_PATH_KEY, MOVIES_ROOT_FOLDERS_KEY, NFO_WRITE_ON_IMPORT_ANIME_KEY,
+    NFO_WRITE_ON_IMPORT_MOVIE_KEY, NFO_WRITE_ON_IMPORT_SERIES_KEY,
     NZBGET_OLDER_PRIORITY_SETTING_KEY, NZBGET_RECENT_PRIORITY_SETTING_KEY, PASSWORD_MIN_LENGTH_KEY,
     PASSWORD_MIN_LENGTH_MIN, PLEXMATCH_WRITE_ON_IMPORT_ANIME_KEY,
     PLEXMATCH_WRITE_ON_IMPORT_SERIES_KEY, PLUGIN_AUTO_UPDATE_ENABLED_KEY,
@@ -723,11 +727,11 @@ pub use settings::keys::{
     RENAME_MISSING_METADATA_POLICY_MOVIE_GLOBAL_KEY,
     RENAME_MISSING_METADATA_POLICY_SERIES_GLOBAL_KEY, RENAME_TEMPLATE_ANIME_GLOBAL_KEY,
     RENAME_TEMPLATE_KEY, RENAME_TEMPLATE_MOVIE_GLOBAL_KEY, RENAME_TEMPLATE_SERIES_GLOBAL_KEY,
-    REQUEST_RULE_GATE_EVALUATION_KEY, REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY,
-    SCRIPT_INTERPRETER_BATCH_KEY, SCRIPT_INTERPRETER_GO_KEY, SCRIPT_INTERPRETER_POWERSHELL_KEY,
-    SCRIPT_INTERPRETER_PYTHON_KEY, SEARCH_LANGUAGES_KEY, SEASON_FOLDER_TEMPLATE_KEY,
-    SERIES_PATH_KEY, SERIES_ROOT_FOLDERS_KEY, SESSION_DURATION_DAYS_KEY, SET_PERMISSIONS_LINUX_KEY,
-    SETTINGS_SCOPE_MEDIA, SETTINGS_SCOPE_SYSTEM, SETTINGS_SOURCE_TYPED_GRAPHQL, SETUP_COMPLETE_KEY,
+    REQUIRED_AUDIO_LANGUAGES_KEY, SCORING_PERSONA_KEY, SCRIPT_INTERPRETER_BATCH_KEY,
+    SCRIPT_INTERPRETER_GO_KEY, SCRIPT_INTERPRETER_POWERSHELL_KEY, SCRIPT_INTERPRETER_PYTHON_KEY,
+    SEARCH_LANGUAGES_KEY, SEASON_FOLDER_TEMPLATE_KEY, SERIES_PATH_KEY, SERIES_ROOT_FOLDERS_KEY,
+    SESSION_DURATION_DAYS_KEY, SET_PERMISSIONS_LINUX_KEY, SETTINGS_SCOPE_MEDIA,
+    SETTINGS_SCOPE_SYSTEM, SETTINGS_SOURCE_TYPED_GRAPHQL, SETUP_COMPLETE_KEY,
     SKIP_LOGIN_FOR_LOCAL_IPS_KEY, SPECIALS_FOLDER_TEMPLATE_KEY,
     SRRDB_FILENAME_RECOVERY_ENABLED_KEY, TITLE_METADATA_LANGUAGE_OVERRIDE_KEY,
     TITLE_REQUIRED_AUDIO_OVERRIDE_KEY, TLS_CERT_PATH_KEY, TLS_KEY_PATH_KEY,
@@ -759,7 +763,8 @@ pub use types::{
     LoginVerificationMethod, LoginVerificationRequirement, LoginVerificationSatisfied,
     ManualImportSelection, ManualImportSelectionCandidate, MdblistSummary, MediaFileAssociations,
     MediaRequestCounts, MissingEpisodeCandidate, MissingScopeCandidates,
-    MissingSeriesMovieLinkCandidate, MissingTitleCandidate, OAuthAuthorizationCodeRecord,
+    MissingSeriesMovieLinkCandidate, MissingTitleCandidate, MovieAvailabilityDecision,
+    MovieAvailabilityProjection, MovieAvailabilityStatus, OAuthAuthorizationCodeRecord,
     OAuthAuthorizationSource, OAuthClientRegistrationRecord, OAuthConnectedAppRecord,
     OAuthRefreshGrantRecord, OAuthRefreshRotation, OAuthRefreshRotationOutcome,
     OAuthRefreshTokenRecord, PasskeySummary, PendingImportBindingFilePreview,

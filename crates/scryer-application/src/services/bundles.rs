@@ -150,6 +150,7 @@ pub struct AppWorkflowServices {
 pub struct AppConfigServices {
     pub(crate) settings: Arc<dyn SettingsRepository>,
     pub(crate) quality_profiles: Arc<dyn QualityProfileRepository>,
+    pub(crate) delay_profiles: Arc<dyn crate::ports::DelayProfileRepository>,
     pub(crate) system_info: Arc<dyn SystemInfoProvider>,
     pub(crate) plugin_http_trust_runtime: RuntimeFeature<Arc<dyn PluginHttpTrustConfigRuntime>>,
     pub(crate) logical_backup_exporter: Arc<dyn LogicalBackupExporter>,
@@ -165,8 +166,7 @@ pub struct AppCustomizationServices {
     pub(crate) rule_sets: Arc<dyn RuleSetRepository>,
     pub(crate) maintenance_rule_sets: Arc<dyn MaintenanceRuleSetRepository>,
     pub(crate) maintenance_evaluation: Arc<dyn crate::ports::MaintenanceEvaluationRepository>,
-    /// User-authored request rules (spec 0003). Ships dark behind the same
-    /// experimental gate as maintenance.
+    /// User-authored request rules.
     pub(crate) request_rule_sets: Arc<dyn crate::ports::RequestRuleSetRepository>,
     /// Append-only traces of every request evaluation (spec 0003 FR-016).
     pub(crate) request_rule_decisions: Arc<dyn crate::ports::RequestRuleDecisionRepository>,
@@ -458,6 +458,9 @@ impl AppServices {
             config: AppConfigServices {
                 settings,
                 quality_profiles,
+                delay_profiles: Arc::new(
+                    null_repositories::InMemoryDelayProfileRepository::default(),
+                ),
                 system_info: Arc::new(NullSystemInfoProvider),
                 plugin_http_trust_runtime: RuntimeFeature::Disabled,
                 logical_backup_exporter: Arc::new(NullLogicalBackupExporter),

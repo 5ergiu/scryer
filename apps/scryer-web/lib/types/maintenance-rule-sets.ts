@@ -1,15 +1,14 @@
-/// Maintenance rules are authored, armed, and operated here. What actually
-/// happens to a matching title is decided by two independent controls: the
-/// instance-wide gates (which the whole instance shares) and each rule's own
-/// evaluation mode and effect arming. A rule only acts when both agree.
+/// Maintenance rules are authored and operated here. What actually happens to
+/// a matching title is decided by two controls: the two instance-wide switches
+/// and each rule's own state. A rule only acts when both allow it.
 
-/// Lifecycle mode of a stored rule set. Creation always stores `DISABLED`, so
-/// arming a rule is always a deliberate second step.
-export type MaintenanceEvaluationMode = "DISABLED" | "SHADOW" | "OBSERVE";
+/// What a stored rule does. Creation always stores `DISABLED`, so turning a
+/// rule on is always a deliberate second step; `DRY_RUN` records matches
+/// without changing anything.
+export type MaintenanceRuleState = "DISABLED" | "DRY_RUN" | "ENABLED";
 
-/// How far a rule set's effects are armed. `NONE` evaluates without acting,
-/// `REVERSIBLE` permits low- and medium-risk actions, and `DESTRUCTIVE`
-/// additionally permits the high-risk actions that delete files.
+/// The class of effects a rule's action can have. `DESTRUCTIVE` actions delete
+/// files, so enabling such a rule needs a confirmation.
 export type MaintenanceEffectArming = "NONE" | "REVERSIBLE" | "DESTRUCTIVE";
 
 /// Rule scope is distinct from an action's movie/show/season/episode vocabulary.
@@ -70,14 +69,16 @@ export type MaintenanceRuleSetRecord = {
   id: string;
   name: string;
   description: string | null;
-  enabled: boolean;
-  evaluationMode: MaintenanceEvaluationMode;
-  /// How far this rule's effects are armed, independently of its mode. A rule
-  /// can evaluate in `OBSERVE` while still armed to `NONE`.
-  effectArming: MaintenanceEffectArming;
-  /// An existing destructive title rule must be reviewed after its newly
-  /// available show facts changed what it can select.
-  destructiveRearmRequired: boolean;
+  state: MaintenanceRuleState;
+  /// What `ENABLED` would allow for this rule's action. `NONE` means the rule
+  /// can only run as a dry run.
+  enabledArming: MaintenanceEffectArming;
+  /// The rule was enabled, then its matcher, action or scope changed, so it
+  /// dropped back to a dry run until it is enabled again.
+  editedSinceEnabled: boolean;
+  /// Shipped with Scryer: name, matcher and action are fixed and it cannot be
+  /// deleted. State, grace period and libraries stay editable.
+  systemOwned: boolean;
   libraryIds: string[];
   /// Immutable granularity, separate from an action's supported subjects.
   subjectKind: MaintenanceRuleScope;
@@ -220,7 +221,7 @@ export type MaintenancePreviewResult = {
 export type MaintenancePreviewSource = "stored" | "draft";
 
 /// Lifecycle state of one candidate. The states past `OBSERVING` are written by
-/// the action handler; a shadow rule only ever produces the first three.
+/// the action handler; a dry run rule only ever produces the first three.
 export type MaintenanceCandidateState =
   | "OBSERVING"
   | "PENDING_ACTION"
@@ -273,6 +274,8 @@ export type MaintenanceCandidate = {
   /// root. Null means no root was selected or exact ownership is unknown.
   storageRootFileCount: number | null;
   storageRootTotalSizeBytes: number | null;
+  /// The live operator keep on the subject's title; null when it is not kept.
+  operatorKeepClaimId: string | null;
   subjectLabel: string;
   subjectKind: string;
   subjectId: string;
@@ -301,7 +304,7 @@ export type MaintenanceCandidate = {
 };
 
 /// One rule set's pass through one evaluation run. Runs carry counts rather
-/// than subjects, which is why the result-display gate does not hide them.
+/// than subjects, which is why switching maintenance off does not hide them.
 export type MaintenanceEvaluationRun = {
   id: string;
   ruleSetId: string;
@@ -347,18 +350,13 @@ export type MaintenanceActionRun = {
   finishedAt: string | null;
 };
 
-/// The five independent instance-wide gates. Every one defaults off, and a rule
-/// only ever acts where its own arming and the matching gate agree.
+/// The two instance-wide switches. A new instance has maintenance disabled and
+/// actions paused, and an enabled rule only acts while both allow it.
 export type MaintenanceInstanceGates = {
-  evaluationEnabled: boolean;
-  resultDisplayEnabled: boolean;
-  presentationEffectsEnabled: boolean;
-  reversibleEffectsEnabled: boolean;
-  destructiveEffectsEnabled: boolean;
+  enabled: boolean;
+  actionsPaused: boolean;
 };
 
-/// Which gate a switch drives. Kept as a union so the panel can render the five
-/// switches from one list without a stringly-typed indexer.
 export type MaintenanceGateKey = keyof MaintenanceInstanceGates;
 
 /// A subject a maintenance rule must never act on.

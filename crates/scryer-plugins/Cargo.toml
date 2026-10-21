@@ -1,6 +1,6 @@
 [package]
 name = "scryer-plugins"
-version = "0.21.17"
+version = "0.21.19"
 edition.workspace = true
 
 [dependencies]
@@ -19,7 +19,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 aws-lc-rs = { workspace = true }
-crc-fast = "1.10.0"
+crc-turbo = "1.11.0"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider", "http2"] }
 quick-xml = { workspace = true }
 base64 = { workspace = true }

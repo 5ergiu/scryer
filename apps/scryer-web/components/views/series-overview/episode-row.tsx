@@ -43,10 +43,12 @@ import type { DownloadQueueItem } from "@/lib/types/download-queue";
 import {
   episodeDisplayTitle,
   formatDate,
+  seasonHeading,
   formatFileSize,
   formatRuntimeFromSeconds,
 } from "./helpers";
-import { EpisodePanelContent } from "./episode-panel-content";
+import { EpisodePanelContent, EpisodeSearchResults } from "./episode-panel-content";
+import { InteractiveSearchDialog } from "@/components/common/interactive-search-dialog";
 import {
   EpisodeTableActionButton,
   type TranslateFn,
@@ -56,11 +58,7 @@ import { LoadingMark } from "@/components/common/loading-mark";
 function renderEpisodeTypeBadges(episode: CollectionEpisode, t: TranslateFn) {
   return (
     <>
-      {episode.episodeType === "SPECIAL" ? (
-        <Badge tone="info" className="px-1.5 text-[10px]">
-          {t("episode.special")}
-        </Badge>
-      ) : episode.episodeType === "OVA" ? (
+      {episode.episodeType === "OVA" ? (
         <Badge tone="info" className="px-1.5 text-[10px]">
           {t("episode.ova")}
         </Badge>
@@ -197,6 +195,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   const [isPanelOpen, setIsPanelOpen] = React.useState(initiallyOpen);
   const [activeTab, setActiveTab] = React.useState<EpisodePanelTab>("details");
   const [episodeToggling, setEpisodeToggling] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const initializedDeepLinkEpisodeIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
@@ -237,11 +236,8 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       setActiveTab(tab);
       setIsPanelOpen(true);
       void onLoadEpisodeDetail?.(episode.id);
-      if (tab === "search" && onRunEpisodeSearch && (searchBlocked || !hasSearchResults)) {
-        onRunEpisodeSearch(episode);
-      }
     },
-    [episode, hasSearchResults, onLoadEpisodeDetail, onRunEpisodeSearch, searchBlocked],
+    [episode.id, onLoadEpisodeDetail],
   );
 
   const handleToggleEpisodeDetails = React.useCallback(() => {
@@ -253,17 +249,15 @@ export const EpisodeRow = React.memo(function EpisodeRow({
     openPanelTab("details");
   }, [activeTab, isPanelOpen, openPanelTab]);
 
-  const handleToggleEpisodeSearch = React.useCallback(() => {
+  const handleOpenEpisodeSearch = React.useCallback(() => {
     if (!onRunEpisodeSearch || !onQueueFromEpisodeSearch) {
       return;
     }
-    if (isPanelOpen && activeTab === "search") {
-      setIsPanelOpen(false);
-      return;
+    setSearchOpen(true);
+    if (searchBlocked || !hasSearchResults) {
+      onRunEpisodeSearch(episode);
     }
-
-    openPanelTab("search");
-  }, [activeTab, isPanelOpen, onQueueFromEpisodeSearch, onRunEpisodeSearch, openPanelTab]);
+  }, [episode, hasSearchResults, onQueueFromEpisodeSearch, onRunEpisodeSearch, searchBlocked]);
 
   const handleEpisodeTabChange = React.useCallback(
     (tab: EpisodePanelTab | "history") => {
@@ -303,27 +297,48 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       clearingReleaseBlocklistEntryId={clearingReleaseBlocklistEntryId}
       episode={episode}
       episodeFiles={episodeFiles}
-      episodeIndexerProgress={episodeIndexerProgress}
-      episodeLoading={searchLoading}
-      episodeResults={episodeResults}
       facet={facet}
-      hasSearchResults={hasSearchResults}
       onClearReleaseBlocklistEntry={onClearReleaseBlocklistEntry}
       onDeleteFile={onDeleteFile}
       onMakePrimaryFile={onMakePrimaryFile}
-      onQueueFromEpisodeSearch={onQueueFromEpisodeSearch}
-      onQueueAdditionalFromEpisodeSearch={onQueueAdditionalFromEpisodeSearch}
       onRefreshSubtitles={onRefreshSubtitles}
-      onRunEpisodeSearch={onRunEpisodeSearch}
       onTabChange={handleEpisodeTabChange}
       showHistoryTab={Boolean(onOpenHistory)}
-      showSearchTab={Boolean(onRunEpisodeSearch && onQueueFromEpisodeSearch)}
       releaseBlocklistEntries={releaseBlocklistEntries}
-      searchBlocked={searchBlocked}
       subtitleDownloads={subtitleDownloads}
       libraryId={libraryId}
       primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
     />
+  ) : null;
+
+  const searchDialog = searchOpen ? (
+    <InteractiveSearchDialog
+      id={selectorId("series-overview-episode-search-dialog", episode.id)}
+      open={searchOpen}
+      onOpenChange={setSearchOpen}
+      title={episodeDisplayTitle(episode, t)}
+      description={[
+        seasonHeading(collection, t),
+        episode.episodeNumber ?? episode.episodeLabel,
+        t("label.interactiveSearch"),
+      ]
+        .filter(Boolean)
+        .join(" · ")}
+    >
+      <EpisodeSearchResults
+        collection={collection}
+        episode={episode}
+        episodeIndexerProgress={episodeIndexerProgress}
+        episodeLoading={searchLoading}
+        episodeResults={episodeResults}
+        facet={facet}
+        hasSearchResults={hasSearchResults}
+        onQueueFromEpisodeSearch={onQueueFromEpisodeSearch}
+        onQueueAdditionalFromEpisodeSearch={onQueueAdditionalFromEpisodeSearch}
+        onRunEpisodeSearch={onRunEpisodeSearch}
+        searchBlocked={searchBlocked}
+      />
+    </InteractiveSearchDialog>
   ) : null;
 
   const episodeTypeBadges = renderEpisodeTypeBadges(episode, t);
@@ -347,10 +362,15 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   if (isMobile) {
     return (
       <div
-        id={selectorId("series-overview-episode", episode.id)}
+        id={seriesOverviewEpisodeRowId(
+          facet,
+          episode.seasonNumber,
+          episode.episodeNumber,
+          episode.absoluteNumber,
+        )}
         data-episode-id={episode.id}
         className={cn(
-          "rounded-lg border border-border bg-card/50 p-3",
+          "@container rounded-lg border border-border bg-card/50 p-3",
           !episode.monitored && "opacity-60",
         )}
       >
@@ -418,14 +438,19 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               ) : null}
               {episodeSizeLabel ? <span>{episodeSizeLabel}</span> : null}
             </div>
-            <div className="mt-3 flex flex-col gap-2">
+            <div className="mt-3 flex flex-col gap-2 @md:flex-row">
               {onAutoSearchEpisode ? (
                 <TextActionButton
-                  id={selectorId("series-overview-episode-auto-search", episode.id)}
+                  id={seriesOverviewEpisodeAutoSearchId(
+                    facet,
+                    episode.seasonNumber,
+                    episode.episodeNumber,
+                    episode.absoluteNumber,
+                  )}
                   type="button"
                   size="sm"
                   tone="auto"
-                  className="w-full"
+                  className="w-full @md:w-auto @md:min-w-0 @md:flex-1"
                   onClick={handleAutoSearchClick}
                   disabled={autoSearching}
                   leadingIcon={
@@ -441,25 +466,31 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               ) : null}
               {onRunEpisodeSearch && onQueueFromEpisodeSearch ? (
                 <TextActionButton
-                  id={selectorId("series-overview-episode-interactive-search", episode.id)}
+                  id={seriesOverviewEpisodeInteractiveSearchId(
+                    facet,
+                    episode.seasonNumber,
+                    episode.episodeNumber,
+                    episode.absoluteNumber,
+                  )}
                   type="button"
                   size="sm"
                   tone="search"
-                  className="w-full"
-                  onClick={handleToggleEpisodeSearch}
+                  className="w-full @md:w-auto @md:min-w-0 @md:flex-1"
+                  onClick={handleOpenEpisodeSearch}
                   leadingIcon={<Search className="h-4 w-4" />}
                 >
                   <span>{t("label.interactiveSearch")}</span>
                 </TextActionButton>
               ) : null}
             </div>
-            {isPanelOpen ? (
-              <div className="mt-3 border-t border-border pt-3">
-                {panelContent}
-              </div>
-            ) : null}
           </div>
         </div>
+        {isPanelOpen ? (
+          <div className="mt-3 border-t border-border pt-3">
+            {panelContent}
+          </div>
+        ) : null}
+        {searchDialog}
       </div>
     );
   }
@@ -533,17 +564,18 @@ export const EpisodeRow = React.memo(function EpisodeRow({
               {episodeRuntime}
             </span>
           ) : null}
-          {episodeSizeLabel ? (
-            <span className="ml-2 text-[10px] tabular-nums text-muted-foreground">
-              {episodeSizeLabel}
-            </span>
-          ) : null}
         </TableCell>
         <TableCell className="text-center text-muted-foreground">
           <span className="inline-flex items-center justify-center gap-1">
             <CalendarDays className="h-3.5 w-3.5" />
             {formattedAirDate}
           </span>
+        </TableCell>
+        <TableCell
+          id={selectorId("series-overview-episode-size", episode.id)}
+          className="text-center text-xs tabular-nums text-muted-foreground"
+        >
+          {episodeSizeLabel ?? null}
         </TableCell>
         <TableCell className="text-center">
           <div className="inline-flex items-center justify-center gap-1">
@@ -583,7 +615,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
                   episode.absoluteNumber,
                 )}
                 tone="search"
-                onClick={handleToggleEpisodeSearch}
+                onClick={handleOpenEpisodeSearch}
                 label={t("label.search")}
                 tooltip={t("help.interactiveSearchTooltip")}
                 showTitleAttribute={false}
@@ -597,7 +629,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       {isPanelOpen ? (
         <TableRow id={selectorId("series-overview-episode-panel", episode.id)}>
           <TableCell
-            colSpan={selectionCheckbox ? 7 : 6}
+            colSpan={selectionCheckbox ? 8 : 7}
             className="border-t border-border bg-background/40 p-0"
           >
             <div className="px-4 py-3">
@@ -606,6 +638,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
           </TableCell>
         </TableRow>
       ) : null}
+      {searchDialog}
     </React.Fragment>
   );
 });

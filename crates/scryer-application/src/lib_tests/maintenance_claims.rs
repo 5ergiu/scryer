@@ -12,13 +12,12 @@ use crate::lib_tests::maintenance_evaluation::InMemoryMaintenanceEvaluationRepo;
 use crate::lib_tests::maintenance_rules::InMemoryMaintenanceRuleRepo;
 use crate::lib_tests::request_rules_support::InMemoryLifecycleClaimRepo;
 use crate::maintenance_rules::{
-    MaintenanceActionKind, MaintenanceActionSpec, MaintenanceGatesUpdate,
-    MaintenancePreviewMatcher, MaintenancePreviewRequest, MaintenancePreviewSelection,
-    MaintenanceRuleDraft, execution_reason,
+    MaintenanceActionKind, MaintenanceActionSpec, MaintenancePreviewMatcher,
+    MaintenancePreviewRequest, MaintenancePreviewSelection, MaintenanceRuleDraft, execution_reason,
 };
 use scryer_domain::{
     LifecycleClaim, LifecycleClaimKind, LifecycleClaimProducer, LifecycleClaimState,
-    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceEvaluationMode,
+    MaintenanceCandidateState, MaintenanceEffectArming, MaintenanceRuleState,
 };
 use scryer_rules::maintenance::MaintenanceOutcome;
 
@@ -63,49 +62,29 @@ fn claims_app() -> ClaimFixture {
 }
 
 impl ClaimFixture {
-    async fn rule(&self, draft: MaintenanceRuleDraft, mode: MaintenanceEvaluationMode) -> String {
+    async fn rule(&self, draft: MaintenanceRuleDraft, state: MaintenanceRuleState) -> String {
         let created = self
             .app
             .create_maintenance_rule_set(&self.user, draft)
             .await
             .expect("create rule set");
-        self.app
-            .set_maintenance_rule_evaluation_mode(&self.user, &created.rule_set.id, mode)
-            .await
-            .expect("set mode");
+        super::maintenance_rules::set_rule_state(
+            &self.app,
+            &self.user,
+            &created.rule_set.id,
+            state,
+            None,
+        )
+        .await;
         created.rule_set.id
     }
 
     async fn open_gates(&self, reversible: bool, destructive: bool) {
-        self.app
-            .set_maintenance_instance_gates(
-                &self.user,
-                MaintenanceGatesUpdate {
-                    evaluation_enabled: Some(true),
-                    result_display_enabled: Some(true),
-                    reversible_effects_enabled: Some(reversible),
-                    destructive_effects_enabled: Some(destructive),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("arm gates");
+        super::maintenance_rules::open_maintenance_gates(&self.app, reversible, destructive).await;
     }
 
     async fn arm(&self, rule_set_id: &str, arming: MaintenanceEffectArming, ack: Option<i64>) {
-        let rule = self
-            .app
-            .services
-            .customization
-            .maintenance_rule_sets
-            .get_rule_set(rule_set_id)
-            .await
-            .unwrap()
-            .unwrap();
-        self.app
-            .set_maintenance_rule_arming(&self.user, rule_set_id, arming, ack, Some((&rule).into()))
-            .await
-            .expect("arm rule");
+        super::maintenance_rules::arm_rule(&self.app, &self.user, rule_set_id, arming, ack).await;
     }
 
     async fn evaluate(&self) -> crate::maintenance_rules::MaintenanceEvaluationReport {
@@ -147,7 +126,6 @@ fn draft(rego_source: &str, kind: MaintenanceActionKind) -> MaintenanceRuleDraft
         grace_days: 0,
         storage_root_id: None,
         library_ids: Vec::new(),
-        evaluation_mode: None,
     }
 }
 
@@ -219,14 +197,21 @@ fn keep(id: &str, title_id: &str) -> LifecycleClaim {
 
 // ── The executor's hold (FR-042) ────────────────────────────────────────────
 
+/// What sits on the title when the destructive action comes due.
+enum Claim {
+    Lease(LifecycleClaimState),
+    /// Placed through the same entry point the Keep button calls.
+    OperatorKeep,
+}
+
 /// The table this covers: which claim states hold a destructive action, and
 /// which risk classes the hold applies to at all.
-async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Option<&str>) {
+async fn assert_destructive_hold(claim: Claim, expected_hold: Option<&str>) {
     let fixture = claims_app();
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -271,10 +256,21 @@ async fn assert_destructive_hold(state: LifecycleClaimState, expected_hold: Opti
     fixture
         .arm(&rule_id, MaintenanceEffectArming::Destructive, Some(1))
         .await;
-    fixture
-        .claims
-        .seed(lease("claim-1", &title.id, state))
-        .await;
+    match claim {
+        Claim::Lease(state) => {
+            fixture
+                .claims
+                .seed(lease("claim-1", &title.id, state))
+                .await;
+        }
+        Claim::OperatorKeep => {
+            fixture
+                .app
+                .create_operator_keep_claim(&fixture.user, &title.id)
+                .await
+                .expect("keep the title");
+        }
+    }
 
     let report = fixture.handle().await;
     match expected_hold {
@@ -330,7 +326,7 @@ async fn destructive_execution_reads_claims_under_the_approval_guard() {
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -378,7 +374,7 @@ async fn destructive_execution_reads_claims_under_the_approval_guard() {
 #[tokio::test]
 async fn an_active_lease_holds_a_destructive_action() {
     assert_destructive_hold(
-        LifecycleClaimState::Active,
+        Claim::Lease(LifecycleClaimState::Active),
         Some(execution_reason::RETENTION_CLAIM_HOLD),
     )
     .await;
@@ -389,20 +385,72 @@ async fn an_active_lease_holds_a_destructive_action() {
 #[tokio::test]
 async fn a_dormant_lease_holds_a_destructive_action() {
     assert_destructive_hold(
-        LifecycleClaimState::Dormant,
+        Claim::Lease(LifecycleClaimState::Dormant),
         Some(execution_reason::RETENTION_CLAIM_HOLD),
     )
     .await;
 }
 
 #[tokio::test]
+async fn an_operator_keep_holds_a_destructive_action() {
+    assert_destructive_hold(
+        Claim::OperatorKeep,
+        Some(execution_reason::RETENTION_CLAIM_HOLD),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_candidate_row_carries_its_titles_operator_keep() {
+    let fixture = claims_app();
+    fixture
+        .rule(
+            draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
+            MaintenanceRuleState::DryRun,
+        )
+        .await;
+    fixture.open_gates(false, false).await;
+    let kept = seed_title(&fixture.app, &fixture.user, "Kept subject").await;
+    let unkept = seed_title(&fixture.app, &fixture.user, "Unkept subject").await;
+    fixture.claims.seed(keep("request-keep", &unkept.id)).await;
+    fixture.evaluate().await;
+    let keep = fixture
+        .app
+        .create_operator_keep_claim(&fixture.user, &kept.id)
+        .await
+        .expect("keep the title");
+
+    let rows = fixture
+        .app
+        .list_maintenance_candidates(
+            &fixture.user,
+            crate::maintenance_rules::MaintenanceCandidateFilter::default(),
+        )
+        .await
+        .expect("list candidates");
+    let keep_for = |title_id: &str| {
+        rows.iter()
+            .find(|row| row.candidate.title_id == title_id)
+            .expect("both titles are candidates")
+            .operator_keep_claim_id
+            .clone()
+    };
+    assert_eq!(keep_for(&kept.id), Some(keep.id));
+    assert_eq!(
+        keep_for(&unkept.id),
+        None,
+        "a request's keep is not the operator's, so it offers Keep"
+    );
+}
+
+#[tokio::test]
 async fn a_released_lease_no_longer_holds_a_destructive_action() {
-    assert_destructive_hold(LifecycleClaimState::Released, None).await;
+    assert_destructive_hold(Claim::Lease(LifecycleClaimState::Released), None).await;
 }
 
 #[tokio::test]
 async fn an_expired_lease_no_longer_holds_a_destructive_action() {
-    assert_destructive_hold(LifecycleClaimState::Expired, None).await;
+    assert_destructive_hold(Claim::Lease(LifecycleClaimState::Expired), None).await;
 }
 
 #[tokio::test]
@@ -411,7 +459,7 @@ async fn an_unreadable_claim_store_holds_a_destructive_action() {
     let rule_id = fixture
         .rule(
             draft(ALWAYS_MATCHER, MaintenanceActionKind::DeleteTitleAndFiles),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, true).await;
@@ -452,7 +500,7 @@ async fn a_live_lease_does_not_hold_a_reversible_action() {
                 ALWAYS_MATCHER,
                 MaintenanceActionKind::UnmonitorScopeKeepFiles,
             ),
-            MaintenanceEvaluationMode::Observe,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(true, false).await;
@@ -491,7 +539,7 @@ async fn the_shipped_template_matches_an_expired_lease_with_no_keep() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -514,7 +562,7 @@ async fn the_shipped_template_spares_a_title_with_a_keep_claim() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -541,7 +589,7 @@ async fn the_shipped_template_spares_a_title_whose_lease_is_still_running() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -566,7 +614,7 @@ async fn an_unreadable_claim_store_holds_a_rule_that_reads_a_lease_fact() {
                 EXPIRED_LEASE_MATCHER,
                 MaintenanceActionKind::DeleteTitleAndFiles,
             ),
-            MaintenanceEvaluationMode::Shadow,
+            MaintenanceRuleState::DryRun,
         )
         .await;
     fixture.open_gates(false, false).await;
@@ -782,4 +830,216 @@ async fn deleting_a_title_releases_its_live_claims() {
     let claim = fixture.only_claim().await;
     assert_eq!(claim.state, LifecycleClaimState::Released);
     assert_eq!(claim.released_reason.as_deref(), Some("title_deleted"));
+}
+
+// ── The shipped expired-request-leases rule ─────────────────────────────────
+
+impl ClaimFixture {
+    async fn shipped_rule(&self) -> crate::maintenance_rules::MaintenanceRuleSetDetail {
+        let rules = self
+            .app
+            .list_maintenance_rule_set_details(&self.user)
+            .await
+            .expect("list rule sets");
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        rules[0].clone()
+    }
+}
+
+#[tokio::test]
+async fn the_shipped_rule_is_created_once_and_starts_enabled() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("a second startup leaves the rule alone");
+
+    let detail = fixture.shipped_rule().await;
+    let rule = &detail.rule_set;
+    assert_eq!(rule.name, "Expired request leases");
+    assert!(rule.system_owned && rule.enabled);
+    assert!(rule.library_ids.is_empty(), "every library");
+    assert_eq!(
+        rule.subject_kind,
+        scryer_domain::MaintenanceRuleSubjectKind::Title
+    );
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&detail),
+        MaintenanceRuleState::Enabled
+    );
+    assert_eq!(rule.effect_arming, MaintenanceEffectArming::Destructive);
+    assert_eq!(detail.revision.grace_days, 7);
+    assert_eq!(detail.revision.created_by, None);
+    assert_eq!(
+        detail.revision.action_spec_json,
+        r#"{"schema_version":2,"steps":[{"id":"legacy-delete-title","kind":"delete_title_and_files"}]}"#
+    );
+    assert_eq!(
+        scryer_rules::strip_editor_source(&detail.revision.rego_source),
+        EXPIRED_LEASE_MATCHER
+    );
+}
+
+#[test]
+fn the_shipped_rule_matches_the_web_template() {
+    let template =
+        include_str!("../../../../apps/scryer-web/lib/constants/maintenance-rule-templates.ts");
+    let escaped = crate::maintenance_rules::EXPIRED_REQUEST_LEASES_REGO
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t");
+    assert!(
+        template.contains(&format!("\"{escaped}\"")),
+        "the expired-request-leases template and the shipped rule must carry the same source"
+    );
+}
+
+#[tokio::test]
+async fn the_shipped_rule_keeps_its_matcher_and_name_but_not_its_grace_or_scope() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    let detail = fixture.shipped_rule().await;
+    let id = detail.rule_set.id.clone();
+    let stored_source = scryer_rules::strip_editor_source(&detail.revision.rego_source);
+    let matcher = |rego_source: &str, action_definition, grace_days| {
+        crate::maintenance_rules::MaintenanceMatcherDraft {
+            rego_source: rego_source.to_string(),
+            action_definition,
+            grace_days,
+            storage_root_id: None,
+        }
+    };
+    let refused = |result: AppResult<_>| matches!(result, Err(AppError::Validation(_)));
+
+    assert!(refused(
+        fixture
+            .app
+            .delete_maintenance_rule_set(&fixture.user, &id)
+            .await
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_metadata(
+                &fixture.user,
+                &id,
+                "Renamed".into(),
+                String::new(),
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_matcher(
+                &fixture.user,
+                &id,
+                matcher(ALWAYS_MATCHER, detail.action_definition.clone(), 7),
+            )
+            .await
+            .map(|_| ())
+    ));
+    assert!(refused(
+        fixture
+            .app
+            .update_maintenance_rule_matcher(
+                &fixture.user,
+                &id,
+                matcher(
+                    &stored_source,
+                    crate::maintenance_rules::MaintenanceActionDefinition::Legacy(
+                        MaintenanceActionSpec::new(MaintenanceActionKind::UnmonitorScopeKeepFiles),
+                    ),
+                    7,
+                ),
+            )
+            .await
+            .map(|_| ())
+    ));
+    let unchanged = fixture.shipped_rule().await;
+    assert_eq!(
+        unchanged.rule_set, detail.rule_set,
+        "a refused edit writes nothing"
+    );
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&unchanged),
+        MaintenanceRuleState::Enabled
+    );
+
+    // Grace and libraries are edited exactly as on any rule, including the
+    // drop to Dry run that every matcher or scope edit of an enabled rule has.
+    let regraced = fixture
+        .app
+        .update_maintenance_rule_matcher(
+            &fixture.user,
+            &id,
+            matcher(&stored_source, detail.action_definition.clone(), 14),
+        )
+        .await
+        .expect("grace period is editable");
+    assert_eq!(regraced.revision.grace_days, 14);
+    let rescoped = fixture
+        .app
+        .update_maintenance_rule_metadata(
+            &fixture.user,
+            &id,
+            detail.rule_set.name.clone(),
+            detail.rule_set.description.clone(),
+            vec!["library-1".into()],
+        )
+        .await
+        .expect("libraries are editable");
+    assert_eq!(rescoped.library_ids, vec!["library-1".to_string()]);
+    let edited = fixture.shipped_rule().await;
+    assert!(edited.rule_set.system_owned);
+    assert_eq!(
+        crate::maintenance_rules::maintenance_rule_state(&edited),
+        MaintenanceRuleState::DryRun
+    );
+    assert!(edited.rule_set.destructive_rearm_required);
+}
+
+#[tokio::test]
+async fn the_shipped_rule_matches_only_titles_whose_lease_expired_unkept() {
+    let fixture = claims_app();
+    fixture
+        .app
+        .ensure_expired_request_leases_rule()
+        .await
+        .expect("seed");
+    fixture.open_gates(false, false).await;
+
+    let lapsed = seed_title(&fixture.app, &fixture.user, "Lapsed").await;
+    fixture
+        .claims
+        .seed(lease("claim-1", &lapsed.id, LifecycleClaimState::Expired))
+        .await;
+    let kept = seed_title(&fixture.app, &fixture.user, "Kept").await;
+    fixture
+        .claims
+        .seed(lease("claim-2", &kept.id, LifecycleClaimState::Expired))
+        .await;
+    let mut operator_keep = keep("claim-3", &kept.id);
+    operator_keep.producer = LifecycleClaimProducer::OperatorKeep;
+    operator_keep.producer_ref = None;
+    fixture.claims.seed(operator_keep).await;
+    let forever = seed_title(&fixture.app, &fixture.user, "Forever").await;
+    fixture.claims.seed(keep("claim-4", &forever.id)).await;
+    seed_title(&fixture.app, &fixture.user, "Unrequested").await;
+
+    let report = fixture.evaluate().await;
+    assert_eq!(report.candidates_created, 1, "{report:?}");
+    assert_eq!(fixture.only_candidate().await.title_id, lapsed.id);
 }

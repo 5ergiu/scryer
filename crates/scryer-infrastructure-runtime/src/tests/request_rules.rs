@@ -299,7 +299,7 @@ async fn assert_rule_set_round_trip(store: &dyn RequestRuleSetRepository) -> App
     store
         .update_rule_set_evaluation_mode(
             "rule-a",
-            RequestRuleEvaluationMode::Shadow,
+            RequestRuleEvaluationMode::Enforce,
             true,
             Utc::now(),
         )
@@ -310,7 +310,7 @@ async fn assert_rule_set_round_trip(store: &dyn RequestRuleSetRepository) -> App
         .expect("rule set should exist");
     assert_eq!(loaded.name, "Renamed");
     assert_eq!(loaded.library_ids, vec!["library-9".to_string()]);
-    assert_eq!(loaded.evaluation_mode, RequestRuleEvaluationMode::Shadow);
+    assert_eq!(loaded.evaluation_mode, RequestRuleEvaluationMode::Enforce);
     assert!(loaded.enabled);
     assert_eq!(
         loaded.current_revision_number, 2,
@@ -359,7 +359,7 @@ async fn assert_decision_round_trip(store: &dyn RequestRuleDecisionRepository) -
         .await?
         .expect("a decision was recorded for request-1");
     assert_eq!(latest.id, "decision-2");
-    // Shadow and enforce disagree on purpose, so the two verdicts are stored
+    // The policy and effective verdicts can disagree, so the two are stored
     // and read back separately.
     assert_eq!(
         latest.effective_outcome,

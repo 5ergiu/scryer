@@ -1,6 +1,6 @@
 //! The frozen crypto/CRC cores served to archive-extractor guests.
 //!
-//! The AES-CBC (aws-lc, stateless per call) and CRC-32 (`crc-fast`, seeded)
+//! The AES-CBC (aws-lc, stateless per call) and CRC-32 (`crc-turbo`, seeded)
 //! cores are unchanged from the core-module host ABI (`host_aes_cbc_decrypt` /
 //! `host_crc32`); only the binding layer moved. Archive extractors are WASI
 //! Preview 2 components now, so buffers cross the boundary as `list<u8>`
@@ -10,7 +10,7 @@
 //! `-1` out-of-bounds statuses have no counterpart; every other status and
 //! every numeric result is bit-for-bit what the core ABI produced.
 //!
-//! `crc` is the 1.1.0 catalog function: any named `crc-fast` algorithm,
+//! `crc` is the 1.1.0 catalog function: any named `crc-turbo` algorithm,
 //! started fresh or resumed from a previous finalized result.
 //!
 //! `archive_component_host` is the only consumer: it wires these functions
@@ -20,7 +20,7 @@ use aws_lc_rs::{
     cipher::{AES_128, AES_256, DecryptingKey, DecryptionContext, UnboundCipherKey},
     iv::{FixedLength, IV_LEN_128_BIT},
 };
-use crc_fast::{CrcAlgorithm, Digest};
+use crc_turbo::{CrcAlgorithm, Digest};
 
 pub(crate) const AES_BLOCK_LEN: usize = 16;
 const AES_128_KEY_LEN: usize = 16;
@@ -47,7 +47,7 @@ pub(crate) enum CrcError {
     SeedOutOfRange,
 }
 
-/// Register width in bits of a named `crc-fast` catalog algorithm.
+/// Register width in bits of a named `crc-turbo` catalog algorithm.
 #[allow(deprecated)]
 const fn crc_width(algorithm: CrcAlgorithm) -> Option<u32> {
     use CrcAlgorithm::*;
@@ -63,7 +63,7 @@ const fn crc_width(algorithm: CrcAlgorithm) -> Option<u32> {
         Crc64Ecma182 | Crc64GoIso | Crc64Ms | Crc64Nvme | Crc64Redis | Crc64We | Crc64Xz => {
             Some(64)
         }
-        // Custom variants carry no catalog parameters; crc-fast panics on them.
+        // Custom variants carry no catalog parameters; crc-turbo panics on them.
         CrcCustom | Crc32Custom | Crc64Custom => None,
     }
 }
@@ -71,7 +71,7 @@ const fn crc_width(algorithm: CrcAlgorithm) -> Option<u32> {
 /// `algorithm` over `buf`, finalized and zero-extended to 64 bits.
 ///
 /// `None` starts from the algorithm's initial value. `Some(previous)` resumes
-/// from a finalized result of an earlier call: crc-fast finalizes as
+/// from a finalized result of an earlier call: crc-turbo finalizes as
 /// `state ^ xorout`, so the running state is `previous ^ xorout` exactly, and
 /// the resumed result equals the one-shot checksum of the concatenated input.
 pub(crate) fn crc(algorithm: CrcAlgorithm, seed: Option<u64>, buf: &[u8]) -> Result<u64, CrcError> {
@@ -302,7 +302,7 @@ mod tests {
         ]
     };
 
-    /// Long enough to cross crc-fast's SIMD folding thresholds, with a
+    /// Long enough to cross crc-turbo's SIMD folding thresholds, with a
     /// non-repeating byte pattern.
     fn crc_payload() -> Vec<u8> {
         (0..600u32)
@@ -316,7 +316,7 @@ mod tests {
             for input in [&b""[..], b"123456789", &crc_payload()] {
                 assert_eq!(
                     crc(algorithm, None, input),
-                    Ok(crc_fast::checksum(algorithm, input)),
+                    Ok(crc_turbo::checksum(algorithm, input)),
                     "{algorithm:?}"
                 );
             }
@@ -338,7 +338,7 @@ mod tests {
     fn crc_resumed_at_every_split_matches_the_one_shot_checksum() {
         let payload = crc_payload();
         for algorithm in CATALOG {
-            let whole = crc_fast::checksum(algorithm, &payload);
+            let whole = crc_turbo::checksum(algorithm, &payload);
             for split in [0, 1, 7, 16, 63, 64, 65, 255, 256, 300, 599, 600] {
                 let (head, tail) = payload.split_at(split);
                 let first = crc(algorithm, None, head).unwrap();

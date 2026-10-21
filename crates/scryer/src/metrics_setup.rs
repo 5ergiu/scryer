@@ -300,6 +300,23 @@ pub fn describe_metrics() {
         "Wall-clock duration of one scheduled task execution, labelled by task name."
     );
     describe_counter!(
+        "scryer_task_skipped_overlapping_total",
+        "Scheduled task ticks skipped because the previous run of that task was still in flight, labelled by task name."
+    );
+    describe_counter!(
+        "scryer_task_overdue_total",
+        "Scheduled task runs that ran past their overdue budget at least once, labelled by task name."
+    );
+    describe_gauge!(
+        "scryer_task_running_seconds",
+        Unit::Seconds,
+        "How long the in-flight run of a scheduled task has been running; zero when none is running, labelled by task name."
+    );
+    describe_counter!(
+        "scryer_job_run_terminal_write_failures_total",
+        "Job runs whose terminal status the job run store refused to write; the in-memory tracker ended them anyway, labelled by job key."
+    );
+    describe_counter!(
         "scryer_background_worker_errors_total",
         "Errors raised by a polling background worker, labelled by worker name and the call-site context that failed."
     );

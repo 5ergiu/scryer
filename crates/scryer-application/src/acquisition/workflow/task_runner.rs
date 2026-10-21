@@ -219,6 +219,9 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     // any indexer is queried.
     let dl_snapshot = DownloadClientSnapshot::fetch(app).await;
     check_grabbed_for_failures(app, &dl_snapshot).await;
+    // Grabs no client ever confirmed are the other half of failure handling:
+    // released, they re-open their scope for this same pass.
+    release_unconfirmed_grab_intents(app).await;
     // Between walks the tick stops here, unless failure handling (this pass's
     // or the download lifecycle's since the last walk) re-opened a scope: that
     // scope's saved results are tried now, as they were before the walk had
@@ -4461,6 +4464,7 @@ async fn process_single_target(
                             &delay_profiles,
                             &search_title.tags,
                             &search_title.facet,
+                            &search_title.library_id,
                         )
                         .map(|profile| {
                             profile.release_age_unknown_escalation_deadline(
@@ -5476,17 +5480,168 @@ fn acquisition_walk_interval_may_have_changed(
     }
 }
 
-/// Dispatch long evaluation work without blocking acquisition or queueing
-/// another evaluation behind it. The owner reaps and drains admitted work.
-fn spawn_single_scheduled_task(
-    tasks: &mut tokio::task::JoinSet<()>,
-    task: impl std::future::Future<Output = ()> + Send + 'static,
-) -> bool {
-    if !tasks.is_empty() {
-        return false;
+/// The background acquisition cycle's task name; one cycle runs at a time no
+/// matter which trigger started it.
+const BACKGROUND_ACQUISITION_CYCLE_TASK: &str = "background_acquisition_cycle";
+
+/// How often the scheduler loop checks its in-flight jobs against their
+/// overdue budgets.
+const SCHEDULED_TASK_WATCHDOG_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The shortest overdue budget any scheduled job gets, so a job on a
+/// one-minute cadence is not reported for an ordinary slow run.
+const SCHEDULED_TASK_MIN_OVERDUE_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+/// A job is overdue once it is still running when its next run is due: its
+/// cadence, floored at [`SCHEDULED_TASK_MIN_OVERDUE_BUDGET`].
+fn scheduled_task_overdue_budget(cadence: std::time::Duration) -> std::time::Duration {
+    cadence.max(SCHEDULED_TASK_MIN_OVERDUE_BUDGET)
+}
+
+/// One admitted scheduled job, as the scheduler loop sees it.
+#[derive(Debug)]
+struct InFlightScheduledTask {
+    name: &'static str,
+    started_at: tokio::time::Instant,
+    overdue_after: std::time::Duration,
+    /// Whole budgets elapsed at the last overdue report; zero until the first.
+    reported_budgets: u32,
+}
+
+/// A scheduled job's task that has finished, panicked included.
+#[derive(Debug)]
+struct ScheduledTaskCompletion<T> {
+    name: &'static str,
+    elapsed: std::time::Duration,
+    result: Result<T, tokio::task::JoinError>,
+}
+
+/// A job the watchdog found still running past its budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverdueScheduledTask {
+    name: &'static str,
+    elapsed: std::time::Duration,
+    overdue_after: std::time::Duration,
+}
+
+/// Runs every scheduled job in its own task so the scheduler loop only
+/// schedules, reaps and watches: a slow job never holds up another job's tick.
+///
+/// Admission is single-flight per task name. A tick that lands while that
+/// job's previous run is still going is skipped, not queued, and counted.
+/// The owner reaps completions with [`Self::join_next`] and, at shutdown,
+/// drains admitted work to completion so a job settles its durable state.
+///
+/// The watchdog only reports. It never aborts a job: stopping work in the
+/// middle of persisting it is not a decision the scheduler makes.
+struct ScheduledTaskSupervisor<T> {
+    tasks: tokio::task::JoinSet<T>,
+    in_flight: HashMap<tokio::task::Id, InFlightScheduledTask>,
+}
+
+impl<T: Send + 'static> ScheduledTaskSupervisor<T> {
+    fn new() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            in_flight: HashMap::new(),
+        }
     }
-    tasks.spawn(task);
-    true
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    fn is_running(&self, name: &str) -> bool {
+        self.in_flight.values().any(|task| task.name == name)
+    }
+
+    /// Record a tick that was not admitted because the job is still running.
+    fn note_skipped(&self, name: &'static str) {
+        debug!(
+            task = name,
+            "scheduled task still running; skipping the overlapping run"
+        );
+        metrics::counter!("scryer_task_skipped_overlapping_total", "task" => name).increment(1);
+    }
+
+    /// Start `task` unless a run of `name` is already in flight. Returns
+    /// whether it was admitted; a refused task is dropped without running.
+    fn try_spawn(
+        &mut self,
+        name: &'static str,
+        overdue_after: std::time::Duration,
+        task: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> bool {
+        if self.is_running(name) {
+            self.note_skipped(name);
+            return false;
+        }
+        let id = self.tasks.spawn(task).id();
+        self.in_flight.insert(
+            id,
+            InFlightScheduledTask {
+                name,
+                started_at: tokio::time::Instant::now(),
+                overdue_after,
+                reported_budgets: 0,
+            },
+        );
+        true
+    }
+
+    /// The next job to finish, with its name. `None` once nothing is in flight.
+    async fn join_next(&mut self) -> Option<ScheduledTaskCompletion<T>> {
+        let (id, result) = match self.tasks.join_next_with_id().await? {
+            Ok((id, output)) => (id, Ok(output)),
+            Err(error) => (error.id(), Err(error)),
+        };
+        let (name, elapsed) = self
+            .in_flight
+            .remove(&id)
+            .map_or(("unknown", std::time::Duration::ZERO), |task| {
+                (task.name, task.started_at.elapsed())
+            });
+        metrics::gauge!("scryer_task_running_seconds", "task" => name).set(0.0);
+        Some(ScheduledTaskCompletion {
+            name,
+            elapsed,
+            result,
+        })
+    }
+
+    /// Report every job running past its budget. A job is reported when it
+    /// first crosses its budget and again each further budget it runs, so a
+    /// stuck job stays visible without a warning on every check.
+    fn report_overdue(&mut self, now: tokio::time::Instant) -> Vec<OverdueScheduledTask> {
+        let mut overdue = Vec::new();
+        for task in self.in_flight.values_mut() {
+            let elapsed = now.saturating_duration_since(task.started_at);
+            metrics::gauge!("scryer_task_running_seconds", "task" => task.name)
+                .set(elapsed.as_secs_f64());
+            let budget_secs = task.overdue_after.as_secs_f64().max(1.0);
+            let budgets = (elapsed.as_secs_f64() / budget_secs).floor() as u32;
+            if budgets <= task.reported_budgets {
+                continue;
+            }
+            if task.reported_budgets == 0 {
+                metrics::counter!("scryer_task_overdue_total", "task" => task.name).increment(1);
+            }
+            task.reported_budgets = budgets;
+            warn!(
+                task = task.name,
+                elapsed_secs = elapsed.as_secs(),
+                overdue_after_secs = task.overdue_after.as_secs(),
+                "scheduled task is still running past its overdue budget"
+            );
+            overdue.push(OverdueScheduledTask {
+                name: task.name,
+                elapsed,
+                overdue_after: task.overdue_after,
+            });
+        }
+        overdue
+    }
 }
 
 pub async fn start_background_acquisition_poller(
@@ -5748,7 +5903,6 @@ pub async fn start_background_acquisition_poller(
         maintenance_evaluation_cadence,
     );
     maintenance_evaluation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut maintenance_evaluation_tasks = tokio::task::JoinSet::new();
     let mut lifecycle_action_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + lifecycle_action_offset,
         lifecycle_action_cadence,
@@ -5762,6 +5916,7 @@ pub async fn start_background_acquisition_poller(
         list_sync_cadence,
     );
     list_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watchdog_interval = new_skip_interval(SCHEDULED_TASK_WATCHDOG_PERIOD);
 
     // Consume immediate intervals.
     poll_interval.tick().await;
@@ -5773,6 +5928,7 @@ pub async fn start_background_acquisition_poller(
     direct_indexer_caps_interval.tick().await;
     rss_sync_interval.tick().await;
     pending_release_interval.tick().await;
+    watchdog_interval.tick().await;
 
     {
         let app = app.clone();
@@ -5782,17 +5938,34 @@ pub async fn start_background_acquisition_poller(
         });
     }
 
+    // A process that died mid-grab left intents no client confirmed. They
+    // predate this process, so they are released now rather than a poll
+    // interval (or a grace period) from now; the release is idempotent, so a
+    // poll tick that overlaps it settles nothing twice.
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            release_unconfirmed_grab_intents(&app).await;
+        });
+    }
+
     let wake = app.runtime.acquisition.acquisition_wake.clone();
     // The walk interval applies without a restart. The poll interval, and so
     // the failure check's cadence, is still read once at startup.
     let mut settings_changed = app.runtime.events.settings_changed_broadcast.subscribe();
 
     /// Run a scheduled task inside a spawned task to isolate panics.
-    /// If the task panics, the error is logged and the scheduler loop continues.
-    async fn run_task(
+    /// If the task panics, the error is logged, the scheduler loop continues,
+    /// and the caller gets `None` instead of the task's output.
+    ///
+    /// The supervisor runs this wrapper as the job's detached task, so the
+    /// metrics below are recorded when the job itself finishes. The inner
+    /// spawn also means the job body is never aborted if the supervisor is
+    /// dropped: it detaches and runs to completion.
+    async fn run_task<T: Send + 'static>(
         task_name: &'static str,
-        fut: impl std::future::Future<Output = ()> + Send + 'static,
-    ) {
+        fut: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> Option<T> {
         let t = std::time::Instant::now();
         let outcome = tokio::spawn(fut).await;
         // Freshness: a counter that stops moving is indistinguishable from a
@@ -5806,13 +5979,14 @@ pub async fn start_background_acquisition_poller(
             "task" => task_name
         )
         .set(now);
-        match outcome {
-            Ok(()) => {
+        let output = match outcome {
+            Ok(output) => {
                 metrics::gauge!(
                     crate::metrics_support::TASK_LAST_SUCCESS_TIMESTAMP_SECONDS,
                     "task" => task_name
                 )
                 .set(now);
+                Some(output)
             }
             Err(e) => {
                 tracing::error!(
@@ -5821,37 +5995,87 @@ pub async fn start_background_acquisition_poller(
                     "CRITICAL: scheduled task panicked — scheduler continues but this task failed"
                 );
                 metrics::counter!("scryer_task_panics_total", "task" => task_name).increment(1);
+                None
             }
-        }
+        };
         metrics::counter!("scryer_task_runs_total", "task" => task_name).increment(1);
         metrics::histogram!("scryer_task_duration_seconds", "task" => task_name)
             .record(t.elapsed().as_secs_f64());
+        output
     }
 
-    /// One convergence cycle through the panic-isolating wrapper, with its
-    /// outcome carried back so the loop can re-arm on deferred work. A cycle
-    /// that panicked reports the default outcome — nothing deferred — so a
-    /// panicking cycle cannot drive a retry loop.
-    async fn run_acquisition_cycle_task(
+    /// What a scheduled job's detached task hands back to the loop: the cycle
+    /// outcome for the acquisition cycle, `None` for every other job and for
+    /// a cycle that panicked.
+    type ScheduledJobOutput = Option<BackgroundAcquisitionCycleOutcome>;
+
+    /// Admit one interval job as its own detached task. A tick that lands
+    /// while the job is still running is skipped; the job advertised its next
+    /// run when the running pass started, and that time has now passed, so
+    /// the next real chance — one cadence out — is advertised instead.
+    async fn admit_scheduled_job<Job>(
         app: &AppUseCase,
+        supervisor: &mut ScheduledTaskSupervisor<ScheduledJobOutput>,
+        task_name: &'static str,
+        cadence: std::time::Duration,
+        next_run: Option<(JobKey, chrono::Duration)>,
+        job: impl FnOnce(AppUseCase) -> Job,
+    ) where
+        Job: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let job = job(app.clone());
+        let admitted = supervisor.try_spawn(
+            task_name,
+            scheduled_task_overdue_budget(cadence),
+            async move {
+                run_task(task_name, job).await;
+                None
+            },
+        );
+        if !admitted && let Some((job_key, next_run_in)) = next_run {
+            app.advertise_job_next_run_at(job_key, Utc::now() + next_run_in)
+                .await;
+        }
+    }
+
+    /// Start one convergence cycle as its own detached task through the
+    /// panic-isolating wrapper. Its outcome comes back through the
+    /// supervisor so the loop can record the walk and re-arm on deferred
+    /// work; a cycle that panicked reports the default outcome — nothing
+    /// deferred — so a panicking cycle cannot drive a retry loop.
+    ///
+    /// Returns the trigger and pass the loop needs when the cycle finishes,
+    /// or `None` when a cycle is already running and this one was skipped.
+    fn spawn_acquisition_cycle(
+        app: &AppUseCase,
+        supervisor: &mut ScheduledTaskSupervisor<ScheduledJobOutput>,
         walk_cadence: &mut AcquisitionWalkCadence,
         trigger: BackgroundAcquisitionTrigger,
-    ) -> BackgroundAcquisitionCycleOutcome {
+    ) -> Option<(BackgroundAcquisitionTrigger, BackgroundAcquisitionPass)> {
+        if supervisor.is_running(BACKGROUND_ACQUISITION_CYCLE_TASK) {
+            supervisor.note_skipped(BACKGROUND_ACQUISITION_CYCLE_TASK);
+            return None;
+        }
         let pass = walk_cadence.pass_for(trigger, tokio::time::Instant::now());
-        let sink = Arc::new(Mutex::new(BackgroundAcquisitionCycleOutcome::default()));
-        let recorded = Arc::clone(&sink);
         let app = app.clone();
-        run_task("background_acquisition_cycle", async move {
-            let outcome = run_background_acquisition_cycle(&app, pass).await;
-            *recorded
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
-        })
-        .await;
-        let outcome = *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        walk_cadence.record(pass, outcome, tokio::time::Instant::now());
-        outcome
+        supervisor
+            .try_spawn(
+                BACKGROUND_ACQUISITION_CYCLE_TASK,
+                scheduled_task_overdue_budget(walk_cadence.walk_period),
+                run_task(BACKGROUND_ACQUISITION_CYCLE_TASK, async move {
+                    run_background_acquisition_cycle(&app, pass).await
+                }),
+            )
+            .then_some((trigger, pass))
     }
+
+    let mut supervisor = ScheduledTaskSupervisor::<ScheduledJobOutput>::new();
+    // The running cycle's trigger and pass, held until it finishes. A wake or
+    // a deferred-work deadline that arrives meanwhile is not dropped: its
+    // select arm waits, and it runs as soon as the cycle finishes, exactly as
+    // it did when the loop itself was busy running the cycle.
+    let mut acquisition_cycle: Option<(BackgroundAcquisitionTrigger, BackgroundAcquisitionPass)> =
+        None;
 
     // Bounded re-arm for a scope whose every uncovered indexer was cooling
     // down: the cooldown lifts on its own and re-arms nothing, so without this
@@ -5873,43 +6097,61 @@ pub async fn start_background_acquisition_poller(
                 info!("background acquisition poller shutting down");
                 break;
             }
-            _ = wake.notified() => {
-                let outcome = run_acquisition_cycle_task(
+            Some(completion) = supervisor.join_next(), if !supervisor.is_empty() => {
+                if completion.name == BACKGROUND_ACQUISITION_CYCLE_TASK
+                    && let Some((trigger, pass)) = acquisition_cycle.take()
+                {
+                    let outcome = completion.result.ok().flatten().unwrap_or_default();
+                    walk_cadence.record(pass, outcome, tokio::time::Instant::now());
+                    // A deferred-work cycle drops the deadline that fired it
+                    // rather than carrying it forward, so a cycle that clears
+                    // the deferral disarms the timer entirely.
+                    let armed = match trigger {
+                        BackgroundAcquisitionTrigger::DeferredRetry => None,
+                        BackgroundAcquisitionTrigger::Wake
+                        | BackgroundAcquisitionTrigger::PollTick => deferred_retry_at,
+                    };
+                    deferred_retry_at =
+                        arm_deferred_acquisition_retry(outcome, armed, acquisition_poll_period);
+                } else if let Err(error) = completion.result {
+                    warn!(
+                        task = completion.name,
+                        elapsed_secs = completion.elapsed.as_secs(),
+                        %error,
+                        "scheduled task worker failed"
+                    );
+                }
+            }
+            _ = watchdog_interval.tick(), if !supervisor.is_empty() => {
+                supervisor.report_overdue(tokio::time::Instant::now());
+            }
+            _ = wake.notified(), if acquisition_cycle.is_none() => {
+                acquisition_cycle = spawn_acquisition_cycle(
                     &app,
+                    &mut supervisor,
                     &mut walk_cadence,
                     BackgroundAcquisitionTrigger::Wake,
-                )
-                .await;
-                deferred_retry_at = arm_deferred_acquisition_retry(
-                    outcome,
-                    deferred_retry_at,
-                    acquisition_poll_period,
                 );
             }
             _ = poll_interval.tick() => {
-                let outcome = run_acquisition_cycle_task(
+                // A tick during a running cycle is skipped and counted; only an
+                // admitted cycle moves the walk count.
+                if let Some(cycle) = spawn_acquisition_cycle(
                     &app,
+                    &mut supervisor,
                     &mut walk_cadence,
                     BackgroundAcquisitionTrigger::PollTick,
-                )
-                .await;
-                deferred_retry_at = arm_deferred_acquisition_retry(
-                    outcome,
-                    deferred_retry_at,
-                    acquisition_poll_period,
-                );
+                ) {
+                    acquisition_cycle = Some(cycle);
+                }
             }
-            // The fired deadline is dropped rather than carried forward, so a
-            // cycle that clears the deferral disarms the timer entirely.
-            _ = tokio::time::sleep_until(deferred_retry_deadline), if deferred_retry_at.is_some() => {
-                let outcome = run_acquisition_cycle_task(
+            _ = tokio::time::sleep_until(deferred_retry_deadline), if deferred_retry_at.is_some() && acquisition_cycle.is_none() => {
+                acquisition_cycle = spawn_acquisition_cycle(
                     &app,
+                    &mut supervisor,
                     &mut walk_cadence,
                     BackgroundAcquisitionTrigger::DeferredRetry,
-                )
-                .await;
-                deferred_retry_at =
-                    arm_deferred_acquisition_retry(outcome, None, acquisition_poll_period);
+                );
             }
             changed = settings_changed.recv() => {
                 if acquisition_walk_interval_may_have_changed(changed) {
@@ -5924,8 +6166,7 @@ pub async fn start_background_acquisition_poller(
                 }
             }
             _ = registry_refresh_interval.tick() => {
-                let app = app.clone();
-                run_task("registry_refresh", async move {
+                admit_scheduled_job(&app, &mut supervisor, "registry_refresh", std::time::Duration::from_hours(1), Some((JobKey::PluginRegistryRefresh, chrono::Duration::hours(1))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::PluginRegistryRefresh,
                         Utc::now() + chrono::Duration::hours(1),
@@ -5937,8 +6178,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = health_check_interval.tick() => {
-                let app = app.clone();
-                run_task("health_check", async move {
+                admit_scheduled_job(&app, &mut supervisor, "health_check", std::time::Duration::from_hours(6), Some((JobKey::HealthChecks, chrono::Duration::hours(6))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::HealthChecks,
                         Utc::now() + chrono::Duration::hours(6),
@@ -5949,8 +6189,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = staged_nzb_prune_interval.tick() => {
-                let app = app.clone();
-                run_task("staged_nzb_prune", async move {
+                admit_scheduled_job(&app, &mut supervisor, "staged_nzb_prune", std::time::Duration::from_hours(1), Some((JobKey::StagedNzbPrune, chrono::Duration::hours(1))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::StagedNzbPrune,
                         Utc::now() + chrono::Duration::hours(1),
@@ -5962,8 +6201,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = housekeeping_interval.tick() => {
-                let app = app.clone();
-                run_task("housekeeping", async move {
+                admit_scheduled_job(&app, &mut supervisor, "housekeeping", std::time::Duration::from_hours(24), Some((JobKey::Housekeeping, chrono::Duration::hours(24))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::Housekeeping,
                         Utc::now() + chrono::Duration::hours(24),
@@ -5975,8 +6213,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = pending_release_interval.tick() => {
-                let app = app.clone();
-                run_task("pending_releases", async move {
+                admit_scheduled_job(&app, &mut supervisor, "pending_releases", std::time::Duration::from_mins(1), Some((JobKey::PendingReleaseProcessing, chrono::Duration::minutes(1))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::PendingReleaseProcessing,
                         Utc::now() + chrono::Duration::minutes(1),
@@ -5988,8 +6225,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = prowlarr_sync_interval.tick() => {
-                let app = app.clone();
-                run_task("prowlarr_sync", async move {
+                admit_scheduled_job(&app, &mut supervisor, "prowlarr_sync", std::time::Duration::from_mins(5), Some((JobKey::ProwlarrSync, chrono::Duration::minutes(5))), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::ProwlarrSync,
                         Utc::now() + chrono::Duration::minutes(5),
@@ -6001,8 +6237,7 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = direct_indexer_caps_interval.tick() => {
-                let app = app.clone();
-                run_task("direct_indexer_caps", async move {
+                admit_scheduled_job(&app, &mut supervisor, "direct_indexer_caps", std::time::Duration::from_hours(24), None, move |app| async move {
                     let actor = scryer_domain::User::new_admin("system-indexer-caps");
                     if let Err(error) = app.refresh_enabled_direct_nab_caps_snapshots(&actor).await {
                         warn!(error = %error, "periodic direct indexer caps refresh failed");
@@ -6010,36 +6245,29 @@ pub async fn start_background_acquisition_poller(
                     }
                 }).await;
             }
-            result = maintenance_evaluation_tasks.join_next(), if !maintenance_evaluation_tasks.is_empty() => {
-                if let Some(Err(error)) = result {
-                    warn!(%error, "maintenance evaluation worker failed");
-                }
-            }
             _ = maintenance_evaluation_interval.tick() => {
-                let app = app.clone();
                 let cadence = maintenance_evaluation_cadence;
-                spawn_single_scheduled_task(&mut maintenance_evaluation_tasks, run_task("maintenance_rule_evaluation", async move {
+                let next_run_in =
+                    chrono::Duration::from_std(cadence).unwrap_or_else(|_| chrono::Duration::hours(8));
+                admit_scheduled_job(&app, &mut supervisor, "maintenance_rule_evaluation", cadence, Some((JobKey::MaintenanceRuleEvaluation, next_run_in)), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::MaintenanceRuleEvaluation,
-                        Utc::now()
-                            + chrono::Duration::from_std(cadence)
-                                .unwrap_or_else(|_| chrono::Duration::hours(8)),
+                        Utc::now() + next_run_in,
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::MaintenanceRuleEvaluation, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "scheduled maintenance rule evaluation failed");
                         metrics::counter!("scryer_task_errors_total", "task" => "maintenance_rule_evaluation").increment(1);
                     }
-                }));
+                }).await;
             }
             _ = lifecycle_action_interval.tick() => {
-                let app = app.clone();
                 let cadence = lifecycle_action_cadence;
-                run_task("lifecycle_action_handling", async move {
+                let next_run_in =
+                    chrono::Duration::from_std(cadence).unwrap_or_else(|_| chrono::Duration::hours(12));
+                admit_scheduled_job(&app, &mut supervisor, "lifecycle_action_handling", cadence, Some((JobKey::LifecycleActionHandling, next_run_in)), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::LifecycleActionHandling,
-                        Utc::now()
-                            + chrono::Duration::from_std(cadence)
-                                .unwrap_or_else(|_| chrono::Duration::hours(12)),
+                        Utc::now() + next_run_in,
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::LifecycleActionHandling, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "scheduled maintenance action handling failed");
@@ -6048,14 +6276,13 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = media_server_signal_interval.tick() => {
-                let app = app.clone();
                 let cadence = media_server_signal_cadence;
-                run_task("media_server_signal_sync", async move {
+                let next_run_in =
+                    chrono::Duration::from_std(cadence).unwrap_or_else(|_| chrono::Duration::hours(6));
+                admit_scheduled_job(&app, &mut supervisor, "media_server_signal_sync", cadence, Some((JobKey::MediaServerSignalSync, next_run_in)), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::MediaServerSignalSync,
-                        Utc::now()
-                            + chrono::Duration::from_std(cadence)
-                                .unwrap_or_else(|_| chrono::Duration::hours(6)),
+                        Utc::now() + next_run_in,
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::MediaServerSignalSync, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "scheduled media-server signal sync failed");
@@ -6064,14 +6291,13 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = list_sync_interval.tick() => {
-                let app = app.clone();
                 let cadence = list_sync_cadence;
-                run_task("list_sync", async move {
+                let next_run_in =
+                    chrono::Duration::from_std(cadence).unwrap_or_else(|_| chrono::Duration::minutes(15));
+                admit_scheduled_job(&app, &mut supervisor, "list_sync", cadence, Some((JobKey::ListSync, next_run_in)), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::ListSync,
-                        Utc::now()
-                            + chrono::Duration::from_std(cadence)
-                                .unwrap_or_else(|_| chrono::Duration::minutes(15)),
+                        Utc::now() + next_run_in,
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::ListSync, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "scheduled list sync failed");
@@ -6080,11 +6306,11 @@ pub async fn start_background_acquisition_poller(
                 }).await;
             }
             _ = rss_sync_interval.tick() => {
-                let app = app.clone();
-                run_task("rss_sync", async move {
+                let next_run_in = rss_sync_next_run_delta(rss_sync_tick);
+                admit_scheduled_job(&app, &mut supervisor, "rss_sync", rss_sync_tick, Some((JobKey::RssSync, next_run_in)), move |app| async move {
                     app.advertise_job_next_run_at(
                         JobKey::RssSync,
-                        Utc::now() + rss_sync_next_run_delta(rss_sync_tick),
+                        Utc::now() + next_run_in,
                     ).await;
                     if let Err(e) = app.run_scheduled_job_now(JobKey::RssSync, JobTriggerSource::ScheduledInterval).await {
                         warn!(error = %e, "periodic RSS sync failed");
@@ -6094,11 +6320,21 @@ pub async fn start_background_acquisition_poller(
             }
         }
     }
-    // Stop admitting evaluations at shutdown, but let the admitted job settle
-    // its durable state instead of detaching it from the scheduler lifecycle.
-    while let Some(result) = maintenance_evaluation_tasks.join_next().await {
-        if let Err(error) = result {
-            warn!(%error, "maintenance evaluation worker failed during shutdown");
+    // Stop admitting jobs at shutdown, but let every admitted job settle its
+    // durable state instead of detaching it from the scheduler lifecycle.
+    if !supervisor.is_empty() {
+        info!(
+            in_flight = supervisor.in_flight.len(),
+            "background acquisition poller waiting for running scheduled tasks"
+        );
+    }
+    while let Some(completion) = supervisor.join_next().await {
+        if let Err(error) = completion.result {
+            warn!(
+                task = completion.name,
+                %error,
+                "scheduled task worker failed during shutdown"
+            );
         }
     }
 }
@@ -6179,26 +6415,250 @@ mod task_runner_tests {
 
     #[tokio::test]
     async fn scheduled_evaluation_dispatch_is_nonblocking_and_single_flight() {
-        let mut tasks = tokio::task::JoinSet::new();
+        let mut tasks = ScheduledTaskSupervisor::<()>::new();
+        let budget = scheduled_task_overdue_budget(secs(60));
         let (started, started_rx) = tokio::sync::oneshot::channel();
         let (finish, finish_rx) = tokio::sync::oneshot::channel();
-        assert!(spawn_single_scheduled_task(&mut tasks, async move {
-            started.send(()).unwrap();
-            finish_rx.await.unwrap();
-        }));
+        assert!(
+            tasks.try_spawn("maintenance_rule_evaluation", budget, async move {
+                started.send(()).unwrap();
+                finish_rx.await.unwrap();
+            })
+        );
         started_rx.await.unwrap();
-        assert!(!spawn_single_scheduled_task(&mut tasks, async {
-            panic!("a second tick must not queue another evaluation");
-        }));
+        assert!(
+            !tasks.try_spawn("maintenance_rule_evaluation", budget, async {
+                panic!("a second tick must not queue another evaluation");
+            })
+        );
         // Unrelated work remains schedulable while evaluation is held.
         let unrelated = tokio::spawn(async { 42 });
         assert_eq!(unrelated.await.unwrap(), 42);
-        assert!(tasks.try_join_next().is_none());
+        assert!(tasks.tasks.try_join_next().is_none());
         finish.send(()).unwrap();
-        tasks.join_next().await.unwrap().unwrap();
-        assert!(spawn_single_scheduled_task(&mut tasks, async {}));
-        tasks.join_next().await.unwrap().unwrap();
+        let done = tasks.join_next().await.unwrap();
+        assert_eq!(done.name, "maintenance_rule_evaluation");
+        done.result.unwrap();
+        assert!(tasks.try_spawn("maintenance_rule_evaluation", budget, async {}));
+        tasks.join_next().await.unwrap().result.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    /// Bound for a test whose every wait is on a condition: with the clock
+    /// paused it only fires if that condition never comes, failing the test
+    /// instead of hanging it.
+    const SUPERVISOR_TEST_BOUND: std::time::Duration =
+        std::time::Duration::from_secs(7 * 24 * 3600);
+
+    /// The value of a `task`-labelled counter in a debugging snapshot.
+    fn task_counter(
+        snapshotter: &metrics_util::debugging::Snapshotter,
+        name: &str,
+        task: &str,
+    ) -> Option<u64> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                let key = key.key();
+                let labelled = key
+                    .labels()
+                    .any(|label| label.key() == "task" && label.value() == task);
+                match value {
+                    metrics_util::debugging::DebugValue::Counter(count)
+                        if key.name() == name && labelled =>
+                    {
+                        Some(count)
+                    }
+                    _ => None,
+                }
+            })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_job_does_not_stop_a_sibling_interval_from_running() {
+        tokio::time::timeout(SUPERVISOR_TEST_BOUND, async {
+            let mut supervisor = ScheduledTaskSupervisor::<()>::new();
+            let budget = scheduled_task_overdue_budget(secs(60));
+            let (held_started, held_started_rx) = tokio::sync::oneshot::channel();
+            let (release_held, held) = tokio::sync::oneshot::channel::<()>();
+            assert!(supervisor.try_spawn("rss_sync", budget, async move {
+                held_started.send(()).unwrap();
+                let _ = held.await;
+            }));
+            held_started_rx.await.unwrap();
+
+            // A sibling on its own interval keeps firing and finishing while
+            // the held job never returns.
+            let mut sibling_interval = tokio::time::interval(secs(60));
+            sibling_interval.tick().await;
+            let sibling_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut sibling_completions = 0;
+            while sibling_completions < 3 {
+                tokio::select! {
+                    biased;
+                    Some(done) = supervisor.join_next(), if !supervisor.is_empty() => {
+                        assert_eq!(done.name, "pending_releases", "the held job must not finish");
+                        done.result.unwrap();
+                        sibling_completions += 1;
+                    }
+                    _ = sibling_interval.tick() => {
+                        let runs = Arc::clone(&sibling_runs);
+                        assert!(supervisor.try_spawn("pending_releases", budget, async move {
+                            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }));
+                    }
+                }
+            }
+            assert_eq!(sibling_runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert!(supervisor.is_running("rss_sync"));
+
+            release_held.send(()).unwrap();
+            let done = supervisor.join_next().await.unwrap();
+            assert_eq!(done.name, "rss_sync");
+            done.result.unwrap();
+            assert!(supervisor.is_empty());
+        })
+        .await
+        .expect("sibling runs must complete while the held job is pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_during_a_running_job_is_skipped_not_duplicated() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        tokio::time::timeout(SUPERVISOR_TEST_BOUND, async {
+            let mut supervisor = ScheduledTaskSupervisor::<()>::new();
+            let budget = scheduled_task_overdue_budget(secs(15 * 60));
+            let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let first_starts = Arc::clone(&starts);
+            assert!(supervisor.try_spawn("rss_sync", budget, async move {
+                first_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                started.send(()).unwrap();
+                let _ = held.await;
+            }));
+            started_rx.await.unwrap();
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let admitted = metrics::with_local_recorder(&recorder, || {
+                let overlapping_starts = Arc::clone(&starts);
+                supervisor.try_spawn("rss_sync", budget, async move {
+                    overlapping_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            });
+            assert!(!admitted, "an overlapping tick must not start a second run");
+            assert_eq!(supervisor.in_flight.len(), 1);
+            assert_eq!(
+                task_counter(
+                    &snapshotter,
+                    "scryer_task_skipped_overlapping_total",
+                    "rss_sync"
+                ),
+                Some(1)
+            );
+
+            release.send(()).unwrap();
+            let done = supervisor.join_next().await.unwrap();
+            assert_eq!(done.name, "rss_sync");
+            done.result.unwrap();
+            assert!(supervisor.is_empty());
+            // The refused body was dropped, never run.
+            assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+            // Once the run has finished the next tick is admitted again.
+            let next_starts = Arc::clone(&starts);
+            assert!(supervisor.try_spawn("rss_sync", budget, async move {
+                next_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            supervisor.join_next().await.unwrap().result.unwrap();
+            assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        })
+        .await
+        .expect("the held run must finish once released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watchdog_reports_an_overdue_job_without_stopping_it() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        tokio::time::timeout(SUPERVISOR_TEST_BOUND, async {
+            let mut supervisor = ScheduledTaskSupervisor::<u32>::new();
+            // A one-minute job is floored to the minimum budget.
+            let budget = scheduled_task_overdue_budget(secs(60));
+            assert_eq!(budget, SCHEDULED_TASK_MIN_OVERDUE_BUDGET);
+            assert_eq!(
+                scheduled_task_overdue_budget(secs(6 * 3600)),
+                secs(6 * 3600)
+            );
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let started_at = tokio::time::Instant::now();
+            assert!(supervisor.try_spawn("rss_sync", budget, async move {
+                started.send(()).unwrap();
+                let _ = held.await;
+                7
+            }));
+            started_rx.await.unwrap();
+            assert_eq!(tokio::time::Instant::now(), started_at);
+
+            // Inside its budget: nothing to report.
+            tokio::time::advance(budget - secs(1)).await;
+            assert!(
+                supervisor
+                    .report_overdue(tokio::time::Instant::now())
+                    .is_empty()
+            );
+
+            // Past it: reported once, by name, with how long it has run.
+            tokio::time::advance(secs(2)).await;
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let overdue = metrics::with_local_recorder(&recorder, || {
+                supervisor.report_overdue(tokio::time::Instant::now())
+            });
+            assert_eq!(
+                overdue,
+                vec![OverdueScheduledTask {
+                    name: "rss_sync",
+                    elapsed: tokio::time::Instant::now() - started_at,
+                    overdue_after: budget,
+                }]
+            );
+            assert_eq!(
+                task_counter(&snapshotter, "scryer_task_overdue_total", "rss_sync"),
+                Some(1)
+            );
+
+            // Not again on every check, only once per further budget.
+            tokio::time::advance(SCHEDULED_TASK_WATCHDOG_PERIOD).await;
+            assert!(
+                supervisor
+                    .report_overdue(tokio::time::Instant::now())
+                    .is_empty()
+            );
+            tokio::time::advance(budget).await;
+            let again = supervisor.report_overdue(tokio::time::Instant::now());
+            assert_eq!(again.len(), 1);
+            assert_eq!(again[0].name, "rss_sync");
+
+            // Reporting never stopped the job: it still finishes with its output.
+            assert!(supervisor.is_running("rss_sync"));
+            release.send(()).unwrap();
+            let done = supervisor.join_next().await.unwrap();
+            assert_eq!(done.name, "rss_sync");
+            assert_eq!(done.result.unwrap(), 7);
+            assert!(
+                supervisor
+                    .report_overdue(tokio::time::Instant::now())
+                    .is_empty()
+            );
+        })
+        .await
+        .expect("the watched job must finish once released");
     }
 
     fn secs(value: u64) -> std::time::Duration {
@@ -6407,13 +6867,19 @@ mod task_runner_tests {
 
     #[tokio::test]
     async fn failed_scheduled_evaluation_can_be_reaped_and_restarted() {
-        let mut tasks = tokio::task::JoinSet::new();
-        assert!(spawn_single_scheduled_task(&mut tasks, async {
-            panic!("synthetic evaluation failure");
-        }));
-        assert!(tasks.join_next().await.unwrap().unwrap_err().is_panic());
-        assert!(spawn_single_scheduled_task(&mut tasks, async {}));
-        tasks.join_next().await.unwrap().unwrap();
+        let mut tasks = ScheduledTaskSupervisor::<()>::new();
+        let budget = scheduled_task_overdue_budget(secs(60));
+        assert!(
+            tasks.try_spawn("maintenance_rule_evaluation", budget, async {
+                panic!("synthetic evaluation failure");
+            })
+        );
+        let failed = tasks.join_next().await.unwrap();
+        // The panic still releases the job's slot under its own name.
+        assert_eq!(failed.name, "maintenance_rule_evaluation");
+        assert!(failed.result.unwrap_err().is_panic());
+        assert!(tasks.try_spawn("maintenance_rule_evaluation", budget, async {}));
+        tasks.join_next().await.unwrap().result.unwrap();
     }
 
     #[test]

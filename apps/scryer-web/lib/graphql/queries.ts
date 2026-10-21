@@ -462,7 +462,7 @@ export const TITLE_MEDIA_FILE_FIELDS = `
 export const TITLE_MEDIA_FILE_SCORE_FIELDS = `
       currentScoreEvaluation {
         score evaluatedAt needsRefresh timeSensitive rejectionCodes
-        entries { code delta kind source }
+        entries { code delta kind source origin }
       }`;
 
 const WANTED_ITEM_FIELDS = `
@@ -611,6 +611,15 @@ const MOVIE_SIDE_PANEL_TITLE_FIELDS = `
     effectiveMetadataLanguage
     inheritsMetadataLanguage
     metadataFetchedAt
+    minAvailability
+    movieAvailability {
+      status
+      effectiveDate
+      estimated
+      reason
+      market
+      minimumAvailability
+    }
     qualityProfileId
     requiredAudioLanguagesOverride
     effectiveRequiredAudioLanguages
@@ -752,7 +761,7 @@ export const TITLE_MUTATION_RESULT_FIELDS = `
 
 const HISTORY_SCORING_FIELDS = `scoring {
   candidateScore previousScore delta decisionCode
-  entries { code delta kind source }
+  entries { code delta kind source origin }
   comparisons { fileId episodeIds previousScore delta }
 }`;
 
@@ -1000,6 +1009,19 @@ export const titleReleaseBlocklistQuery = `query TitleReleaseBlocklist($titleId:
 
 export const movieSidePanelTitleQuery = `query MovieSidePanelTitle($id: ID!) {
   title(id: $id) {${MOVIE_SIDE_PANEL_TITLE_FIELDS}
+  }
+}`;
+
+export const movieAvailabilityQuery = `query MovieAvailability($id: ID!) {
+  title(id: $id) {
+    movieAvailability {
+      status
+      effectiveDate
+      estimated
+      reason
+      market
+      minimumAvailability
+    }
   }
 }`;
 
@@ -1663,6 +1685,12 @@ export const librarySettingsQuery = `query LibrarySettings($libraryId: ID!) {
     folderChmod
     chownGroupOverride
     chownGroup
+    defaultMovieAvailabilityOverride
+    defaultMovieAvailability
+    movieReleaseMarketOverride
+    movieReleaseMarket
+    movieAvailabilityDelayDaysOverride
+    movieAvailabilityDelayDays
     indexerRoutingOverride {
       indexerId
       enabled
@@ -1750,6 +1778,17 @@ ${pageMetadataFields}
   }
 }`;
 }
+
+/** Ids of every title matching the catalog filters, for select-all. */
+export const titleCatalogIdsQuery = `query TitleCatalogIds(
+  $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
+  $filter: TitleCatalogFilterInput, $sort: TitleCatalogSortInput, $limit: Int, $offset: Int
+) {
+  titles(facet: $facet, libraryIds: $libraryIds, query: $query, filter: $filter, sort: $sort, limit: $limit, offset: $offset) {
+    items { id }
+    hasMore
+  }
+}`;
 
 export const titleCatalogCountsQuery = `query TitleCatalogCounts(
   $facet: MediaFacetValue, $libraryIds: [ID!], $query: String,
@@ -2903,6 +2942,23 @@ export const acquisitionSettingsQuery = `query AcquisitionSettings {
   }
 }`;
 
+// The Movie facet's availability gate settings.
+export const movieAvailabilitySettingsQuery = `query MovieAvailabilitySettings {
+  mediaSettings(scope: MOVIE) {
+    scope
+    defaultMovieAvailability
+    movieReleaseMarket
+    movieAvailabilityDelayDays
+  }
+}`;
+
+// The availability threshold a movie added to this library inherits.
+export const libraryDefaultMovieAvailabilityQuery = `query LibraryDefaultMovieAvailability($libraryId: ID!) {
+  librarySettings(libraryId: $libraryId) {
+    defaultMovieAvailability
+  }
+}`;
+
 export const generalSettingsQuery = `query GeneralSettings {
   generalSettings {
     apiExplorerEnabled
@@ -3063,6 +3119,7 @@ export const delayProfilesQuery = `query DelayProfiles {
     bypassIfHighestQuality
     appliesToFacets
     tags
+    libraryIds
     priority
     enabled
   }
@@ -3723,9 +3780,10 @@ export const MAINTENANCE_RULE_SET_FIELDS = `
     id
     name
     description
-    enabled
-    evaluationMode
-    destructiveRearmRequired
+    state
+    enabledArming
+    editedSinceEnabled
+    systemOwned
     libraryIds
     subjectKind
     currentRevisionNumber
@@ -3763,13 +3821,8 @@ const maintenanceRuleRevisionFieldSelection = `
     createdBy
     createdAt`;
 
-/// The list is the only rule-set document that reads `effectArming`: the field
-/// is not on the shared selection because every mutation payload also embeds
-/// that selection, and arming is refetched from the list after a mutation
-/// rather than read back off it.
 export const maintenanceRuleSetsQuery = `query MaintenanceRuleSets {
   maintenanceRuleSets {${MAINTENANCE_RULE_SET_FIELDS}
-    effectArming
   }
 }`;
 
@@ -3841,12 +3894,10 @@ export const maintenanceActionStepDescriptorsQuery = `query MaintenanceActionSte
   }
 }`;
 
-/// Candidates. This admin surface always passes `includeShadow: true`: with the
-/// result-display gate closed the server otherwise returns nothing, and an
-/// operator deciding whether to open that gate has to see what shadow
-/// evaluation actually found first.
-export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetId: ID, $states: [MaintenanceCandidateState!], $libraryId: ID, $includeShadow: Boolean, $limit: Int) {
-  maintenanceCandidates(ruleSetId: $ruleSetId, states: $states, libraryId: $libraryId, includeShadow: $includeShadow, limit: $limit) {
+/// Candidates, soonest due first. The server returns none while maintenance
+/// is switched off for the instance.
+export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetId: ID, $states: [MaintenanceCandidateState!], $libraryId: ID, $limit: Int) {
+  maintenanceCandidates(ruleSetId: $ruleSetId, states: $states, libraryId: $libraryId, limit: $limit) {
     id
     ruleSetId
     ruleName
@@ -3854,6 +3905,7 @@ export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetI
       totalSizeBytes
       storageRootFileCount
       storageRootTotalSizeBytes
+    operatorKeepClaimId
     revisionNumber
     subjectKind
     subjectId
@@ -4009,11 +4061,8 @@ export const maintenanceActionRunsQuery = `query MaintenanceActionRuns($ruleSetI
 /// and renders the panel read-locked instead of failing the whole section.
 export const maintenanceInstanceGatesQuery = `query MaintenanceInstanceGates {
   maintenanceInstanceGates {
-    evaluationEnabled
-    resultDisplayEnabled
-    presentationEffectsEnabled
-    reversibleEffectsEnabled
-    destructiveEffectsEnabled
+    enabled
+    actionsPaused
   }
 }`;
 
@@ -4036,16 +4085,14 @@ export const maintenanceExclusionsQuery = `query MaintenanceExclusions($ruleSetI
 
 // ── Request Rules ─────────────────────────────────────────────────────
 //
-// Request rules are saved DISABLED and nothing evaluates until three separate
-// controls agree: the instance gate (system-settings), the rule's own mode
-// (catalog settings), and the requester's library permission.
+// Request rules are saved disabled. An enabled rule covering the library
+// decides a request; with none, the requester's library permission does.
 
 export const REQUEST_RULE_SET_FIELDS = `
     id
     name
     description
     enabled
-    evaluationMode
     libraryIds
     currentRevisionNumber
     decisionCount
@@ -4111,12 +4158,6 @@ export const requestRuleSetQuery = `query RequestRuleSet($id: ID!) {
 
 export const requestRuleRevisionsQuery = `query RequestRuleRevisions($ruleSetId: ID!) {
   requestRuleRevisions(ruleSetId: $ruleSetId) {${requestRuleRevisionFieldSelection}
-  }
-}`;
-
-export const requestRuleInstanceGatesQuery = `query RequestRuleInstanceGates {
-  requestRuleInstanceGates {
-    evaluationEnabled
   }
 }`;
 

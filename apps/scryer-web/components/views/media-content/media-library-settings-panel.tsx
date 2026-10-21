@@ -2,6 +2,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { useBeforeUnload, useBlocker } from "react-router";
 import {
+  CalendarClock,
   FileText,
   Folder,
   FolderOpen,
@@ -62,7 +63,7 @@ import type {
   RootFolderOption,
   ScoringPersonaId,
 } from "@/lib/types";
-import type { ImportMode } from "@/lib/types/settings";
+import { MOVIE_AVAILABILITY_VALUES, type ImportMode } from "@/lib/types/settings";
 import type {
   DownloadClientRoutingSettings,
   DownloadClientRoutingSettingsByClient,
@@ -151,8 +152,6 @@ type MediaLibrarySettingsPanelProps = {
   onUpdateLibrary: (libraryId: string, input: LibraryMutationInput) => Promise<LibraryRecord | null | void> | LibraryRecord | null | void;
   onDeleteLibrary: (libraryId: string) => Promise<boolean | void> | boolean | void;
   onScan: (libraryId: string) => Promise<void> | void;
-  /** Reports whether the content column should widen (dense routing table). */
-  onWideLayoutChange?: (wide: boolean) => void;
   /** Reports the active library name for the page breadcrumb (null when creating). */
   onActiveLibraryNameChange?: (name: string | null) => void;
 };
@@ -246,6 +245,16 @@ function booleanOverrideFromSelectValue(value: string): boolean | null {
   return value === BOOLEAN_TRUE_VALUE;
 }
 
+/** Whole days typed into an override field; blank or unreadable inherits. */
+function parseDelayDays(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function fillerPolicyLabelKey(value: string | null | undefined): string {
   return value === "SKIP_FILLER"
     ? "settings.fillerPolicySkipFiller"
@@ -292,7 +301,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   onUpdateLibrary,
   onDeleteLibrary,
   onScan,
-  onWideLayoutChange,
   onActiveLibraryNameChange,
 }: MediaLibrarySettingsPanelProps) {
   const t = useTranslate();
@@ -328,6 +336,10 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   const [draftPlexmatchWriteOnImport, setDraftPlexmatchWriteOnImport] = React.useState(INHERIT_VALUE);
   const [draftImportMode, setDraftImportMode] = React.useState(INHERIT_VALUE);
   const [draftSetPermissionsLinux, setDraftSetPermissionsLinux] = React.useState(INHERIT_VALUE);
+  const [draftMovieAvailability, setDraftMovieAvailability] = React.useState(INHERIT_VALUE);
+  const [draftMovieReleaseMarket, setDraftMovieReleaseMarket] = React.useState("");
+  const [draftMovieAvailabilityDelayDays, setDraftMovieAvailabilityDelayDays] =
+    React.useState("");
   const [draftFileChmod, setDraftFileChmod] = React.useState("");
   const [draftFolderChmod, setDraftFolderChmod] = React.useState("");
   const [draftChownGroup, setDraftChownGroup] = React.useState("");
@@ -361,9 +373,6 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
     );
     setFooterTarget(document.getElementById(LIBRARY_FOOTER_SLOT_ID));
   }, []);
-  React.useEffect(() => {
-    onWideLayoutChange?.(draftDownloadClientRoutingMode === "custom");
-  }, [draftDownloadClientRoutingMode, onWideLayoutChange]);
 
   const activeLibrary = React.useMemo(
     () => libraries.find((library) => library.id === activeLibraryId) ?? null,
@@ -381,6 +390,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
   }, [canCreateLibrary, libraries, mode]);
   const currentFacet = activeLibrary?.facet ?? facet;
   const isAnimeFacet = currentFacet === "ANIME";
+  const isMovieFacet = currentFacet === "MOVIE";
   const isEpisodicFacet = currentFacet === "SERIES" || currentFacet === "ANIME";
   const showPlexmatch = currentFacet === "SERIES" || currentFacet === "ANIME";
   const savedDownloadClientRoutingEntries =
@@ -429,6 +439,13 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod(settings?.fileChmodOverride ?? "");
       setDraftFolderChmod(settings?.folderChmodOverride ?? "");
       setDraftChownGroup(settings?.chownGroupOverride ?? "");
+      setDraftMovieAvailability(settings?.defaultMovieAvailabilityOverride ?? INHERIT_VALUE);
+      setDraftMovieReleaseMarket(settings?.movieReleaseMarketOverride ?? "");
+      setDraftMovieAvailabilityDelayDays(
+        settings?.movieAvailabilityDelayDaysOverride == null
+          ? ""
+          : String(settings.movieAvailabilityDelayDaysOverride),
+      );
     },
     [],
   );
@@ -477,6 +494,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod("");
       setDraftFolderChmod("");
       setDraftChownGroup("");
+      setDraftMovieAvailability(INHERIT_VALUE);
+      setDraftMovieReleaseMarket("");
+      setDraftMovieAvailabilityDelayDays("");
       setDraftDownloadClientRoutingMode("inherit");
       setDraftDownloadClientRouting({});
       setDraftDownloadClientRoutingOrder([]);
@@ -688,6 +708,17 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
         folderChmod: draftFolderChmod.trim() === "" ? null : draftFolderChmod.trim(),
         chownGroup: draftChownGroup.trim() === "" ? null : draftChownGroup.trim(),
         indexerRouting: savedSettings?.indexerRoutingOverride ?? null,
+        defaultMovieAvailability:
+          isMovieFacet && draftMovieAvailability !== INHERIT_VALUE
+            ? draftMovieAvailability
+            : null,
+        movieReleaseMarket:
+          isMovieFacet && draftMovieReleaseMarket.trim() !== ""
+            ? draftMovieReleaseMarket.trim().toUpperCase()
+            : null,
+        movieAvailabilityDelayDays: isMovieFacet
+          ? parseDelayDays(draftMovieAvailabilityDelayDays)
+          : null,
       };
       if (canManageDownloadClientRouting) {
         draft.downloadClientRouting = draftDownloadClientRoutingEntries;
@@ -699,6 +730,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       draftDownloadClientRoutingEntries,
       draftFillerPolicy,
       draftMetadataLanguage,
+      draftMovieAvailability,
+      draftMovieAvailabilityDelayDays,
+      draftMovieReleaseMarket,
       draftSearchLanguages,
       draftChownGroup,
       draftFileChmod,
@@ -718,6 +752,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       draftUseSeasonFolders,
       isAnimeFacet,
       isEpisodicFacet,
+      isMovieFacet,
       savedSettings,
       showPlexmatch,
     ],
@@ -748,6 +783,11 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
         settingsDraft.fileChmod !== savedSettings.fileChmodOverride ||
         settingsDraft.folderChmod !== savedSettings.folderChmodOverride ||
         settingsDraft.chownGroup !== savedSettings.chownGroupOverride ||
+        settingsDraft.defaultMovieAvailability !==
+          (savedSettings.defaultMovieAvailabilityOverride ?? null) ||
+        settingsDraft.movieReleaseMarket !== (savedSettings.movieReleaseMarketOverride ?? null) ||
+        settingsDraft.movieAvailabilityDelayDays !==
+          (savedSettings.movieAvailabilityDelayDaysOverride ?? null) ||
         (canManageDownloadClientRouting &&
           ((draftDownloadClientRoutingMode === "custom") !==
             Boolean(savedDownloadClientRoutingEntries) ||
@@ -830,6 +870,9 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
       setDraftFileChmod("");
       setDraftFolderChmod("");
       setDraftChownGroup("");
+      setDraftMovieAvailability(INHERIT_VALUE);
+      setDraftMovieReleaseMarket("");
+      setDraftMovieAvailabilityDelayDays("");
       setDraftDownloadClientRoutingMode("inherit");
       setDraftDownloadClientRouting({});
       setDraftDownloadClientRoutingOrder([]);
@@ -1295,76 +1338,82 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
                         id={selectorId("media-library-root-row", rf.path)}
                         className="space-y-1"
                       >
-                        <div className="flex items-center gap-2.5 rounded-[11px] border border-[var(--scry-border2)] bg-[var(--scry-bg)] py-1.5 pl-3.5 pr-2">
-                          <FolderOpen className="h-4 w-4 shrink-0 text-[var(--scry-faint)]" />
-                          <span
-                            className="flex-1 truncate font-[var(--font-code)] text-[13.5px] text-[var(--scry-text2)]"
-                            title={rf.path}
-                          >
-                            {rf.path}
-                          </span>
-                          {pathIsInvalid ? (
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 rounded-[11px] border border-[var(--scry-border2)] bg-[var(--scry-bg)] py-2 pl-3.5 pr-2 sm:flex-nowrap sm:py-1.5">
+                          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                            <FolderOpen className="h-4 w-4 shrink-0 text-[var(--scry-faint)]" />
                             <span
-                              className="shrink-0 rounded-[7px] border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-destructive"
-                              title={invalidRootTooltip}
+                              className="min-w-0 flex-1 break-all font-[var(--font-code)] text-[13.5px] text-[var(--scry-text2)] sm:truncate"
+                              title={rf.path}
                             >
-                              {t("settings.rootFolderInvalid")}
+                              {rf.path}
                             </span>
-                          ) : null}
-                          {rf.isDefault ? (
-                            <span className="shrink-0 rounded-[7px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.12)] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-accent-text)]">
-                              {t("label.default")}
-                            </span>
-                          ) : (
-                            <Button
-                              id={selectorId("media-library-root-set-default", rf.path)}
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
-                              onClick={() => handleSetDefault(index)}
+                          </div>
+                          <div className="order-last flex w-full flex-wrap items-center gap-2 sm:order-none sm:w-auto sm:shrink-0 sm:flex-nowrap">
+                            {pathIsInvalid ? (
+                              <span
+                                className="shrink-0 rounded-[7px] border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-destructive"
+                                title={invalidRootTooltip}
+                              >
+                                {t("settings.rootFolderInvalid")}
+                              </span>
+                            ) : null}
+                            {rf.isDefault ? (
+                              <span className="shrink-0 rounded-[7px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.12)] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.06em] text-[var(--scry-accent-text)]">
+                                {t("label.default")}
+                              </span>
+                            ) : (
+                              <Button
+                                id={selectorId("media-library-root-set-default", rf.path)}
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
+                                onClick={() => handleSetDefault(index)}
+                                disabled={actionBusy}
+                              >
+                                {t("settings.rootFolderSetDefault")}
+                              </Button>
+                            )}
+                            {rf.id && experimentalFeaturesEnabled ? (
+                              <Button
+                                id={selectorId("media-library-root-change", rf.path)}
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
+                                onClick={() => setChangeRootId(rf.id ?? null)}
+                                disabled={!canChangeRoot}
+                                title={
+                                  canChangeRoot
+                                    ? undefined
+                                    : t("rootChange.unavailableWhileUnsaved")
+                                }
+                              >
+                                <HardDrive className="mr-1 h-3.5 w-3.5" />
+                                {t("rootChange.rowAction")}
+                              </Button>
+                            ) : null}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <IconButton
+                              id={selectorId("media-library-root-edit", rf.path)}
+                              label={t("label.edit")}
+                              tone="edit"
+                              onClick={() => openEdit(index)}
                               disabled={actionBusy}
                             >
-                              {t("settings.rootFolderSetDefault")}
-                            </Button>
-                          )}
-                          {rf.id && experimentalFeaturesEnabled ? (
-                            <Button
-                              id={selectorId("media-library-root-change", rf.path)}
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
-                              onClick={() => setChangeRootId(rf.id ?? null)}
-                              disabled={!canChangeRoot}
-                              title={
-                                canChangeRoot
-                                  ? undefined
-                                  : t("rootChange.unavailableWhileUnsaved")
-                              }
+                              <Pencil className="h-4 w-4" />
+                            </IconButton>
+                            <IconButton
+                              id={selectorId("media-library-root-delete", rf.path)}
+                              label={t("label.delete")}
+                              tone="delete"
+                              onClick={() => handleRemovePath(index)}
+                              disabled={actionBusy}
                             >
-                              <HardDrive className="mr-1 h-3.5 w-3.5" />
-                              {t("rootChange.rowAction")}
-                            </Button>
-                          ) : null}
-                          <IconButton
-                            id={selectorId("media-library-root-edit", rf.path)}
-                            label={t("label.edit")}
-                            tone="edit"
-                            onClick={() => openEdit(index)}
-                            disabled={actionBusy}
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </IconButton>
-                          <IconButton
-                            id={selectorId("media-library-root-delete", rf.path)}
-                            label={t("label.delete")}
-                            tone="delete"
-                            onClick={() => handleRemovePath(index)}
-                            disabled={actionBusy}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </IconButton>
+                              <Trash2 className="h-4 w-4" />
+                            </IconButton>
+                          </div>
                         </div>
                         {conflictingLibraryNames ? (
                           <p className="text-xs text-destructive">
@@ -1591,6 +1640,94 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
                 </p>
               </div>
               </LibrarySettingsSection>
+
+              {isMovieFacet ? (
+                <LibrarySettingsSection
+                  icon={CalendarClock}
+                  title={t("settings.movieAvailability")}
+                  description={t("settings.libraryMovieAvailabilityDescription")}
+                >
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-default-availability">
+                        {t("settings.movieDefaultAvailability")}
+                      </Label>
+                      <Select
+                        value={draftMovieAvailability}
+                        onValueChange={setDraftMovieAvailability}
+                        disabled={settingsBusy}
+                      >
+                        <SelectTrigger id="library-movie-default-availability">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={INHERIT_VALUE}>
+                            {t("settings.libraryInheritFacet")}
+                          </SelectItem>
+                          {MOVIE_AVAILABILITY_VALUES.map((value) => (
+                            <SelectItem key={value} value={value}>
+                              {t(`settings.minAvailability.${value}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {savedSettings?.defaultMovieAvailability ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: t(
+                              `settings.minAvailability.${savedSettings.defaultMovieAvailability}`,
+                            ),
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-release-market">
+                        {t("settings.movieReleaseMarket")}
+                      </Label>
+                      <Input
+                        id="library-movie-release-market"
+                        value={draftMovieReleaseMarket}
+                        maxLength={2}
+                        placeholder={t("settings.libraryInheritFacet")}
+                        disabled={settingsBusy}
+                        onChange={(event) =>
+                          setDraftMovieReleaseMarket(event.target.value.toUpperCase())
+                        }
+                      />
+                      {savedSettings?.movieReleaseMarket ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: savedSettings.movieReleaseMarket,
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="library-movie-availability-delay-days">
+                        {t("settings.movieAvailabilityDelay")}
+                      </Label>
+                      <Input
+                        id="library-movie-availability-delay-days"
+                        type="number"
+                        value={draftMovieAvailabilityDelayDays}
+                        placeholder={t("settings.libraryInheritFacet")}
+                        disabled={settingsBusy}
+                        onChange={(event) =>
+                          setDraftMovieAvailabilityDelayDays(event.target.value)
+                        }
+                      />
+                      {savedSettings?.movieAvailabilityDelayDays != null ? (
+                        <EffectiveChip>
+                          {t("settings.libraryEffectiveValue", {
+                            value: String(savedSettings.movieAvailabilityDelayDays),
+                          })}
+                        </EffectiveChip>
+                      ) : null}
+                    </div>
+                  </div>
+                </LibrarySettingsSection>
+              ) : null}
 
               <LibrarySettingsSection
                 icon={ImportIcon}
@@ -2082,12 +2219,7 @@ export const MediaLibrarySettingsPanel = React.memo(function MediaLibrarySetting
             ? createPortal(
                 <div className="border-t border-[var(--scry-border2)] bg-[var(--scry-surf)]">
                   <div
-                    className={cn(
-                      "mx-auto flex w-full flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]",
-                      draftDownloadClientRoutingMode === "custom"
-                        ? "max-w-[1280px]"
-                        : "max-w-[920px]",
-                    )}
+                    className="mx-auto flex w-full max-w-[920px] flex-wrap items-center gap-2 px-4 pb-[max(1.5rem,calc(0.875rem+env(safe-area-inset-bottom)))] pt-3.5 sm:px-6 sm:pb-3.5 md:px-[30px]"
                   >
                     {mode !== "new" &&
                     activeLibrary &&

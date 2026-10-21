@@ -28,22 +28,52 @@ impl IndexerErrorStore {
     }
 }
 
+/// Error entries waiting for the persister beyond this many are dropped, and
+/// counted, rather than holding up the indexer call that saw them.
+const PERSIST_QUEUE_CAPACITY: usize = 256;
+
+/// Records indexer HTTP errors without making the caller wait for storage.
+///
+/// The plugin host calls `record` synchronously from inside an indexer call,
+/// often in a task that also polls other work, such as the other titles of an
+/// acquisition walk. Waiting there for the SQLite writer gate would stop that
+/// task, including a sibling future that holds the gate or is next in line
+/// for it, and so freeze every writer in the process. `record` therefore only
+/// counts the error and queues it; one persister task owned by the recorder
+/// writes the queue in order.
 #[derive(Clone)]
-pub struct BlockingIndexerErrorRecorder {
-    repository: Arc<dyn IndexerErrorRepository>,
-    runtime: tokio::runtime::Handle,
+pub struct QueuedIndexerErrorRecorder {
+    queue: tokio::sync::mpsc::Sender<NewIndexerError>,
 }
 
-impl BlockingIndexerErrorRecorder {
+impl QueuedIndexerErrorRecorder {
+    /// Spawns the persister on the current Tokio runtime, so this must be
+    /// called from within one. `record` may then be called from any thread,
+    /// inside or outside that runtime. The persister stops once every clone
+    /// of the recorder is dropped and the queue is drained.
     pub fn new(repository: Arc<dyn IndexerErrorRepository>) -> Self {
-        Self {
-            repository,
-            runtime: tokio::runtime::Handle::current(),
-        }
+        Self::with_capacity(repository, PERSIST_QUEUE_CAPACITY)
+    }
+
+    fn with_capacity(repository: Arc<dyn IndexerErrorRepository>, capacity: usize) -> Self {
+        let (queue, mut pending) = tokio::sync::mpsc::channel::<NewIndexerError>(capacity);
+        tokio::spawn(async move {
+            while let Some(error) = pending.recv().await {
+                let indexer_id = error.indexer_id.clone();
+                if let Err(error) = repository.record(error).await {
+                    tracing::warn!(
+                        indexer_id = indexer_id.as_str(),
+                        error = %error,
+                        "failed to persist indexer HTTP error history"
+                    );
+                }
+            }
+        });
+        Self { queue }
     }
 }
 
-impl IndexerErrorRecorder for BlockingIndexerErrorRecorder {
+impl IndexerErrorRecorder for QueuedIndexerErrorRecorder {
     fn record(&self, error: NewIndexerError) -> AppResult<()> {
         // Counted before persistence, and regardless of whether persistence
         // succeeds: the classification is the operator-facing signal, and a
@@ -56,34 +86,30 @@ impl IndexerErrorRecorder for BlockingIndexerErrorRecorder {
             "class" => error.classification.as_str()
         )
         .increment(1);
-        let repository = Arc::clone(&self.repository);
-        let runtime = self.runtime.clone();
-        let persist = || {
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(move || runtime.block_on(repository.record(error)))
-                    .join()
-                    .map_err(|_| {
-                        AppError::Repository("indexer error recorder thread panicked".to_string())
-                    })?
-            })
-        };
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                // Joining the persistence thread must release this worker's
-                // runtime duties: its database socket needs that runtime's I/O
-                // driver even though the repository future runs on another thread.
-                tokio::task::block_in_place(persist)
+        match self.queue.try_send(error) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(error)) => {
+                // A burst larger than the queue loses history rows, never the
+                // caller's progress: the counter above already holds the
+                // signal, and this one shows how much history went missing.
+                tracing::warn!(
+                    indexer = error.indexer_name.as_str(),
+                    operation = error.operation.as_str(),
+                    "indexer HTTP error history queue is full; dropping this entry"
+                );
+                metrics::counter!(
+                    "scryer_indexer_errors_dropped_total",
+                    "indexer" => error.indexer_name,
+                    "operation" => error.operation.as_str(),
+                    "class" => error.classification.as_str()
+                )
+                .increment(1);
+                Ok(())
             }
-            Ok(_) => Err(AppError::Repository(
-                "synchronous indexer error capture requires a multi-thread runtime".to_string(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(AppError::Repository(
+                "indexer error history persister has stopped".to_string(),
             )),
-            Err(_) => persist(),
-        };
-        if let Err(error) = &result {
-            tracing::warn!(error = %error, "failed to persist indexer HTTP error history");
         }
-        result
     }
 }
 
@@ -352,6 +378,17 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn test_store() -> (IndexerErrorStore, sqlx::SqlitePool) {
+        let (store, pool, _writer_gate) = test_store_with_writer_gate().await;
+        (store, pool)
+    }
+
+    /// The store plus its SQLite writer gate, so a test can stand in for
+    /// another writer that holds the gate.
+    async fn test_store_with_writer_gate() -> (
+        IndexerErrorStore,
+        sqlx::SqlitePool,
+        Arc<tokio::sync::Mutex<()>>,
+    ) {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -367,11 +404,112 @@ mod tests {
         .execute(&pool)
         .await
         .expect("indexer error migration");
+        let writer_gate = Arc::new(tokio::sync::Mutex::new(()));
         let store = IndexerErrorStore::new(StoreDatastore::Sqlite {
             pool: pool.clone(),
-            writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            writer_gate: Arc::clone(&writer_gate),
         });
-        (store, pool)
+        (store, pool, writer_gate)
+    }
+
+    async fn insert_indexer(pool: &sqlx::SqlitePool, id: &str) {
+        sqlx::query("INSERT INTO indexers (id) VALUES (?)")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("indexer row");
+    }
+
+    /// Delegates to the SQLite store and reports every finished write, so a
+    /// test waits for the row instead of for elapsed time.
+    struct ObservedIndexerErrorStore {
+        inner: IndexerErrorStore,
+        persisted: std::sync::mpsc::Sender<String>,
+    }
+
+    #[async_trait]
+    impl IndexerErrorRepository for ObservedIndexerErrorStore {
+        async fn record(&self, error: NewIndexerError) -> AppResult<()> {
+            let id = error.id.clone();
+            let result = self.inner.record(error).await;
+            let _ = self.persisted.send(id);
+            result
+        }
+
+        async fn list(
+            &self,
+            indexer_id: Option<&str>,
+            first: usize,
+            after: Option<&str>,
+        ) -> AppResult<IndexerErrorPage> {
+            self.inner.list(indexer_id, first, after).await
+        }
+
+        async fn get_detail(&self, id: &str) -> AppResult<Option<IndexerErrorDetail>> {
+            self.inner.get_detail(id).await
+        }
+
+        async fn delete_older_than(&self, cutoff: DateTime<Utc>) -> AppResult<u32> {
+            self.inner.delete_older_than(cutoff).await
+        }
+    }
+
+    /// An acquisition walk polls several titles inside one task. If one title
+    /// holds (or is next in line for) the SQLite writer gate while a sibling
+    /// records an indexer error, recording must not stop the task: the holder
+    /// could then never be polled again to release the gate, and every writer
+    /// in the process would wait behind it forever.
+    #[test]
+    fn error_capture_does_not_stall_a_sibling_future_holding_the_writer_gate() {
+        let runtime = multi_thread_runtime(2);
+        let (store, pool, writer_gate) = runtime.block_on(test_store_with_writer_gate());
+        runtime.block_on(insert_indexer(&pool, "indexer-a"));
+        let (persisted_tx, persisted_rx) = std::sync::mpsc::channel();
+        let recorder = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::new(Arc::new(ObservedIndexerErrorStore {
+                inner: store.clone(),
+                persisted: persisted_tx,
+            }))
+        };
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let gate_held = tokio::sync::Notify::new();
+            let recorded = tokio::sync::Notify::new();
+            let holder = async {
+                let _write = writer_gate.lock().await;
+                gate_held.notify_one();
+                recorded.notified().await;
+            };
+            let capturer = async {
+                gate_held.notified().await;
+                let result = recorder.record(error_event("sibling", "indexer-a", Utc::now()));
+                recorded.notify_one();
+                result
+            };
+            let ((), result) = tokio::join!(holder, capturer);
+            let _ = finished_tx.send(result);
+        });
+
+        let finished = finished_rx.recv_timeout(BOUND);
+        if finished.is_err() {
+            runtime.shutdown_background();
+            panic!(
+                "recording an indexer error blocked the task while a sibling future held the writer gate"
+            );
+        }
+        assert!(matches!(finished, Ok(Ok(()))), "{finished:?}");
+        let persisted = persisted_rx.recv_timeout(BOUND);
+        assert_eq!(persisted.as_deref(), Ok("sibling"));
+        let detail = runtime
+            .block_on(store.get_detail("sibling"))
+            .expect("detail query");
+        runtime.shutdown_background();
+        assert!(
+            detail.is_some(),
+            "the error row must persist once the gate frees"
+        );
     }
 
     fn error_event(id: &str, indexer_id: &str, occurred_at: DateTime<Utc>) -> NewIndexerError {
@@ -604,14 +742,42 @@ mod tests {
         );
     }
 
-    /// Stands in for a datastore that refuses the write, so the test can prove
-    /// the counter survives a persistence failure.
-    struct FailingIndexerErrorRepository;
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn multi_thread_runtime(workers: usize) -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .expect("application runtime")
+    }
+
+    fn datastore_down<T>() -> AppResult<T> {
+        Err(AppError::Repository("datastore is down".to_string()))
+    }
+
+    /// Stands in for a datastore that refuses the write, and reports each
+    /// attempt so a test can wait for the persister to have tried.
+    struct FailingIndexerErrorRepository {
+        attempts: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    fn failing_repository() -> (
+        Arc<FailingIndexerErrorRepository>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        let (attempts, attempted) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Arc::new(FailingIndexerErrorRepository { attempts }),
+            attempted,
+        )
+    }
 
     #[async_trait]
     impl IndexerErrorRepository for FailingIndexerErrorRepository {
-        async fn record(&self, _error: NewIndexerError) -> AppResult<()> {
-            Err(AppError::Repository("datastore is down".to_string()))
+        async fn record(&self, error: NewIndexerError) -> AppResult<()> {
+            let _ = self.attempts.send(error.id);
+            datastore_down()
         }
 
         async fn list(
@@ -620,23 +786,24 @@ mod tests {
             _first: usize,
             _after: Option<&str>,
         ) -> AppResult<IndexerErrorPage> {
-            Err(AppError::Repository("datastore is down".to_string()))
+            datastore_down()
         }
 
         async fn get_detail(&self, _id: &str) -> AppResult<Option<IndexerErrorDetail>> {
-            Err(AppError::Repository("datastore is down".to_string()))
+            datastore_down()
         }
 
         async fn delete_older_than(&self, _cutoff: DateTime<Utc>) -> AppResult<u32> {
-            Err(AppError::Repository("datastore is down".to_string()))
+            datastore_down()
         }
     }
 
     /// Models Postgres persistence waiting for socket I/O on the application
-    /// runtime. The escape channel lets the observer
-    /// release a blocked recorder without needing that runtime to make progress.
+    /// runtime: each write completes only once the observer sends a byte on
+    /// that error's socket.
     struct RuntimeDrivenIndexerErrorRepository {
-        entered: std::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+        entered: std::sync::mpsc::Sender<String>,
+        persisted: std::sync::mpsc::Sender<String>,
         sockets: std::sync::Mutex<std::collections::HashMap<String, tokio::net::TcpStream>>,
     }
 
@@ -650,245 +817,259 @@ mod tests {
                 .unwrap()
                 .remove(&error.id)
                 .expect("error socket");
-            let (escape_tx, escape_rx) = tokio::sync::oneshot::channel();
-            self.entered
-                .send(escape_tx)
-                .map_err(|_| AppError::Repository("reproduction observer stopped".into()))?;
+            let _ = self.entered.send(error.id.clone());
             let mut response = [0_u8; 1];
-            tokio::select! {
-                result = socket.read_exact(&mut response) => result
-                    .map(|_| ())
-                    .map_err(|error| AppError::Repository(error.to_string())),
-                _ = escape_rx => Ok(()),
-            }
+            socket
+                .read_exact(&mut response)
+                .await
+                .map_err(|io_error| AppError::Repository(io_error.to_string()))?;
+            let _ = self.persisted.send(error.id);
+            Ok(())
         }
 
         async fn list(
             &self,
-            indexer_id: Option<&str>,
-            first: usize,
-            after: Option<&str>,
+            _indexer_id: Option<&str>,
+            _first: usize,
+            _after: Option<&str>,
         ) -> AppResult<IndexerErrorPage> {
-            FailingIndexerErrorRepository
-                .list(indexer_id, first, after)
-                .await
+            datastore_down()
         }
 
-        async fn get_detail(&self, id: &str) -> AppResult<Option<IndexerErrorDetail>> {
-            FailingIndexerErrorRepository.get_detail(id).await
+        async fn get_detail(&self, _id: &str) -> AppResult<Option<IndexerErrorDetail>> {
+            datastore_down()
         }
 
-        async fn delete_older_than(&self, cutoff: DateTime<Utc>) -> AppResult<u32> {
-            FailingIndexerErrorRepository
-                .delete_older_than(cutoff)
-                .await
+        async fn delete_older_than(&self, _cutoff: DateTime<Utc>) -> AppResult<u32> {
+            datastore_down()
         }
     }
 
+    /// More concurrent callers than runtime workers, all recording while the
+    /// first write is still waiting on runtime I/O: every caller returns, the
+    /// runtime keeps serving unrelated work, and every write completes once
+    /// its response arrives.
     #[test]
     fn concurrent_indexer_error_capture_keeps_runtime_responsive() {
-        fn probe(concurrent_errors: usize) -> bool {
-            use std::io::Write;
-            const WORKERS: usize = 2;
-            const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(WORKERS)
-                .enable_all()
-                .build()
-                .expect("application runtime");
-            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-            let listener =
-                std::net::TcpListener::bind("127.0.0.1:0").expect("persistence listener");
-            let address = listener.local_addr().expect("persistence address");
-            let mut sockets = std::collections::HashMap::new();
-            let mut peers = Vec::new();
-            for index in 0..concurrent_errors {
-                let peer = std::net::TcpStream::connect_timeout(&address, BOUND)
-                    .expect("persistence peer");
-                peer.set_write_timeout(Some(BOUND))
-                    .expect("peer write bound");
-                let (socket, _) = listener.accept().expect("persistence connection");
-                socket
-                    .set_nonblocking(true)
-                    .expect("async persistence socket");
-                let socket = {
-                    let _guard = runtime.enter();
-                    tokio::net::TcpStream::from_std(socket).expect("register persistence socket")
-                };
-                sockets.insert(format!("error-{index}"), socket);
-                peers.push(peer);
-            }
-            let probe_listener =
-                std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
-            let probe_address = probe_listener.local_addr().expect("probe address");
-            probe_listener
+        use std::io::Write;
+        const WORKERS: usize = 2;
+        const CONCURRENT_ERRORS: usize = WORKERS * 2;
+        let runtime = multi_thread_runtime(WORKERS);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (persisted_tx, persisted_rx) = std::sync::mpsc::channel();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("persistence listener");
+        let address = listener.local_addr().expect("persistence address");
+        let mut sockets = std::collections::HashMap::new();
+        let mut peers = Vec::new();
+        for index in 0..CONCURRENT_ERRORS {
+            let peer =
+                std::net::TcpStream::connect_timeout(&address, BOUND).expect("persistence peer");
+            peer.set_write_timeout(Some(BOUND))
+                .expect("peer write bound");
+            let (socket, _) = listener.accept().expect("persistence connection");
+            socket
                 .set_nonblocking(true)
-                .expect("async probe listener");
-            let probe_listener = {
+                .expect("async persistence socket");
+            let socket = {
                 let _guard = runtime.enter();
-                tokio::net::TcpListener::from_std(probe_listener).expect("register probe listener")
+                tokio::net::TcpStream::from_std(socket).expect("register persistence socket")
             };
-            let repository = Arc::new(RuntimeDrivenIndexerErrorRepository {
+            sockets.insert(format!("error-{index}"), socket);
+            peers.push(peer);
+        }
+        let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        let probe_address = probe_listener.local_addr().expect("probe address");
+        probe_listener
+            .set_nonblocking(true)
+            .expect("async probe listener");
+        let probe_listener = {
+            let _guard = runtime.enter();
+            tokio::net::TcpListener::from_std(probe_listener).expect("register probe listener")
+        };
+        let recorder = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::new(Arc::new(RuntimeDrivenIndexerErrorRepository {
                 entered: entered_tx,
+                persisted: persisted_tx,
                 sockets: std::sync::Mutex::new(sockets),
-            });
-            let recorder = {
-                let _guard = runtime.enter();
-                BlockingIndexerErrorRecorder::new(repository)
-            };
-            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-            for index in 0..concurrent_errors {
-                let recorder = recorder.clone();
-                let finished = finished_tx.clone();
-                runtime.spawn(async move {
-                    let result = recorder.record(error_event(
-                        &format!("error-{index}"),
-                        &format!("indexer-{index}"),
-                        Utc::now(),
-                    ));
-                    let _ = finished.send(result);
-                });
-            }
-            drop(finished_tx);
-
-            // Each signal proves its caller is inside the synchronous recorder
-            // before the observer supplies any persistence response bytes.
-            // Do not infer saturation from a sleep or a scheduling guess.
-            let mut escape = Vec::new();
-            for _ in 0..concurrent_errors {
-                match entered_rx.recv_timeout(BOUND) {
-                    Ok(sender) => escape.push(sender),
-                    Err(error) => {
-                        drop(escape);
-                        runtime.shutdown_background();
-                        panic!("recorder never reached persistence: {error}");
-                    }
-                }
-            }
-            // These bytes reach the sockets without application-runtime work.
-            // A stalled read therefore cannot be blamed on a slow database.
-            let responses_sent = peers.iter_mut().all(|peer| peer.write_all(&[1]).is_ok());
-            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+            }))
+        };
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        for index in 0..CONCURRENT_ERRORS {
+            let recorder = recorder.clone();
+            let finished = finished_tx.clone();
             runtime.spawn(async move {
-                let result = probe_listener.accept().await.map(|_| ());
-                let _ = probe_tx.send(result);
+                let result = recorder.record(error_event(
+                    &format!("error-{index}"),
+                    &format!("indexer-{index}"),
+                    Utc::now(),
+                ));
+                let _ = finished.send(result);
             });
-            let connected = std::net::TcpStream::connect_timeout(&probe_address, BOUND);
-            let responsive = matches!(probe_rx.recv_timeout(BOUND), Ok(Ok(())));
+        }
+        drop(finished_tx);
 
-            // The observer is an ordinary test thread. It can wake repository
-            // futures polled by the recorder's scoped threads even when every
-            // application worker is blocked, so failed assertions cannot hang
-            // runtime shutdown or leave the test process wedged.
-            for sender in escape {
-                let _ = sender.send(());
-            }
-            let mut finished = Vec::new();
-            for _ in 0..concurrent_errors {
-                finished.push(finished_rx.recv_timeout(BOUND));
-            }
-            let recovered = responsive || matches!(probe_rx.recv_timeout(BOUND), Ok(Ok(())));
-            runtime.shutdown_background();
-            assert!(
-                responses_sent,
-                "persistence responses must reach every socket"
-            );
-            assert!(connected.is_ok(), "the probe TCP connection must establish");
-            assert!(finished.iter().all(|result| matches!(result, Ok(Ok(())))));
-            assert!(
-                recovered,
-                "runtime must recover when recorder callers are released"
-            );
-            responsive
+        // No response byte has been sent yet, so no write can have finished:
+        // every caller returning here proves none of them waited for storage.
+        let finished = (0..CONCURRENT_ERRORS)
+            .map(|_| finished_rx.recv_timeout(BOUND))
+            .collect::<Vec<_>>();
+        // The persister is now parked on runtime I/O for its first write.
+        let first_entered = entered_rx.recv_timeout(BOUND);
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let result = probe_listener.accept().await.map(|_| ());
+            let _ = probe_tx.send(result);
+        });
+        let connected = std::net::TcpStream::connect_timeout(&probe_address, BOUND);
+        let responsive = matches!(probe_rx.recv_timeout(BOUND), Ok(Ok(())));
+
+        // These bytes reach the sockets without application-runtime work, so
+        // a write that never completes cannot be blamed on a slow database.
+        let responses_sent = peers.iter_mut().all(|peer| peer.write_all(&[1]).is_ok());
+        let mut persisted = (0..CONCURRENT_ERRORS)
+            .map_while(|_| persisted_rx.recv_timeout(BOUND).ok())
+            .collect::<Vec<_>>();
+        persisted.sort();
+        runtime.shutdown_background();
+
+        assert!(
+            finished.iter().all(|result| matches!(result, Ok(Ok(())))),
+            "every caller must return while persistence is pending: {finished:?}"
+        );
+        assert!(
+            first_entered.is_ok(),
+            "the persister never reached the repository"
+        );
+        assert!(connected.is_ok(), "the probe TCP connection must establish");
+        assert!(
+            responsive,
+            "the runtime must serve unrelated work while persistence is pending"
+        );
+        assert!(
+            responses_sent,
+            "persistence responses must reach every socket"
+        );
+        let mut expected = (0..CONCURRENT_ERRORS)
+            .map(|index| format!("error-{index}"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(persisted, expected, "every queued error must persist");
+    }
+
+    #[test]
+    fn record_returns_before_persistence_and_the_row_follows() {
+        let runtime = multi_thread_runtime(2);
+        let (store, pool, writer_gate) = runtime.block_on(test_store_with_writer_gate());
+        runtime.block_on(insert_indexer(&pool, "indexer-a"));
+        let (persisted_tx, persisted_rx) = std::sync::mpsc::channel();
+        let recorder = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::new(Arc::new(ObservedIndexerErrorStore {
+                inner: store.clone(),
+                persisted: persisted_tx,
+            }))
+        };
+
+        // Another writer holds the gate, so the write cannot finish before
+        // `record` returns.
+        let other_writer = runtime.block_on(Arc::clone(&writer_gate).lock_owned());
+        let result = recorder.record(error_event("queued", "indexer-a", Utc::now()));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            persisted_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        assert!(
+            runtime
+                .block_on(store.get_detail("queued"))
+                .expect("detail query")
+                .is_none(),
+            "the row must not exist while the writer gate is held"
+        );
+
+        drop(other_writer);
+        assert_eq!(persisted_rx.recv_timeout(BOUND).as_deref(), Ok("queued"));
+        let detail = runtime
+            .block_on(store.get_detail("queued"))
+            .expect("detail query")
+            .expect("persisted row");
+        runtime.shutdown_background();
+        assert_eq!(detail.summary.indexer_id, "indexer-a");
+        assert_eq!(
+            detail.summary.classification,
+            IndexerErrorClassification::HttpRateLimited
+        );
+        assert_eq!(detail.response.map(|response| response.status), Some(429));
+    }
+
+    /// Parks every write until the test releases it, and reports when each
+    /// write starts and finishes.
+    struct ParkedIndexerErrorRepository {
+        entered: tokio::sync::mpsc::UnboundedSender<String>,
+        persisted: tokio::sync::mpsc::UnboundedSender<String>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait]
+    impl IndexerErrorRepository for ParkedIndexerErrorRepository {
+        async fn record(&self, error: NewIndexerError) -> AppResult<()> {
+            let _ = self.entered.send(error.id.clone());
+            self.release
+                .acquire()
+                .await
+                .expect("release semaphore")
+                .forget();
+            let _ = self.persisted.send(error.id);
+            Ok(())
         }
 
-        assert!(
-            probe(1),
-            "one free worker must drive persistence and the probe"
-        );
-        assert!(
-            probe(2),
-            "all workers stalled in synchronous indexer error capture; the unrelated runtime probe ran only after the observer released persistence"
-        );
+        async fn list(
+            &self,
+            _indexer_id: Option<&str>,
+            _first: usize,
+            _after: Option<&str>,
+        ) -> AppResult<IndexerErrorPage> {
+            datastore_down()
+        }
+
+        async fn get_detail(&self, _id: &str) -> AppResult<Option<IndexerErrorDetail>> {
+            datastore_down()
+        }
+
+        async fn delete_older_than(&self, _cutoff: DateTime<Utc>) -> AppResult<u32> {
+            datastore_down()
+        }
     }
 
-    #[test]
-    fn current_thread_error_capture_returns_an_error_without_blocking() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let subject =
-                BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository));
-            let error = subject
-                .record(error_event("current-thread", "fixture", Utc::now()))
-                .expect_err("a current-thread runtime cannot hand off its driver");
-            assert!(
-                error
-                    .to_string()
-                    .contains("requires a multi-thread runtime")
-            );
-        });
+    type CounterSeries = Vec<(
+        std::collections::BTreeMap<String, String>,
+        metrics_util::debugging::DebugValue,
+    )>;
+
+    /// Every series by metric name, from one snapshot: taking a snapshot
+    /// resets the debugging recorder's counters, so it must happen once.
+    fn counter_series(
+        snapshotter: &metrics_util::debugging::Snapshotter,
+    ) -> std::collections::BTreeMap<String, CounterSeries> {
+        let mut series = std::collections::BTreeMap::<String, CounterSeries>::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_string(), label.value().to_string()))
+                .collect();
+            series
+                .entry(key.key().name().to_string())
+                .or_default()
+                .push((labels, value));
+        }
+        series
     }
 
-    #[test]
-    fn error_capture_outside_runtime_preserves_repository_failure() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        let subject = {
-            let _guard = runtime.enter();
-            BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository))
-        };
-        let error = subject
-            .record(error_event("outside-runtime", "fixture", Utc::now()))
-            .expect_err("repository failure must reach the synchronous caller");
-        assert!(error.to_string().contains("datastore is down"));
-    }
-
-    #[test]
-    fn classified_errors_are_counted_even_when_persistence_fails() {
-        // A multi-thread runtime: `record` blocks on the repository future from
-        // a scoped std thread, which needs a runtime that keeps being driven.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .expect("multi-thread runtime");
-        let _guard = runtime.enter();
-        let subject = BlockingIndexerErrorRecorder::new(Arc::new(FailingIndexerErrorRepository));
-
-        let debugging = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = debugging.snapshotter();
-        let result = metrics::with_local_recorder(&debugging, || {
-            subject.record(error_event("err-1", "idx-1", Utc::now()))
-        });
-
-        assert!(
-            result.is_err(),
-            "the stub repository must fail, otherwise the test proves nothing"
-        );
-
-        let recorded = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, _, _, _)| key.key().name() == "scryer_indexer_errors_total")
-            .map(|(key, _, _, value)| {
-                let labels = key
-                    .key()
-                    .labels()
-                    .map(|label| (label.key().to_string(), label.value().to_string()))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                (labels, value)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(recorded.len(), 1, "unexpected series: {recorded:?}");
-        let (labels, value) = &recorded[0];
+    fn assert_labels_match_fixture(series: &CounterSeries) {
+        assert_eq!(series.len(), 1, "unexpected series: {series:?}");
+        let (labels, value) = &series[0];
         assert_eq!(
             labels.get("indexer").map(String::as_str),
             Some("Example indexer")
@@ -902,5 +1083,163 @@ mod tests {
             Some("http_rate_limited")
         );
         assert_eq!(value, &metrics_util::debugging::DebugValue::Counter(1));
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_entry_without_blocking_and_counts_it() {
+        const CAPACITY: usize = 2;
+        let runtime = multi_thread_runtime(1);
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persisted_tx, mut persisted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let recorder = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::with_capacity(
+                Arc::new(ParkedIndexerErrorRepository {
+                    entered: entered_tx,
+                    persisted: persisted_tx,
+                    release: Arc::clone(&release),
+                }),
+                CAPACITY,
+            )
+        };
+
+        // The persister takes the first entry and parks inside the repository,
+        // which leaves exactly CAPACITY free slots for the next entries.
+        recorder
+            .record(error_event("queued-0", "indexer-a", Utc::now()))
+            .expect("first entry");
+        let entered =
+            runtime.block_on(async { tokio::time::timeout(BOUND, entered_rx.recv()).await });
+        assert_eq!(entered.ok().flatten().as_deref(), Some("queued-0"));
+        for index in 1..=CAPACITY {
+            recorder
+                .record(error_event(
+                    &format!("queued-{index}"),
+                    "indexer-a",
+                    Utc::now(),
+                ))
+                .expect("queued entry");
+        }
+
+        // A thread of its own bounds the call: a regression that blocks on the
+        // full queue fails here instead of hanging the test.
+        let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+        let overflowing = recorder.clone();
+        std::thread::spawn(move || {
+            let debugging = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = debugging.snapshotter();
+            let result = metrics::with_local_recorder(&debugging, || {
+                overflowing.record(error_event("overflow", "indexer-a", Utc::now()))
+            });
+            let _ = outcome_tx.send((result, counter_series(&snapshotter)));
+        });
+        let outcome = outcome_rx.recv_timeout(BOUND);
+        let Ok((result, mut series)) = outcome else {
+            runtime.shutdown_background();
+            panic!("recording into a full queue blocked the caller");
+        };
+        assert!(result.is_ok(), "{result:?}");
+        assert_labels_match_fixture(
+            &series
+                .remove("scryer_indexer_errors_total")
+                .unwrap_or_default(),
+        );
+        assert_labels_match_fixture(
+            &series
+                .remove("scryer_indexer_errors_dropped_total")
+                .unwrap_or_default(),
+        );
+
+        release.add_permits(CAPACITY + 1);
+        let persisted = runtime.block_on(async {
+            let mut persisted = Vec::new();
+            for _ in 0..=CAPACITY {
+                match tokio::time::timeout(BOUND, persisted_rx.recv()).await {
+                    Ok(Some(id)) => persisted.push(id),
+                    _ => break,
+                }
+            }
+            persisted
+        });
+        assert_eq!(persisted, ["queued-0", "queued-1", "queued-2"]);
+
+        // Dropping the last recorder closes the queue; the persister drains
+        // it and exits, dropping the repository. The dropped entry was never
+        // queued, so the persisted stream ends without it.
+        drop(recorder);
+        let after_drain =
+            runtime.block_on(async { tokio::time::timeout(BOUND, persisted_rx.recv()).await });
+        runtime.shutdown_background();
+        assert_eq!(after_drain.ok(), Some(None));
+    }
+
+    #[test]
+    fn current_thread_error_capture_hands_off_without_blocking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (repository, mut attempted) = failing_repository();
+            let subject = QueuedIndexerErrorRecorder::new(repository);
+            subject
+                .record(error_event("current-thread", "fixture", Utc::now()))
+                .expect("a current-thread runtime queues the entry");
+            let attempt = tokio::time::timeout(BOUND, attempted.recv()).await;
+            assert_eq!(attempt.ok().flatten().as_deref(), Some("current-thread"));
+        });
+    }
+
+    #[test]
+    fn error_capture_outside_runtime_hands_off_to_the_persister() {
+        let runtime = multi_thread_runtime(1);
+        let (repository, mut attempted) = failing_repository();
+        let subject = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::new(repository)
+        };
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        subject
+            .record(error_event("outside-runtime", "fixture", Utc::now()))
+            .expect("a caller outside the runtime queues the entry");
+        let attempt =
+            runtime.block_on(async { tokio::time::timeout(BOUND, attempted.recv()).await });
+        runtime.shutdown_background();
+        assert_eq!(attempt.ok().flatten().as_deref(), Some("outside-runtime"));
+    }
+
+    #[test]
+    fn classified_errors_are_counted_even_when_persistence_fails() {
+        let runtime = multi_thread_runtime(1);
+        let (repository, mut attempted) = failing_repository();
+        let subject = {
+            let _guard = runtime.enter();
+            QueuedIndexerErrorRecorder::new(repository)
+        };
+
+        let debugging = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = debugging.snapshotter();
+        let result = metrics::with_local_recorder(&debugging, || {
+            subject.record(error_event("err-1", "idx-1", Utc::now()))
+        });
+        assert!(result.is_ok(), "{result:?}");
+        // The stub repository must actually have refused the write, otherwise
+        // the test proves nothing.
+        let attempt =
+            runtime.block_on(async { tokio::time::timeout(BOUND, attempted.recv()).await });
+        runtime.shutdown_background();
+        assert_eq!(attempt.ok().flatten().as_deref(), Some("err-1"));
+
+        let mut series = counter_series(&snapshotter);
+        assert_labels_match_fixture(
+            &series
+                .remove("scryer_indexer_errors_total")
+                .unwrap_or_default(),
+        );
+        assert!(
+            !series.contains_key("scryer_indexer_errors_dropped_total"),
+            "a queued entry is not a dropped one"
+        );
     }
 }

@@ -35,7 +35,7 @@ fn graphql_invalid_nzb_xml_queue_failure_is_blocklisted() {
 
 async fn graphql_invalid_nzb_xml_queue_failure_is_blocklisted_impl() {
     let ctx = TestContext::new().await;
-    let title_id = add_test_title(&ctx, "Broken NZB Movie", "MOVIE").await;
+    let title_id = add_available_test_movie(&ctx, "Broken NZB Movie").await;
     let source_hint = format!("{}/invalid.nzb", ctx.nzbget_server.uri());
     let admin = ctx.app.find_or_create_default_user().await.unwrap();
     let candidate_token = ctx
@@ -136,7 +136,7 @@ fn graphql_title_release_blocklist_entry_can_be_cleared() {
 
 async fn graphql_title_release_blocklist_entry_can_be_cleared_impl() {
     let ctx = TestContext::new().await;
-    let title_id = add_test_title(&ctx, "Clear Blocklist Movie", "MOVIE").await;
+    let title_id = add_available_test_movie(&ctx, "Clear Blocklist Movie").await;
     let source_hint = format!("{}/invalid-clear.nzb", ctx.nzbget_server.uri());
     let release_title = "Clear.Blocklist.Movie.2024";
     let admin = ctx.app.find_or_create_default_user().await.unwrap();

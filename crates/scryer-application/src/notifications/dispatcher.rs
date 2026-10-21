@@ -2793,7 +2793,6 @@ mod tests {
                     list: list_sample_subject(),
                     title: title_context("Listed Movie", MediaFacet::Movie),
                     library_id: "library-movies".to_string(),
-                    searched: true,
                 }),
             ),
             list_sample_event(19, list_sample_request(false)),

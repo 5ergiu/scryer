@@ -66,6 +66,7 @@ impl DownloadClient for GatedClient {
                 info_hash: None,
                 download_id: request.download_id,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             }),
             RaceAnswer::Refuse => Err(scryer_application::AppError::Validation(
                 "the fixture client refuses this release".to_string(),
@@ -248,6 +249,7 @@ impl RaceHarness {
             size_bytes: Some(1_000),
             completed_at: Some(completed_at),
             parameters,
+            posted_file_names: Vec::new(),
         };
         self.ingest
             .publish(TrackedDownloadSnapshotUpdate {

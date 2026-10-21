@@ -4299,7 +4299,7 @@ async fn graphql_add_title_default_root_id_stores_library_default() {
 #[tokio::test]
 async fn graphql_wanted_items_missing_view_exposes_fileless_monitored_movie() {
     let ctx = TestContext::new().await;
-    let id = add_test_title(&ctx, "Search Monitored Test", "MOVIE").await;
+    let id = add_available_test_movie(&ctx, "Search Monitored Test").await;
 
     let body = gql(
         &ctx,
@@ -4351,7 +4351,7 @@ async fn graphql_wanted_items_missing_view_exposes_fileless_monitored_movie() {
 #[tokio::test]
 async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
     let ctx = TestContext::new().await;
-    let title_id = add_test_title(&ctx, "Standby Count Test", "MOVIE").await;
+    let title_id = add_available_test_movie(&ctx, "Standby Count Test").await;
     let wanted_item_id = Id::new().0;
     let now = Utc::now();
     ctx.library_state
@@ -5609,85 +5609,7 @@ async fn graphql_tmdb_primary_series_is_added_hydrated_and_searched_by_smg_id() 
 async fn graphql_library_search_languages_round_trip_in_order() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
-    // Saving library settings also touches the import, permission and routing
-    // keys, which the shared typed-settings seed does not cover.
-    ctx.settings_store
-        .batch_ensure_setting_definitions(vec![
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "import.mode".into(),
-                data_type: "string".into(),
-                default_value_json: "\"hardlink_or_copy\"".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.set_linux".into(),
-                data_type: "boolean".into(),
-                default_value_json: "false".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.file_chmod".into(),
-                data_type: "string".into(),
-                default_value_json: "null".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.folder_chmod".into(),
-                data_type: "string".into(),
-                default_value_json: "\"755\"".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "permissions.chown_group".into(),
-                data_type: "string".into(),
-                default_value_json: "null".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "download_client.routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "nzbget.client_routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-            SettingDefinitionSeed {
-                category: "media".into(),
-                scope: "system".into(),
-                key_name: "indexer.routing".into(),
-                data_type: "string".into(),
-                default_value_json: "{}".into(),
-                is_sensitive: false,
-                validation_json: None,
-            },
-        ])
-        .await
-        .expect("seed library import settings definitions");
+    seed_library_settings_definitions(&ctx).await;
     let library_id =
         scryer_domain::default_library_id_for_facet(&scryer_domain::MediaFacet::Series);
     let update = gql(
@@ -5859,4 +5781,117 @@ async fn graphql_title_search_language_override_accepts_picker_languages_only() 
     let inherited = update(json!({ "searchLanguages": null })).await;
     assert_no_errors(&inherited);
     assert!(language_tags(&inherited["data"]["updateTitle"]).is_empty());
+}
+
+/// Unset availability inherits the current default; explicit choices stay
+/// independent of that default and editable through title options.
+#[tokio::test]
+async fn graphql_added_movie_inherits_default_availability_and_reads_it_back() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let library = create_title_catalog_library(
+        &ctx,
+        "MOVIE",
+        "Availability Add Library",
+        &[("/availability-add/default", true)],
+    )
+    .await;
+    let library_id = library_id(&library);
+    let root_id = library_root_id(&library, "/availability-add/default");
+    let add = r#"mutation($input: AddTitleInput!) {
+        addTitle(input: $input) { title { id minAvailability movieAvailability { minimumAvailability } } }
+    }"#;
+    let add_movie = |name: &'static str, tvdb_id: &'static str, availability: Option<&str>| {
+        let mut input = json!({
+            "name": name,
+            "facet": "MOVIE",
+            "libraryId": library_id,
+            "monitored": true,
+            "tags": [],
+            "externalIds": [{ "source": "tvdb", "value": tvdb_id }],
+            "options": { "rootFolderId": root_id }
+        });
+        if let Some(availability) = availability {
+            input["minAvailability"] = json!(availability);
+        }
+        json!({ "input": input })
+    };
+
+    let defaulted = gql(
+        &ctx,
+        add,
+        add_movie("Availability Record A", "991001", None),
+    )
+    .await;
+    assert_no_errors(&defaulted);
+    assert_eq!(
+        defaulted["data"]["addTitle"]["title"]["minAvailability"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        defaulted["data"]["addTitle"]["title"]["movieAvailability"]["minimumAvailability"],
+        "released"
+    );
+    let defaulted_id = defaulted["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .unwrap();
+
+    let explicit = gql(
+        &ctx,
+        add,
+        add_movie("Availability Record B", "991002", Some("in_cinemas")),
+    )
+    .await;
+    assert_no_errors(&explicit);
+    let explicit_id = explicit["data"]["addTitle"]["title"]["id"]
+        .as_str()
+        .expect("added title id")
+        .to_string();
+    let read = r#"query($id: ID!) { title(id: $id) { minAvailability movieAvailability { minimumAvailability } } }"#;
+    let read_back = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&read_back);
+    assert_eq!(read_back["data"]["title"]["minAvailability"], "in_cinemas");
+
+    let changed_default = gql(
+        &ctx,
+        r#"mutation {
+        updateMediaSettings(input: { scope: MOVIE, defaultMovieAvailability: "announced" }) {
+            defaultMovieAvailability
+        }
+    }"#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&changed_default);
+    let inherited = gql(&ctx, read, json!({ "id": defaulted_id })).await;
+    assert_no_errors(&inherited);
+    assert_eq!(
+        inherited["data"]["title"]["minAvailability"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        inherited["data"]["title"]["movieAvailability"]["minimumAvailability"],
+        "announced"
+    );
+    let explicit = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&explicit);
+    assert_eq!(explicit["data"]["title"]["minAvailability"], "in_cinemas");
+    assert_eq!(
+        explicit["data"]["title"]["movieAvailability"]["minimumAvailability"],
+        "in_cinemas"
+    );
+
+    let edit = r#"mutation($input: UpdateTitleInput!) {
+        updateTitle(input: $input) { id minAvailability }
+    }"#;
+    let edited = gql(
+        &ctx,
+        edit,
+        json!({ "input": { "titleId": explicit_id, "options": { "minAvailability": "announced" } } }),
+    )
+    .await;
+    assert_no_errors(&edited);
+    let read_back = gql(&ctx, read, json!({ "id": explicit_id })).await;
+    assert_no_errors(&read_back);
+    assert_eq!(read_back["data"]["title"]["minAvailability"], "announced");
 }

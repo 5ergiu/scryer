@@ -6,6 +6,163 @@ const REMATCH_DERIVED_TAG_PREFIXES: &[&str] = &[
     "scryer:anime-media-type:",
     "scryer:anime-status:",
 ];
+
+impl AppUseCase {
+    /// Movie metadata with release dates for the Movie facet's market, for
+    /// reads not tied to a library: search previews, request enrichment and
+    /// artwork.
+    pub(crate) async fn get_movie_titles_for_current_release_market(
+        &self,
+        refs: &[crate::MovieTitleRef],
+        language: &str,
+    ) -> AppResult<crate::MovieTitleBulkResult> {
+        let market = self
+            .movie_availability_facet_settings()
+            .await?
+            .release_market;
+        self.services
+            .library
+            .metadata_gateway
+            .get_movie_titles_for_release_market(refs, language, &market)
+            .await
+    }
+
+    /// Movie metadata with each title's release dates for the market its
+    /// library uses. `library_ids[i]` is the library of `refs[i]`; one request
+    /// is made per distinct market and the answers keep the input indexes.
+    pub(crate) async fn get_movie_titles_for_library_release_markets(
+        &self,
+        refs: &[crate::MovieTitleRef],
+        library_ids: &[&str],
+        language: &str,
+    ) -> AppResult<crate::MovieTitleBulkResult> {
+        debug_assert_eq!(refs.len(), library_ids.len());
+        let policies = self.movie_availability_policies().await?;
+        let mut indexes_by_market = std::collections::BTreeMap::<String, Vec<usize>>::new();
+        for (index, library_id) in library_ids.iter().enumerate() {
+            indexes_by_market
+                .entry(policies.for_library(library_id).release_market.clone())
+                .or_default()
+                .push(index);
+        }
+        if indexes_by_market.len() <= 1 {
+            let market = indexes_by_market
+                .into_keys()
+                .next()
+                .unwrap_or_else(|| policies.facet().release_market.clone());
+            return self
+                .services
+                .library
+                .metadata_gateway
+                .get_movie_titles_for_release_market(refs, language, &market)
+                .await;
+        }
+        let mut result = crate::MovieTitleBulkResult::default();
+        for (market, indexes) in indexes_by_market {
+            let market_refs = indexes
+                .iter()
+                .map(|&index| refs[index].clone())
+                .collect::<Vec<_>>();
+            let market_result = self
+                .services
+                .library
+                .metadata_gateway
+                .get_movie_titles_for_release_market(&market_refs, language, &market)
+                .await?;
+            for (market_index, movie) in market_result.by_ref_index {
+                if let Some(&index) = indexes.get(market_index) {
+                    result.by_ref_index.insert(index, movie);
+                }
+            }
+            result.missing_ref_indexes.extend(
+                market_result
+                    .missing_ref_indexes
+                    .into_iter()
+                    .filter_map(|market_index| indexes.get(market_index).copied()),
+            );
+            result.redirects.extend(market_result.redirects);
+        }
+        result.missing_ref_indexes.sort_unstable();
+        result.redirects.sort_unstable();
+        result.redirects.dedup();
+        Ok(result)
+    }
+}
+
+impl AppUseCase {
+    pub async fn get_movie_availability_for_title(
+        &self,
+        actor: &User,
+        title_id: &str,
+    ) -> AppResult<Option<crate::types::MovieAvailabilityProjection>> {
+        let Some(title) = self.get_title(actor, title_id).await? else {
+            return Ok(None);
+        };
+        if title.facet != MediaFacet::Movie {
+            return Ok(None);
+        }
+        // The resolved threshold already includes the title's own, so the
+        // policy carries no separate per-title threshold.
+        let settings = self
+            .effective_movie_availability_policy_for_title(&title)
+            .await?;
+        let decision = crate::acquisition::targets::movie_availability_decision(
+            title.movie_release_dates.as_ref(),
+            title.metadata_fetched_at.is_some(),
+            title.first_aired.as_deref(),
+            title.digital_release_date.as_deref(),
+            settings.policy(None),
+            &Utc::now(),
+        );
+        Ok(Some(crate::types::MovieAvailabilityProjection {
+            status: match decision.status {
+                crate::types::MovieAvailabilityStatus::Available => "available",
+                crate::types::MovieAvailabilityStatus::Waiting => "waiting",
+                crate::types::MovieAvailabilityStatus::Unknown => "unknown",
+            }
+            .to_string(),
+            effective_date: decision.effective_date,
+            estimated: decision.estimated,
+            reason: decision.reason,
+            release_market: settings.release_market.clone(),
+            minimum_availability: settings.default_availability.clone(),
+        }))
+    }
+}
+
+impl AppUseCase {
+    /// Marks every movie in these libraries for rehydration, so their release
+    /// dates are fetched again for the market each library now uses.
+    pub(crate) async fn queue_movie_release_market_refresh_for_libraries(
+        &self,
+        library_ids: &[String],
+    ) -> AppResult<()> {
+        if library_ids.is_empty() {
+            return Ok(());
+        }
+        let titles = self
+            .services
+            .catalog
+            .titles
+            .list_for_libraries(Some(MediaFacet::Movie), library_ids, None)
+            .await?;
+        let title_ids = titles
+            .into_iter()
+            .filter(|title| title.facet == MediaFacet::Movie)
+            .map(|title| title.id)
+            .collect::<Vec<_>>();
+        if !title_ids.is_empty() {
+            self.services
+                .catalog
+                .titles
+                .mark_titles_metadata_hydration_due_now(&title_ids)
+                .await?;
+            self.runtime.catalog.title_hydration_wake.notify_one();
+        }
+        Ok(())
+    }
+}
+
 fn title_external_id_value(title: &Title, source: &str) -> Option<String> {
     if source == "imdb"
         && let Some(imdb_id) = title.imdb_id.as_deref()
@@ -651,6 +808,58 @@ impl AppUseCase {
         Ok(title)
     }
 
+    pub async fn update_title_min_availability(
+        &self,
+        actor: &User,
+        title_id: &str,
+        min_availability: Option<String>,
+    ) -> AppResult<Title> {
+        let title = self
+            .services
+            .catalog
+            .titles
+            .get_by_id(title_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("title {title_id}")))?;
+        self.require_library_permission(
+            actor,
+            &title.library_id,
+            scryer_domain::LibraryPermission::ManageTitles,
+        )
+        .await?;
+        if title.facet != MediaFacet::Movie {
+            return Err(AppError::Validation(
+                "minimum availability is only valid for movie titles".into(),
+            ));
+        }
+        if min_availability.as_deref().is_some_and(|value| {
+            !matches!(value, "announced" | "in_cinemas" | "released")
+        }) {
+            return Err(AppError::Validation(
+                "minimum availability must be announced, in_cinemas, or released".into(),
+            ));
+        }
+        if title.min_availability == min_availability {
+            return Ok(title);
+        }
+
+        let updated = self
+            .services
+            .catalog
+            .titles
+            .update_title_hydrated_metadata(
+                title_id,
+                TitleMetadataUpdate {
+                    min_availability: Some(min_availability),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.emit_title_updated_activity(actor, &updated).await;
+        self.runtime.acquisition.acquisition_wake.notify_one();
+        Ok(updated)
+    }
+
     pub async fn set_primary_movie_file(
         &self,
         actor: &User,
@@ -841,10 +1050,11 @@ impl AppUseCase {
                         .resolve_metadata_language_for_title(&existing_title)
                         .await;
                     let movie = self
-                        .services
-                        .library
-                        .metadata_gateway
-                        .get_movie_titles(std::slice::from_ref(&requested_ref), &language)
+                        .get_movie_titles_for_library_release_markets(
+                            std::slice::from_ref(&requested_ref),
+                            &[existing_title.library_id.as_str()],
+                            &language,
+                        )
                         .await?
                         .by_ref_index
                         .get(&0)

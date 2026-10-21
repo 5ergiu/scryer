@@ -238,7 +238,7 @@ export const QueueRowItem = memo(function QueueRowItem({
             <span>
               {isManualImportPending
                 ? t("queue.manualImporting")
-                : t("queue.manualImportTooltip")}
+                : t("queue.manualImport")}
             </span>
           </Button>
         )}

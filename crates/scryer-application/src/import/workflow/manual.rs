@@ -1294,13 +1294,38 @@ async fn preview_manual_import(
         // Translate community anime numbering into the catalog's own before the
         // suggestion lookups, so a file named in per-cour numbering points at
         // the episode the user actually has. Inert without a bridge.
-        let numbering = crate::anime_numbering::translate_release_numbering(
+        let literal_parsed = parsed.clone();
+        let mut numbering = crate::anime_numbering::translate_release_numbering(
             anime_numbering_bridge.as_ref(),
             title,
             available_episodes,
             &mut parsed,
             file_reference_date(path),
         );
+        // A community season index can collide with an official season. The
+        // recorded grab disambiguates that collision when every literal member
+        // is inside its scope and the community reading is wholly outside it.
+        // A named cour or an ambiguous reading is stronger evidence and must
+        // still go through the normal refusal path.
+        if matches!(
+            &numbering,
+            crate::anime_numbering::NumberingResolution::Resolved(candidate)
+                if candidate.kind == crate::anime_numbering::NumberingCandidateKind::Community
+                    && candidate.episode_ids.iter().all(|id| !grabbed_episode_ids.contains(id))
+        ) && let Some(literal) = literal_parsed.episode.as_ref()
+            && let Some(season) = literal.season
+            && !literal.episode_numbers.is_empty()
+            && literal.episode_numbers.iter().all(|number| {
+                available_episodes.iter().any(|episode| {
+                    episode.season_number.as_deref() == Some(season.to_string().as_str())
+                        && episode.episode_number.as_deref() == Some(number.to_string().as_str())
+                        && grabbed_episode_ids.contains(&episode.id)
+                })
+            })
+        {
+            parsed = literal_parsed;
+            numbering = crate::anime_numbering::NumberingResolution::Unchanged;
+        }
         // Several readings fit equally well: suggest nothing rather than the
         // wrong episode, and let the user pick.
         let numbering_ambiguous = numbering.is_ambiguous()
@@ -2775,6 +2800,44 @@ async fn execute_manual_series_movie_import(
     let search_title = crate::acquisition_release_search::series_movie_search_title(title, &link);
     let parsed =
         build_augmented_movie_import_metadata_for_title(source, release_evidence, &search_title);
+    let source_size = std::fs::metadata(source)
+        .map_err(|error| AppError::Repository(error.to_string()))?
+        .len();
+    let quality_profile = resolve_import_quality_profile(app, title).await?;
+    let existing_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await?;
+    let prepared = match crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+        app,
+        title,
+        &parsed,
+        &quality_profile,
+        source,
+        i64::try_from(source_size).unwrap_or(i64::MAX),
+        !existing_files.is_empty(),
+        None,
+        false,
+        crate::post_download_gate::RuntimeSampleValidation::manual_override(None),
+        mapping.disc_selection.as_ref(),
+        release_evidence.release_listing_json(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(rejection) => {
+            return Ok(manual_import_file_result(
+                mapping,
+                false,
+                None,
+                Some(ImportErrorCode::PolicyMismatch),
+                Some(rejection.message),
+            ));
+        }
+    };
+    let parsed = &prepared.parsed;
     let ext = import_video_destination_extension(source, content_qualified).to_string();
     let linked_episode = resolve_series_movie_linked_episode(app, title, &link).await?;
     // The resolved episode, not `link.linked_episode_id`, is this import's episode
@@ -2804,6 +2867,33 @@ async fn execute_manual_series_movie_import(
         0,
     )
     .join(rendered_filename);
+    let import_mode = crate::seeding_gate::resolve_seeding_safe_import_mode(
+        app,
+        Some(&title.library_id),
+        &title.facet,
+        completed,
+    )
+    .await?;
+    let check_ctx = crate::import_checks::ImportCheckContext {
+        import_mode,
+        source_path: source,
+        dest_path: &dest_path,
+        source_size,
+        parsed,
+        existing_files: &existing_files,
+        content_qualified_video: content_qualified.is_some(),
+    };
+    if let crate::import_checks::ImportVerdict::Reject { reason, .. } =
+        crate::import_checks::run_import_checks_and_report(app, &check_ctx, completed, title).await
+    {
+        return Ok(manual_import_file_result(
+            mapping,
+            false,
+            None,
+            Some(ImportErrorCode::PolicyMismatch),
+            Some(reason),
+        ));
+    }
     persist_title_folder_path_if_missing(app, title, full_folder_path).await?;
     if let Some(parent) = dest_path.parent()
         && let Err(error) = tokio::fs::create_dir_all(parent).await
@@ -2820,13 +2910,6 @@ async fn execute_manual_series_movie_import(
         ));
     }
 
-    let import_mode = crate::seeding_gate::resolve_seeding_safe_import_mode(
-        app,
-        Some(&title.library_id),
-        &title.facet,
-        completed,
-    )
-    .await?;
     let destination_ownership = ImportDestinationOwnership::series_movie(
         series_movie_link_id,
         linked_episode_id.as_deref(),
@@ -2840,7 +2923,7 @@ async fn execute_manual_series_movie_import(
         source,
         &dest_path,
         import_mode,
-        None,
+        Some(&prepared.source_snapshot),
         completed,
     )
     .await
@@ -2875,7 +2958,7 @@ async fn execute_manual_series_movie_import(
                 quality_label: quality_label.clone(),
                 scene_name: Some(parsed.raw_title.clone()),
                 release_group: parsed.release_group.clone(),
-                source_type: crate::release_parser::parsed_release_source_type(&parsed),
+                source_type: crate::release_parser::parsed_release_source_type(parsed),
                 resolution: quality_label,
                 video_codec_parsed: parsed.video_codec,
                 audio_codec_parsed: parsed.audio.as_ref().map(ToString::to_string),
@@ -2916,8 +2999,12 @@ async fn execute_manual_series_movie_import(
             .await?;
     }
 
-    analyze_and_persist_imported_media_file(app, &title.id, &imported_media_file_id, &dest_path)
-        .await;
+    crate::post_download_gate::persist_media_analysis_result(
+        &app.services.library.media_files,
+        &imported_media_file_id,
+        &prepared.accepted,
+    )
+    .await?;
     if let Err(error) = crate::subtitles::reconcile_external_subtitles_for_media_file(
         app,
         &title.id,

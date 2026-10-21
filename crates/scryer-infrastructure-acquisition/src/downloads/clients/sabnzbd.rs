@@ -1253,6 +1253,7 @@ impl DownloadClient for SabnzbdDownloadClient {
                         client_type: "sabnzbd".to_string(),
                         info_hash: None,
                         seed_goals: None,
+                        grabbed_file_names: Vec::new(),
                     })
                 }
                 SabAddfileOutcome::Rejected(detail) => {
@@ -1877,6 +1878,7 @@ impl SabnzbdDownloadClient {
                 client_type: "sabnzbd".to_string(),
                 info_hash: None,
                 seed_goals: None,
+                grabbed_file_names: Vec::new(),
             }),
             None => Err(ambiguous_error),
         }
@@ -2659,6 +2661,7 @@ fn completed_downloads_from_sab_slots(
                 size_bytes,
                 completed_at,
                 parameters: Vec::new(),
+                posted_file_names: Vec::new(),
             })
         })
         .collect()
@@ -3109,6 +3112,7 @@ mod tests {
                 metadata_fetched_at: None,
                 min_availability: None,
                 digital_release_date: None,
+                movie_release_dates: None,
                 folder_path: None,
             },
             search_facet: None,

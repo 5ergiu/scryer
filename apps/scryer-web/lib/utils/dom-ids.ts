@@ -362,8 +362,8 @@ export function settingsRequestRuleNameId(name: string): string {
   return selectorId("settings-request-rule-name", name);
 }
 
-export function settingsRequestRuleModeId(ruleSetId: string): string {
-  return selectorId("settings-request-rule-mode", ruleSetId);
+export function settingsRequestRuleEnabledId(ruleSetId: string): string {
+  return selectorId("settings-request-rule-enabled", ruleSetId);
 }
 
 export function settingsRequestRuleCopyId(ruleSetId: string): string {

@@ -867,6 +867,15 @@ export const updateAcquisitionSettingsMutation = `mutation UpdateAcquisitionSett
   }
 }`;
 
+export const updateMovieAvailabilitySettingsMutation = `mutation UpdateMovieAvailabilitySettings($input: UpdateMediaSettingsInput!) {
+  updateMediaSettings(input: $input) {
+    scope
+    defaultMovieAvailability
+    movieReleaseMarket
+    movieAvailabilityDelayDays
+  }
+}`;
+
 export const updateGeneralSettingsMutation = `mutation UpdateGeneralSettings($input: UpdateGeneralSettingsInput!) {
   updateGeneralSettings(input: $input) {
     apiExplorerEnabled
@@ -1166,6 +1175,7 @@ export const upsertDelayProfileMutation = `mutation UpsertDelayProfile($input: D
     bypassIfHighestQuality
     appliesToFacets
     tags
+    libraryIds
     priority
     enabled
   }
@@ -1756,6 +1766,7 @@ export const updateTitleMutation = `mutation UpdateTitle($input: UpdateTitleInpu
     facet
     tags
     monitored
+    minAvailability
     qualityProfileId
     rootFolderId
     rootFolderPath
@@ -2579,9 +2590,8 @@ export const uninstallTrackedRulePackMutation = `mutation UninstallTrackedRulePa
 
 // ── Maintenance Rules ─────────────────────────────────────────────────
 //
-// Maintenance rule sets are saved disabled and nothing evaluates or executes
-// them yet. Preview is the only mutation here that runs a matcher, and it is
-// read-only: it reports what a rule would select, and changes nothing.
+// Maintenance rule sets are saved disabled. Preview runs a matcher read-only:
+// it reports what a rule would select, and changes nothing.
 
 export const createMaintenanceRuleSetMutation = `mutation CreateMaintenanceRuleSet($input: CreateMaintenanceRuleSetInput!) {
   createMaintenanceRuleSet(input: $input) {${MAINTENANCE_RULE_SET_DETAIL_FIELDS}
@@ -2636,34 +2646,22 @@ export const previewMaintenanceRuleMutation = `mutation PreviewMaintenanceRule($
   }
 }`;
 
-/// Mode and arming both return the whole rule set, but the caller refetches the
-/// list afterwards rather than patching state from the payload, so these
-/// selections stay at the identity the caller needs to correlate the response.
-export const setMaintenanceRuleModeMutation = `mutation SetMaintenanceRuleMode($input: SetMaintenanceRuleModeInput!) {
-  setMaintenanceRuleMode(input: $input) {
+/// Enabling a rule that deletes files must confirm the reviewed revision, scope
+/// and current candidate count. When the count no longer matches, the server
+/// rejects the call with the real count in the message and the dialog re-asks
+/// against that number. The caller refetches the list afterwards, so the
+/// selection stays at what it needs to correlate the response.
+export const setMaintenanceRuleStateMutation = `mutation SetMaintenanceRuleState($ruleSetId: ID!, $state: MaintenanceRuleState!, $confirmation: MaintenanceRuleArmingConfirmationInput) {
+  setMaintenanceRuleState(ruleSetId: $ruleSetId, state: $state, confirmation: $confirmation) {
     id
-    evaluationMode
-    enabled
-  }
-}`;
-
-/// Arming to `DESTRUCTIVE` must acknowledge the rule's current non-terminal
-/// candidate count. When it no longer matches, the server rejects the call with
-/// the real count in the message and the dialog re-asks against that number.
-export const setMaintenanceRuleArmingMutation = `mutation SetMaintenanceRuleArming($input: SetMaintenanceRuleArmingInput!) {
-  setMaintenanceRuleArming(input: $input) {
-    id
-    effectArming
+    state
   }
 }`;
 
 export const setMaintenanceInstanceGatesMutation = `mutation SetMaintenanceInstanceGates($input: SetMaintenanceInstanceGatesInput!) {
   setMaintenanceInstanceGates(input: $input) {
-    evaluationEnabled
-    resultDisplayEnabled
-    presentationEffectsEnabled
-    reversibleEffectsEnabled
-    destructiveEffectsEnabled
+    enabled
+    actionsPaused
   }
 }`;
 
@@ -2694,8 +2692,7 @@ export const runMaintenanceActionHandlerNowMutation = `mutation RunMaintenanceAc
 
 // ── Request Rules ─────────────────────────────────────────────────────
 //
-// A rule is created DISABLED; `setRequestRuleMode` arms it, and the instance
-// gate is a third switch under a different permission entirely.
+// A rule is created disabled; `setRequestRuleEnabled` turns it on or off.
 
 export const createRequestRuleSetMutation = `mutation CreateRequestRuleSet($input: CreateRequestRuleSetInput!) {
   createRequestRuleSet(input: $input) {${REQUEST_RULE_SET_DETAIL_FIELDS}
@@ -2712,8 +2709,8 @@ export const updateRequestRuleMetadataMutation = `mutation UpdateRequestRuleMeta
   }
 }`;
 
-export const setRequestRuleModeMutation = `mutation SetRequestRuleMode($input: SetRequestRuleModeInput!) {
-  setRequestRuleMode(input: $input) {${REQUEST_RULE_SET_DETAIL_FIELDS}
+export const setRequestRuleEnabledMutation = `mutation SetRequestRuleEnabled($ruleSetId: ID!, $enabled: Boolean!) {
+  setRequestRuleEnabled(ruleSetId: $ruleSetId, enabled: $enabled) {${REQUEST_RULE_SET_FIELDS}
   }
 }`;
 
@@ -2746,12 +2743,6 @@ export const previewRequestRuleMutation = `mutation PreviewRequestRule($input: P
   }
 }`;
 
-export const setRequestRuleInstanceGatesMutation = `mutation SetRequestRuleInstanceGates($input: SetRequestRuleInstanceGatesInput!) {
-  setRequestRuleInstanceGates(input: $input) {
-    evaluationEnabled
-  }
-}`;
-
 // ── Title retention claims ────────────────────────────────────────────
 //
 // Converting a lease to a permanent hold leaves the original CONVERTED as
@@ -2765,6 +2756,13 @@ export const extendTitleClaimMutation = `mutation ExtendTitleClaim($input: Exten
 
 export const convertTitleClaimToPermanentMutation = `mutation ConvertTitleClaimToPermanent($input: ConvertTitleClaimToPermanentInput!) {
   convertTitleClaimToPermanent(input: $input) {${TITLE_CLAIM_FIELDS}
+  }
+}`;
+
+/// Keep a title. Returns the live operator keep it already has instead of
+/// stacking a second one.
+export const createOperatorKeepClaimMutation = `mutation CreateOperatorKeepClaim($titleId: ID!) {
+  createOperatorKeepClaim(titleId: $titleId) {${TITLE_CLAIM_FIELDS}
   }
 }`;
 

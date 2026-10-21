@@ -626,6 +626,7 @@ fn history_scoring(json: Option<&str>) -> Option<HistoryScoringPayload> {
                 delta: entry.delta,
                 kind: entry.kind,
                 source: entry.source,
+                origin: entry.origin,
             })
             .collect(),
     })

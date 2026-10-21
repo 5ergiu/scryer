@@ -160,6 +160,7 @@ mod tests {
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
+            posted_file_names: Vec::new(),
         }
     }
 
@@ -544,6 +545,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }
@@ -1763,6 +1765,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }
@@ -1878,13 +1881,11 @@ mod tests {
 
     /// The one field that genuinely differed: `languages_audio`.
     ///
-    /// The parse itself agrees, but the grab lane *enriches* it before scoring —
-    /// inferring the title's original language when the name says nothing and
-    /// the profile requires one. Import did not, so
-    /// `required_audio_language_missing` fired on every release for such a
-    /// profile. Both sides go through `announced_metadata_for_title` now.
+    /// The parse itself agrees, and the scorer fills in the title's original
+    /// language when the name says nothing and the profile requires one. Both
+    /// lanes hand it the raw parse, so neither can skip that step.
     #[test]
-    fn both_lanes_enrich_audio_languages_the_same_way() {
+    fn both_lanes_score_audio_languages_the_same_way() {
         let mut title = parity_title("Umibe Signal", MediaFacet::Anime, Some(2019));
         title.language = Some("ja".to_string());
 
@@ -1905,30 +1906,43 @@ mod tests {
             "fixture precondition: the name says nothing about audio"
         );
 
-        let grab_enriched = crate::quality::canonical_context::announced_metadata_for_title(
-            &title,
-            &at_grab,
-            &profile.criteria.required_audio_languages,
-            None,
-        );
-        let import_enriched = crate::quality::canonical_context::announced_metadata_for_title(
-            &title,
-            &at_import,
-            &profile.criteria.required_audio_languages,
-            None,
-        );
+        let context = crate::canonical_scoring::ScoringContext {
+            profile: &profile,
+            required_audio_languages: &profile.criteria.required_audio_languages,
+            category: title.facet.as_str(),
+            size_basis: crate::quality_profile::CoverageSizeBasis::default(),
+            rules: None,
+            title_id: None,
+            library_name: None,
+            original_language: title.language.as_deref(),
+            original_country: title.country.as_deref(),
+            title_tags: &title.tags,
+            is_filler: false,
+        };
+        let score = |parsed: &crate::ParsedReleaseMetadata| {
+            crate::canonical_scoring::score_release(
+                &crate::canonical_scoring::ReleaseEvidence::announced(parsed.clone(), None),
+                &context,
+            )
+            .announced_decision
+        };
+        let grab = score(&at_grab);
+        let import = score(&at_import);
 
-        assert_eq!(
-            grab_enriched.languages_audio,
-            import_enriched.languages_audio
+        assert_eq!(grab.block_codes, import.block_codes);
+        assert!(
+            !grab
+                .block_codes
+                .iter()
+                .any(|code| code == "required_audio_language_missing"),
+            "the title's original language must be inferred: {:?}",
+            grab.block_codes
         );
         assert!(
-            grab_enriched
+            crate::canonical_scoring::canonical_parse(&at_grab, None, &context)
                 .languages_audio
                 .iter()
-                .any(|code| code == "jpn"),
-            "the title's original language must be inferred: {:?}",
-            grab_enriched.languages_audio
+                .any(|code| code == "jpn")
         );
     }
 }

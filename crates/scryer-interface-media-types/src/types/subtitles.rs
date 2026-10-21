@@ -82,6 +82,9 @@ pub struct ScoreEvaluationEntryPayload {
     pub kind: String,
     /// Rule name, or null for a built-in contribution.
     pub source: Option<String>,
+    /// Rule origin: user or system, or null for a built-in contribution or an
+    /// entry recorded before origins were kept.
+    pub origin: Option<String>,
 }
 
 #[derive(SimpleObject, Clone)]

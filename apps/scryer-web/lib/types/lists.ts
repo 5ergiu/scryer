@@ -1,7 +1,7 @@
 import type { ExternalId, Facet } from "./titles";
 
 export type ListScope = "PUBLIC" | "PERSONAL";
-export type ListMode = "SEARCH" | "ADD" | "HOLD" | "REQUEST" | "DISCOVER";
+export type ListMode = "ADD" | "HOLD" | "REQUEST" | "DISCOVER";
 export type ListOnLeave = "KEEP" | "LOG" | "UNMONITOR" | "TAG";
 export type ListSyncState = "OK" | "NEW" | "FAIL" | "OFF";
 export type ListPolicy = "AUTO" | "APPROVAL" | "NONE";

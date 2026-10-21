@@ -1497,6 +1497,25 @@ fn source_season_type(source: NumberingBridgeSource) -> &'static str {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MovieReleaseDates {
+    pub market: String,
+    pub fetched: bool,
+    pub theatrical_dates: Vec<String>,
+    pub digital_dates: Vec<String>,
+    pub physical_dates: Vec<String>,
+    /// Theatrical dates from every country, earliest first. Rows written
+    /// before these worldwide fields existed read back empty.
+    pub any_market_theatrical_dates: Vec<String>,
+    /// Digital release dates from every country, earliest first.
+    pub any_market_digital_dates: Vec<String>,
+    /// Physical release dates from every country, earliest first.
+    pub any_market_physical_dates: Vec<String>,
+    /// Some country has a home release whose date could not be read.
+    pub any_market_home_dates_unusable: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Title {
     pub id: String,
@@ -1535,6 +1554,8 @@ pub struct Title {
     pub metadata_fetched_at: Option<DateTime<Utc>>,
     pub min_availability: Option<String>,
     pub digital_release_date: Option<String>,
+    #[serde(default)]
+    pub movie_release_dates: Option<MovieReleaseDates>,
     pub folder_path: Option<String>,
 }
 
@@ -3091,6 +3112,20 @@ pub struct CompletedDownload {
     pub size_bytes: Option<i64>,
     pub completed_at: Option<DateTime<Utc>>,
     pub parameters: Vec<(String, String)>,
+    /// Files the client wrote under a different name than they were posted
+    /// with (shortened, cleaned of characters a filesystem refuses, or made
+    /// unique), each with its posted name. Empty when the client reports
+    /// none; only Weaver does.
+    #[serde(default)]
+    pub posted_file_names: Vec<PostedFileName>,
+}
+
+/// A downloaded file's name on disk and the name it was posted with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedFileName {
+    /// The file's name inside the download's `dest_dir`.
+    pub name: String,
+    pub posted_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4453,6 +4488,10 @@ pub struct ScoringSnapshotEntry {
     pub delta: i32,
     pub kind: String,
     pub source: Option<String>,
+    /// `"user"` or `"system"` for a rule contribution, `None` for a built-in
+    /// one. Absent on entries saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Release facts captured at grab time, for history and notifications.
@@ -5526,21 +5565,14 @@ pub struct RulePackMember {
     pub removed: bool,
 }
 
-/// How far a maintenance rule set is allowed to act (RFC 137 section 7).
-///
-/// Only [`Self::Disabled`] is reachable in the foundation wave: nothing
-/// evaluates stored maintenance rules yet, so a rule that claimed to be running
-/// in shadow or observe mode would be advertising a capability that does not
-/// exist. The other two variants are declared here because the storage column
-/// is written now and must not need a migration when the evaluator lands.
+/// Whether a maintenance rule set is evaluated at all. Whether an evaluated
+/// rule may act is its [`MaintenanceEffectArming`].
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceEvaluationMode {
     #[default]
     Disabled,
-    /// Evaluate and record candidates; never act.
-    Shadow,
-    /// Evaluate, record, and surface candidates for manual approval.
+    /// Evaluate and record candidates.
     Observe,
 }
 
@@ -5548,7 +5580,6 @@ impl MaintenanceEvaluationMode {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::Shadow => "shadow",
             Self::Observe => "observe",
         }
     }
@@ -5556,11 +5587,22 @@ impl MaintenanceEvaluationMode {
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "disabled" => Some(Self::Disabled),
-            "shadow" => Some(Self::Shadow),
             "observe" => Some(Self::Observe),
             _ => None,
         }
     }
+}
+
+/// The one operator-facing control of a maintenance rule set.
+///
+/// Disabled is never evaluated. Dry run is evaluated and records candidates
+/// but never acts. Enabled is evaluated and armed for the effects its own
+/// action can have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaintenanceRuleState {
+    Disabled,
+    DryRun,
+    Enabled,
 }
 
 /// Granularity a maintenance rule set is scoped to.
@@ -5609,18 +5651,31 @@ pub struct MaintenanceRuleSet {
     /// How far this rule's effects are armed, independent of its mode. The
     /// action handler requires both this and the instance effect gates.
     pub effect_arming: MaintenanceEffectArming,
-    /// Set only by the one-time compatibility migration when newly available
-    /// show facts could widen an already destructively armed title rule.
-    /// Operators must review and arm the rule again before it can execute.
+    /// The rule was armed when its matcher, action, or scope last changed (or a
+    /// compatibility migration widened what it can match), so it must be
+    /// reviewed and enabled again. Any state change clears it.
     #[serde(default)]
     pub destructive_rearm_required: bool,
     /// Libraries this rule is confined to. Empty means every library.
     pub library_ids: Vec<String>,
     pub subject_kind: MaintenanceRuleSubjectKind,
+    /// Shipped with Scryer: its name, matcher and action are fixed and it
+    /// cannot be deleted. Its state, grace period and libraries stay editable.
+    #[serde(default)]
+    pub system_owned: bool,
     /// Revision number of the matcher currently in force.
     pub current_revision_number: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl MaintenanceRuleSet {
+    /// What a matcher or scope edit does to arming: an armed rule drops to dry
+    /// run and is flagged for review.
+    pub fn disarm_after_edit(&mut self) {
+        self.destructive_rearm_required |= self.effect_arming != MaintenanceEffectArming::None;
+        self.effect_arming = MaintenanceEffectArming::None;
+    }
 }
 
 /// The rule configuration an operator reviewed before arming deletion.
@@ -6294,19 +6349,13 @@ pub struct MaintenanceSequenceTerminalMembership {
     pub released_at: Option<DateTime<Utc>>,
 }
 
-/// How far a request rule set is allowed to act (spec 0003 FR-013).
-///
-/// The whole enum is pinned here, storage strings included, even though the
-/// persistence wave only ever writes [`Self::Disabled`]: the column ships now
-/// and must not need a migration when the evaluator lands.
+/// Whether a request rule set takes part in deciding requests. Operators see
+/// these as Disabled and Enabled.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRuleEvaluationMode {
     #[default]
     Disabled,
-    /// Evaluate and record the trace; the effective decision stays whatever
-    /// today's permission check would have produced.
-    Shadow,
     /// Evaluate, record, and act on the decision.
     Enforce,
 }
@@ -6315,7 +6364,6 @@ impl RequestRuleEvaluationMode {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
-            Self::Shadow => "shadow",
             Self::Enforce => "enforce",
         }
     }
@@ -6323,7 +6371,6 @@ impl RequestRuleEvaluationMode {
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "disabled" => Some(Self::Disabled),
-            "shadow" => Some(Self::Shadow),
             "enforce" => Some(Self::Enforce),
             _ => None,
         }
@@ -6402,9 +6449,9 @@ impl RequestDecisionOutcome {
 
 /// The durable trace of one request evaluation (spec 0003 FR-016).
 ///
-/// Written for every evaluation, shadow and enforce alike, which is why
 /// `policy_outcome` (what the rules said) and `effective_outcome` (what the
-/// instance acted on) are separate columns: in shadow they disagree on purpose.
+/// instance acted on) are separate columns because a fallback can make them
+/// disagree.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestRuleDecisionRecord {
     pub id: String,

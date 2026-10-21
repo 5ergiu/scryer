@@ -36,11 +36,10 @@ pub struct RequestPreflight {
     /// were unknown. The dialog says "metadata unavailable — will need
     /// approval" rather than pretending to a verdict it does not have.
     pub metadata_partial: bool,
-    /// Strictest mode among the rules that were consulted.
+    /// `Enforce` when an enabled rule was consulted, `Disabled` when none was.
     pub evaluation_mode: RequestRuleEvaluationMode,
-    /// What the policy concluded, which differs from `outcome` exactly when the
-    /// gate is off or every deciding rule is in shadow. The dialog labels it
-    /// "preview" beside the effective verdict.
+    /// What the policy concluded, which differs from `outcome` only when the
+    /// request was held because its tags could not be checked.
     pub policy_outcome: RequestDecisionOutcome,
     /// Why the verdict fell back to needing approval, when it did: one of the
     /// arbitration codes (`rule_manual`, `held`, `error`, `no_rule_matched`),
@@ -121,6 +120,8 @@ impl AppUseCase {
             monitor_type: input.requested_monitor_type.clone(),
             monitor_selection: input.requested_monitor_selection.clone(),
             requested_lease_days,
+            origin: scryer_domain::MediaRequestOrigin::Manual,
+            list_rank: None,
         };
 
         let evaluation = self

@@ -27,8 +27,8 @@ use chrono::{DateTime, Utc};
 use scryer_domain::{
     Collection, CollectionType, CompletedDownload, DomainEventPayload, DownloadQueueItem, Id,
     ImportCompletedEventData, ImportDecision, ImportErrorCode, ImportRecord, ImportResult,
-    ImportSkipReason, ImportStatus, ImportType, MediaFacet, Title, TrackedDownloadState, User,
-    is_video_file,
+    ImportSkipReason, ImportStatus, ImportType, MediaFacet, PostedFileName, Title,
+    TrackedDownloadState, User, is_video_file,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};

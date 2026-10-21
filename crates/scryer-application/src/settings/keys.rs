@@ -105,34 +105,21 @@ pub const LEGACY_TOTP_REQUIRE_CONFIG_STEP_UP_KEY: &str = "auth.totp.require_conf
 pub const LEGACY_TOTP_REQUIRE_PASSWORD_LOGIN_KEY: &str = "auth.totp.require_local_login";
 pub const TOTP_REQUIRE_JELLYFIN_LOGIN_KEY: &str = "auth.totp.require_jellyfin_login";
 pub const TOTP_REQUIRE_EMBY_LOGIN_KEY: &str = "auth.totp.require_emby_login";
-// ── Maintenance instance gates (RFC 137 section 10) ─────────────────────────
-// Five independent instance-wide switches, every one of them off unless a row
-// says otherwise. They are deliberately not one JSON blob: each gate authorizes
-// a different blast radius, and a partially-written blob must never be able to
-// turn a stronger one on. A missing row reads as off, so losing the settings
-// table disarms maintenance rather than arming it.
+// ── Maintenance instance gates ──────────────────────────────────────────────
+// Instance-wide switches, every one of them off unless a row says otherwise.
+// They are deliberately not one JSON blob: each gate authorizes a different
+// blast radius, and a partially-written blob must never be able to turn a
+// stronger one on. A missing row reads as off, so losing the settings table
+// disarms maintenance rather than arming it.
 /// Lets the scheduled evaluator run at all. Off means no rule is evaluated and
 /// nothing is recorded.
 pub const MAINTENANCE_GATE_EVALUATION_KEY: &str = "maintenance.gate.evaluation";
-/// Lets candidate results reach the API for rules that are not in shadow mode.
+/// Lets candidate results reach the API.
 pub const MAINTENANCE_GATE_RESULT_DISPLAY_KEY: &str = "maintenance.gate.result_display";
-/// Reserved for the executor wave: provider collection projection and lifecycle
-/// notifications. Stored now, consumed by nothing in this build.
-pub const MAINTENANCE_GATE_PRESENTATION_EFFECTS_KEY: &str = "maintenance.gate.presentation_effects";
-/// Reserved for the executor wave: low and medium risk actions.
+/// Low and medium risk actions.
 pub const MAINTENANCE_GATE_REVERSIBLE_EFFECTS_KEY: &str = "maintenance.gate.reversible_effects";
-/// Reserved for the executor wave: high risk actions.
+/// High risk actions.
 pub const MAINTENANCE_GATE_DESTRUCTIVE_EFFECTS_KEY: &str = "maintenance.gate.destructive_effects";
-
-// ── Request rule instance gate (spec 0003 FR-013) ───────────────────────────
-/// Lets request rules be evaluated at all. Off means every request is decided
-/// by the library's Auto-Approve permission exactly as it was before rules
-/// existed. A missing row reads as off, so an instance that has never been
-/// configured evaluates nothing.
-///
-/// One key, not five: a request rule votes and has no effects to arm
-/// separately (see `request_rules::gates`).
-pub const REQUEST_RULE_GATE_EVALUATION_KEY: &str = "request_rules.evaluation_enabled";
 
 pub const RECYCLE_BIN_ENABLED_KEY: &str = "recycle_bin.enabled";
 pub const RECYCLE_BIN_PATH_KEY: &str = "recycle_bin.path";
@@ -194,6 +181,12 @@ pub const ANIME_RECAP_POLICY_KEY: &str = "anime.recap_policy";
 pub const ANIME_MONITOR_SPECIALS_KEY: &str = "anime.monitor_specials";
 pub const ANIME_INTER_SEASON_MOVIES_KEY: &str = "anime.inter_season_movies";
 pub const ANIME_MONITOR_FILLER_MOVIES_KEY: &str = "anime.monitor_filler_movies";
+
+// Movie availability gate, read from the Movie facet (`scope_id = "movie"`)
+// and overridable per library (`scope_id = <library id>`).
+pub const MOVIE_DEFAULT_AVAILABILITY_KEY: &str = "movie.default_availability";
+pub const MOVIE_RELEASE_MARKET_KEY: &str = "movie.release_market";
+pub const MOVIE_AVAILABILITY_DELAY_DAYS_KEY: &str = "movie.availability_delay_days";
 
 pub const NFO_WRITE_ON_IMPORT_MOVIE_KEY: &str = "nfo.write_on_import.movie";
 pub const NFO_WRITE_ON_IMPORT_SERIES_KEY: &str = "nfo.write_on_import.series";

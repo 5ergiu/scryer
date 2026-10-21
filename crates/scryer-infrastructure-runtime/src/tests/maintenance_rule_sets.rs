@@ -51,8 +51,9 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
     let reviewed = MaintenanceRuleArmingConfirmation::from(&original);
     assert!(
         !store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 None,
                 Utc::now()
@@ -62,8 +63,9 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
     );
     assert!(
         store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -82,8 +84,9 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
         .unwrap();
     sqlx::query("UPDATE maintenance_rule_set_libraries SET library_id = 'library-2' WHERE rule_set_id = 'reviewed'")
         .execute(&mut *edit).await.unwrap();
-    let arming = store.update_rule_set_arming(
+    let arming = store.update_rule_set_state(
         "reviewed",
+        scryer_domain::MaintenanceEvaluationMode::Observe,
         MaintenanceEffectArming::Destructive,
         Some(&reviewed),
         Utc::now(),
@@ -105,8 +108,9 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
     let reviewed = MaintenanceRuleArmingConfirmation::from(&current);
     assert!(
         store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -121,8 +125,9 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
         .unwrap();
     assert!(
         !store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -141,7 +146,13 @@ async fn destructive_arming_atomically_rechecks_the_reviewed_configuration() {
     );
     assert!(
         store
-            .update_rule_set_arming("reviewed", MaintenanceEffectArming::None, None, Utc::now())
+            .update_rule_set_state(
+                "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
+                MaintenanceEffectArming::None,
+                None,
+                Utc::now()
+            )
             .await
             .unwrap()
     );
@@ -178,8 +189,9 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
     let reviewed = MaintenanceRuleArmingConfirmation::from(&original);
     assert!(
         !store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 None,
                 Utc::now()
@@ -189,8 +201,9 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
     );
     assert!(
         store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -206,8 +219,9 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
         .unwrap();
     sqlx::query("UPDATE maintenance_rule_set_libraries SET library_id = 'library-2' WHERE rule_set_id = 'reviewed'")
         .execute(&mut *edit).await.unwrap();
-    let arming = store.update_rule_set_arming(
+    let arming = store.update_rule_set_state(
         "reviewed",
+        scryer_domain::MaintenanceEvaluationMode::Observe,
         MaintenanceEffectArming::Destructive,
         Some(&reviewed),
         Utc::now(),
@@ -228,8 +242,9 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
     let reviewed = MaintenanceRuleArmingConfirmation::from(&current);
     assert!(
         store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -243,8 +258,9 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
         .unwrap();
     assert!(
         !store
-            .update_rule_set_arming(
+            .update_rule_set_state(
                 "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
                 MaintenanceEffectArming::Destructive,
                 Some(&reviewed),
                 Utc::now()
@@ -254,7 +270,13 @@ async fn postgres_destructive_arming_waits_for_scope_edits_before_checking_confi
     );
     assert!(
         store
-            .update_rule_set_arming("reviewed", MaintenanceEffectArming::None, None, Utc::now())
+            .update_rule_set_state(
+                "reviewed",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
+                MaintenanceEffectArming::None,
+                None,
+                Utc::now()
+            )
             .await
             .unwrap()
     );
@@ -344,8 +366,9 @@ async fn normalized_library_scopes_preserve_intent_and_enforce_integrity() {
     assert!(store.get_rule_set("bad").await.unwrap().is_none());
     assert!(store.list_revisions("bad").await.unwrap().is_empty());
     store
-        .update_rule_set_arming(
+        .update_rule_set_state(
             "scoped",
+            scryer_domain::MaintenanceEvaluationMode::Observe,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(&scryer_domain::MaintenanceRuleArmingConfirmation {
                 revision_number: 1,
@@ -392,15 +415,12 @@ async fn normalized_library_scopes_preserve_intent_and_enforce_integrity() {
         )
         .await
         .unwrap();
+    let rescoped = store.get_rule_set("scoped").await.unwrap().unwrap();
     assert_eq!(
-        store
-            .get_rule_set("scoped")
-            .await
-            .unwrap()
-            .unwrap()
-            .effect_arming,
+        rescoped.effect_arming,
         scryer_domain::MaintenanceEffectArming::None
     );
+    assert!(rescoped.destructive_rearm_required);
     assert!(
         sqlx::query("DELETE FROM libraries WHERE id = 'library-1'")
             .execute(pool)
@@ -470,6 +490,7 @@ fn rule_set(id: &str, library_ids: Vec<String>) -> MaintenanceRuleSet {
         destructive_rearm_required: false,
         library_ids,
         subject_kind: MaintenanceRuleSubjectKind::Title,
+        system_owned: false,
         current_revision_number: 1,
         created_at: now,
         updated_at: now,
@@ -513,6 +534,22 @@ async fn rule_sets_and_revisions_round_trip() {
     assert_eq!(loaded.subject_kind, MaintenanceRuleSubjectKind::Title);
     assert_eq!(loaded.library_ids, vec!["library-1".to_string()]);
     assert_eq!(loaded.current_revision_number, 1);
+    assert!(!loaded.system_owned);
+
+    let mut shipped = rule_set("rule-shipped", Vec::new());
+    shipped.system_owned = true;
+    store
+        .create_rule_set(&shipped, &revision("rule-shipped", 1))
+        .await
+        .expect("create system-owned rule set");
+    assert!(
+        store
+            .get_rule_set("rule-shipped")
+            .await
+            .expect("read rule set")
+            .expect("rule set exists")
+            .system_owned
+    );
 
     let stored_revision = store
         .get_revision("rule-a", 1)
@@ -540,8 +577,9 @@ async fn adding_a_revision_repoints_the_rule_set_and_preserves_the_old_one() {
         .expect("create rule set");
 
     store
-        .update_rule_set_arming(
+        .update_rule_set_state(
             "rule-b",
+            scryer_domain::MaintenanceEvaluationMode::Observe,
             scryer_domain::MaintenanceEffectArming::Destructive,
             Some(&scryer_domain::MaintenanceRuleArmingConfirmation {
                 revision_number: 1,
@@ -571,6 +609,31 @@ async fn adding_a_revision_repoints_the_rule_set_and_preserves_the_old_one() {
         scryer_domain::MaintenanceEffectArming::None,
         "appending a revision must disarm the rule"
     );
+    assert!(
+        loaded.destructive_rearm_required,
+        "disarming an armed rule records that it was edited since it was enabled"
+    );
+    assert!(
+        store
+            .update_rule_set_state(
+                "rule-b",
+                scryer_domain::MaintenanceEvaluationMode::Observe,
+                scryer_domain::MaintenanceEffectArming::None,
+                None,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+    );
+    store
+        .add_revision(&revision("rule-b", 3), Utc::now())
+        .await
+        .expect("add revision to an unarmed rule");
+    let unarmed = store.get_rule_set("rule-b").await.unwrap().unwrap();
+    assert!(
+        !unarmed.destructive_rearm_required,
+        "a state write clears the flag and editing an unarmed rule never sets it"
+    );
 
     let first = store
         .get_revision("rule-b", 1)
@@ -587,7 +650,7 @@ async fn adding_a_revision_repoints_the_rule_set_and_preserves_the_old_one() {
         all.iter()
             .map(|revision| revision.revision_number)
             .collect::<Vec<_>>(),
-        vec![2, 1],
+        vec![3, 2, 1],
         "newest revision first"
     );
 

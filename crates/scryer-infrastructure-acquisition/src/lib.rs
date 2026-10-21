@@ -1,3 +1,4 @@
+pub mod delay_profile_store;
 pub mod downloads;
 pub mod indexers;
 pub mod proxy_config_store;

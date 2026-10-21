@@ -3251,6 +3251,7 @@ async fn download_queue_poller_retries_imported_cleanup_from_facet_routing_until
             size_bytes: None,
             completed_at: None,
             parameters: vec![],
+            posted_file_names: Vec::new(),
         });
     let mut history_item = queue_history_fixture_item(item_id, DownloadQueueState::Completed, 40);
     history_item.client_id = config.id.clone();
@@ -5704,12 +5705,8 @@ fn series_pack_completed_download(
     completed
 }
 
-/// An upgrade the admission ladder refuses ("existing file is better") is a
-/// fair loss, not a lie: canonical scoring disposes it as `Skip`, so the
-/// release is **not** burned and the download parks as import-blocked rather
-/// than failing (design D17). Only a `Blocklist` disposition — a truth verdict
-/// that the release misrepresented itself — sets `release_burned`; that path
-/// needs runtime media analysis and is covered at the `result_state` level.
+/// A verified better library copy satisfies a foreign episode download without
+/// burning its release. A later accepted upgrade still replaces that copy.
 #[tokio::test]
 async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accepted() {
     let (fixture, _) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
@@ -5768,7 +5765,7 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
     let incumbent = events[0].media_updates[0].path.clone();
     let incumbent_size = std::fs::metadata(&incumbent).unwrap().len();
     for (quality, width, height, expected) in [
-        ("480p", 640, 480, scryer_domain::ImportDecision::Rejected),
+        ("480p", 640, 480, scryer_domain::ImportDecision::Skipped),
         ("1080p", 1920, 1080, scryer_domain::ImportDecision::Imported),
     ] {
         let source = tempfile::tempdir().unwrap();
@@ -5787,7 +5784,12 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
             .unwrap();
         assert_eq!(result.title_id.as_deref(), Some(title.id.as_str()));
         assert_eq!(result.decision, expected, "{result:?}");
-        if expected == scryer_domain::ImportDecision::Rejected {
+        if expected == scryer_domain::ImportDecision::Skipped {
+            assert_eq!(
+                result.skip_reason,
+                Some(scryer_domain::ImportSkipReason::AlreadyImported)
+            );
+            assert!(!result.release_burned, "{result:?}");
             assert_eq!(std::fs::metadata(&incumbent).unwrap().len(), incumbent_size);
             assert!(incoming.exists());
         }
@@ -5798,7 +5800,7 @@ async fn foreign_swedish_upgrade_preserves_incumbent_until_replacement_is_accept
 }
 
 #[tokio::test]
-async fn automatic_episode_upgrade_rejection_is_not_burned() {
+async fn automatic_episode_downgrade_is_already_present_without_burning() {
     let (
         FailClosedPackFixture {
             app,
@@ -5836,8 +5838,12 @@ async fn automatic_episode_upgrade_rejection_is_not_burned() {
         scryer_domain::ImportDecision::Imported
     );
 
+    let incumbent = import_completed_events_for_title(&app, &title.id).await[0].media_updates[0]
+        .path
+        .clone();
+    let incumbent_bytes = std::fs::read(&incumbent).unwrap();
     let rejected_source = tempfile::tempdir().expect("rejected source tempdir");
-    write_pack_video(
+    let incoming = write_pack_video(
         rejected_source.path(),
         "Fail.Closed.Pack.S01E01.720p.WEB-DL.mkv",
     );
@@ -5856,12 +5862,21 @@ async fn automatic_episode_upgrade_rejection_is_not_burned() {
 
     assert_eq!(
         result.decision,
-        scryer_domain::ImportDecision::Rejected,
+        scryer_domain::ImportDecision::Skipped,
         "{result:?}"
     );
-    assert!(
-        !result.release_burned,
-        "a release that merely lost the upgrade comparison must not be burned: {result:?}"
+    assert_eq!(
+        result.skip_reason,
+        Some(scryer_domain::ImportSkipReason::AlreadyImported)
+    );
+    assert!(!result.release_burned, "{result:?}");
+    assert!(incoming.exists());
+    assert_eq!(std::fs::read(&incumbent).unwrap(), incumbent_bytes);
+    assert_eq!(
+        import_completed_events_for_title(&app, &title.id)
+            .await
+            .len(),
+        1
     );
 }
 
@@ -5985,6 +6000,15 @@ async fn automatic_episode_upgrade_marks_import_completed_as_upgrade() {
 
 #[tokio::test]
 async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
+    automatic_mixed_pack_with_better_incumbent(true).await;
+}
+
+#[tokio::test]
+async fn automatic_multi_file_import_settles_with_a_verified_better_incumbent() {
+    automatic_mixed_pack_with_better_incumbent(false).await;
+}
+
+async fn automatic_mixed_pack_with_better_incumbent(missing_incumbent: bool) {
     let (
         FailClosedPackFixture {
             app,
@@ -5992,6 +6016,7 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
             title,
             episode,
             library_dir: _library_dir,
+            import_artifacts,
             ..
         },
         _submissions,
@@ -6024,8 +6049,15 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
         scryer_domain::ImportDecision::Imported
     );
 
+    let incumbent = import_completed_events_for_title(&app, &title.id).await[0].media_updates[0]
+        .path
+        .clone();
+    let incumbent_bytes = std::fs::read(&incumbent).unwrap();
+    if missing_incumbent {
+        std::fs::remove_file(&incumbent).expect("remove synthetic incumbent fixture");
+    }
     let mixed_source = tempfile::tempdir().expect("mixed source tempdir");
-    write_pack_video(
+    let incoming = write_pack_video(
         mixed_source.path(),
         "Fail.Closed.Pack.S01E01.720p.WEB-DL.mkv",
     );
@@ -6048,10 +6080,38 @@ async fn automatic_multi_file_import_prefers_rejection_over_another_import() {
 
     assert_eq!(
         result.decision,
-        scryer_domain::ImportDecision::Rejected,
+        if missing_incumbent {
+            scryer_domain::ImportDecision::Rejected
+        } else {
+            scryer_domain::ImportDecision::Imported
+        },
         "{result:?}"
     );
     assert!(!result.release_burned, "{result:?}");
+    assert!(
+        incoming.exists(),
+        "the unneeded or rejected source is preserved"
+    );
+    if missing_incumbent {
+        assert!(!Path::new(&incumbent).exists());
+    } else {
+        assert_eq!(std::fs::read(&incumbent).unwrap(), incumbent_bytes);
+    }
+    for (filename, expected) in [
+        (
+            "fail.closed.pack.s01e01.720p.web-dl.mkv",
+            if missing_incumbent {
+                "rejected"
+            } else {
+                "already_present"
+            },
+        ),
+        ("fail.closed.pack.s01e02.1080p.web-dl.mkv", "imported"),
+    ] {
+        let artifacts = import_artifacts.artifacts_for_file(filename).await;
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert_eq!(artifacts[0].result, expected, "{artifacts:?}");
+    }
 }
 
 #[tokio::test]
@@ -6405,6 +6465,10 @@ async fn catalog_scan_and_final_import_join_the_same_native_probe() {
         serde_json::to_value(imported.analysis.unwrap()).unwrap()
     );
 }
+
+#[cfg(feature = "runtime-media-analysis")]
+#[path = "import_probe_stability.rs"]
+mod import_probe_stability;
 
 #[cfg(feature = "runtime-media-analysis")]
 #[tokio::test]
@@ -9246,6 +9310,112 @@ async fn manual_import_preview_reconciles_alternate_numbered_typoed_episode_titl
 }
 
 #[tokio::test]
+async fn manual_import_preview_keeps_catalog_numbering_inside_grabbed_episode_set() {
+    let (
+        FailClosedPackFixture {
+            app, user, title, ..
+        },
+        submissions,
+    ) = build_fail_closed_pack_fixture(FailClosedPackFixtureOptions {
+        facet: MediaFacet::Anime,
+        title_name: "Lantern Academy".to_string(),
+        ..Default::default()
+    })
+    .await;
+    let mut catalog = Vec::new();
+    let mut intended = Vec::new();
+    for season in [2, 3] {
+        for number in 1..=14 {
+            let episode = create_pack_episode_in_season(
+                &app, &user, &title.id, season, number, None, "standard",
+            )
+            .await;
+            if season == 3 {
+                intended.push(episode.id.clone());
+            }
+            catalog.push(episode);
+        }
+    }
+    let bridge = scryer_domain::AnimeNumberingBridge {
+        source: Default::default(),
+        generated_on: "2026-09-26".into(),
+        corroborating_order: None,
+        seasons: vec![scryer_domain::AnimeCommunitySeason {
+            index: 3,
+            anidb_id: None,
+            anilist_id: None,
+            mal_id: None,
+            titles: vec!["Lantern Academy II".into()],
+            ranges: vec![scryer_domain::AnimeCommunitySeasonRange {
+                community_episode_start: 1,
+                community_episode_end: Some(12),
+                tvdb_season: 2,
+                tvdb_episode_start: 1,
+                tvdb_episode_end: Some(12),
+            }],
+            absolute_start: Some(26),
+            contiguous_absolute_start: Some(24),
+            episode_count: Some(24),
+        }],
+    };
+    app.services
+        .catalog
+        .shows
+        .replace_anime_numbering_bridge(&title.id, Some(&bridge))
+        .await
+        .expect("store numbering bridge");
+    let release = "[Group] Lantern Academy S03E01-E14 1080p WEB-DL Dual-Audio";
+    let item_id = "catalog-numbered-cour-pack";
+    record_pack_identity_submission(
+        &submissions,
+        &title.id,
+        item_id,
+        release,
+        SubmissionScope::EpisodeSet {
+            episode_ids: intended.clone(),
+        },
+    )
+    .await;
+    let source = tempfile::tempdir().expect("source fixture");
+    for number in 1..=14 {
+        write_pack_video(
+            source.path(),
+            &format!(
+                "Lantern.Academy.2021.S03E{number:02}.1080p.CR.WEB-DL.DUAL.DDP2.0.H.264-Group.mkv"
+            ),
+        );
+    }
+    let completed = series_pack_completed_download(item_id, &title.id, release, source.path());
+    write_pack_video(
+        source.path(),
+        "Lantern.Academy.2021.S02E14.1080p.WEB-DL.mkv",
+    );
+    let evidence = crate::import::workflow::resolve_release_evidence_for_completed_download(
+        &app, &completed, None,
+    )
+    .await
+    .expect("release evidence");
+    let suggestions =
+        crate::import::workflow::preview_manual_import_suggested_episode_ids_for_tests(
+            &app,
+            source.path(),
+            &title,
+            &evidence,
+            &catalog,
+        )
+        .await
+        .expect("preview");
+    assert_eq!(suggestions.len(), 15);
+    assert_eq!(
+        suggestions.iter().filter(|id| id.is_none()).count(),
+        1,
+        "{suggestions:?}"
+    );
+    let actual: std::collections::HashSet<_> = suggestions.into_iter().flatten().collect();
+    assert_eq!(actual, intended.into_iter().collect());
+}
+
+#[tokio::test]
 async fn alternate_numbered_verified_pack_member_reconciles_from_typoed_episode_title() {
     let (
         FailClosedPackFixture {
@@ -10061,7 +10231,9 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
     let app = base_app.with_test_overrides(|services| {
         services
             .with_imports(import_repo.clone())
-            .with_file_importer(Arc::new(CopyingFileImporter))
+            .with_file_importer(Arc::new(PreparedSourceImporter {
+                change_before_transfer: false,
+            }))
             .with_media_files(media_files.clone())
     });
 
@@ -10209,6 +10381,7 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
     completed.parameters.clear();
     *download_client.completed_downloads.lock().await = vec![completed.clone()];
 
+    let _probe = probe_agrees_with_the_name(1280, 720);
     let result = crate::import_workflow::import_completed_download(&app, &user, &completed)
         .await
         .expect("series movie additional completed download should import");
@@ -10243,6 +10416,8 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
         .find(|file| file.id != primary_file_id)
         .expect("additional file imported");
     assert_eq!(additional_file.role, MediaFileRole::Additional);
+    assert_eq!(additional_file.video_width, Some(1280));
+    assert_eq!(additional_file.video_height, Some(720));
     assert_eq!(
         additional_file.episode_id.as_deref(),
         Some(linked_episode.id.as_str())
@@ -10253,6 +10428,336 @@ async fn completed_import_imports_additional_series_movie_file_from_submission_s
         Some(GRAB_LISTING_SNAPSHOT)
     );
     assert_eq!(primary_file.release_listing_json, None);
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn operator_preparation_bypasses_rules_and_audio_but_automatic_enforces_them() {
+    let fixture = disposition_fixture("Operator Policy", "Operator.Policy.2026.1080p.WEB-DL").await;
+    let source = write_pack_video(
+        fixture._download_dir.path(),
+        "Operator.Policy.2026.1080p.WEB-DL.mkv",
+    );
+    // An explicitly tagged track makes a missing language conclusive.
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/import/h264_aac_eng.mkv"),
+        &source,
+    )
+    .unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(PACK_VIDEO_SIZE_BYTES)
+        .unwrap();
+    let parsed = crate::parse_release_metadata("Operator.Policy.2026.1080p.WEB-DL");
+    let profile = fixture
+        .app
+        .resolve_quality_profile_for_title(&fixture.title)
+        .await
+        .unwrap();
+    let native = scryer_mediainfo::analyze_catalog_file(&source).unwrap();
+    assert!(scryer_mediainfo::is_valid_video(&native));
+    let policy = scryer_rules::UserPolicy {
+        id: "reject_probed_files".into(),
+        name: "Reject probed files".into(),
+        rego_source: scryer_rules::rewrite_package_declaration(
+            "score_entry[\"reject_probed_files\"] := -10000 if { input.file != null }",
+            "reject_probed_files",
+        ),
+        origin: scryer_rules::PolicyOrigin::User,
+        applied_facets: vec![],
+    };
+    // Test each gate independently: an audio failure must not mask a rule failure.
+    for required_audio in [false, true] {
+        *fixture
+            .app
+            .services
+            .customization
+            .user_rules
+            .write()
+            .unwrap() = if required_audio {
+            scryer_rules::UserRulesEngine::empty()
+        } else {
+            scryer_rules::UserRulesEngine::build(std::slice::from_ref(&policy)).unwrap()
+        };
+        fixture
+            .app
+            .set_title_required_audio_override(
+                &fixture.user,
+                &fixture.title.id,
+                Some(if required_audio {
+                    vec!["jpn".into()]
+                } else {
+                    vec![]
+                }),
+            )
+            .await
+            .unwrap();
+        for manual in [false, true] {
+            let validation = if manual {
+                crate::post_download_gate::RuntimeSampleValidation::manual_override(None)
+            } else {
+                crate::post_download_gate::RuntimeSampleValidation::automatic(
+                    native.duration_seconds,
+                )
+            };
+            let result = crate::post_download_gate::prepare_import_candidate_with_disc_selection(
+                &fixture.app,
+                &fixture.title,
+                &parsed,
+                &profile,
+                &source,
+                PACK_VIDEO_SIZE_BYTES as i64,
+                false,
+                None,
+                false,
+                validation,
+                None,
+                None,
+            )
+            .await;
+            if manual {
+                let prepared =
+                    result.unwrap_or_else(|r| panic!("manual preparation rejected: {}", r.message));
+                assert_eq!(
+                    prepared.accepted.analysis.unwrap().video_width,
+                    native.video_width
+                );
+            } else {
+                let rejection = result.err().expect("automatic gate must reject");
+                assert_eq!(
+                    rejection.recycle_reason,
+                    if required_audio {
+                        "language_mismatch"
+                    } else {
+                        "post_download_rule_blocked"
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn additional_movie_preparation_preserves_files_on_inconclusive_or_changed_source() {
+    for changed_source in [false, true] {
+        let release = "Prepared.Additional.2026.1080p.WEB-DL";
+        let fixture = disposition_fixture("Prepared Additional", release).await;
+        fixture
+            .set_submission_purpose(DownloadSubmissionPurpose::AdditionalFile)
+            .await;
+        let incumbent = seed_primary_movie_file(&fixture, "incumbent.mkv", "2160p").await;
+        let unrelated = fixture.title_folder.join("unrelated.txt");
+        std::fs::write(&unrelated, b"preserve").unwrap();
+        let source = fixture._download_dir.path().join(format!("{release}.mkv"));
+        if changed_source {
+            write_pack_video(fixture._download_dir.path(), &format!("{release}.mkv"));
+        } else {
+            // MPEG program stream declares video but supplies no codec headers.
+            std::fs::write(
+                &source,
+                [
+                    0, 0, 1, 0xba, 0x44, 0, 4, 0, 4, 1, 0, 0, 3, 0xf8, 0, 0, 1, 0xe0, 0, 3, 0x80,
+                    0, 0,
+                ],
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&source).unwrap();
+        let app = fixture.app.with_test_overrides(|services| {
+            services.with_file_importer(Arc::new(PreparedSourceImporter {
+                change_before_transfer: changed_source,
+            }))
+        });
+        let result = crate::import_workflow::import_completed_download(
+            &app,
+            &fixture.user,
+            &fixture.completed,
+        )
+        .await;
+        assert!(
+            !matches!(result, Ok(ref r) if r.decision == scryer_domain::ImportDecision::Imported)
+        );
+        let message = match result {
+            Ok(result) => result.error_message.unwrap_or_default(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains(if changed_source {
+                "source changed"
+            } else {
+                "inconclusive"
+            }),
+            "{message}"
+        );
+        let files = app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&fixture.title.id)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, incumbent);
+        assert_eq!(files[0].role, MediaFileRole::Primary);
+        assert!(source.exists());
+        if !changed_source {
+            assert_eq!(std::fs::read(&source).unwrap(), before);
+        }
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"preserve");
+        assert!(fixture.blocklisted_titles().await.is_empty());
+        assert_eq!(
+            fixture.scope_status().await,
+            AcquisitionScopeStatus::Grabbed
+        );
+    }
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn additional_movie_preparation_persists_native_analysis_and_manual_probe_errors() {
+    for valid_video in [false, true] {
+        let release = "Prepared.Metadata.2026.1080p.WEB-DL";
+        let fixture = disposition_fixture("Prepared Metadata", release).await;
+        fixture
+            .app
+            .set_title_required_audio_override(
+                &fixture.user,
+                &fixture.title.id,
+                Some(vec!["jpn".into()]),
+            )
+            .await
+            .unwrap();
+        *fixture
+            .app
+            .services
+            .customization
+            .user_rules
+            .write()
+            .unwrap() = scryer_rules::UserRulesEngine::build(&[scryer_rules::UserPolicy {
+            id: "reject_additional".into(),
+            name: "Reject additional".into(),
+            rego_source: scryer_rules::rewrite_package_declaration(
+                "score_entry[\"reject_additional\"] := -10000 if { input.file != null }",
+                "reject_additional",
+            ),
+            origin: scryer_rules::PolicyOrigin::User,
+            applied_facets: vec![],
+        }])
+        .unwrap();
+        fixture
+            .set_submission_purpose(DownloadSubmissionPurpose::AdditionalFile)
+            .await;
+        let source = fixture._download_dir.path().join(format!("{release}.mkv"));
+        let expected = if valid_video {
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/import/h264_aac_eng.mkv"),
+                &source,
+            )
+            .unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_len(PACK_VIDEO_SIZE_BYTES)
+                .unwrap();
+            Some(scryer_mediainfo::analyze_catalog_file(&source).unwrap())
+        } else {
+            // Harmless non-video bytes under a video extension exercise the
+            // explicitly retained manual probe-error override.
+            std::fs::write(&source, b"MZ harmless invalid media fixture").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_len(PACK_VIDEO_SIZE_BYTES)
+                .unwrap();
+            None
+        };
+        let result = crate::import_workflow::import_completed_download(
+            &fixture.app,
+            &fixture.user,
+            &fixture.completed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.decision,
+            scryer_domain::ImportDecision::Imported,
+            "{result:?}"
+        );
+        let files = fixture
+            .app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&fixture.title.id)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].role, MediaFileRole::Additional);
+        if let Some(expected) = expected {
+            assert_eq!(files[0].video_width, expected.video_width);
+            assert_eq!(files[0].duration_seconds, expected.duration_seconds);
+            assert_eq!(files[0].scan_status, "scanned");
+        } else {
+            assert_eq!(files[0].scan_status, "failed");
+        }
+        assert!(fixture.blocklisted_titles().await.is_empty());
+    }
+}
+
+/// These import lanes must hand the transfer the exact source version they probed.
+struct PreparedSourceImporter {
+    change_before_transfer: bool,
+}
+
+#[async_trait]
+impl FileImporter for PreparedSourceImporter {
+    async fn remove_import_source_after_verified_import(
+        &self,
+        guard: scryer_domain::ImportSourceCleanupGuard,
+        final_dest_path: &Path,
+    ) -> AppResult<()> {
+        CopyingFileImporter
+            .remove_import_source_after_verified_import(guard, final_dest_path)
+            .await
+    }
+
+    async fn snapshot_import_source(
+        &self,
+        source: &Path,
+    ) -> AppResult<scryer_domain::ImportSourceSnapshot> {
+        test_import_source_snapshot(source)
+    }
+
+    async fn import_file(
+        &self,
+        source: &Path,
+        dest: &Path,
+        mode: scryer_domain::ImportMode,
+        expected_source: Option<&scryer_domain::ImportSourceSnapshot>,
+    ) -> AppResult<scryer_domain::ImportFileResult> {
+        assert!(
+            expected_source.is_some(),
+            "transfer must carry pre-import proof"
+        );
+        if self.change_before_transfer {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(source)
+                .unwrap()
+                .write_all(b"changed after analysis")
+                .unwrap();
+        }
+        CopyingFileImporter
+            .import_file(source, dest, mode, expected_source)
+            .await
+    }
 }
 
 /// A completed additional-file movie download that is imported again (copy
@@ -10274,7 +10779,9 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     let app = base_app.with_test_overrides(|services| {
         services
             .with_imports(import_repo.clone())
-            .with_file_importer(Arc::new(CopyingFileImporter))
+            .with_file_importer(Arc::new(PreparedSourceImporter {
+                change_before_transfer: false,
+            }))
             .with_media_files(media_files.clone())
     });
 
@@ -10372,6 +10879,7 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     completed.parameters.clear();
     *download_client.completed_downloads.lock().await = vec![completed.clone()];
 
+    let _probe = probe_agrees_with_the_name(1280, 720);
     let first = crate::import_workflow::import_completed_download(&app, &user, &completed)
         .await
         .expect("first additional movie import");
@@ -10419,6 +10927,8 @@ async fn completed_import_retry_reuses_existing_additional_movie_file() {
     );
     assert_eq!(additional_files[0].role, MediaFileRole::Additional);
     assert_eq!(additional_files[0].file_path, first_dest);
+    assert_eq!(additional_files[0].video_width, Some(1280));
+    assert_eq!(additional_files[0].video_height, Some(720));
     let library_videos = std::fs::read_dir(&title_folder)
         .expect("read title folder")
         .filter_map(Result::ok)
@@ -10503,6 +11013,11 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
         },
         download_submissions,
     ) = fail_closed_pack_fixture_with_submissions().await;
+    let app = app.with_test_overrides(|services| {
+        services.with_file_importer(Arc::new(PreparedSourceImporter {
+            change_before_transfer: false,
+        }))
+    });
 
     let season_folder = library_dir
         .path()
@@ -10573,6 +11088,7 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
     let source_file = write_pack_video(source_dir.path(), &format!("{release}.mkv"));
     let completed = series_pack_completed_download(item_id, &title.id, release, source_dir.path());
 
+    let _probe = probe_agrees_with_the_name(1280, 720);
     let first = crate::import_workflow::import_completed_download(&app, &user, &completed)
         .await
         .expect("first additional episode import");
@@ -10635,6 +11151,8 @@ async fn completed_import_retry_reuses_existing_additional_episode_file() {
         Some(episode.id.as_str())
     );
     assert_eq!(additional_files[0].file_path, first_dest);
+    assert_eq!(additional_files[0].video_width, Some(1280));
+    assert_eq!(additional_files[0].video_height, Some(720));
     assert_eq!(
         additional_files[0].release_listing_json.as_deref(),
         Some(GRAB_LISTING_SNAPSHOT)
@@ -13885,6 +14403,102 @@ async fn automatic_movie_import_and_upgrade_each_send_one_import_completed() {
     }
 }
 
+fn sized_video(dir: &std::path::Path, name: &str, bytes: u64) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::File::create(&path)
+        .expect("create fixture video")
+        .set_len(bytes)
+        .expect("size fixture video");
+    path
+}
+
+/// A movie grab that came down as a season of episodes is held for the
+/// operator: nothing lands in the library and every source file stays put.
+#[tokio::test]
+async fn an_automatic_movie_import_holding_a_season_of_episodes_is_held() {
+    let release_title = "Quillon.2026.1080p.WEB-DL-SYNTH";
+    let fixture = disposition_fixture("Quillon", release_title).await;
+    let download_dir = PathBuf::from(&fixture.completed.dest_dir);
+    let episodes = (1..=12)
+        .map(|episode| {
+            sized_video(
+                &download_dir,
+                &format!("[SynthSubs] Quillon - {episode:02} [1080p].mkv"),
+                300 * 1024 * 1024,
+            )
+        })
+        .collect::<Vec<_>>();
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import_workflow::import_completed_download(
+        &fixture.app,
+        &fixture.user,
+        &fixture.completed,
+    )
+    .await
+    .expect("the import runs to a decision");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Skipped,
+        "{result:?}"
+    );
+    assert!(!result.release_burned, "{result:?}");
+    assert!(result.dest_path.is_none(), "{result:?}");
+    assert!(
+        result
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("12 episode files")),
+        "{result:?}"
+    );
+    assert!(primary_movie_files(&fixture).await.is_empty());
+    assert!(
+        !fixture.title_folder.exists()
+            || std::fs::read_dir(&fixture.title_folder)
+                .expect("read title folder")
+                .next()
+                .is_none(),
+        "nothing lands in the library"
+    );
+    for episode in &episodes {
+        assert!(episode.exists(), "{} is left in place", episode.display());
+    }
+    assert!(download_dir.join(format!("{release_title}.mkv")).exists());
+    assert!(fixture.blocklist_repo.entries.lock().await.is_empty());
+}
+
+/// The feature still imports when the download also carries a sample and an
+/// extra: neither names an episode.
+#[tokio::test]
+async fn an_automatic_movie_import_with_a_sample_and_an_extra_imports_the_feature() {
+    let release_title = "Quillon.2026.1080p.WEB-DL-SYNTH";
+    let fixture = disposition_fixture("Quillon", release_title).await;
+    let download_dir = PathBuf::from(&fixture.completed.dest_dir);
+    sized_video(
+        &download_dir,
+        &format!("{release_title}.sample.mkv"),
+        20 * 1024 * 1024,
+    );
+    sized_video(&download_dir, "Quillon.Featurette.mkv", 40 * 1024 * 1024);
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import_workflow::import_completed_download(
+        &fixture.app,
+        &fixture.user,
+        &fixture.completed,
+    )
+    .await
+    .expect("the import runs to a decision");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{result:?}"
+    );
+    assert_eq!(primary_movie_files(&fixture).await.len(), 1);
+}
+
 /// A movie imported from a Scryer grab keeps that grab's listing snapshot on
 /// its media row, whether it lands fresh or replaces an incumbent.
 #[tokio::test]
@@ -14466,13 +15080,19 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
     );
 }
 
-/// **Minor 5.** A manual series-movie-link import does not go through
-/// `import_series_movie_download` at all, so it never reaches the verdict gate —
-/// whatever the probe reports. Pinned because `operator_initiated_import`'s doc
-/// used to claim it covered "all three import paths", which invited someone to
-/// rely on the bypass flag for a path that never consults it.
+/// Manual links use prepared analysis without automatic upgrade competition.
 #[tokio::test]
-async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
+async fn manual_series_movie_import_prepares_analysis_without_upgrade_competition() {
+    manual_series_movie_preparation_case(false).await;
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn manual_series_movie_import_holds_inconclusive_video_before_transfer() {
+    manual_series_movie_preparation_case(true).await;
+}
+
+async fn manual_series_movie_preparation_case(inconclusive: bool) {
     let download_client = Arc::new(StubDownloadClient::default());
     let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
@@ -14482,7 +15102,9 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
     let blocklist_repo = Arc::new(MockBlocklistRepo::default());
     let app = base_app.with_test_overrides(|services| {
         services
-            .with_file_importer(Arc::new(CopyingFileImporter))
+            .with_file_importer(Arc::new(PreparedSourceImporter {
+                change_before_transfer: false,
+            }))
             .with_media_files(media_files.clone())
             .with_blocklist_repo(blocklist_repo.clone())
     });
@@ -14544,14 +15166,25 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
     analysis.video_codec = crate::release_parser::VideoCodec::parse("h264");
     analysis.video_width = Some(1280);
     analysis.video_height = Some(720);
-    let _probe = crate::post_download_gate::probe_override::install(
-        crate::post_download_gate::ImportedFileAcceptance {
-            analysis: Some(analysis),
-            scan_error: None,
-            rule_file_doc: None,
-            audio_language_warning: None,
-        },
-    );
+    if inconclusive {
+        std::fs::write(
+            &source_file,
+            [
+                0, 0, 1, 0xba, 0x44, 0, 4, 0, 4, 1, 0, 0, 3, 0xf8, 0, 0, 1, 0xe0, 0, 3, 0x80, 0, 0,
+            ],
+        )
+        .unwrap();
+    }
+    let _probe = (!inconclusive).then(|| {
+        crate::post_download_gate::probe_override::install(
+            crate::post_download_gate::ImportedFileAcceptance {
+                analysis: Some(analysis),
+                scan_error: None,
+                rule_file_doc: None,
+                audio_language_warning: None,
+            },
+        )
+    });
 
     let results = crate::import_workflow::execute_manual_import(
         &app,
@@ -14571,10 +15204,6 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
     .await
     .expect("execute manual import");
 
-    assert!(
-        results.iter().all(|result| result.success),
-        "the operator's own file must import: {results:?}"
-    );
     let files = app
         .services
         .library
@@ -14582,10 +15211,25 @@ async fn a_manual_series_movie_link_import_never_reaches_the_verdict_gate() {
         .list_media_files_for_title(&title.id)
         .await
         .expect("list media files");
+    if inconclusive {
+        assert!(results.iter().all(|result| !result.success), "{results:?}");
+        assert!(files.is_empty());
+        assert!(source_file.exists());
+        assert!(blocklist_repo.entries.lock().await.is_empty());
+        assert!(!title_folder.exists());
+        return;
+    }
+    assert!(
+        results.iter().all(|result| result.success),
+        "the operator's own file must import: {results:?}"
+    );
     assert!(
         !files.is_empty() && files.iter().all(|file| file.release_listing_json.is_none()),
         "a manual import with no grab behind it records no listing snapshot: {files:?}"
     );
+    assert_eq!(files[0].video_width, Some(1280));
+    assert_eq!(files[0].video_height, Some(720));
+    assert_eq!(files[0].scan_status, "scanned");
     assert!(
         blocklist_repo.entries.lock().await.is_empty(),
         "a manual link import must never blocklist the operator's release: {:?}",

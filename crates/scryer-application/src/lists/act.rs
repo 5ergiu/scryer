@@ -48,14 +48,12 @@ pub trait ListActions: Send + Sync {
     ) -> AppResult<scryer_domain::UserListAccount> {
         Ok(account)
     }
-    /// Create the title monitored in the route's library and, when `search`
-    /// is set, start the same wanted search an approved request starts.
+    /// Create the title in the route's library with the route's monitoring.
     async fn add_title(
         &self,
         subscription: &ListSubscription,
         route: &ListRoute,
         item: &ResolvedItem,
-        search: bool,
     ) -> AppResult<AddedTitle>;
 
     /// Whether the subscription's owner may manage titles in the route's
@@ -182,9 +180,9 @@ pub async fn act_on_candidate(
     };
 
     // Re-check the owner's current grants on every item. A revoked grant
-    // falls back to the normal request policy; Add keeps its no-search intent.
+    // falls back to the normal request policy.
     let mode = match subscription.mode {
-        ListMode::Search | ListMode::Add if subscription.is_personal() => {
+        ListMode::Add if subscription.is_personal() => {
             match actions.owner_manages_titles(subscription, route).await {
                 Ok(true) => subscription.mode,
                 Ok(false) => ListMode::Request,
@@ -199,9 +197,7 @@ pub async fn act_on_candidate(
         mode => mode,
     };
     let result = match mode {
-        ListMode::Search | ListMode::Add => {
-            add_outcome(actions, subscription, route, item, mode == ListMode::Search).await
-        }
+        ListMode::Add => add_outcome(actions, subscription, route, item).await,
         // Hold parks every item for review, whoever owns the list.
         ListMode::Hold => actions
             .submit_request(subscription, route, item, true)
@@ -212,10 +208,10 @@ pub async fn act_on_candidate(
             }),
         ListMode::Request => {
             // Manage Titles shadows Request: an owner who may add the title
-            // themselves gets it added, searched as an approved request would
-            // be, rather than a request that only they could approve.
+            // themselves gets it added with the route's monitoring, rather
+            // than a request that only they could approve.
             match actions.owner_manages_titles(subscription, route).await {
-                Ok(true) => add_outcome(actions, subscription, route, item, true).await,
+                Ok(true) => add_outcome(actions, subscription, route, item).await,
                 Ok(false) => actions
                     .submit_request(subscription, route, item, hold_requests)
                     .await
@@ -264,9 +260,8 @@ async fn add_outcome(
     subscription: &ListSubscription,
     route: &ListRoute,
     item: &ResolvedItem,
-    search: bool,
 ) -> AppResult<ActOutcome> {
-    let added = actions.add_title(subscription, route, item, search).await?;
+    let added = actions.add_title(subscription, route, item).await?;
     Ok(if added.created {
         ActOutcome {
             title_id: Some(added.title_id),

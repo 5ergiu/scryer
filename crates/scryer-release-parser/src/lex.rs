@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 pub(crate) const MAX_TOKENS: usize = 256;
+// Past `MAX_TOKENS`, this many tokens are kept from the start of the name and
+// the rest of the budget from its end. A name that long is almost all title,
+// and the episode, quality and group that identify the release follow it.
+const KEPT_HEAD_TOKENS: usize = 64;
 pub(crate) const MAX_BRACKET_DEPTH: usize = 8;
 
 /// Byte span inside the sanitized input string.
@@ -114,10 +118,6 @@ pub(crate) fn lex_lossless(input: &str) -> LexedRelease {
                     group_stack.len(),
                 ) {
                     tokens.push(token);
-                    if tokens.len() == MAX_TOKENS {
-                        hints.push("token_limit_reached".to_string());
-                        break;
-                    }
                 }
             }
 
@@ -160,6 +160,12 @@ pub(crate) fn lex_lossless(input: &str) -> LexedRelease {
         {
             tokens.push(token);
         }
+    }
+
+    if tokens.len() > MAX_TOKENS {
+        let kept_tail = MAX_TOKENS - KEPT_HEAD_TOKENS;
+        tokens.drain(KEPT_HEAD_TOKENS..tokens.len() - kept_tail);
+        hints.push("token_limit_reached".to_string());
     }
 
     let cst = build_cst(&tokens);

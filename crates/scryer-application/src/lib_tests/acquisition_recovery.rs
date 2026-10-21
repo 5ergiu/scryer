@@ -597,24 +597,16 @@ async fn standby_delay_parks_the_best_row_stops_the_walk_and_promotion_grabs_whe
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Standby Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "standby-delay",
-                "name": "Standby delay",
-                "usenet_delay_minutes": 10,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "standby-delay",
+            "name": "Standby delay",
+            "usenet_delay_minutes": 10,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let now = Utc::now();
     let mut best = pending_movie_release(
         &wanted_id,
@@ -957,24 +949,16 @@ async fn waiting_promotion_reparks_when_the_delay_profile_grows() {
         .insert_pending_release(&waiting)
         .await
         .expect("seed waiting release");
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "grown-delay",
-                "name": "Grown delay",
-                "usenet_delay_minutes": 30,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("lengthen delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "grown-delay",
+            "name": "Grown delay",
+            "usenet_delay_minutes": 30,
+        }]),
+    )
+    .await
+    .expect("lengthen delay profile");
     let wanted = wanted_items
         .get_acquisition_scope_state_by_id(&wanted_id)
         .await
@@ -1028,24 +1012,16 @@ async fn operator_pending_grab_ignores_the_delay_profile() {
     );
     let (title, wanted_id) =
         seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Operator Delay", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "operator-delay",
-                "name": "Operator delay",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "operator-delay",
+            "name": "Operator delay",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
     let pending = pending_movie_release(
         &wanted_id,
         &title,
@@ -6213,24 +6189,16 @@ async fn automatic_search_parks_invalid_publication_time_for_age_review() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Unknown Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age-search",
-                "name": "Unknown age search",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age-search",
+            "name": "Unknown age search",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -6284,25 +6252,17 @@ async fn automatic_search_parks_hard_minimum_age_until_publication_deadline() {
         indexer_client,
     );
     seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Minimum Age Movie", 2024).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "minimum-age-search",
-                "name": "Minimum age search",
-                "usenet_delay_minutes": 0,
-                "min_age_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "minimum-age-search",
+            "name": "Minimum age search",
+            "usenet_delay_minutes": 0,
+            "min_age_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -8820,24 +8780,16 @@ async fn the_rss_park_path_stores_the_reported_seeder_count_on_the_pending_row()
     // only client the acquisition harness enables; the capture under test reads
     // `extra["seeders"]` and is indifferent to the protocol, and the production
     // park site is the same single call either way.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delay-torrents",
-                "name": "Delay torrents",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delay-torrents",
+            "name": "Delay torrents",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -8874,24 +8826,16 @@ async fn rss_treats_an_invalid_publication_timestamp_as_unknown_age() {
             indexer_client,
         );
     let _title = add_rss_target_movie(&app, &user, &wanted_items, "Rss Unknown Age Movie").await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "unknown-age",
-                "name": "Unknown age",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile catalog");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "unknown-age",
+            "name": "Unknown age",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile catalog");
 
     let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
 
@@ -9041,6 +8985,66 @@ async fn add_rss_target_movie(
         .remember_title_facet(&title.id, MediaFacet::Movie)
         .await;
     title
+}
+
+#[tokio::test]
+async fn rss_sync_never_grabs_a_movie_the_availability_gate_blocks() {
+    let release_title = "Rss.Gated.Movie.2024.1080p.WEB-DL-GRP";
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user, release_attempts) =
+        bootstrap_with_acquisition_tracking_and_indexer_and_release_attempts(
+            Arc::new(StubDownloadClient::default()),
+            download_submissions.clone(),
+            Arc::new(TrackingPendingReleaseRepo::default()),
+            wanted_items.clone(),
+            Arc::new(FixedReleaseIndexerClient::new(release_title)),
+        );
+    let title = add_rss_target_movie(&app, &user, &wanted_items, "Rss Gated Movie").await;
+    // The unhydrated title has no release dates, so `released` is unknown.
+    app.update_title_min_availability(&user, &title.id, Some("released".to_string()))
+        .await
+        .expect("set movie availability");
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(download_submissions.store.lock().await.is_empty());
+    assert!(release_attempts.attempts.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn external_release_is_rejected_for_a_movie_the_availability_gate_blocks() {
+    let pending = Arc::new(TrackingPendingReleaseRepo::default());
+    let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        submissions.clone(),
+        pending.clone(),
+        wanted.clone(),
+        Arc::new(MockIndexerClient),
+    );
+    let title = add_rss_target_movie(&app, &user, &wanted, "Convergent Skyline").await;
+    app.update_title_min_availability(&user, &title.id, Some("released".to_string()))
+        .await
+        .expect("set movie availability");
+    let mut input = external_test_input();
+    input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
+    input.published_at = Some(Utc::now());
+
+    let outcome = app
+        .submit_external_release(&user, input, &[])
+        .await
+        .expect("evaluate external release");
+
+    assert_eq!(
+        outcome.status,
+        crate::ExternalReleaseStatus::Rejected,
+        "{outcome:?}"
+    );
+    assert!(submissions.store.lock().await.is_empty());
+    assert!(pending.store.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -9314,7 +9318,7 @@ async fn acquisition_cycle_submits_paperman_media_request_candidate() {
                     ExternalId::new("imdb".to_string(), "tt2388725".to_string()),
                 ],
                 content_status: Some("Released".to_string()),
-                min_availability: Some("released".to_string()),
+                min_availability: Some("announced".to_string()),
                 ..Default::default()
             },
         )
@@ -10880,8 +10884,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
         Arc::new(MockIndexerClient),
     );
     let title = add_rss_target_movie(&app, &user, &wanted, "Convergent Skyline").await;
-    app.services.config.settings.upsert_setting_json(SETTINGS_SCOPE_SYSTEM, DELAY_PROFILE_CATALOG_KEY, None,
-        serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}]).to_string(), "test", None).await.unwrap();
+    replace_delay_profiles(&app, serde_json::json!([{"id":"external-delay", "name":"Hold announcements", "usenet_delay_minutes":120}])).await.unwrap();
     let mut input = external_test_input();
     // With no incumbent, use a tier upgrade rather than a revision-only tie.
     input.name = "Convergent.Skyline.2024.720p.WEB-DL-GRP".into();
@@ -10927,17 +10930,7 @@ async fn external_intake_delay_survives_reconstruction_without_indexer_polling()
     assert_eq!(pending.store.lock().await.len(), 2);
     // A policy edit makes the ordinary delay admission check eligible;
     // no wall-clock sleep and no RSS/indexer request is needed.
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            "[]".into(),
-            "test",
-            None,
-        )
+    replace_delay_profiles(&app, serde_json::json!([]))
         .await
         .unwrap();
     assert_eq!(app.process_external_pending_releases().await.unwrap(), 1);
@@ -11419,6 +11412,92 @@ async fn rss_library_quality_profile_overrides_global_profile() {
     let submissions = download_submissions.store.lock().await.clone();
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].source_title.as_deref(), Some(release_1080p));
+}
+
+#[tokio::test]
+async fn rss_refuses_a_pack_on_identity_before_quality_and_never_takes_another_years_film() {
+    // 2160p, so the 1080p profile would refuse every one of them on quality;
+    // the recorded reason must be what they are, not what they look like.
+    let releases = [
+        "Quillon 2000 2160p BluRay x265-SYNTH",
+        "Quillon.2000.2160p.WEB-DL.DDP5.1.H.265-SYNTH",
+        "Quillon (2000) [2160p] [BluRay]",
+        "[SynthSubs] Quillon (01-12) [2160p]",
+    ];
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let quality_profiles = Arc::new(StoredQualityProfileRepo::default());
+    quality_profiles
+        .set_profiles(vec![
+            crate::builtin_4k_profile(),
+            crate::builtin_1080p_profile(),
+        ])
+        .await;
+    let (app, user, settings) = bootstrap_rss_with_media_files_and_profiles(
+        Arc::new(StubDownloadClient::default()),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        Arc::new(MockMediaFileRepo::default()),
+        quality_profiles,
+        Arc::new(MultiReleaseIndexerClient::new(releases.to_vec())),
+    )
+    .await;
+    let title = app
+        .add_title(
+            &user,
+            NewTitle {
+                name: "Quillon".into(),
+                sort_title: Some("Quillon".into()),
+                slug: Some("quillon".into()),
+                facet: MediaFacet::Movie,
+                monitored: true,
+                year: Some(2028),
+                min_availability: Some("announced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create monitored movie");
+    wanted_items
+        .remember_title_facet(&title.id, MediaFacet::Movie)
+        .await;
+    settings
+        .set_scoped_value(
+            SETTINGS_SCOPE_SYSTEM,
+            QUALITY_PROFILE_ID_KEY,
+            &title.library_id,
+            "\"1080p\"",
+        )
+        .await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(report.releases_grabbed, 0);
+    assert!(download_submissions.store.lock().await.is_empty());
+    let decisions = wanted_items.release_decisions.lock().await.clone();
+    let code_for = |release: &str| {
+        decisions
+            .iter()
+            .find(|decision| decision.release_title == release)
+            .map(|decision| decision.decision_code.clone())
+    };
+    // The feed never pairs another year's film with this title at all; if a
+    // lane ever does, it must say why.
+    for release in &releases[..3] {
+        assert!(
+            matches!(
+                code_for(release).as_deref(),
+                None | Some("title_year_mismatch")
+            ),
+            "{release}: {:?}",
+            code_for(release)
+        );
+    }
+    assert_eq!(
+        code_for(releases[3]).as_deref(),
+        Some("episodic_release_for_movie")
+    );
 }
 
 #[tokio::test]
@@ -13095,24 +13174,16 @@ async fn a_delayed_season_pack_no_longer_suppresses_its_episode_search() {
     );
     let (app, _title, indexer_client, download_client) =
         seed_recent_failed_season_pack_fixture_with_indexer(indexer_client).await;
-    app.services
-        .config
-        .settings
-        .upsert_setting_json(
-            SETTINGS_SCOPE_SYSTEM,
-            DELAY_PROFILE_CATALOG_KEY,
-            None,
-            serde_json::json!([{
-                "id": "delayed-pack",
-                "name": "Delayed pack",
-                "usenet_delay_minutes": 120,
-            }])
-            .to_string(),
-            "test",
-            None,
-        )
-        .await
-        .expect("seed delay profile");
+    replace_delay_profiles(
+        &app,
+        serde_json::json!([{
+            "id": "delayed-pack",
+            "name": "Delayed pack",
+            "usenet_delay_minutes": 120,
+        }]),
+    )
+    .await
+    .expect("seed delay profile");
 
     app.run_background_acquisition_cycle_once().await;
 
@@ -15982,7 +16053,7 @@ async fn seed_monitored_movie_for_cycle(
                 monitored: true,
                 year: Some(year),
                 content_status: Some("Released".to_string()),
-                min_availability: Some("released".to_string()),
+                min_availability: Some("announced".to_string()),
                 ..Default::default()
             },
         )
@@ -16977,5 +17048,199 @@ async fn a_covered_walk_prunes_the_coverage_of_a_source_gone_row() {
         coverage.indexers_for_scope(&scope_key).await,
         vec!["kept-indexer".to_string()],
         "the gone source's coverage is pruned so the next cycle re-queries it"
+    );
+}
+
+/// Replace every stored delay profile with `catalog`, written in the JSON shape
+/// the profiles used to be stored in.
+async fn replace_delay_profiles(app: &AppUseCase, catalog: serde_json::Value) -> AppResult<()> {
+    let repository = &app.services.config.delay_profiles;
+    for profile in repository.list().await? {
+        repository.delete(&profile.id).await?;
+    }
+    let profiles = crate::parse_delay_profile_catalog(&catalog.to_string())
+        .map_err(|error| AppError::Validation(error.to_string()))?
+        .into_iter()
+        .map(crate::normalize_delay_profile)
+        .collect();
+    repository.save_many(profiles).await
+}
+
+fn streamed_rss_result(indexer_id: &str, guid: &str, title: &str) -> IndexerSearchResult {
+    IndexerSearchResult {
+        indexer_id: Some(indexer_id.to_string()),
+        source: indexer_id.to_string(),
+        title: title.to_string(),
+        link: Some(format!("https://example.invalid/info/{guid}")),
+        download_url: Some(format!("https://example.invalid/download/{guid}.nzb")),
+        source_kind: Some(DownloadSourceKind::NzbUrl),
+        size_bytes: None,
+        published_at: Some("1970-01-01T00:00:00Z".into()),
+        thumbs_up: None,
+        thumbs_down: None,
+        indexer_languages: None,
+        indexer_subtitles: None,
+        indexer_grabs: None,
+        password_hint: None,
+        parsed_release_metadata: Some(crate::parse_release_metadata(title)),
+        quality_profile_decision: None,
+        extra: Default::default(),
+        response_attributes: Default::default(),
+        guid: Some(guid.to_string()),
+        info_url: Some(format!("https://example.invalid/info/{guid}")),
+        provenance: None,
+        auto_eligible: None,
+        auto_decision_code: None,
+        auto_decision_summary: None,
+        candidate_token: None,
+        queue_scope: None,
+        coverage_scope: None,
+        release_listing_json: None,
+    }
+}
+
+/// Streams two indexers' polls as separate pages, and before it hands on the
+/// second it waits for the first to be taken and records what the RSS worker
+/// had seen by then.
+struct StreamingRssIndexerClient {
+    seen_guids:
+        std::sync::OnceLock<Arc<tokio::sync::RwLock<crate::acquisition::rss::RssSeenGuids>>>,
+    seen_before_second_poll: Mutex<Option<usize>>,
+    first_title: String,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for StreamingRssIndexerClient {
+    async fn search(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+
+    async fn search_stream(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+        page_sink: crate::IndexerSearchPageSink,
+    ) -> AppResult<IndexerSearchResponse> {
+        page_sink
+            .send(vec![streamed_rss_result(
+                "indexer-a",
+                "stream-guid-a",
+                &self.first_title,
+            )])
+            .await
+            .expect("the RSS worker should take the first poll");
+        // The worker holds one page at a time, so this reservation is granted
+        // only once the first poll's page has been taken and released.
+        let reservation =
+            tokio::time::timeout(std::time::Duration::from_secs(30), page_sink.reserve())
+                .await
+                .expect("the first poll should be released while the cycle is still fetching")
+                .expect("the page sink should stay open");
+        let seen = self
+            .seen_guids
+            .get()
+            .expect("seen-guid handle installed")
+            .read()
+            .await
+            .len();
+        *self.seen_before_second_poll.lock().await = Some(seen);
+        reservation
+            .send(vec![streamed_rss_result(
+                "indexer-b",
+                "stream-guid-b",
+                "Unrelated.Feed.Item.2019.720p.HDTV-GRP",
+            )])
+            .await
+            .expect("the RSS worker should take the second poll");
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: Vec::new(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn scheduled_rss_ingests_each_poll_before_the_next_is_fetched() {
+    let release_title = "Streamed Feed Movie.2024.1080p.WEB-DL-GRP".replace(' ', ".");
+    let pending_releases = Arc::new(TrackingPendingReleaseRepo::default());
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let indexer_client = Arc::new(StreamingRssIndexerClient {
+        seen_guids: std::sync::OnceLock::new(),
+        seen_before_second_poll: Mutex::new(None),
+        first_title: release_title,
+    });
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        Arc::new(TrackingDownloadSubmissionRepo::default()),
+        pending_releases,
+        wanted_items.clone(),
+        indexer_client.clone(),
+    );
+    let seen_guids = app.runtime.acquisition.rss_seen_guids.clone();
+    indexer_client
+        .seen_guids
+        .set(seen_guids.clone())
+        .expect("seen-guid handle installed once");
+    seed_movie_wanted_for_acquisition(&app, &user, &wanted_items, "Streamed Feed Movie", 2024)
+        .await;
+
+    let report = app.run_scheduled_rss_sync().await.expect("run RSS sync");
+
+    assert_eq!(
+        *indexer_client.seen_before_second_poll.lock().await,
+        Some(1),
+        "the first poll must be deduped before the second is handed on"
+    );
+    assert_eq!(seen_guids.read().await.len(), 2);
+    assert_eq!(
+        report.releases_grabbed, 1,
+        "a match from the first poll must survive to title processing: {report:?}"
     );
 }

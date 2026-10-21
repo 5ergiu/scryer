@@ -10,6 +10,9 @@ pub mod canonical_download_identity;
 #[cfg(test)]
 #[path = "cropped_resolution_relabel_upgrade_tests.rs"]
 mod cropped_resolution_relabel_upgrade_tests;
+pub mod delay_profile_tables;
+#[cfg(test)]
+mod delay_profile_tables_upgrade_tests;
 #[cfg(test)]
 mod discovery_query_indexes_upgrade_tests;
 pub mod event_storage;
@@ -23,19 +26,29 @@ pub mod known_bad;
 #[cfg(test)]
 mod legacy_monitor_snapshot_upgrade_tests;
 #[cfg(test)]
+mod lifecycle_claims_one_operator_keep_upgrade_tests;
+#[cfg(test)]
+mod list_search_mode_upgrade_tests;
+#[cfg(test)]
 #[path = "migration_progress_tests.rs"]
 mod migration_progress_tests;
+#[cfg(test)]
+mod movie_availability_facet_settings_upgrade_tests;
 pub mod notification_targets;
 pub mod post_0_16_6_prerelease;
 pub mod post_processing_output;
 pub mod release_url_scrub;
 pub mod repair_root_title_folders;
+#[cfg(test)]
+mod request_rules_enable_only_upgrade_tests;
 pub mod rule_set_runtime_wrapper;
 pub mod synthetic_root_ids;
 #[cfg(test)]
 #[path = "synthetic_root_ids_upgrade_tests.rs"]
 mod synthetic_root_ids_upgrade_tests;
 pub mod title_catalog_sort_keys;
+#[cfg(test)]
+mod title_external_id_value_lookup_upgrade_tests;
 pub mod title_folder_ownership;
 pub mod title_folder_ownership_safe;
 pub mod title_image_blobs;
@@ -891,6 +904,9 @@ async fn run_rust_hook(
         }
         "scrub_stored_release_url_credentials" => {
             release_url_scrub::scrub_stored_release_url_credentials_sqlite(tx).await
+        }
+        "import_delay_profile_catalog" => {
+            delay_profile_tables::import_delay_profile_catalog_sqlite(tx).await
         }
         #[cfg(test)]
         "test_insert_hook_marker" => {

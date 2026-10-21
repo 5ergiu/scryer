@@ -21,6 +21,13 @@ fn hydration_source_for_scan_mode(
     }
 }
 
+fn title_has_recorded_folder(title: &Title) -> bool {
+    title
+        .folder_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+}
+
 pub(super) async fn title_requires_scan_hydration(
     app: &AppUseCase,
     title: &Title,
@@ -2331,7 +2338,7 @@ impl AppUseCase {
         actor: &User,
         title_id: &str,
     ) -> AppResult<LibraryScanSummary> {
-        let title = self
+        let mut title = self
             .services
             .catalog
             .titles
@@ -2339,6 +2346,9 @@ impl AppUseCase {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("title {}", title_id)))?;
         self.require_library_management_permission(actor, &title.library_id)
+            .await?;
+        let folder_was_missing = !title_has_recorded_folder(&title);
+        self.record_missing_title_folder_for_rescan(&mut title)
             .await?;
 
         let work = LibraryScanTitleWork {
@@ -2349,7 +2359,63 @@ impl AppUseCase {
             created_in_scan: false,
         };
 
-        self.execute_user_title_refresh_work(actor, work).await
+        let summary = self.execute_user_title_refresh_work(actor, work).await?;
+        // Files this walk recorded can settle a folder the earlier ones could
+        // not.
+        if folder_was_missing
+            && let Some(mut title) = self.services.catalog.titles.get_by_id(title_id).await?
+            && !title_has_recorded_folder(&title)
+        {
+            self.record_missing_title_folder_for_rescan(&mut title)
+                .await?;
+        }
+        Ok(summary)
+    }
+
+    /// Record the folder of a title that has none, as a library scan records
+    /// the folder it matched a title to: the one folder the title's recorded
+    /// files sit in, claimed with the scan's checks. Files in more than one
+    /// folder, or a folder the claim refuses, leave the title as it was and
+    /// the rescan goes on without it.
+    async fn record_missing_title_folder_for_rescan(&self, title: &mut Title) -> AppResult<()> {
+        if title_has_recorded_folder(title) {
+            return Ok(());
+        }
+        let recorded_paths: Vec<String> = self
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&title.id)
+            .await?
+            .into_iter()
+            .map(|file| file.file_path)
+            .collect();
+        if recorded_paths.is_empty() {
+            return Ok(());
+        }
+        let folder =
+            match super::super::user_delete::implied_title_folder_for(self, title, &recorded_paths)
+                .await
+            {
+                Ok(folder) => folder,
+                Err(AppError::Validation(_) | AppError::ValidationRefused { .. }) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        match crate::folder_ownership::claim_title_folder_for_scan_if_missing(self, title, &folder)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error @ (AppError::Validation(_) | AppError::ValidationRefused { .. })) => {
+                tracing::info!(
+                    title_id = %title.id,
+                    folder_path = %folder.display(),
+                    error = %error,
+                    "title rescan did not record the folder its files are in"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn scan_title_library_with_discovered_files(
@@ -3612,6 +3678,7 @@ mod tests {
             metadata_fetched_at: None,
             min_availability: None,
             digital_release_date: None,
+            movie_release_dates: None,
             folder_path: None,
         }
     }

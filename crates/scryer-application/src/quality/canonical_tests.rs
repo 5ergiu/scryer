@@ -2409,3 +2409,116 @@ fn a_row_without_a_listing_scores_as_before() {
     let without_rules = score_media_file(&row, &ctx(&profile, &[]));
     assert_eq!(re_derived.total, without_rules.total);
 }
+
+/// A stored anime row whose name says nothing about audio, re-derived for a
+/// profile that requires the original language: the grab and the import both
+/// infer the title's original audio before scoring, so the re-derive must too,
+/// or every rescore rejects the file as `required_audio_language_missing`.
+#[test]
+fn rederiving_an_unlabeled_row_infers_audio_like_the_import() {
+    let profile = movie_profile();
+    let tags: Vec<String> = Vec::new();
+    let required = vec!["jpn".to_string()];
+    let context = ScoringContext {
+        required_audio_languages: &required,
+        category: "anime",
+        ..ctx(&profile, &tags)
+    };
+
+    let evidence = announced(8.0).with_analysis(analyzed(8.0, None));
+    let at_import = score_release(&evidence, &context);
+    let row = media_row_as_import_would_write(&evidence, &at_import);
+
+    let re_derived = score_media_file(&row, &context);
+    assert!(
+        !re_derived
+            .announced_decision
+            .block_codes
+            .iter()
+            .any(|code| code == "required_audio_language_missing"),
+        "unlabeled row was rejected for audio on re-derive: {:?}",
+        re_derived.announced_decision.block_codes
+    );
+}
+
+/// The indexer languages the grab saw travel on the row's listing snapshot,
+/// and the re-derive reads them as the grab did.
+#[test]
+fn rederiving_a_row_reads_the_snapshot_indexer_languages() {
+    let profile = movie_profile();
+    let tags: Vec<String> = Vec::new();
+    let required = vec!["eng".to_string()];
+    let context = ScoringContext {
+        required_audio_languages: &required,
+        category: "anime",
+        ..ctx(&profile, &tags)
+    };
+
+    let evidence = announced(8.0).with_analysis(analyzed(8.0, None));
+    let at_import = score_release(&evidence, &context);
+    let mut row = media_row_as_import_would_write(&evidence, &at_import);
+    row.release_listing_json = Some(
+        r#"{"indexer_languages":["English"],"captured_at":"2026-01-01T00:00:00Z"}"#.to_string(),
+    );
+
+    let re_derived = score_media_file(&row, &context);
+    assert!(
+        !re_derived
+            .announced_decision
+            .block_codes
+            .iter()
+            .any(|code| code == "required_audio_language_missing"),
+        "snapshot English was ignored on re-derive: {:?}",
+        re_derived.announced_decision.block_codes
+    );
+
+    row.release_listing_json = None;
+    let without_snapshot = score_media_file(&row, &context);
+    assert!(
+        without_snapshot
+            .announced_decision
+            .block_codes
+            .iter()
+            .any(|code| code == "required_audio_language_missing"),
+        "an anime row with no snapshot infers Japanese, not English"
+    );
+}
+
+/// A dual-audio anime row whose snapshot lists both languages, rescored for a
+/// profile that requires both: neither the name nor the snapshot may be lost
+/// between the import and the re-derive.
+#[test]
+fn rederiving_a_dual_audio_row_keeps_both_languages() {
+    let profile = movie_profile();
+    let tags: Vec<String> = Vec::new();
+    let required = vec!["jpn".to_string(), "eng".to_string()];
+    let context = ScoringContext {
+        required_audio_languages: &required,
+        category: "anime",
+        original_language: Some("jpn"),
+        ..ctx(&profile, &tags)
+    };
+
+    let evidence = ReleaseEvidence::announced(
+        parse_release_metadata("Synthetic.Show.S01E03.1080p.WEB-DL.DUAL.AAC2.0.H.264-GRP"),
+        Some(8 * GIB),
+    )
+    .with_analysis(analyzed(8.0, None));
+    let at_import = score_release(&evidence, &context);
+    let mut row = media_row_as_import_would_write(&evidence, &at_import);
+    row.release_listing_json = Some(
+        r#"{"indexer_languages":["ja","en"],"captured_at":"2026-01-01T00:00:00Z"}"#.to_string(),
+    );
+
+    let re_derived = score_media_file(&row, &context);
+    assert!(
+        !re_derived
+            .announced_decision
+            .block_codes
+            .iter()
+            .any(|code| code == "required_audio_language_missing"),
+        "dual-audio row was rejected for audio on re-derive: {:?}",
+        re_derived.announced_decision.block_codes
+    );
+    assert_eq!(re_derived.total, at_import.total);
+}

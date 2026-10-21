@@ -1,6 +1,43 @@
 use super::*;
 
 #[tokio::test]
+async fn graphql_movie_availability_update_returns_persisted_setting() {
+    let ctx = TestContext::new().await;
+    let title = create_catalog_title(
+        &ctx,
+        "Availability Fixture",
+        MediaFacet::Movie,
+        vec![],
+        vec![],
+        true,
+    )
+    .await;
+    let mutation = r#"mutation Update($input: UpdateTitleInput!) {
+        updateTitle(input: $input) { id minAvailability }
+    }"#;
+    for value in [json!("released"), json!(null), json!("in_cinemas")] {
+        let response = gql(
+            &ctx,
+            mutation,
+            json!({"input": {
+                "titleId": title.id, "options": {"minAvailability": value}
+            }}),
+        )
+        .await;
+        assert_no_errors(&response);
+        assert_eq!(response["data"]["updateTitle"]["minAvailability"], value);
+        let stored = TitleRepository::get_by_id(&ctx.titles, &title.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(stored.min_availability).unwrap(),
+            value
+        );
+    }
+}
+
+#[tokio::test]
 async fn graphql_trusted_proxies_requires_system_settings_permission() {
     let ctx = TestContext::new().await;
     seed_typed_settings_definitions(&ctx).await;
@@ -895,6 +932,226 @@ async fn graphql_acquisition_walk_interval_defaults_and_survives_older_clients()
     assert!(
         rejected["errors"].is_array(),
         "a walk interval below one second is rejected: {rejected}"
+    );
+}
+
+/// The movie availability settings live on the Movie facet. The acquisition
+/// fields they moved from stay in the schema for 0.21.18 clients: reads
+/// report the Movie facet values and writes are ignored.
+#[tokio::test]
+async fn graphql_movie_availability_settings_live_on_the_movie_facet() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    let media_read = r#"query {
+        mediaSettings(scope: MOVIE) {
+            defaultMovieAvailability movieReleaseMarket movieAvailabilityDelayDays
+        }
+    }"#;
+    let defaults = gql(&ctx, media_read, json!({})).await;
+    assert_no_errors(&defaults);
+    assert_eq!(
+        defaults["data"]["mediaSettings"],
+        json!({
+            "defaultMovieAvailability": "released",
+            "movieReleaseMarket": "US",
+            "movieAvailabilityDelayDays": 0
+        })
+    );
+
+    let media_update = r#"mutation($input: UpdateMediaSettingsInput!) {
+        updateMediaSettings(input: $input) {
+            defaultMovieAvailability movieReleaseMarket movieAvailabilityDelayDays
+        }
+    }"#;
+    let saved = gql(
+        &ctx,
+        media_update,
+        json!({"input": {
+            "scope": "MOVIE",
+            "defaultMovieAvailability": "in_cinemas",
+            "movieReleaseMarket": " gb ",
+            "movieAvailabilityDelayDays": -2
+        }}),
+    )
+    .await;
+    assert_no_errors(&saved);
+    let expected = json!({
+        "defaultMovieAvailability": "in_cinemas",
+        "movieReleaseMarket": "GB",
+        "movieAvailabilityDelayDays": -2
+    });
+    assert_eq!(saved["data"]["updateMediaSettings"], expected);
+    let read = gql(&ctx, media_read, json!({})).await;
+    assert_eq!(read["data"]["mediaSettings"], expected);
+
+    for (scope, field, value) in [
+        ("MOVIE", "movieReleaseMarket", json!("ZZ")),
+        ("MOVIE", "defaultMovieAvailability", json!("someday")),
+        ("SERIES", "movieReleaseMarket", json!("GB")),
+    ] {
+        let rejected = gql(
+            &ctx,
+            media_update,
+            json!({"input": {"scope": scope, field: value}}),
+        )
+        .await;
+        assert_eq!(
+            rejected["errors"][0]["extensions"]["code"], "VALIDATION_ERROR",
+            "{scope} {field}: {rejected}"
+        );
+    }
+    let series = gql(
+        &ctx,
+        r#"query { mediaSettings(scope: SERIES) { movieReleaseMarket } }"#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&series);
+    assert_eq!(
+        series["data"]["mediaSettings"]["movieReleaseMarket"],
+        serde_json::Value::Null
+    );
+
+    let legacy_update = gql(
+        &ctx,
+        r#"mutation($input: UpdateAcquisitionSettingsInput!) {
+            updateAcquisitionSettings(input: $input) {
+                defaultMovieAvailability movieReleaseMarket movieAvailabilityDelayDays
+            }
+        }"#,
+        json!({"input": {
+            "enabled": true,
+            "sameTierMinDelta": 120,
+            "pollIntervalSeconds": 60,
+            "longTailBackfillMaxScopesPerCycle": 500,
+            "longTailReconvergeDays": 0,
+            "defaultMovieAvailability": "announced",
+            "movieReleaseMarket": "DE",
+            "movieAvailabilityDelayDays": 9
+        }}),
+    )
+    .await;
+    assert_no_errors(&legacy_update);
+    assert_eq!(legacy_update["data"]["updateAcquisitionSettings"], expected);
+    let legacy_read = gql(
+        &ctx,
+        r#"query {
+            acquisitionSettings {
+                defaultMovieAvailability movieReleaseMarket movieAvailabilityDelayDays
+            }
+        }"#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&legacy_read);
+    assert_eq!(legacy_read["data"]["acquisitionSettings"], expected);
+    let read = gql(&ctx, media_read, json!({})).await;
+    assert_eq!(read["data"]["mediaSettings"], expected);
+}
+
+/// A Movie library overrides each movie availability setting on its own;
+/// null inherits the Movie facet, and non-Movie libraries refuse them.
+#[tokio::test]
+async fn graphql_movie_library_overrides_movie_availability_settings() {
+    let ctx = TestContext::new().await;
+    seed_typed_settings_definitions(&ctx).await;
+    seed_library_settings_definitions(&ctx).await;
+    let movie_library =
+        scryer_domain::default_library_id_for_facet(&scryer_domain::MediaFacet::Movie);
+    let series_library =
+        scryer_domain::default_library_id_for_facet(&scryer_domain::MediaFacet::Series);
+    let facet = gql(
+        &ctx,
+        r#"mutation {
+            updateMediaSettings(input: { scope: MOVIE, movieReleaseMarket: "FR", movieAvailabilityDelayDays: 4 }) {
+                movieReleaseMarket
+            }
+        }"#,
+        json!({}),
+    )
+    .await;
+    assert_no_errors(&facet);
+
+    let update = r#"mutation($input: UpdateLibraryInput!) {
+        updateLibrary(input: $input) { id }
+    }"#;
+    let read = r#"query($libraryId: ID!) {
+        librarySettings(libraryId: $libraryId) {
+            defaultMovieAvailabilityOverride defaultMovieAvailability
+            movieReleaseMarketOverride movieReleaseMarket
+            movieAvailabilityDelayDaysOverride movieAvailabilityDelayDays
+        }
+    }"#;
+    let saved = gql(
+        &ctx,
+        update,
+        json!({"input": {
+            "libraryId": movie_library,
+            "settings": { "movieReleaseMarket": "gb", "defaultMovieAvailability": "announced" }
+        }}),
+    )
+    .await;
+    assert_no_errors(&saved);
+    let overridden = gql(&ctx, read, json!({ "libraryId": movie_library })).await;
+    assert_no_errors(&overridden);
+    assert_eq!(
+        overridden["data"]["librarySettings"],
+        json!({
+            "defaultMovieAvailabilityOverride": "announced",
+            "defaultMovieAvailability": "announced",
+            "movieReleaseMarketOverride": "GB",
+            "movieReleaseMarket": "GB",
+            "movieAvailabilityDelayDaysOverride": null,
+            "movieAvailabilityDelayDays": 4
+        })
+    );
+
+    let cleared = gql(
+        &ctx,
+        update,
+        json!({"input": { "libraryId": movie_library, "settings": {} }}),
+    )
+    .await;
+    assert_no_errors(&cleared);
+    let inherited = gql(&ctx, read, json!({ "libraryId": movie_library })).await;
+    assert_eq!(
+        inherited["data"]["librarySettings"],
+        json!({
+            "defaultMovieAvailabilityOverride": null,
+            "defaultMovieAvailability": "released",
+            "movieReleaseMarketOverride": null,
+            "movieReleaseMarket": "FR",
+            "movieAvailabilityDelayDaysOverride": null,
+            "movieAvailabilityDelayDays": 4
+        })
+    );
+
+    for (library_id, settings) in [
+        (
+            movie_library.as_str(),
+            json!({ "movieReleaseMarket": "USA" }),
+        ),
+        (
+            series_library.as_str(),
+            json!({ "movieAvailabilityDelayDays": 1 }),
+        ),
+    ] {
+        let rejected = gql(
+            &ctx,
+            update,
+            json!({"input": { "libraryId": library_id, "settings": settings }}),
+        )
+        .await;
+        assert_eq!(
+            rejected["errors"][0]["extensions"]["code"], "VALIDATION_ERROR",
+            "{library_id}: {rejected}"
+        );
+    }
+    let series = gql(&ctx, read, json!({ "libraryId": series_library })).await;
+    assert_no_errors(&series);
+    assert_eq!(
+        series["data"]["librarySettings"]["movieReleaseMarket"],
+        serde_json::Value::Null
     );
 }
 

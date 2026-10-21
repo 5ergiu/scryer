@@ -127,6 +127,7 @@ fn scryer_completed(
             ("*scryer_title_id".to_string(), title_id.to_string()),
             ("*scryer_facet".to_string(), facet_id.to_string()),
         ],
+        posted_file_names: Vec::new(),
     }
 }
 
@@ -261,6 +262,7 @@ async fn add_movie_title(ctx: &TestContext, id: &str, name: &str, media_root: &s
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: None,
     };
     ctx.titles.create(title).await.expect("add movie title")
@@ -323,6 +325,7 @@ async fn add_series_title_with_runtime(
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: None,
     };
     ctx.titles.create(title).await.expect("add series title")
@@ -374,6 +377,7 @@ async fn set_folder_template(ctx: &TestContext, facet: MediaFacet, template: &st
                 file_chmod: None,
                 folder_chmod: None,
                 chown_group: None,
+                movie_availability: Default::default(),
             },
         )
         .await
@@ -851,6 +855,7 @@ async fn import_returns_unmatched_when_title_not_found() {
         size_bytes: None,
         completed_at: None,
         parameters: vec![("*scryer_title_id".to_string(), "nonexistent-id".to_string())],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -1116,6 +1121,7 @@ async fn import_movie_decypharr_symlink_release_folder_succeeds() {
             ("*scryer_title_id".to_string(), title.id.clone()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -1206,6 +1212,7 @@ async fn import_movie_decypharr_symlink_release_folder_uses_remote_path_mapping(
             ("*scryer_title_id".to_string(), title.id.clone()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)
@@ -1605,6 +1612,236 @@ async fn automatic_import_series_pack_imports_every_episode_from_the_bounded_dir
         episode_ids,
         std::collections::BTreeSet::from([episode_1.id.as_str(), episode_2.id.as_str()])
     );
+}
+
+const BETTER_COPY_PACK_RELEASE: &str = "Pack.Show.S01.720p.WEB-DL.H264-GRP";
+
+/// What importing a pack over a better library episode left behind.
+struct PackOverBetterLibraryEpisode {
+    result: scryer_domain::ImportResult,
+    /// The pack's import artifact results by normalized source file name.
+    artifacts: std::collections::BTreeMap<String, String>,
+    media_files: Vec<scryer_application::TitleMediaFile>,
+    /// The path of the E01 already in the library.
+    library_e01: String,
+    library_e01_on_disk: bool,
+    /// E01's scope row status after the pack import.
+    e01_scope_status: scryer_application::AcquisitionScopeStatus,
+}
+
+/// A two-episode pack whose E01 the library already holds at a better quality
+/// than the pack's, imported after that E01. E01's scope row is seeded
+/// `grabbed` for `e01_grabbed_for` before the pack completes.
+async fn import_pack_over_a_better_library_episode(
+    remove_library_copy: bool,
+    e01_grabbed_for: &str,
+) -> PackOverBetterLibraryEpisode {
+    let ctx = TestContext::new().await;
+    let app = app_with_real_imports(&ctx).await;
+    let user = ctx.app.find_or_create_default_user().await.unwrap();
+    let dest_root = tempfile::tempdir().expect("dest tempdir");
+    let title = add_short_form_series_title(
+        &ctx,
+        "title-pack-better-library-copy",
+        "Pack Show",
+        dest_root.path().to_str().unwrap(),
+    )
+    .await;
+    let episode_1 = seed_short_form_series_episode(&ctx, &title).await;
+    seed_second_short_form_series_episode(
+        &ctx,
+        &title,
+        episode_1.collection_id.as_deref().expect("collection id"),
+    )
+    .await;
+
+    let earlier_dir = tempfile::tempdir().expect("earlier source tempdir");
+    let earlier = copy_import_fixture(
+        earlier_dir.path(),
+        1080,
+        "Pack.Show.S01E01.1080p.WEB-DL.H264.mkv",
+    );
+    pad_file_past_series_sample_threshold(&earlier);
+    let earlier_result = import_completed_download(
+        &app,
+        &user,
+        &scryer_completed(
+            "dl-earlier-episode",
+            earlier_dir.path().to_str().unwrap(),
+            &title.id,
+            "series",
+        ),
+    )
+    .await
+    .expect("import the earlier episode");
+    assert_eq!(
+        earlier_result.decision,
+        ImportDecision::Imported,
+        "{earlier_result:?}"
+    );
+    let library_e01 = ctx
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files")
+        .into_iter()
+        .find(|file| file.episode_id.as_deref() == Some(episode_1.id.as_str()))
+        .expect("E01 is in the library")
+        .file_path;
+    if remove_library_copy {
+        std::fs::remove_file(&library_e01).expect("remove the library E01");
+    }
+
+    let pack_dir = tempfile::tempdir().expect("pack source tempdir");
+    for name in [
+        "Pack.Show.S01E01.720p.WEB-DL.H264.mkv",
+        "Pack.Show.S01E02.720p.WEB-DL.H264.mkv",
+    ] {
+        let file = copy_import_fixture(pack_dir.path(), 720, name);
+        pad_file_past_series_sample_threshold(&file);
+    }
+    let e01_scope = seed_episode_wanted_item(
+        &ctx,
+        &title,
+        &episode_1,
+        scryer_application::AcquisitionScopeStatus::Wanted,
+    )
+    .await;
+    ctx.library_state
+        .transition_acquisition_scope_to_grabbed(
+            &scryer_application::AcquisitionScopeGrabTransition {
+                id: e01_scope.id.clone(),
+                last_search_at: None,
+                grabbed_release: serde_json::json!({
+                    "title": e01_grabbed_for,
+                    "score": 0,
+                    "grabbed_at": chrono::Utc::now().to_rfc3339(),
+                })
+                .to_string(),
+            },
+        )
+        .await
+        .expect("record the E01 grab");
+
+    let mut pack = scryer_completed(
+        "dl-pack",
+        pack_dir.path().to_str().unwrap(),
+        &title.id,
+        "series",
+    );
+    pack.release_name = Some(BETTER_COPY_PACK_RELEASE.to_string());
+    let result = import_completed_download(&app, &user, &pack)
+        .await
+        .expect("import the pack");
+
+    let artifacts = ImportStore::new(ctx.db.datastore())
+        .list_by_source_identity(&ClientJobLocator::for_import_artifact(
+            Some(&pack.client_id),
+            &pack.client_type,
+            &pack.download_client_item_id,
+        ))
+        .await
+        .expect("list import artifacts")
+        .into_iter()
+        .map(|artifact| (artifact.normalized_file_name, artifact.result))
+        .collect();
+    let media_files = ctx
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    let library_e01_on_disk = Path::new(&library_e01).exists();
+    let e01_scope_status = ctx
+        .library_state
+        .get_acquisition_scope_state_for_title(&title.id, Some(&episode_1.id))
+        .await
+        .expect("read the E01 scope")
+        .expect("the E01 scope exists")
+        .status;
+    PackOverBetterLibraryEpisode {
+        result,
+        artifacts,
+        media_files,
+        library_e01,
+        library_e01_on_disk,
+        e01_scope_status,
+    }
+}
+
+#[tokio::test]
+async fn a_pack_imports_once_the_library_holds_its_other_episode_at_a_better_quality() {
+    let PackOverBetterLibraryEpisode {
+        result,
+        artifacts,
+        media_files,
+        library_e01,
+        library_e01_on_disk,
+        e01_scope_status,
+    } = import_pack_over_a_better_library_episode(false, BETTER_COPY_PACK_RELEASE).await;
+
+    assert_eq!(result.decision, ImportDecision::Imported, "{result:?}");
+    assert_eq!(
+        artifacts
+            .get("pack.show.s01e01.720p.web-dl.h264.mkv")
+            .map(String::as_str),
+        Some("already_present"),
+        "{artifacts:#?}"
+    );
+    assert_eq!(
+        artifacts
+            .get("pack.show.s01e02.720p.web-dl.h264.mkv")
+            .map(String::as_str),
+        Some("imported"),
+        "{artifacts:#?}"
+    );
+    assert_eq!(media_files.len(), 2, "{media_files:#?}");
+    assert!(
+        media_files.iter().any(|file| file.file_path == library_e01),
+        "the better E01 stays the library's file: {media_files:#?}"
+    );
+    assert!(library_e01_on_disk, "the better E01 stays on disk");
+    assert_eq!(
+        e01_scope_status,
+        scryer_application::AcquisitionScopeStatus::Completed,
+        "the pack's claim on E01 is released once the pack settles"
+    );
+}
+
+#[tokio::test]
+async fn a_settled_pack_leaves_an_episode_grabbed_for_another_release_alone() {
+    let settled = import_pack_over_a_better_library_episode(
+        false,
+        "Pack.Show.S01E01.2160p.WEB-DL.H265-OTHER",
+    )
+    .await;
+
+    assert_eq!(
+        settled.result.decision,
+        ImportDecision::Imported,
+        "{:?}",
+        settled.result
+    );
+    assert_eq!(
+        settled.e01_scope_status,
+        scryer_application::AcquisitionScopeStatus::Grabbed,
+        "another download's claim on E01 stays in place"
+    );
+}
+
+#[tokio::test]
+async fn a_better_library_episode_missing_from_disk_does_not_settle_the_pack() {
+    let PackOverBetterLibraryEpisode {
+        result, artifacts, ..
+    } = import_pack_over_a_better_library_episode(true, BETTER_COPY_PACK_RELEASE).await;
+
+    assert_eq!(
+        artifacts
+            .get("pack.show.s01e01.720p.web-dl.h264.mkv")
+            .map(String::as_str),
+        Some("rejected"),
+        "{artifacts:#?}"
+    );
+    assert_ne!(result.decision, ImportDecision::Imported, "{result:?}");
 }
 
 #[tokio::test]
@@ -3449,6 +3686,7 @@ async fn a_titleless_obfuscated_download_matches_and_imports_on_its_recovered_na
         size_bytes: None,
         completed_at: None,
         parameters: vec![],
+        posted_file_names: Vec::new(),
     };
 
     let result = import_completed_download(&app, &user, &completed)

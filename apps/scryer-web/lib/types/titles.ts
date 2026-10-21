@@ -193,6 +193,15 @@ export type TitleReleaseBlocklistEntry = {
   attemptedAt: string;
 };
 
+export type MovieAvailabilityRecord = {
+  status: "available" | "waiting" | "unknown";
+  effectiveDate: string | null;
+  estimated: boolean;
+  reason: string;
+  market: string;
+  minimumAvailability: string;
+};
+
 export type TitleRecord = {
   id: string;
   name: string;
@@ -243,6 +252,7 @@ export type TitleRecord = {
   inheritsRequiredAudioLanguages?: boolean;
   metadataFetchedAt?: string | null;
   minAvailability?: string | null;
+  movieAvailability?: MovieAvailabilityRecord | null;
   qualityProfileId?: string | null;
   rootFolderId?: string;
   rootFolderPath?: string;
@@ -399,6 +409,12 @@ export type LibrarySettingsRecord = {
   folderChmod: string | null;
   chownGroupOverride: string | null;
   chownGroup: string | null;
+  defaultMovieAvailabilityOverride?: string | null;
+  defaultMovieAvailability?: string | null;
+  movieReleaseMarketOverride?: string | null;
+  movieReleaseMarket?: string | null;
+  movieAvailabilityDelayDaysOverride?: number | null;
+  movieAvailabilityDelayDays?: number | null;
   indexerRoutingOverride: unknown[] | null;
   downloadClientRoutingOverride: DownloadClientRoutingEntry[] | null;
 };
@@ -423,6 +439,9 @@ export type LibrarySettingsDraft = {
   fileChmod: string | null;
   folderChmod: string | null;
   chownGroup: string | null;
+  defaultMovieAvailability?: string | null;
+  movieReleaseMarket?: string | null;
+  movieAvailabilityDelayDays?: number | null;
   indexerRouting?: unknown[] | null;
   downloadClientRouting?: DownloadClientRoutingEntry[] | null;
 };

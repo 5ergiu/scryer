@@ -25,13 +25,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use scryer_domain::{
-    AppPermission, ExternalAccountStatus, ExternalId, Library, LibraryPermission, MediaFacet,
-    MonitorSelection, User, UserAccountKind,
+    AppPermission, ExternalAccountStatus, ExternalId, Library, LibraryPermission, ListScope,
+    MediaFacet, MediaRequestOrigin, MonitorSelection, User, UserAccountKind,
 };
 use scryer_rules::request::{
     Observation, REQUEST_INPUT_SCHEMA_VERSION, RequestCertificationDoc, RequestClockDoc,
-    RequestDoc, RequestFactsDoc, RequestInput, RequestLibraryDoc, RequestRequesterDoc,
-    certification_rank_for_label, max_resolution_for_quality_tiers,
+    RequestDoc, RequestFactsDoc, RequestInput, RequestLibraryDoc, RequestListDoc,
+    RequestRequesterDoc, certification_rank_for_label, max_resolution_for_quality_tiers,
 };
 
 use crate::media_requests::snapshot::{MediaRequestMetadataSnapshot, SNAPSHOT_GROUP_ALL};
@@ -72,6 +72,9 @@ pub struct RequestDraft {
     pub monitor_selection: Option<MonitorSelection>,
     /// `None` means forever (spec 0003 FR-040).
     pub requested_lease_days: Option<i64>,
+    pub origin: MediaRequestOrigin,
+    /// The item's rank on the list that submitted it, when the list ranks it.
+    pub list_rank: Option<i64>,
 }
 
 /// The quality profile the draft names, resolved once.
@@ -536,7 +539,8 @@ impl AppUseCase {
         excluding_request_id: Option<&str>,
     ) -> AppResult<RequestInputContext> {
         let requester = self.request_requester_doc(actor, &library.id).await?;
-        let request = request_doc(draft);
+        let list = self.request_list_doc(actor, draft).await;
+        let request = request_doc(draft, list);
         let quality = self.request_quality_context(draft).await;
         let catalog = self
             .request_catalog_context(library, draft, excluding_request_id)
@@ -561,6 +565,45 @@ impl AppUseCase {
             catalog,
             history,
             library_title_count,
+        })
+    }
+
+    /// The list section for a list-sourced draft: one read of the
+    /// subscription and one of its owner's list policy. A failed read leaves
+    /// the section absent so the request still evaluates.
+    async fn request_list_doc(&self, actor: &User, draft: &RequestDraft) -> Option<RequestListDoc> {
+        let subscription_id = draft.origin.subscription_id()?;
+        let lists = &self.services.lists;
+        let read = async {
+            let Some(subscription) = lists.subscriptions.get_by_id(subscription_id).await? else {
+                return Ok(None);
+            };
+            let policy = lists.policies.get(&subscription.owner_user_id).await?;
+            AppResult::Ok(Some((subscription, policy)))
+        };
+        let (subscription, policy) = match read.await {
+            Ok(found) => found?,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "could not read the request's list; its list section is absent"
+                );
+                return None;
+            }
+        };
+        Some(RequestListDoc {
+            subscription_id: subscription.id,
+            name: (subscription.scope == ListScope::Public).then_some(subscription.name),
+            scope: subscription.scope.as_str().to_string(),
+            mode: subscription.mode.as_str().to_string(),
+            provider: subscription.source.provider,
+            owner_is_requester: subscription.owner_user_id == actor.id,
+            owner_list_policy: policy
+                .map(|policy| policy.policy)
+                .unwrap_or_default()
+                .as_str()
+                .to_string(),
+            rank: draft.list_rank,
         })
     }
 
@@ -871,11 +914,9 @@ impl AppUseCase {
 
 /// The draft half of the input document. Always known: it is what the requester
 /// is looking at.
-fn request_doc(draft: &RequestDraft) -> RequestDoc {
+fn request_doc(draft: &RequestDraft, list: Option<RequestListDoc>) -> RequestDoc {
     RequestDoc {
-        // Fixed until a non-manual origin exists; the field is in the contract
-        // so a watchlist-sourced request needs no schema bump.
-        origin: "manual".to_string(),
+        origin: draft.origin.as_str().to_string(),
         title: draft.title.clone(),
         year: draft.year,
         external_ids: draft
@@ -897,5 +938,6 @@ fn request_doc(draft: &RequestDraft) -> RequestDoc {
             .map(|selection| selection.seasons.len() as i64),
         lease_forever: draft.requested_lease_days.is_none(),
         lease_days: draft.requested_lease_days,
+        list,
     }
 }

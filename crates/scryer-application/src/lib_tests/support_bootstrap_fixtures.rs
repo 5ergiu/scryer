@@ -448,6 +448,7 @@ pub(super) fn media_request_input(
             ExternalId::new("imdb".to_string(), "tt1234567".to_string()),
         ],
         origin: Default::default(),
+        list_rank: None,
         admission: Default::default(),
     }
 }
@@ -633,6 +634,7 @@ pub(super) fn make_due_hydration_title(id: &str, facet: MediaFacet, tvdb_id: i64
         metadata_fetched_at: None,
         min_availability: None,
         digital_release_date: None,
+        movie_release_dates: None,
         folder_path: None,
     }
 }
@@ -1818,6 +1820,7 @@ pub(super) fn empty_update_media_settings_with_roots(
         file_chmod: None,
         folder_chmod: None,
         chown_group: None,
+        movie_availability: Default::default(),
     }
 }
 
@@ -1846,6 +1849,7 @@ pub(super) fn empty_update_media_settings() -> UpdateMediaSettings {
         file_chmod: None,
         folder_chmod: None,
         chown_group: None,
+        movie_availability: Default::default(),
     }
 }
 
@@ -1872,6 +1876,7 @@ pub(super) fn empty_library_settings_override() -> LibrarySettingsOverrideDraft 
         chown_group: None,
         indexer_routing: None,
         download_client_routing: None,
+        movie_availability: Default::default(),
     }
 }
 
@@ -2032,6 +2037,7 @@ pub(super) fn completed_download_fixture_item(
             ("*scryer_title_id".to_string(), title_id.to_string()),
             ("*scryer_facet".to_string(), "movie".to_string()),
         ],
+        posted_file_names: Vec::new(),
     }
 }
 

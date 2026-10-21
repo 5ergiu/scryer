@@ -2822,3 +2822,99 @@ async fn folder_ownership_holds_a_multi_root_library_to_all_of_its_roots() {
         );
     }
 }
+
+/// `/movies/<slug>` is the default library's deep link: the path builder omits
+/// the library segment only for the default library. A vault copy of the same
+/// film in another library shares the slug, and an unscoped lookup used to
+/// answer "maps to multiple titles" for that valid link. The default library
+/// wins; the unscoped lookup still widens when the default library lacks the
+/// slug.
+#[tokio::test]
+async fn unscoped_slug_lookup_prefers_the_default_library_over_a_vault_copy() {
+    let (app, user) = bootstrap();
+    let movie_library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let vault = app
+        .create_library(
+            &user,
+            MediaFacet::Movie,
+            "Vault".to_string(),
+            vec![LibraryRootDraft {
+                path: "/Volumes/Media/Vault".to_string(),
+                is_default: true,
+            }],
+            None,
+        )
+        .await
+        .expect("vault library should be created");
+    let new_title = |library_name: &str| NewTitle {
+        name: format!("Spirited Away ({library_name})"),
+        facet: MediaFacet::Movie,
+        monitored: false,
+        tags: vec![],
+        external_ids: vec![],
+        min_availability: None,
+        slug: Some("spirited-away".to_string()),
+        ..Default::default()
+    };
+    let in_vault = app
+        .create_title_without_hydration_in_library(&user, new_title("vault"), vault.id.clone())
+        .await
+        .expect("vault title should be created");
+    let in_default = app
+        .create_title_without_hydration_in_library(
+            &user,
+            new_title("default"),
+            movie_library_id.clone(),
+        )
+        .await
+        .expect("default-library title should be created");
+    assert_eq!(in_vault.title.slug.as_deref(), Some("spirited-away"));
+    assert_eq!(in_default.title.slug.as_deref(), Some("spirited-away"));
+
+    let unscoped = app
+        .get_title_by_slug(&user, MediaFacet::Movie, None, None, "spirited-away")
+        .await
+        .expect("an unscoped lookup of a slug the default library holds succeeds");
+    assert_eq!(
+        unscoped.map(|title| title.id),
+        Some(in_default.title.id.clone()),
+        "the default library's title answers the unscoped deep link"
+    );
+
+    let scoped_to_vault = app
+        .get_title_by_slug(
+            &user,
+            MediaFacet::Movie,
+            None,
+            Some(vault.slug.clone()),
+            "spirited-away",
+        )
+        .await
+        .expect("a library-scoped lookup succeeds");
+    assert_eq!(
+        scoped_to_vault.map(|title| title.id),
+        Some(in_vault.title.id.clone())
+    );
+
+    // Only the vault holds this slug: the unscoped lookup still widens to it.
+    let only_in_vault = app
+        .create_title_without_hydration_in_library(
+            &user,
+            NewTitle {
+                name: "Vault Only".into(),
+                slug: Some("vault-only".to_string()),
+                ..new_title("vault")
+            },
+            vault.id.clone(),
+        )
+        .await
+        .expect("vault-only title should be created");
+    let widened = app
+        .get_title_by_slug(&user, MediaFacet::Movie, None, None, "vault-only")
+        .await
+        .expect("an unscoped lookup widens past an empty default library");
+    assert_eq!(
+        widened.map(|title| title.id),
+        Some(only_in_vault.title.id.clone())
+    );
+}

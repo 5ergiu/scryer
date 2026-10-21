@@ -2,11 +2,15 @@ import { useRegoValidation } from "@/lib/hooks/use-rego-validation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useClient } from "urql";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
+import {
+  MAINTENANCE_CANDIDATE_LIMIT,
+  useMaintenanceRuleState,
+} from "@/components/containers/settings/use-maintenance-rule-state";
 import type { MaintenanceRulesSection } from "@/components/root/types";
 import {
   MaintenanceCandidatesPanel,
   MaintenanceExclusionsPanel,
-  MaintenanceGatesPanel,
+  MaintenanceInstanceSwitches,
   MaintenanceRunsPanel,
 } from "@/components/views/settings/settings-maintenance-operations-panel";
 import {
@@ -16,7 +20,6 @@ import {
   type MaintenanceStorageRootOption,
 } from "@/components/views/settings/settings-maintenance-rules-section";
 import { sequenceHasUnresolvedSteps } from "@/components/views/settings/maintenance-action-sequence-editor";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SingleSelectField } from "@/components/ui/select";
@@ -28,8 +31,6 @@ import type {
   MaintenanceActionStepDescriptor,
   MaintenanceActionRun,
   MaintenanceCandidate,
-  MaintenanceEffectArming,
-  MaintenanceEvaluationMode,
   MaintenanceEvaluationRun,
   MaintenanceExclusion,
   MaintenanceGateKey,
@@ -50,13 +51,10 @@ import {
   createMaintenanceRuleSetInput,
   excludeMaintenanceSubjectInput,
   initialMaintenanceRuleDraft,
-  isNonTerminalCandidateState,
   maintenanceFilterArgument,
   maintenanceActionSequenceFromLegacySpec,
   maintenancePreviewInput,
   maintenanceRuleDraftFromDetail,
-  parseAcknowledgedCandidateCountMismatch,
-  setMaintenanceRuleArmingInput,
   updateMaintenanceRuleMatcherInput,
   updateMaintenanceRuleMetadataInput,
 } from "@/lib/utils/maintenance-rule-sets";
@@ -82,8 +80,6 @@ import {
   runMaintenanceActionHandlerNowMutation,
   runMaintenanceEvaluationNowMutation,
   setMaintenanceInstanceGatesMutation,
-  setMaintenanceRuleArmingMutation,
-  setMaintenanceRuleModeMutation,
   updateMaintenanceRuleMatcherMutation,
   updateMaintenanceRuleMetadataMutation,
 } from "@/lib/graphql/mutations";
@@ -91,26 +87,6 @@ import {
 /// How many recent runs each history table shows. The API clamps its own
 /// maximum; this is only how much of it the panel asks for.
 const MAINTENANCE_RUN_HISTORY_LIMIT = 25;
-const MAINTENANCE_CANDIDATE_LIMIT = 200;
-/// Titles named in the destructive-arming dialog before it falls back to a
-/// count. Enough to recognize what is about to be armed, short enough to read.
-const DESTRUCTIVE_ARMING_PREVIEW_TITLES = 5;
-
-/// A destructive arming in flight. The count is the number the dialog actually
-/// showed, and the same number it sends as the acknowledgement, so the server's
-/// check compares against what the operator saw rather than a fresher count
-/// they never read.
-type PendingArming = {
-  record: MaintenanceRuleSetRecord;
-  candidateCount: number;
-  sampleTitles: string[];
-  acknowledged: boolean;
-  loading: boolean;
-  /// Set after the server refused the acknowledgement and the dialog re-asked
-  /// against the count the server reported.
-  countChanged: boolean;
-};
-
 type PendingExclusion = {
   subjectKind: string;
   subjectId: string;
@@ -182,8 +158,8 @@ export function SettingsMaintenanceRulesContainer({
   /// system-settings management, and a reader without it must still get a
   /// working page rather than a failed section.
   const [gatesLocked, setGatesLocked] = useState(false);
-  const [savingGate, setSavingGate] = useState<MaintenanceGateKey | null>(null);
-  const [pendingDestructiveGate, setPendingDestructiveGate] = useState(false);
+  const [savingSwitch, setSavingSwitch] = useState<MaintenanceGateKey | null>(null);
+  const [pendingUnpause, setPendingUnpause] = useState(false);
 
   const [candidates, setCandidates] = useState<MaintenanceCandidate[]>([]);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
@@ -212,8 +188,6 @@ export function SettingsMaintenanceRulesContainer({
     null,
   );
   const [excluding, setExcluding] = useState(false);
-
-  const [pendingArming, setPendingArming] = useState<PendingArming | null>(null);
 
   const isDraftDirty =
     JSON.stringify(ruleSetDraft) !== JSON.stringify(ruleSetDraftBaseline);
@@ -476,9 +450,6 @@ export function SettingsMaintenanceRulesContainer({
     }
   }, [client]);
 
-  /// `includeShadow` is always true here: with the result-display gate closed
-  /// the server otherwise returns nothing, and an operator deciding whether to
-  /// open that gate has to see what shadow evaluation found first.
   const refreshCandidates = useCallback(async () => {
     setCandidatesLoading(true);
     setCandidatesError(null);
@@ -492,7 +463,6 @@ export function SettingsMaintenanceRulesContainer({
               ? [candidateStateFilter]
               : undefined,
             libraryId: maintenanceFilterArgument(candidateLibraryFilter),
-            includeShadow: true,
             limit: MAINTENANCE_CANDIDATE_LIMIT,
           },
           { requestPolicy: "network-only" },
@@ -577,9 +547,9 @@ export function SettingsMaintenanceRulesContainer({
     void refreshGates();
   }, [refreshGates]);
 
-  // Each pane pays only for what it shows. Rule sets, catalogs and gates are
-  // shared — the rule list needs them, and every other pane labels its rows
-  // with them — but candidates, runs and exclusions are one pane's own query.
+  // Each pane pays only for what it shows. Rule sets, catalogs and the instance
+  // switches are shared — every pane shows the switches and labels its rows
+  // with the rule sets — but candidates, runs and exclusions are one pane's own query.
   useEffect(() => {
     if (section !== "candidates") {
       return;
@@ -595,7 +565,7 @@ export function SettingsMaintenanceRulesContainer({
   }, [refreshRuns, section]);
 
   useEffect(() => {
-    if (section !== "gates") {
+    if (section !== "candidates") {
       return;
     }
     void refreshExclusions();
@@ -781,29 +751,29 @@ export function SettingsMaintenanceRulesContainer({
     setPreviewing(false);
   }, [runPreview]);
 
-  // ── Instance gates ──────────────────────────────────────────────────
+  // ── Instance switches ───────────────────────────────────────────────
 
-  /// Gate writes are never optimistic: the mutation returns the whole gate set,
-  /// but the panel refetches instead, so what it shows is what the server holds
-  /// even when another operator moved a gate in the same moment.
-  const applyGate = useCallback(
-    async (gate: MaintenanceGateKey, enabled: boolean) => {
-      setSavingGate(gate);
+  /// Switch writes are never optimistic: the page refetches instead, so what
+  /// it shows is what the server holds even when another operator moved a
+  /// switch in the same moment.
+  const applySwitch = useCallback(
+    async (key: MaintenanceGateKey, value: boolean) => {
+      setSavingSwitch(key);
       try {
         const { error } = await client
           .mutation(setMaintenanceInstanceGatesMutation, {
-            input: { [gate]: enabled },
+            input: { [key]: value },
           })
           .toPromise();
         if (error) throw error;
-        setGlobalStatus(t("settings.maintenanceGatesUpdated"), { level: "SUCCESS" });
+        setGlobalStatus(t("settings.maintenanceSwitchesUpdated"), { level: "SUCCESS" });
       } catch (error) {
         setGlobalStatus(
           error instanceof Error ? error.message : t("status.failedToUpdate"),
           { level: "ERROR" },
         );
       } finally {
-        setSavingGate(null);
+        setSavingSwitch(null);
         await refreshGates();
         await refreshCandidates();
       }
@@ -811,186 +781,29 @@ export function SettingsMaintenanceRulesContainer({
     [client, refreshCandidates, refreshGates, setGlobalStatus, t],
   );
 
-  const handleGateChange = useCallback(
-    (gate: MaintenanceGateKey, enabled: boolean) => {
-      /// Opening the destructive gate is the one switch that can let files be
-      /// deleted, so it confirms first. Closing it never does.
-      if (gate === "destructiveEffectsEnabled" && enabled) {
-        setPendingDestructiveGate(true);
+  const handleSwitchChange = useCallback(
+    (key: MaintenanceGateKey, value: boolean) => {
+      /// Resuming actions is the one switch that can let files be deleted, so
+      /// it confirms first. Pausing never does.
+      if (key === "actionsPaused" && !value) {
+        setPendingUnpause(true);
         return;
       }
-      void applyGate(gate, enabled);
+      void applySwitch(key, value);
     },
-    [applyGate],
+    [applySwitch],
   );
 
-  // ── Rule mode and arming ────────────────────────────────────────────
+  // ── Rule state ──────────────────────────────────────────────────────
 
-  const setRuleMode = useCallback(
-    async (record: MaintenanceRuleSetRecord, mode: MaintenanceEvaluationMode) => {
-      if (mode === record.evaluationMode) return;
-      setMutatingRuleSetId(record.id);
-      try {
-        const { error } = await client
-          .mutation(setMaintenanceRuleModeMutation, {
-            input: { id: record.id, mode },
-          })
-          .toPromise();
-        if (error) throw error;
-        setGlobalStatus(
-          t("settings.maintenanceRuleModeUpdated", { name: record.name }),
-          { level: "SUCCESS" },
-        );
-        await refreshRuleSets();
-        await refreshCandidates();
-      } catch (error) {
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToUpdate"),
-          { level: "ERROR" },
-        );
-      } finally {
-        setMutatingRuleSetId(null);
-      }
-    },
-    [client, refreshCandidates, refreshRuleSets, setGlobalStatus, t],
-  );
-
-  const applyArming = useCallback(
-    async (
-      record: MaintenanceRuleSetRecord,
-      arming: MaintenanceEffectArming,
-      acknowledgedCandidateCount?: number,
-    ): Promise<{ ok: true } | { ok: false; message: string }> => {
-      const { error } = await client
-        .mutation(setMaintenanceRuleArmingMutation, {
-          input: setMaintenanceRuleArmingInput(
-            record.id,
-            arming,
-            acknowledgedCandidateCount,
-            record,
-          ),
-        })
-        .toPromise();
-      if (error) {
-        return { ok: false, message: error.message };
-      }
-      await refreshRuleSets();
-      return { ok: true };
-    },
-    [client, refreshRuleSets],
-  );
-
-  /// Count what an armed handler could still act on for one rule, and name a
-  /// few of the titles. The dialog shows both, and sends the count it showed.
-  const openDestructiveArming = useCallback(
-    async (record: MaintenanceRuleSetRecord) => {
-      setPendingArming({
-        record,
-        candidateCount: 0,
-        sampleTitles: [],
-        acknowledged: false,
-        loading: true,
-        countChanged: false,
-      });
-      try {
-        const { data, error } = await client
-          .query(
-            maintenanceCandidatesQuery,
-            {
-              ruleSetId: record.id,
-              includeShadow: true,
-              limit: MAINTENANCE_CANDIDATE_LIMIT,
-            },
-            { requestPolicy: "network-only" },
-          )
-          .toPromise();
-        if (error) throw error;
-        const ruleCandidates =
-          (data?.maintenanceCandidates as MaintenanceCandidate[]) ?? [];
-        const actionable = ruleCandidates.filter((candidate) =>
-          isNonTerminalCandidateState(candidate.state),
-        );
-        setPendingArming((prev) =>
-          prev && prev.record.id === record.id
-            ? {
-                ...prev,
-                candidateCount: actionable.length,
-                sampleTitles: actionable
-                  .slice(0, DESTRUCTIVE_ARMING_PREVIEW_TITLES)
-                  .map((candidate) => candidate.subjectKind === "title" ? candidate.titleName : `${candidate.titleName} · ${candidate.subjectLabel}`),
-                loading: false,
-              }
-            : prev,
-        );
-      } catch (error) {
-        setPendingArming(null);
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToLoad"),
-          { level: "ERROR" },
-        );
-      }
-    },
-    [client, setGlobalStatus, t],
-  );
-
-  const setRuleArming = useCallback(
-    (record: MaintenanceRuleSetRecord, arming: MaintenanceEffectArming) => {
-      if (arming === record.effectArming) return;
-      if (arming === "DESTRUCTIVE") {
-        void openDestructiveArming(record);
-        return;
-      }
-      void (async () => {
-        setMutatingRuleSetId(record.id);
-        const result = await applyArming(record, arming);
-        setMutatingRuleSetId(null);
-        setGlobalStatus(
-          result.ok
-            ? t("settings.maintenanceRuleArmingUpdated", { name: record.name })
-            : result.message,
-          { level: result.ok ? "SUCCESS" : "ERROR" },
-        );
-      })();
-    },
-    [applyArming, openDestructiveArming, setGlobalStatus, t],
-  );
-
-  /// The server rejects a stale acknowledgement and reports the count it holds.
-  /// Rather than dropping the operator back to the table, the dialog adopts
-  /// that count, clears the acknowledgement, and asks again against the real
-  /// number.
-  const confirmDestructiveArming = useCallback(async () => {
-    if (!pendingArming || !pendingArming.acknowledged) return;
-    const { record, candidateCount } = pendingArming;
-    setPendingArming((prev) => (prev ? { ...prev, loading: true } : prev));
-    const result = await applyArming(record, "DESTRUCTIVE", candidateCount);
-    if (result.ok) {
-      setPendingArming(null);
-      setGlobalStatus(
-        t("settings.maintenanceRuleArmingUpdated", { name: record.name }),
-        { level: "SUCCESS" },
-      );
-      return;
-    }
-    const serverCount = parseAcknowledgedCandidateCountMismatch(result.message);
-    if (serverCount === null) {
-      setPendingArming(null);
-      setGlobalStatus(result.message, { level: "ERROR" });
-      await refreshRuleSets();
-      return;
-    }
-    setPendingArming((prev) =>
-      prev
-        ? {
-            ...prev,
-            candidateCount: serverCount,
-            acknowledged: false,
-            loading: false,
-            countChanged: true,
-          }
-        : prev,
-    );
-  }, [applyArming, pendingArming, refreshRuleSets, setGlobalStatus, t]);
+  const refreshAfterRuleState = useCallback(async () => {
+    await refreshRuleSets();
+    await refreshCandidates();
+  }, [refreshCandidates, refreshRuleSets]);
+  const { setRuleState, armingDialog } = useMaintenanceRuleState({
+    onChanged: refreshAfterRuleState,
+    setBusyRuleSetId: setMutatingRuleSetId,
+  });
 
   // ── Run now ─────────────────────────────────────────────────────────
 
@@ -1168,7 +981,6 @@ export function SettingsMaintenanceRulesContainer({
         startCreateRuleSet={requestCreateEditor}
         applyTemplate={requestApplyTemplate}
         ruleSetRecords={ruleSetRecords}
-        actionDescriptors={actionDescriptors}
         actionStepDescriptors={actionStepDescriptors}
         actionStepDescriptorsLoaded={actionStepDescriptorsLoaded}
         libraries={libraries}
@@ -1192,18 +1004,34 @@ export function SettingsMaintenanceRulesContainer({
         previewing={previewing}
         previewResult={previewResult}
         previewError={previewError}
-        gates={gates}
-        setRuleMode={(record, mode) => void setRuleMode(record, mode)}
-        setRuleArming={setRuleArming}
+        instanceSwitches={
+          <MaintenanceInstanceSwitches
+            gates={gates}
+            gatesLocked={gatesLocked}
+            savingSwitch={savingSwitch}
+            onSwitchChange={handleSwitchChange}
+          />
+        }
+        setRuleState={setRuleState}
         section={section}
         operationsPanels={
-          section === "gates" ? (
+          section === "candidates" ? (
             <>
-              <MaintenanceGatesPanel
+              <MaintenanceCandidatesPanel
+                candidates={candidates}
+                candidatesLoading={candidatesLoading}
+                candidatesError={candidatesError}
+                ruleSetRecords={ruleSetRecords}
+                libraries={libraries}
                 gates={gates}
-                gatesLocked={gatesLocked}
-                savingGate={savingGate}
-                onGateChange={handleGateChange}
+                candidateRuleFilter={candidateRuleFilter}
+                setCandidateRuleFilter={setCandidateRuleFilter}
+                candidateStateFilter={candidateStateFilter}
+                setCandidateStateFilter={setCandidateStateFilter}
+                candidateLibraryFilter={candidateLibraryFilter}
+                setCandidateLibraryFilter={setCandidateLibraryFilter}
+                refreshCandidates={() => void refreshCandidates()}
+                excludeCandidate={excludeCandidate}
               />
               <MaintenanceExclusionsPanel
                 exclusions={exclusions}
@@ -1213,23 +1041,6 @@ export function SettingsMaintenanceRulesContainer({
                 removeExclusion={setPendingRemoveExclusion}
               />
             </>
-          ) : section === "candidates" ? (
-            <MaintenanceCandidatesPanel
-              candidates={candidates}
-              candidatesLoading={candidatesLoading}
-              candidatesError={candidatesError}
-              ruleSetRecords={ruleSetRecords}
-              libraries={libraries}
-              gates={gates}
-              candidateRuleFilter={candidateRuleFilter}
-              setCandidateRuleFilter={setCandidateRuleFilter}
-              candidateStateFilter={candidateStateFilter}
-              setCandidateStateFilter={setCandidateStateFilter}
-              candidateLibraryFilter={candidateLibraryFilter}
-              setCandidateLibraryFilter={setCandidateLibraryFilter}
-              refreshCandidates={() => void refreshCandidates()}
-              excludeCandidate={excludeCandidate}
-            />
           ) : section === "history" ? (
             <MaintenanceRunsPanel
               evaluationRuns={evaluationRuns}
@@ -1249,90 +1060,20 @@ export function SettingsMaintenanceRulesContainer({
         }
       />
       <ConfirmDialog
-        open={pendingDestructiveGate}
-        contentId="settings-maintenance-gate-destructive-confirm"
-        title={t("settings.maintenanceGateDestructiveConfirmTitle")}
-        description={t("settings.maintenanceGateDestructiveConfirmBody")}
-        confirmLabel={t("settings.maintenanceGateDestructiveConfirmAction")}
+        open={pendingUnpause}
+        contentId="settings-maintenance-unpause-confirm"
+        title={t("settings.maintenanceUnpauseConfirmTitle")}
+        description={t("settings.maintenanceUnpauseConfirmBody")}
+        confirmLabel={t("settings.maintenanceUnpauseConfirmAction")}
         cancelLabel={t("label.cancel")}
-        isBusy={savingGate !== null}
+        isBusy={savingSwitch !== null}
         onConfirm={() => {
-          setPendingDestructiveGate(false);
-          void applyGate("destructiveEffectsEnabled", true);
+          setPendingUnpause(false);
+          void applySwitch("actionsPaused", false);
         }}
-        onCancel={() => setPendingDestructiveGate(false)}
+        onCancel={() => setPendingUnpause(false)}
       />
-      <ConfirmDialog
-        open={pendingArming !== null}
-        contentId="settings-maintenance-arming-confirm"
-        title={t("settings.maintenanceArmDestructiveTitle")}
-        description={
-          pendingArming
-            ? t("settings.maintenanceArmDestructiveBody", {
-                name: pendingArming.record.name,
-              })
-            : ""
-        }
-        confirmLabel={t("settings.maintenanceArmDestructiveConfirm")}
-        cancelLabel={t("label.cancel")}
-        isBusy={pendingArming?.loading ?? false}
-        confirmDisabled={!pendingArming?.acknowledged}
-        onConfirm={() => void confirmDestructiveArming()}
-        onCancel={() => setPendingArming(null)}
-      >
-        {pendingArming ? (
-          <div className="space-y-2 text-xs">
-            {pendingArming.loading && pendingArming.candidateCount === 0 ? (
-              <p className="text-muted-foreground">
-                {t("settings.maintenanceArmDestructiveLoading")}
-              </p>
-            ) : (
-              <>
-                {pendingArming.countChanged ? (
-                  <p
-                    id="settings-maintenance-arming-count-changed"
-                    className="rounded border border-[var(--scry-warning-border)] bg-[var(--scry-warning-bg)] px-2 py-1.5 text-[var(--scry-warning-text)]"
-                  >
-                    {t("settings.maintenanceArmDestructiveCountChanged", {
-                      count: pendingArming.candidateCount,
-                    })}
-                  </p>
-                ) : null}
-                <p id="settings-maintenance-arming-count" className="font-semibold">
-                  {pendingArming.candidateCount === 0
-                    ? t("settings.maintenanceArmDestructiveNoCandidates")
-                    : t("settings.maintenanceArmDestructiveCount", {
-                        count: pendingArming.candidateCount,
-                      })}
-                </p>
-                {pendingArming.sampleTitles.length > 0 ? (
-                  <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-                    {pendingArming.sampleTitles.map((title) => (
-                      <li key={title}>{title}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                <label className="flex items-start gap-2 pt-1">
-                  <Checkbox
-                    id="settings-maintenance-arming-acknowledge"
-                    checked={pendingArming.acknowledged}
-                    onCheckedChange={(value) =>
-                      setPendingArming((prev) =>
-                        prev ? { ...prev, acknowledged: value === true } : prev,
-                      )
-                    }
-                  />
-                  <span>
-                    {t("settings.maintenanceArmDestructiveAcknowledge", {
-                      count: pendingArming.candidateCount,
-                    })}
-                  </span>
-                </label>
-              </>
-            )}
-          </div>
-        ) : null}
-      </ConfirmDialog>
+      {armingDialog}
       <ConfirmDialog
         open={pendingExclusion !== null}
         contentId="settings-maintenance-exclude-confirm"

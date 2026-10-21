@@ -163,6 +163,7 @@ async fn seed_ceiling_labels(app: &AppUseCase, user: &User) -> Vec<String> {
 
 struct RenameFailureSettings {
     inner: Arc<dyn SettingsRepository>,
+    delay_profiles: Arc<dyn crate::DelayProfileRepository>,
     fail_delay_write: std::sync::atomic::AtomicBool,
     fail_journal_clear: std::sync::atomic::AtomicBool,
 }
@@ -187,11 +188,9 @@ impl SettingsRepository for RenameFailureSettings {
         actor: Option<String>,
     ) -> AppResult<()> {
         use std::sync::atomic::Ordering;
-        if (key == crate::delay_profile::DELAY_PROFILE_CATALOG_KEY
-            && self.fail_delay_write.load(Ordering::SeqCst))
-            || (key == "title_tags.pending_renames"
-                && value == "{}"
-                && self.fail_journal_clear.load(Ordering::SeqCst))
+        if key == "title_tags.pending_renames"
+            && value == "{}"
+            && self.fail_journal_clear.load(Ordering::SeqCst)
         {
             return Err(AppError::Repository(
                 "synthetic rename settings write failure".into(),
@@ -214,6 +213,27 @@ impl SettingsRepository for RenameFailureSettings {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::DelayProfileRepository for RenameFailureSettings {
+    async fn list(&self) -> AppResult<Vec<crate::DelayProfile>> {
+        self.delay_profiles.list().await
+    }
+    async fn save_many(&self, profiles: Vec<crate::DelayProfile>) -> AppResult<()> {
+        if self
+            .fail_delay_write
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository(
+                "synthetic delay profile write failure".into(),
+            ));
+        }
+        self.delay_profiles.save_many(profiles).await
+    }
+    async fn delete(&self, id: &str) -> AppResult<bool> {
+        self.delay_profiles.delete(id).await
+    }
+}
+
 #[tokio::test]
 async fn title_tag_rename_recovers_each_cross_store_failure_on_retry_or_startup() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -222,12 +242,15 @@ async fn title_tag_rename_recovers_each_cross_store_failure_on_retry_or_startup(
             let mut h = bootstrap_media_request_app();
             let settings = Arc::new(RenameFailureSettings {
                 inner: h.app.services.config.settings.clone(),
+                delay_profiles: h.app.services.config.delay_profiles.clone(),
                 fail_delay_write: AtomicBool::new(false),
                 fail_journal_clear: AtomicBool::new(false),
             });
-            h.app = h
-                .app
-                .with_test_overrides(|builder| builder.with_settings(settings.clone()));
+            h.app = h.app.with_test_overrides(|builder| {
+                builder
+                    .with_settings(settings.clone())
+                    .with_delay_profiles(settings.clone())
+            });
             let definition = h
                 .app
                 .create_title_tag_definition(&h.manager, "before", None)
@@ -341,12 +364,15 @@ async fn title_tag_delete_recovers_each_cross_store_failure_on_retry_or_startup(
             let mut h = bootstrap_media_request_app();
             let settings = Arc::new(RenameFailureSettings {
                 inner: h.app.services.config.settings.clone(),
+                delay_profiles: h.app.services.config.delay_profiles.clone(),
                 fail_delay_write: AtomicBool::new(false),
                 fail_journal_clear: AtomicBool::new(false),
             });
-            h.app = h
-                .app
-                .with_test_overrides(|builder| builder.with_settings(settings.clone()));
+            h.app = h.app.with_test_overrides(|builder| {
+                builder
+                    .with_settings(settings.clone())
+                    .with_delay_profiles(settings.clone())
+            });
             let definition = h
                 .app
                 .create_title_tag_definition(&h.manager, "before", None)

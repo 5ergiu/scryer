@@ -15,6 +15,7 @@ use scryer_domain::{
 use tracing::warn;
 
 const SOURCE_CHANGED_AFTER_PROBE_CODE: &str = "source_changed_after_probe";
+const SOURCE_SNAPSHOT_UNAVAILABLE_CODE: &str = "import_source_snapshot_unavailable";
 
 pub(crate) enum ImportedFileGateDecision {
     Accepted(Box<ImportedFileAcceptance>),
@@ -81,6 +82,7 @@ impl ImportedFileRejection {
         matches!(
             self.recycle_reason,
             RUNTIME_OUT_OF_BAND_CODE
+                | SOURCE_SNAPSHOT_UNAVAILABLE_CODE
                 | DISC_REVIEW_REQUIRED_CODE
                 | MEDIA_ANALYSIS_REVIEW_REQUIRED_CODE
                 | POST_DOWNLOAD_RULE_ERROR_CODE
@@ -133,6 +135,59 @@ fn import_source_changed_rejection(
         skip_reason: Some(ImportSkipReason::PolicyMismatch),
         blocking_rule_codes: vec![SOURCE_CHANGED_AFTER_PROBE_CODE.to_string()],
     }
+}
+
+fn import_source_snapshot_unavailable_rejection(
+    path: &Path,
+    detail: impl std::fmt::Display,
+) -> ImportedFileRejection {
+    ImportedFileRejection {
+        message: format!(
+            "import source snapshot temporarily unavailable: {} ({detail})",
+            path.display()
+        ),
+        recycle_reason: SOURCE_SNAPSHOT_UNAVAILABLE_CODE,
+        skip_reason: Some(ImportSkipReason::PolicyMismatch),
+        blocking_rule_codes: vec![SOURCE_SNAPSHOT_UNAVAILABLE_CODE.to_string()],
+    }
+}
+
+fn source_snapshot_change_detail(
+    before: &scryer_domain::ImportSourceSnapshot,
+    after: &scryer_domain::ImportSourceSnapshot,
+) -> String {
+    let mut changed = Vec::new();
+    if before.identity.file.len != after.identity.file.len {
+        changed.push("size");
+    }
+    if before.identity.file.modified != after.identity.file.modified {
+        changed.push("modification time");
+    }
+    #[cfg(unix)]
+    if before.identity.file.dev != after.identity.file.dev
+        || before.identity.file.ino != after.identity.file.ino
+    {
+        changed.push("file identity");
+    }
+    if before.identity.kind != after.identity.kind {
+        changed.push("source kind or symlink target");
+    }
+    if before.proof != after.proof {
+        changed.push("sampled content proof");
+    }
+    format!("changed fields: {}", changed.join(", "))
+}
+
+fn only_source_modification_time_changed(
+    before: &scryer_domain::ImportSourceSnapshot,
+    after: &scryer_domain::ImportSourceSnapshot,
+) -> bool {
+    if before.identity.file.modified == after.identity.file.modified {
+        return false;
+    }
+    let mut same_version = before.clone();
+    same_version.identity.file.modified = after.identity.file.modified;
+    same_version == *after
 }
 
 /// Longest engine error text quoted per failing rule in the operator message.
@@ -1106,7 +1161,9 @@ pub(crate) async fn probe_and_validate_with_disc_selection(
         .read()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| scryer_rules::UserRulesEngine::empty());
-    if !user_rules_engine.is_empty() {
+    if runtime_sample_validation.mode == RuntimeSampleValidationMode::EnforceAutomatic
+        && !user_rules_engine.is_empty()
+    {
         let library_name = match app
             .services
             .catalog
@@ -1390,75 +1447,107 @@ pub(crate) async fn prepare_import_candidate_with_disc_selection(
             "disc selection requires an ISO image",
         ));
     }
-    let source_snapshot_before = app
-        .services
-        .workflow
-        .file_importer
-        .snapshot_import_source(path)
-        .await
-        .map_err(|err| import_source_changed_rejection(path, err))?;
-
-    match probe_and_validate_with_disc_selection(
-        app,
-        title,
-        parsed,
-        quality_profile,
-        path,
-        size_bytes,
-        has_existing_file,
-        existing_score,
-        is_filler,
-        runtime_sample_validation,
-        disc_selection,
-        release_listing_json,
-    )
-    .await
-    {
-        ImportedFileGateDecision::Rejected(rejection) => Err(rejection),
-        ImportedFileGateDecision::Accepted(accepted) => {
-            let source_snapshot_after = app
-                .services
-                .workflow
-                .file_importer
-                .snapshot_import_source(path)
-                .await
-                .map_err(|err| import_source_changed_rejection(path, err))?;
-            if source_snapshot_after != source_snapshot_before {
-                return Err(import_source_changed_rejection(
-                    path,
-                    "source identity or content proof changed",
-                ));
-            }
-
-            let (parsed, rescore_changes) = rescore_from_mediainfo(parsed, accepted.as_ref());
-            if !rescore_changes.is_empty() {
-                tracing::debug!(
-                    title = %title.name,
-                    path = %path.display(),
-                    changes = ?rescore_changes,
-                    "mediainfo rescore prepared import candidate"
-                );
-            }
-            // Surface a required-audio "could not verify" flag (untagged tracks):
-            // the file was accepted for review rather than falsely rejected.
-            if let Some(warning) = accepted.audio_language_warning.as_deref() {
-                warn!(
-                    title_id = %title.id,
-                    title = %title.name,
-                    path = %path.display(),
-                    warning,
-                    "imported file accepted with unverified required audio language(s) for review"
-                );
-            }
-
-            Ok(PreparedImportCandidate {
-                parsed,
-                accepted,
-                rescore_changes,
-                source_snapshot: source_snapshot_after,
-                release_listing_json: release_listing_json.map(str::to_string),
-            })
+    let mut retry_snapshot = None;
+    loop {
+        let source_snapshot_before = app
+            .services
+            .workflow
+            .file_importer
+            .snapshot_import_source(path)
+            .await
+            .map_err(|err| import_source_snapshot_unavailable_rejection(path, err))?;
+        if let Some(expected) = retry_snapshot.as_ref()
+            && expected != &source_snapshot_before
+        {
+            return Err(import_source_changed_rejection(
+                path,
+                source_snapshot_change_detail(expected, &source_snapshot_before),
+            ));
         }
+
+        let decision = probe_and_validate_with_disc_selection(
+            app,
+            title,
+            parsed,
+            quality_profile,
+            path,
+            size_bytes,
+            has_existing_file,
+            existing_score,
+            is_filler,
+            runtime_sample_validation,
+            disc_selection,
+            release_listing_json,
+        )
+        .await;
+        let accepted = match decision {
+            ImportedFileGateDecision::Rejected(rejection)
+                if rejection
+                    .blocking_rule_codes
+                    .iter()
+                    .any(|code| code == SOURCE_CHANGED_AFTER_PROBE_CODE) =>
+            {
+                Err(rejection)
+            }
+            ImportedFileGateDecision::Rejected(rejection) => return Err(rejection),
+            ImportedFileGateDecision::Accepted(accepted) => Ok(accepted),
+        };
+        let source_snapshot_after = app
+            .services
+            .workflow
+            .file_importer
+            .snapshot_import_source(path)
+            .await
+            .map_err(|err| import_source_snapshot_unavailable_rejection(path, err))?;
+        if source_snapshot_after != source_snapshot_before {
+            // A timestamp-only finalization must not reuse the old probe.
+            // Re-run every validation once against the new version. A second
+            // change, different sampled proof, or different identity still defers.
+            if retry_snapshot.is_none()
+                && only_source_modification_time_changed(
+                    &source_snapshot_before,
+                    &source_snapshot_after,
+                )
+            {
+                retry_snapshot = Some(source_snapshot_after);
+                tracing::info!(path = %path.display(), "import source modification time changed; validating the new source version once");
+                continue;
+            }
+            return Err(import_source_changed_rejection(
+                path,
+                source_snapshot_change_detail(&source_snapshot_before, &source_snapshot_after),
+            ));
+        }
+        let accepted = accepted?;
+
+        let (parsed, rescore_changes) = rescore_from_mediainfo(parsed, accepted.as_ref());
+        if !rescore_changes.is_empty() {
+            tracing::debug!(
+                title = %title.name,
+                path = %path.display(),
+                changes = ?rescore_changes,
+                "mediainfo rescore prepared import candidate"
+            );
+        }
+        // Surface a required-audio "could not verify" flag (untagged tracks):
+        // the file was accepted for review rather than falsely rejected.
+        if let Some(warning) = accepted.audio_language_warning.as_deref() {
+            warn!(
+                title_id = %title.id,
+                title = %title.name,
+                path = %path.display(),
+                warning,
+                "imported file accepted with unverified required audio language(s) for review"
+            );
+        }
+
+        return Ok(PreparedImportCandidate {
+            parsed,
+            accepted,
+            rescore_changes,
+            source_snapshot: source_snapshot_after,
+            release_listing_json: release_listing_json.map(str::to_string),
+        });
     }
 }
 
@@ -1940,20 +2029,9 @@ pub(crate) fn compute_post_download_acquisition_decision(
 
     let view = context.view(size_basis, is_filler);
 
-    // **Parse parity with the grab lane.** Most release names say nothing about
-    // audio, and the grab path fills that in from the title's original language
-    // (`announced_metadata_for_title`) before scoring. Import did not, so a
-    // profile with `required_audio_languages` raised
-    // `required_audio_language_missing` against every release the grab side had
-    // just accepted — a veto on the announced pass of a file that is fine. The
-    // dedicated `classify_required_audio` gate, which reads the file's real
-    // audio streams, is the one that should speak here, and it already ran.
-    let announced_parsed = crate::quality::canonical_context::announced_metadata_for_title(
-        title,
-        parsed,
-        context.required_audio_languages(),
-        None,
-    );
+    // The raw parse: the scorer fills in audio languages itself, from the
+    // listing snapshot and the title, exactly as it does for the grab.
+    let announced_parsed = parsed.clone();
 
     // The grab's frozen listing snapshot, anchored at the grab: the same
     // listing facts the grab scored, and the same ones the row will carry.

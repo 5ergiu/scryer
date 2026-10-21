@@ -295,6 +295,7 @@ function ManualImportTargetPickerContent({
 }) {
   const t = useTranslate();
   const [query, setQuery] = React.useState("");
+  const searchRef = React.useRef<HTMLInputElement>(null);
   const selectedEpisodeIds = React.useMemo(() => new Set(episodeTargetIds(value)), [value]);
   const isSelected = (rowValue: string) => {
     const ids = episodeTargetIds(rowValue);
@@ -327,6 +328,10 @@ function ManualImportTargetPickerContent({
     <PopoverContent
       align="start"
       className="z-[90] w-[var(--radix-popover-trigger-width)] min-w-[280px] p-2"
+      onOpenAutoFocus={(event) => {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }}
     >
       <label className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
         <input
@@ -340,7 +345,7 @@ function ManualImportTargetPickerContent({
       <div className="relative mb-2">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
-          autoFocus
+          ref={searchRef}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Filter episodes..."
@@ -436,10 +441,12 @@ const ManualImportTargetSelect = React.memo(function ManualImportTargetSelect({
           className="h-auto min-h-8 w-full justify-between gap-2 px-3 py-1 text-xs font-normal"
         >
           {selectedEpisodeIds.length > 1 ? (
-            <span className="flex flex-wrap items-center gap-1">
+            <span className="flex min-w-0 flex-wrap items-center gap-1">
               {selectedEpisodeIds.map((episodeId) => (
-                <Badge key={episodeId} tone="info" className="px-1.5 text-[10px]">
-                  {targetLabels.get(episodeTargetValue([episodeId])) ?? episodeId}
+                <Badge key={episodeId} tone="info" className="max-w-full px-1.5 text-[10px]">
+                  <span className="truncate">
+                    {targetLabels.get(episodeTargetValue([episodeId])) ?? episodeId}
+                  </span>
                 </Badge>
               ))}
             </span>
@@ -747,7 +754,7 @@ export function ManualImportDialog({
                 </p>
               )
             ) : (
-              <Table id="activity-manual-import-table">
+              <Table id="activity-manual-import-table" className="table-fixed">
                 <TableHeader>
                   <TableRow>
                     <TableHead>File</TableHead>

@@ -34,13 +34,10 @@ import type {
 } from "@/lib/types/maintenance-rule-sets";
 import {
   MAINTENANCE_FILTER_ALL,
-  MAINTENANCE_GATE_ORDER,
   actionKindLabelKey,
   actionStepKindLabelKey,
   candidateStateBadgeTone,
   candidateStateLabelKey,
-  gateHelpKey,
-  gateLabelKey,
   maintenanceSearchHistoryState,
   maintenanceCountdown,
   runStatusBadgeTone,
@@ -50,6 +47,7 @@ import { formatUiDateTime } from "@/lib/utils/date-format";
 import { selectorId } from "@/lib/utils/dom-ids";
 import { parseMaintenanceFileResults } from "@/lib/utils/maintenance-file-results";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { TitleKeepControl } from "@/components/common/title-keep-control";
 
 export type MaintenanceLibraryOption = { id: string; name: string };
 
@@ -204,92 +202,75 @@ function ReasonCodes({ codes }: { codes: string[] }) {
   );
 }
 
-// ── Gates ─────────────────────────────────────────────────────────────
+// ── Instance switches ─────────────────────────────────────────────────
 
-export type MaintenanceGatesPanelProps = {
+/// The two switches every maintenance pane shows above its content, in order.
+const INSTANCE_SWITCHES: { key: MaintenanceGateKey; label: string; help: string }[] = [
+  {
+    key: "enabled",
+    label: "settings.maintenanceSwitchEnabled",
+    help: "settings.maintenanceSwitchEnabledHelp",
+  },
+  {
+    key: "actionsPaused",
+    label: "settings.maintenanceSwitchActionsPaused",
+    help: "settings.maintenanceSwitchActionsPausedHelp",
+  },
+];
+
+export type MaintenanceInstanceSwitchesProps = {
   gates: MaintenanceInstanceGates | null;
-  /// True when the gates query was refused, which on this page means the reader
-  /// is not a system administrator.
+  /// True when the switches query was refused, which on this page means the
+  /// reader is not a system administrator.
   gatesLocked: boolean;
-  savingGate: MaintenanceGateKey | null;
-  onGateChange: (gate: MaintenanceGateKey, enabled: boolean) => void;
+  savingSwitch: MaintenanceGateKey | null;
+  onSwitchChange: (key: MaintenanceGateKey, value: boolean) => void;
 };
 
-export function MaintenanceGatesPanel({
+export function MaintenanceInstanceSwitches({
   gates,
   gatesLocked,
-  savingGate,
-  onGateChange,
-}: MaintenanceGatesPanelProps) {
+  savingSwitch,
+  onSwitchChange,
+}: MaintenanceInstanceSwitchesProps) {
   const t = useTranslate();
 
+  if (gatesLocked || !gates) {
+    return (
+      <p
+        id="settings-maintenance-switches-locked"
+        className="rounded border border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] px-3 py-2 text-xs text-[var(--scry-info-text)]"
+      >
+        {t("settings.maintenanceSwitchesLocked")}
+      </p>
+    );
+  }
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">{t("settings.maintenanceGatesTitle")}</CardTitle>
-        <p className="text-xs text-muted-foreground">
-          {t("settings.maintenanceGatesSubtitle")}
-        </p>
-      </CardHeader>
-      <CardContent>
-        {gatesLocked || !gates ? (
-          <p
-            id="settings-maintenance-gates-locked"
-            className="rounded border border-[var(--scry-info-border)] bg-[var(--scry-info-bg)] px-3 py-2 text-xs text-[var(--scry-info-text)]"
-          >
-            {t("settings.maintenanceGatesLocked")}
-          </p>
-        ) : (
-          <div id="settings-maintenance-gates" className="space-y-3">
-            {MAINTENANCE_GATE_ORDER.map((gate) => {
-              const destructive = gate === "destructiveEffectsEnabled";
-              return (
-                <div
-                  key={gate}
-                  className={`flex flex-col gap-2 rounded border px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between ${
-                    destructive
-                      ? "border-[var(--scry-danger-border)] bg-[var(--scry-danger-bg)]"
-                      : "border-border bg-muted/30"
-                  }`}
-                >
-                  <div className="space-y-1">
-                    <Label
-                      htmlFor={selectorId("settings-maintenance-gate", gate)}
-                      className={
-                        destructive ? "text-[var(--scry-danger-text)]" : undefined
-                      }
-                    >
-                      {t(gateLabelKey(gate))}
-                    </Label>
-                    <p
-                      className={`text-xs ${
-                        destructive
-                          ? "text-[var(--scry-danger-text)]"
-                          : "text-muted-foreground"
-                      }`}
-                    >
-                      {t(gateHelpKey(gate))}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {savingGate === gate ? (
-                      <LoadingMark className="h-4 w-4 text-muted-foreground" />
-                    ) : null}
-                    <SettingsToggleSwitch
-                      id={selectorId("settings-maintenance-gate", gate)}
-                      checked={gates[gate]}
-                      disabled={savingGate !== null}
-                      ariaLabel={t(gateLabelKey(gate))}
-                      onChange={(next) => onGateChange(gate, next)}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+    <div id="settings-maintenance-switches" className="grid gap-3 md:grid-cols-2">
+      {INSTANCE_SWITCHES.map(({ key, label, help }) => (
+        <div
+          key={key}
+          className="flex items-center justify-between gap-3 rounded border border-border bg-muted/30 px-3 py-2.5"
+        >
+          <div className="space-y-1">
+            <Label htmlFor={selectorId("settings-maintenance-switch", key)}>{t(label)}</Label>
+            <p className="text-xs text-muted-foreground">{t(help)}</p>
           </div>
-        )}
-      </CardContent>
-    </Card>
+          <div className="flex shrink-0 items-center gap-2">
+            {savingSwitch === key ? (
+              <LoadingMark className="h-4 w-4 text-muted-foreground" />
+            ) : null}
+            <SettingsToggleSwitch
+              id={selectorId("settings-maintenance-switch", key)}
+              checked={gates[key]}
+              disabled={savingSwitch !== null}
+              ariaLabel={t(label)}
+              onChange={(next) => onSwitchChange(key, next)}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -318,8 +299,8 @@ export type MaintenanceCandidatesPanelProps = {
   candidatesError: string | null;
   ruleSetRecords: MaintenanceRuleSetRecord[];
   libraries: MaintenanceLibraryOption[];
-  /// Gates are null for a reader who cannot see them; the empty state then
-  /// stops guessing why the list is empty.
+  /// Null for a reader who cannot see the instance switches; the empty state
+  /// then stops guessing why the list is empty.
   gates: MaintenanceInstanceGates | null;
   candidateRuleFilter: string;
   setCandidateRuleFilter: (id: string) => void;
@@ -335,11 +316,11 @@ function candidatesEmptyKey(
   gates: MaintenanceInstanceGates | null,
   ruleSetRecords: MaintenanceRuleSetRecord[],
 ): string {
-  if (gates && !gates.evaluationEnabled) {
-    return "settings.maintenanceCandidatesEmptyEvaluationOff";
+  if (gates && !gates.enabled) {
+    return "settings.maintenanceCandidatesEmptyMaintenanceOff";
   }
-  if (!ruleSetRecords.some((record) => record.evaluationMode !== "DISABLED")) {
-    return "settings.maintenanceCandidatesEmptyNoActiveRules";
+  if (!ruleSetRecords.some((record) => record.state !== "DISABLED")) {
+    return "settings.maintenanceCandidatesEmptyAllDisabled";
   }
   return "settings.maintenanceCandidatesEmpty";
 }
@@ -363,9 +344,6 @@ export function MaintenanceCandidatesPanel({
   const t = useTranslate();
   const dateTimeFormat = useUiDateTimeFormat();
 
-  /// A candidate carries no mode of its own; the shadow marker comes from the
-  /// rule that opened it, which is why this admin view always asks for shadow
-  /// candidates and then labels them here.
   // What a tag rule would write, keyed by rule so a candidate row can say
   // "add needs-review" rather than only naming the action. The rule records
   // already carry the action spec of the revision in force, so this costs no
@@ -380,16 +358,6 @@ export function MaintenanceCandidatesPanel({
     }
     return patches;
   }, [ruleSetRecords]);
-
-  const shadowRuleIds = React.useMemo(
-    () =>
-      new Set(
-        ruleSetRecords
-          .filter((record) => record.evaluationMode === "SHADOW")
-          .map((record) => record.id),
-      ),
-    [ruleSetRecords],
-  );
 
   return (
     <Card>
@@ -517,11 +485,6 @@ export function MaintenanceCandidatesPanel({
                             })}
                           </span>
                         ) : null}
-                        {shadowRuleIds.has(candidate.ruleSetId) ? (
-                          <Badge tone="outline" className="w-fit">
-                            {t("settings.maintenanceCandidatesShadowBadge")}
-                          </Badge>
-                        ) : null}
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -576,7 +539,13 @@ export function MaintenanceCandidatesPanel({
                     >
                       <CandidateDueCell dueAt={candidate.dueAt} />
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="space-x-2 whitespace-nowrap text-right">
+                      <TitleKeepControl
+                        id={selectorId("settings-maintenance-candidate-keep", candidate.id)}
+                        titleId={candidate.titleId}
+                        keepClaimId={candidate.operatorKeepClaimId}
+                        onChanged={refreshCandidates}
+                      />
                       <IconButton
                         id={selectorId(
                           "settings-maintenance-candidate-exclude",

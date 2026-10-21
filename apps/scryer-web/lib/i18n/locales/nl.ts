@@ -535,6 +535,8 @@ const nl: LocaleDictionary = {
   "jobs.triggerSource.systemInternal": "Systeem intern",
   "deletePreview.counting": "Bestanden tellen om te verwijderen…",
   "deletePreview.error": "Verwijderingsvoorbeeld kon niet worden voorbereid.",
+  "deletePreview.folderUnknown": "Scryer kan niet bepalen in welke map de bestanden van deze titel staan, dus verwijdert het niets van de schijf.",
+  "deletePreview.removeFromCatalogOnly": "Alleen uit catalogus verwijderen",
   "deletePreview.files": "Bestanden",
   "deletePreview.media": "Media",
   "deletePreview.subtitles": "Ondertitels",
@@ -625,6 +627,9 @@ const nl: LocaleDictionary = {
   "settings.delayProfileFacetsLabel": "Geldt voor",
   "settings.delayProfileFacetsHelp":
     "Voor welke inhoudstypen dit profiel geldt. Laat alles uitgevinkt voor alle typen.",
+  "settings.delayProfileLibrariesLabel": "Bibliotheken",
+  "settings.delayProfileLibrariesHelp": "Bibliotheken waarop dit profiel van toepassing is. Laat alles geselecteerd om het op elke bibliotheek toe te passen. Als de laatste bibliotheek van een profiel wordt verwijderd, wordt het profiel uitgeschakeld.",
+  "settings.delayProfileUnknownLibrary": "Onbekende bibliotheek",
   "settings.delayProfileAllFacets": "Alles",
   "settings.delayProfileTagsLabel": "Tags",
   "settings.delayProfileTagsPlaceholder":
@@ -1798,6 +1803,8 @@ const nl: LocaleDictionary = {
     "Audiokanaalconfiguratie (bijv. 5.1, 7.1, 2.0)",
   "settings.refReleaseLangsAudio":
     "ISO 639-3 audiotaalcodes (bijv. eng, jpn). Bevat de talen die de indexer-listing meldde, vastgelegd toen de release werd gegrabd; bestanden die zijn ingescand, overgenomen of geïmporteerd voordat listing-snapshots werden bewaard, dragen alleen bij wat de naam en het bestand tonen",
+  "settings.refReleaseIndexerLanguages":
+    "ISO 639-3 audiotaalcodes die de indexer-listing zelf meldde, vastgelegd toen de release werd gegrabd. Nooit afgeleid uit de naam of de titel; leeg als de indexer niets meldde",
   "settings.refReleaseLangsSub": "ISO 639-3 ondertitelingstaalcodes",
   "settings.refReleaseIsDualAudio": "True wanneer meerdere audiotracks gedetecteerd zijn",
   "settings.refReleaseIsAtmos": "True wanneer Dolby Atmos-audio aanwezig is",
@@ -3664,13 +3671,11 @@ const nl: LocaleDictionary = {
   "lists.kind.movie": "Films",
   "lists.kind.series": "Series",
   "lists.kind.anime": "Anime",
-  "lists.mode.search": "Toevoegen en zoeken",
-  "lists.mode.add": "Alleen toevoegen",
+  "lists.mode.add": "Toevoegen",
   "lists.mode.hold": "Vasthouden voor goedkeuring",
   "lists.mode.request": "Aanvragen",
   "lists.mode.discover": "Alleen tonen in Ontdekken",
-  "lists.modeHelp.search": "Voegt nieuwe titels bewaakt toe en zoekt er meteen naar.",
-  "lists.modeHelp.add": "Voegt nieuwe titels bewaakt toe zonder te zoeken.",
+  "lists.modeHelp.add": "Voegt nieuwe titels toe met de bewaking die per soort is gekozen. Bewaakte titels worden gezocht, onbewaakte niet.",
   "lists.modeHelp.hold": "Maakt voor elke nieuwe titel een openstaande aanvraag die iemand kan goedkeuren.",
   "lists.modeHelp.request": "Vraagt nieuwe titels aan voor een lid.",
   "lists.modeHelp.discover": "Legt de titels van de lijst vast zonder iets toe te voegen.",

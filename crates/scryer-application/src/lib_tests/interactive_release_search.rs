@@ -1180,6 +1180,8 @@ async fn a_token_is_issued_for_a_release_still_held_by_the_search() {
             NewTitle {
                 name: "Paperman".into(),
                 facet: MediaFacet::Movie,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 monitored: true,
                 year: Some(2012),
                 ..Default::default()
@@ -1983,6 +1985,8 @@ async fn an_assigned_grab_needs_only_title_management() {
             NewTitle {
                 name: "Paperman".into(),
                 facet: MediaFacet::Movie,
+                // An unhydrated fixture has no release dates to wait on.
+                min_availability: Some("announced".into()),
                 monitored: true,
                 year: Some(2012),
                 ..Default::default()
@@ -2526,6 +2530,8 @@ async fn localized_search_rounds_follow_acceptance_and_interactive_policy() {
                 NewTitle {
                     name: "Primary Title".into(),
                     facet: MediaFacet::Movie,
+                    // An unhydrated fixture has no release dates to wait on.
+                    min_availability: Some("announced".into()),
                     year: Some(2019),
                     tags: vec![format!(
                         "{}Svensk Titel",

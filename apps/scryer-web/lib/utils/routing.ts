@@ -74,7 +74,6 @@ export const MAINTENANCE_RULES_SECTION_PATH: Record<MaintenanceRulesSection, str
   rules: "",
   candidates: "candidates",
   history: "history",
-  gates: "gates",
 };
 
 const MAINTENANCE_RULES_SECTION_BY_SEGMENT: Record<string, MaintenanceRulesSection> = {
@@ -82,23 +81,12 @@ const MAINTENANCE_RULES_SECTION_BY_SEGMENT: Record<string, MaintenanceRulesSecti
   candidates: "candidates",
   history: "history",
   runs: "history",
-  gates: "gates",
-  // Exclusions were their own pane before they moved in with the gates, so the
-  // segment redirects rather than 404ing on links people already hold.
-  exclusions: "gates",
+  // Panes that were folded into others redirect rather than 404ing on links
+  // people already hold: the instance switches now head every pane, and
+  // exclusions sit under the candidates they were made from.
+  gates: "rules",
+  exclusions: "candidates",
 };
-
-/// Which kinds of rule the Rules page offers on this instance.
-///
-/// Maintenance and request rules are still being finished, so they are panes
-/// only when the instance has opted into experimental features. Scoring is
-/// always present, so a single-entry result also tells the page there is no
-/// kind to switch between and the rail can be dropped.
-export function rulesSectionsFor(experimentalFeaturesEnabled: boolean): RulesSection[] {
-  return experimentalFeaturesEnabled
-    ? ["scoring", "maintenance", "request"]
-    : ["scoring"];
-}
 
 /// The `rules` settings section is the Scoring pane, `maintenanceRules` the
 /// Maintenance pane and `requestRules` the Request pane. Which `SettingsSection`

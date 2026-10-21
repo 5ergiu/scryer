@@ -108,6 +108,8 @@ pub struct LocationTransferSnapshotPayload {
 pub enum LocationOperationTypeValue {
     /// Correct which folder a title owns; file content is never touched.
     FolderReassignment,
+    /// Repair invalid title ownership while retaining original files.
+    TitleFolderRecovery,
     /// Move selected titles to another root inside the same library.
     RootMove,
     /// Replace one root's path with a new, unconfigured path.
@@ -127,6 +129,8 @@ pub enum LocationOperationTypeValue {
 pub enum LocationExecutionModeValue {
     /// Scryer performs and verifies the filesystem operation.
     MoveWithScryer,
+    /// Internal recovery copies verified files and preserves their sources.
+    CopyPreserveSources,
     /// The user moved the files themselves; Scryer trusts that move and
     /// updates the catalog mappings only.
     UserMovedFiles,

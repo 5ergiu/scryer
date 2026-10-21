@@ -12,10 +12,10 @@
 //! matcher revisions can be created, edited, previewed, and deleted.
 //! [`facts`] builds the fact snapshot preview evaluates against.
 //!
-//! [`evaluation`] adds the scheduled dark evaluator (tracks C1/C2): behind five
-//! instance gates that all default off, it evaluates rules an operator has
-//! explicitly moved to `shadow` or `observe`, and reconciles durable lifecycle
-//! candidates and their grace clocks.
+//! [`evaluation`] adds the scheduled evaluator: behind instance gates that all
+//! default off, it evaluates rules an operator has explicitly moved to Dry run
+//! or Enabled, and reconciles durable lifecycle candidates and their grace
+//! clocks.
 //!
 //! **No reachable action handler is registered.** Nothing executes an action:
 //! rule sets are created disabled, the evaluator only ever writes the
@@ -65,10 +65,10 @@ pub use evaluation::{
     MaintenanceGates, MaintenanceGatesUpdate, candidate_reason,
 };
 pub use service::{
-    MAINTENANCE_MAX_GRACE_DAYS, MAINTENANCE_PREVIEW_DEFAULT_TITLES, MAINTENANCE_PREVIEW_MAX_TITLES,
-    MaintenanceMatcherDraft, MaintenancePreviewMatcher, MaintenancePreviewRequest,
-    MaintenancePreviewResult, MaintenancePreviewSelection, MaintenancePreviewTitleResult,
-    MaintenanceRuleDraft, MaintenanceRuleSetDetail,
+    EXPIRED_REQUEST_LEASES_REGO, MAINTENANCE_MAX_GRACE_DAYS, MAINTENANCE_PREVIEW_DEFAULT_TITLES,
+    MAINTENANCE_PREVIEW_MAX_TITLES, MaintenanceMatcherDraft, MaintenancePreviewMatcher,
+    MaintenancePreviewRequest, MaintenancePreviewResult, MaintenancePreviewSelection,
+    MaintenancePreviewTitleResult, MaintenanceRuleDraft, MaintenanceRuleSetDetail,
 };
 // ── Safety preconditions (RFC 137 §9.10, WP-G) ──────────────────────────────
 pub use safety::{MaintenanceActivityCheck, MaintenancePlaybackHold, fold_playback_hold};
@@ -76,5 +76,6 @@ pub use safety::{MaintenanceActivityCheck, MaintenancePlaybackHold, fold_playbac
 pub use action_execution::{
     MAINTENANCE_HIGH_RISK_FAILURE_BREAKER, MAINTENANCE_MAX_ACTION_ATTEMPTS,
     MAINTENANCE_MAX_ACTIONS_PER_RULE_PER_RUN, MAINTENANCE_MAX_HIGH_RISK_ACTIONS_PER_RUN,
-    MaintenanceActionHandlingReport, MaintenanceActionRunView, execution_reason,
+    MaintenanceActionHandlingReport, MaintenanceActionRunView, derived_effect_arming,
+    execution_reason, maintenance_rule_state,
 };

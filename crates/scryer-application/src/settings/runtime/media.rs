@@ -23,6 +23,8 @@ pub struct MediaSettings {
     pub file_chmod: Option<String>,
     pub folder_chmod: Option<String>,
     pub chown_group: Option<String>,
+    /// The Movie facet's availability gate settings; `None` for other facets.
+    pub movie_availability: Option<MovieAvailabilitySettings>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateMediaSettings {
@@ -49,6 +51,9 @@ pub struct UpdateMediaSettings {
     pub file_chmod: Option<String>,
     pub folder_chmod: Option<String>,
     pub chown_group: Option<String>,
+    /// Movie availability gate settings to set on the Movie facet; unset
+    /// fields are left as they are. Valid only for the Movie facet.
+    pub movie_availability: MovieAvailabilityOverrides,
 }
 fn rename_template_global_key(facet: &MediaFacet) -> &'static str {
     match facet {
@@ -739,6 +744,11 @@ impl AppUseCase {
             file_chmod: import_permissions.file_chmod,
             folder_chmod: import_permissions.folder_chmod,
             chown_group: import_permissions.chown_group,
+            movie_availability: if facet == MediaFacet::Movie {
+                Some(self.movie_availability_facet_settings().await?)
+            } else {
+                None
+            },
         })
     }
 }
@@ -807,6 +817,12 @@ impl AppUseCase {
         {
             return Err(AppError::Validation(
                 "season folder templates are only supported for series and anime".to_string(),
+            ));
+        }
+        let movie_availability = input.movie_availability.clone().normalized()?;
+        if facet != MediaFacet::Movie && !movie_availability.is_empty() {
+            return Err(AppError::Validation(
+                "movie availability settings require scope movie".to_string(),
             ));
         }
         if let Some(template) = input.season_folder_template.as_deref() {
@@ -1251,6 +1267,22 @@ impl AppUseCase {
             return Err(AppError::Validation(
                 "anime-specific settings require scope anime".to_string(),
             ));
+        }
+
+        if !movie_availability.is_empty() {
+            let before = self.movie_availability_policies().await?;
+            changed_keys.extend(
+                self.write_movie_availability_values(
+                    MediaFacet::Movie.as_str(),
+                    &movie_availability,
+                    false,
+                    &actor.id,
+                )
+                .await?,
+            );
+            let after = self.movie_availability_policies().await?;
+            self.queue_movie_release_market_refresh_where_changed(&before, &after)
+                .await?;
         }
 
         if changed_keys.is_empty() {

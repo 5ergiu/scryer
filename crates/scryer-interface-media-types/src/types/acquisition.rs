@@ -868,6 +868,10 @@ pub struct QueueDownloadInput {
     pub replace_in_progress: Option<bool>,
     /// Submission purpose; omission uses the normal download purpose.
     pub purpose: Option<QueueDownloadPurposeValue>,
+    /// Deprecated and ignored. Manual queueing is never gated by movie
+    /// availability; kept for one release so older web bundles still parse.
+    #[graphql(deprecation = "Manual queueing is never gated by availability; ignored.")]
+    pub override_movie_availability: Option<bool>,
 }
 
 #[derive(InputObject)]

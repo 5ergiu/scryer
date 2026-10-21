@@ -43,8 +43,7 @@ pub const FALLBACK_LIBRARY_PERMISSION: &str = LIBRARY_PERMISSION_DECIDER;
 
 /// One rule's vote, already narrowed to the rules whose library scope covers
 /// this request (see [`super::engine`]). Carries the rule's identity and mode so
-/// the trace can be read without a second lookup, and so the caller can ask
-/// whether any *deciding* rule was actually enforcing.
+/// the trace can be read without a second lookup.
 #[derive(Clone, Debug)]
 pub struct ScopedVote {
     pub rule_set_id: String,
@@ -66,12 +65,10 @@ pub struct ScopedError {
     pub message: String,
 }
 
-/// What the policy concluded, before the instance gate and the per-rule
-/// evaluation modes are applied to it.
+/// What the policy concluded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Arbitration {
-    /// The verdict the rules (plus the permission vote) reached. This is the
-    /// *policy's* answer, recorded whether or not it is allowed to act.
+    /// The verdict the rules (plus the permission vote) reached.
     pub policy_outcome: RequestDecisionOutcome,
     /// Why the verdict is a fallback rather than a rule's own decision.
     /// `None` exactly when a rule voted `deny` or `approve` and won; an
@@ -98,54 +95,8 @@ pub struct ArbitrationReason {
     pub rule_set_name: String,
 }
 
-impl Arbitration {
-    /// Whether at least one of the rules that produced this verdict is allowed
-    /// to act on it.
-    ///
-    /// A verdict nobody enforces is a *shadow* verdict: it is recorded in full
-    /// and changes nothing. The permission decider counts as enforcing because
-    /// it is today's behaviour, not a rule an operator has to arm.
-    pub fn is_enforceable(&self, votes: &[ScopedVote], errors: &[ScopedError]) -> bool {
-        if self
-            .deciding_rule_set_ids
-            .iter()
-            .any(|id| id == LIBRARY_PERMISSION_DECIDER)
-        {
-            return true;
-        }
-        self.deciding_rule_set_ids.iter().any(|id| {
-            votes.iter().any(|vote| {
-                &vote.rule_set_id == id && vote.mode == RequestRuleEvaluationMode::Enforce
-            }) || errors.iter().any(|error| {
-                &error.rule_set_id == id && error.mode == RequestRuleEvaluationMode::Enforce
-            })
-        })
-    }
-
-    /// The outcome that actually takes effect.
-    ///
-    /// `gate_enabled` is the instance switch; `enforceable` is
-    /// [`Self::is_enforceable`]. When either is false the effective outcome is
-    /// exactly today's behaviour — the library's Auto-Approve permission
-    /// approves, and everything else waits for a human — while `policy_outcome`
-    /// keeps saying what the rules concluded. That difference is the whole of
-    /// shadow mode (FR-013).
-    pub fn effective_outcome(
-        &self,
-        gate_enabled: bool,
-        enforceable: bool,
-        permission_grants_auto_approve: bool,
-    ) -> RequestDecisionOutcome {
-        if gate_enabled && enforceable {
-            self.policy_outcome
-        } else {
-            legacy_outcome(permission_grants_auto_approve)
-        }
-    }
-}
-
 /// What Scryer did before request rules existed, and what it still does
-/// whenever policy is not allowed to act.
+/// whenever no rule takes part.
 pub const fn legacy_outcome(permission_grants_auto_approve: bool) -> RequestDecisionOutcome {
     if permission_grants_auto_approve {
         RequestDecisionOutcome::AutoApprove
