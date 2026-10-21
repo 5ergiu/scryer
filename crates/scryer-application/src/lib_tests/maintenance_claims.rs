@@ -847,7 +847,7 @@ impl ClaimFixture {
 }
 
 #[tokio::test]
-async fn the_shipped_rule_is_created_once_and_starts_enabled() {
+async fn the_shipped_rule_is_created_once_and_starts_disabled() {
     let fixture = claims_app();
     fixture
         .app
@@ -863,7 +863,10 @@ async fn the_shipped_rule_is_created_once_and_starts_enabled() {
     let detail = fixture.shipped_rule().await;
     let rule = &detail.rule_set;
     assert_eq!(rule.name, "Expired request leases");
-    assert!(rule.system_owned && rule.enabled);
+    assert!(
+        rule.system_owned && !rule.enabled,
+        "nothing is enabled by default"
+    );
     assert!(rule.library_ids.is_empty(), "every library");
     assert_eq!(
         rule.subject_kind,
@@ -871,9 +874,10 @@ async fn the_shipped_rule_is_created_once_and_starts_enabled() {
     );
     assert_eq!(
         crate::maintenance_rules::maintenance_rule_state(&detail),
-        MaintenanceRuleState::Enabled
+        MaintenanceRuleState::Disabled
     );
-    assert_eq!(rule.effect_arming, MaintenanceEffectArming::Destructive);
+    assert_eq!(rule.effect_arming, MaintenanceEffectArming::None);
+    assert!(!rule.destructive_rearm_required);
     assert_eq!(detail.revision.grace_days, 7);
     assert_eq!(detail.revision.created_by, None);
     assert_eq!(
@@ -908,8 +912,22 @@ async fn the_shipped_rule_keeps_its_matcher_and_name_but_not_its_grace_or_scope(
         .ensure_expired_request_leases_rule()
         .await
         .expect("seed");
+    let id = fixture.shipped_rule().await.rule_set.id;
+    // The rule ships Disabled. Enable it as an operator would, acknowledging
+    // the (empty) candidate list, so the edits below start from Enabled.
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &id,
+        MaintenanceRuleState::Enabled,
+        Some(0),
+    )
+    .await;
     let detail = fixture.shipped_rule().await;
-    let id = detail.rule_set.id.clone();
+    assert_eq!(
+        detail.rule_set.effect_arming,
+        MaintenanceEffectArming::Destructive
+    );
     let stored_source = scryer_rules::strip_editor_source(&detail.revision.rego_source);
     let matcher = |rego_source: &str, action_definition, grace_days| {
         crate::maintenance_rules::MaintenanceMatcherDraft {
@@ -1020,6 +1038,15 @@ async fn the_shipped_rule_matches_only_titles_whose_lease_expired_unkept() {
         .await
         .expect("seed");
     fixture.open_gates(false, false).await;
+    let id = fixture.shipped_rule().await.rule_set.id;
+    super::maintenance_rules::set_rule_state(
+        &fixture.app,
+        &fixture.user,
+        &id,
+        MaintenanceRuleState::Enabled,
+        Some(0),
+    )
+    .await;
 
     let lapsed = seed_title(&fixture.app, &fixture.user, "Lapsed").await;
     fixture

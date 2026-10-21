@@ -2082,12 +2082,13 @@ async fn action_sequence_migration_preserves_pre_0232_in_flight_legacy_rows() {
     assert_eq!(row.get::<String, _>("subject_id"), "title");
     assert_eq!(row.get::<String, _>("detail"), r#"{"evidence":true}"#);
     assert_eq!(row.get::<String, _>("idempotency_key"), "legacy-key");
-    let arming: String =
-        sqlx::query_scalar("SELECT effect_arming FROM maintenance_rule_sets WHERE id = 'rule'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(arming, "destructive");
+    let rule_state: (bool, String, String) = sqlx::query_as(
+        "SELECT enabled, evaluation_mode, effect_arming FROM maintenance_rule_sets WHERE id = 'rule'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rule_state, (false, "disabled".into(), "none".into()));
     let exclusion: String = sqlx::query_scalar(
         "SELECT subject_id FROM maintenance_rule_exclusions WHERE id = 'exclusion'",
     )

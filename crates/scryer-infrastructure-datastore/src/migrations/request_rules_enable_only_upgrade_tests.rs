@@ -104,7 +104,7 @@ async fn an_enforcing_rule_behind_an_off_gate_comes_back_disabled() {
 }
 
 #[tokio::test]
-async fn an_enforcing_rule_behind_an_on_gate_stays_enabled() {
+async fn an_enforcing_rule_behind_an_on_gate_is_disabled_without_experimental_opt_in() {
     let pool = pool_before_upgrade().await;
     seed_gate(&pool, Some("true")).await;
     seed_rule(&pool, "enforcing", true, "enforce").await;
@@ -113,7 +113,7 @@ async fn an_enforcing_rule_behind_an_on_gate_stays_enabled() {
 
     assert_eq!(
         rule_state(&pool, "enforcing").await,
-        (true, "enforce".to_string())
+        (false, "disabled".to_string())
     );
     assert_eq!(gate_rows(&pool).await, 0, "the gate is retired");
 }
