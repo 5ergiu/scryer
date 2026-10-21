@@ -2027,7 +2027,9 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
     async fn list_active_unbound_submitted_before(
         &self,
         submitted_before: chrono::DateTime<Utc>,
-    ) -> AppResult<Vec<DownloadSubmission>> {
+    ) -> AppResult<Vec<scryer_application::UnconfirmedDownloadSubmission>> {
+        // The release path needs each intent's submission time to judge
+        // whether a client's bounded history window reaches back to it.
         let sql = download_submission_select_sql(
             &self.datastore,
             "WHERE submitted_at < {}
@@ -2040,13 +2042,26 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
                       AND binding.ended_at IS NULL
                )
              ORDER BY submitted_at, id",
+        )
+        .replacen(
+            "SELECT ",
+            "SELECT download_submissions.submitted_at AS unconfirmed_submitted_at, ",
+            1,
         );
-        fetch_download_submissions(
+        SqlRuntime::fetch_all(
             self.datastore.read_exec(),
             &sql,
             &[SqlArg::Timestamp(submitted_before)],
         )
-        .await
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(scryer_application::UnconfirmedDownloadSubmission {
+                submission: download_submission_from_row(&row)?,
+                submitted_at: lenient_timestamp(&row, "unconfirmed_submitted_at")?,
+            })
+        })
+        .collect()
     }
 
     async fn release_unconfirmed_submission(&self, download_id: &DownloadId) -> AppResult<bool> {
@@ -4436,16 +4451,25 @@ mod seed_goal_tests {
             .await
             .expect("unconfirmed intents should list")
             .into_iter()
-            .map(|submission| (submission.download_id, submission.title_id))
+            .map(|intent| {
+                (
+                    intent.submission.download_id,
+                    intent.submission.title_id,
+                    // Seconds behind `now`, rounded: storage precision varies.
+                    intent
+                        .submitted_at
+                        .map(|at| ((now - at).num_milliseconds() as f64 / 1000.0).round() as i64),
+                )
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
             listed,
             vec![
-                (stale_id, "title-1".to_string()),
-                (ambiguous_id, "title-2".to_string()),
+                (stale_id, "title-1".to_string(), Some(3600)),
+                (ambiguous_id, "title-2".to_string(), Some(1800)),
             ],
-            "only unbound intents older than the cutoff list, oldest first; a fresh intent and a bound grab do not"
+            "only unbound intents older than the cutoff list, oldest first, each with its submission time; a fresh intent and a bound grab do not"
         );
     }
 

@@ -1551,9 +1551,9 @@ pub(crate) struct ComponentActor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GuestMemoryUsage {
     /// Linear memory resident in the Store. Memory never shrinks, so this is
-    /// also the Store's peak.
+    /// also the Store's peak, and the cap bounds it.
     pub(crate) resident_bytes: usize,
-    /// Largest single linear memory, the figure the cap is checked against.
+    /// Largest single linear memory.
     pub(crate) largest_memory_bytes: usize,
     pub(crate) cap_bytes: usize,
     /// The limiter refused a growth past `cap_bytes`.
@@ -2006,6 +2006,71 @@ mod tests {
             store.data().limits.resident_memory_bytes(),
             16 * PAGE,
             "a refused growth must not count as resident memory"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn indexer_store_caps_the_sum_of_several_core_memories() {
+        use crate::wasmtime_host::sandbox::DEFAULT_INDEXER_MEMORY_CAP_BYTES;
+        const PAGE: usize = 65536;
+        let host = ComponentHost::for_indexer(
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+            Duration::from_secs(1),
+            None,
+        )
+        .expect("component host should build");
+        let engine = crate::wasmtime_host::engine::shared_async_engine();
+        let module = wasmtime::Module::new(
+            engine,
+            wat::parse_str("(module (memory (export \"a\") 1) (memory (export \"b\") 1))")
+                .expect("multi-memory WAT must parse"),
+        )
+        .expect("a two-memory core module must compile");
+        let mut store = host.new_store(engine);
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("core module must instantiate");
+        let a = instance
+            .get_memory(&mut store, "a")
+            .expect("memory a must exist");
+        let b = instance
+            .get_memory(&mut store, "b")
+            .expect("memory b must exist");
+        let cap_pages = u64::try_from(DEFAULT_INDEXER_MEMORY_CAP_BYTES / PAGE)
+            .expect("indexer cap fits in u64");
+
+        // Memory a takes three quarters of the cap: within it on its own.
+        a.grow_async(&mut store, cap_pages * 3 / 4 - 1)
+            .await
+            .expect("growth within the cap must succeed");
+        assert!(!store.data().limits.memory_denied);
+        let resident = store.data().limits.resident_memory_bytes();
+        assert_eq!(resident, (cap_pages as usize * 3 / 4 + 1) * PAGE);
+
+        // Memory b growing to half the cap is under the per-memory cap but
+        // would put the Store past it in total.
+        assert!(
+            b.grow_async(&mut store, cap_pages / 2 - 1).await.is_err(),
+            "the Store's memories together must not exceed the cap"
+        );
+        assert!(store.data().limits.memory_denied);
+        assert_eq!(
+            store.data().limits.resident_memory_bytes(),
+            resident,
+            "a refused growth must not count as resident memory"
+        );
+
+        // Up to exactly the remaining headroom is still granted.
+        let headroom_pages =
+            u64::try_from((DEFAULT_INDEXER_MEMORY_CAP_BYTES - resident) / PAGE).expect("fits");
+        b.grow_async(&mut store, headroom_pages)
+            .await
+            .expect("growth to exactly the cap must succeed");
+        assert_eq!(
+            store.data().limits.resident_memory_bytes(),
+            DEFAULT_INDEXER_MEMORY_CAP_BYTES
         );
     }
 

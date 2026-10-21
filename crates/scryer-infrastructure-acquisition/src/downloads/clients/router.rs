@@ -3348,6 +3348,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
         // response, so the recent-completed lookup does not re-read it.
         let mut completed_rows = Vec::new();
         let mut completed_client_ids = HashSet::new();
+        let mut saturated_activity_windows = HashMap::new();
         if recent_activity_limit > 0 {
             let activity_reads = self
                 .poll_feedback_clients(
@@ -3381,6 +3382,16 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                         any_client_read_succeeded = true;
                         activity_successes.insert(config.id.clone());
                         items.truncate(recent_activity_limit);
+                        // A filled window may hide older history; record how
+                        // far back it reaches so absence checks can tell.
+                        if items.len() >= recent_activity_limit
+                            || completed
+                                .as_ref()
+                                .is_some_and(|rows| rows.len() >= recent_activity_limit)
+                        {
+                            saturated_activity_windows
+                                .insert(config.id.clone(), activity_window_oldest(&items));
+                        }
                         for item in &mut items {
                             item.client_id = config.id.clone();
                             item.client_name = config.name.clone();
@@ -3451,6 +3462,7 @@ impl DownloadClient for PrioritizedDownloadClientRouter {
                 .cloned()
                 .collect(),
             failed_client_ids,
+            saturated_activity_windows,
             any_client_read_succeeded,
         })
     }
@@ -4104,6 +4116,18 @@ fn parse_history_timestamp(value: Option<&str>) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.timestamp_millis())
+}
+
+/// The oldest activity timestamp in one client's returned window, or `None`
+/// when the window is empty or any row lacks a parseable timestamp (then
+/// nobody can say how far back the window reaches).
+fn activity_window_oldest(items: &[DownloadQueueItem]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut oldest: Option<i64> = None;
+    for item in items {
+        let at = parse_history_timestamp(item.last_updated_at.as_deref())?;
+        oldest = Some(oldest.map_or(at, |oldest| oldest.min(at)));
+    }
+    chrono::DateTime::from_timestamp_millis(oldest?)
 }
 
 fn compare_history_items_desc(
@@ -9251,6 +9275,68 @@ mod tests {
         assert_eq!(
             prefetched.rows[0].dest_dir,
             "/Volumes/downloads/Remote Download"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_clients_whose_activity_window_filled_the_limit() {
+        let full = Arc::new(MockDownloadClient::default());
+        let partial = Arc::new(MockDownloadClient::default());
+        let undated = Arc::new(MockDownloadClient::default());
+        let mut full_rows = Vec::new();
+        for (id, at) in [("f-1", "300"), ("f-2", "200"), ("f-3", "100")] {
+            let mut item = test_queue_item(id);
+            item.last_updated_at = Some(at.to_string());
+            full_rows.push(item);
+        }
+        full.history_items.lock().unwrap().extend(full_rows);
+        let mut partial_row = test_queue_item("p-1");
+        partial_row.last_updated_at = Some("50".to_string());
+        partial.history_items.lock().unwrap().push(partial_row);
+        let mut undated_rows = vec![test_queue_item("u-1"), test_queue_item("u-2")];
+        undated_rows[0].last_updated_at = Some("400".to_string());
+        undated.history_items.lock().unwrap().extend(undated_rows);
+
+        let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
+            Arc::new(MockDownloadClientPluginProvider {
+                accepted_inputs: vec!["nzb_url".to_string()],
+                clients: vec![
+                    ("client-full".to_string(), full.clone()),
+                    ("client-partial".to_string(), partial.clone()),
+                    ("client-undated".to_string(), undated.clone()),
+                ],
+            });
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![
+                    test_config("client-full", "Full", "qbittorrent", 0),
+                    test_config("client-partial", "Partial", "qbittorrent", 1),
+                    test_config("client-undated", "Undated", "qbittorrent", 2),
+                ],
+            }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            Some(plugin_provider),
+        );
+
+        let outcome = router
+            .list_snapshot_outcome_excluding_client_types(2, &[])
+            .await
+            .expect("snapshot should succeed");
+
+        assert_eq!(
+            outcome.saturated_activity_windows,
+            HashMap::from([
+                // Newest two of three returned: the window reaches back to 200.
+                (
+                    "client-full".to_string(),
+                    chrono::DateTime::from_timestamp_millis(200_000)
+                ),
+                // A row without a timestamp leaves the window's age unknown.
+                ("client-undated".to_string(), None),
+            ]),
+            "a client that returned fewer rows than the limit is not saturated"
         );
     }
 

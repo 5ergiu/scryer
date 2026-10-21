@@ -1352,18 +1352,19 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
     async fn list_active_unbound_submitted_before(
         &self,
         submitted_before: chrono::DateTime<Utc>,
-    ) -> AppResult<Vec<DownloadSubmission>> {
+    ) -> AppResult<Vec<crate::UnconfirmedDownloadSubmission>> {
         let submitted_at = self.unbound_submitted_at.lock().await.clone();
         let entries = self.store.lock().await;
         Ok(entries
             .iter()
-            .filter(|entry| {
-                entry.download_client_item_id.trim().is_empty()
-                    && submitted_at
-                        .get(&entry.download_id)
-                        .is_some_and(|at| *at < submitted_before)
+            .filter(|entry| entry.download_client_item_id.trim().is_empty())
+            .filter_map(|entry| {
+                let at = *submitted_at.get(&entry.download_id)?;
+                (at < submitted_before).then(|| crate::UnconfirmedDownloadSubmission {
+                    submission: entry.clone(),
+                    submitted_at: Some(at),
+                })
             })
-            .cloned()
             .collect())
     }
 
@@ -2197,6 +2198,8 @@ pub(super) struct StubDownloadClient {
     pub(super) queue_error: Arc<Mutex<Option<String>>>,
     pub(super) recent_activity_error: Arc<Mutex<Option<String>>>,
     pub(super) snapshot_authoritative_client_ids: Arc<Mutex<HashSet<String>>>,
+    pub(super) snapshot_saturated_activity_windows:
+        Arc<Mutex<HashMap<String, Option<chrono::DateTime<Utc>>>>>,
     pub(super) submit_error: Arc<Mutex<Option<StubSubmitError>>>,
     pub(super) submit_errors: Arc<Mutex<std::collections::VecDeque<StubSubmitError>>>,
     pub(super) submit_started: Arc<tokio::sync::Notify>,
@@ -2258,6 +2261,19 @@ impl StubDownloadClient {
         client_ids: impl IntoIterator<Item = String>,
     ) {
         *self.snapshot_authoritative_client_ids.lock().await = client_ids.into_iter().collect();
+    }
+
+    /// Report `client_id`'s recent-activity window as filled to the limit,
+    /// reaching back to `oldest` (`None`: the window's age is unknown).
+    pub(super) async fn set_snapshot_saturated_activity_window(
+        &self,
+        client_id: &str,
+        oldest: Option<chrono::DateTime<Utc>>,
+    ) {
+        self.snapshot_saturated_activity_windows
+            .lock()
+            .await
+            .insert(client_id.to_string(), oldest);
     }
 
     pub(super) async fn set_submit_error(&self, error: Option<StubSubmitError>) {
@@ -2527,6 +2543,11 @@ impl DownloadClient for StubDownloadClient {
                 Ok(crate::ports::DownloadClientSnapshotOutcome {
                     items: queue_items,
                     authoritative_client_ids,
+                    saturated_activity_windows: self
+                        .snapshot_saturated_activity_windows
+                        .lock()
+                        .await
+                        .clone(),
                     any_client_read_succeeded: true,
                     ..Default::default()
                 })
