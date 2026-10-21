@@ -1852,6 +1852,56 @@ async fn keeping_a_title_twice_returns_the_live_keep_instead_of_stacking_another
     assert!(matches!(missing, AppError::NotFound(_)), "{missing:?}");
 }
 
+#[tokio::test]
+async fn two_concurrent_keeps_of_one_title_leave_one_live_keep() {
+    let harness = bootstrap_media_request_app();
+    let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Movie);
+    let request_id = submit(&harness, &library_id, 9064, Some(30)).await;
+    harness
+        .app
+        .approve_media_request(
+            &harness.manager,
+            &request_id,
+            "1080p",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("approval should succeed");
+    let title_id = harness.titles.store.lock().await[0].id.clone();
+    // Both Keep clicks read the title's claims, find no keep, and only then
+    // write: the window the store's uniqueness guarantee has to close.
+    harness.lifecycle_claims.line_up_creates(2).await;
+
+    let (first, second) = tokio::join!(
+        harness
+            .app
+            .create_operator_keep_claim(&harness.manager, &title_id),
+        harness
+            .app
+            .create_operator_keep_claim(&harness.manager, &title_id),
+    );
+
+    let first = first.expect("the winning keep succeeds");
+    let second = second.expect("the losing keep returns the winner");
+    assert_eq!(first.id, second.id, "both clicks answer with the same keep");
+    let live_keeps = harness
+        .lifecycle_claims
+        .all()
+        .await
+        .into_iter()
+        .filter(|claim| {
+            claim.title_id == title_id
+                && claim.producer == LifecycleClaimProducer::OperatorKeep
+                && claim.is_live()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(live_keeps.len(), 1, "{live_keeps:?}");
+    assert_eq!(live_keeps[0].id, first.id);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async fn create_rule(

@@ -389,6 +389,48 @@ async fn lifecycle_claims_release_and_convert() {
     let _ = std::fs::remove_file(db);
 }
 
+/// Two operator keeps for one title written at once: the store's partial
+/// unique index (migration 0303) lets exactly one in, whatever the
+/// interleaving, so the Keep path's read-then-insert cannot leave a second
+/// hold behind.
+async fn assert_concurrent_operator_keeps_hold_one(
+    store: &dyn LifecycleClaimRepository,
+) -> AppResult<()> {
+    let mut first = keep("race-keep-a", "title-race", None);
+    first.producer = LifecycleClaimProducer::OperatorKeep;
+    let mut second = keep("race-keep-b", "title-race", None);
+    second.producer = LifecycleClaimProducer::OperatorKeep;
+
+    let (first_result, second_result) = tokio::join!(store.create(&first), store.create(&second));
+
+    assert_eq!(
+        [first_result.is_ok(), second_result.is_ok()]
+            .iter()
+            .filter(|created| **created)
+            .count(),
+        1,
+        "exactly one of two concurrent operator keeps is stored: {first_result:?} / {second_result:?}"
+    );
+    let live_keeps = store
+        .list_for_title("title-race")
+        .await?
+        .into_iter()
+        .filter(|claim| claim.producer == LifecycleClaimProducer::OperatorKeep && claim.is_live())
+        .count();
+    assert_eq!(live_keeps, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_claims_concurrent_operator_keeps_hold_one() {
+    let (services, db) = temp_services("scryer_lifecycle_claims_keep_race").await;
+    let store = crate::LifecycleClaimStore::new(services.datastore());
+    assert_concurrent_operator_keeps_hold_one(&store)
+        .await
+        .expect("concurrent keeps should settle to one");
+    let _ = std::fs::remove_file(db);
+}
+
 /// `count_live_for_user` joins through the producing request, so it needs real
 /// `media_requests` rows rather than the bare claim table.
 #[tokio::test]
@@ -484,7 +526,8 @@ async fn lifecycle_claims_round_trip_postgres() -> AppResult<()> {
         let store = crate::LifecycleClaimStore::new(services.datastore());
         let result = async {
             assert_claim_round_trip(&store).await?;
-            assert_release_and_convert(&store).await
+            assert_release_and_convert(&store).await?;
+            assert_concurrent_operator_keeps_hold_one(&store).await
         }
         .await;
         services.pool().close().await;
