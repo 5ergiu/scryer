@@ -6161,12 +6161,13 @@ pub trait DownloadSubmissionRepository: Send + Sync {
 
     /// Every Scryer submission, across titles, whose canonical client binding
     /// is still active without a native client item and that was submitted
-    /// before `submitted_before`: grab intents no client job ever confirmed.
-    /// Defaults to empty for stores without canonical bindings.
+    /// before `submitted_before`: grab intents no client job ever confirmed,
+    /// each with its submission time. Defaults to empty for stores without
+    /// canonical bindings.
     async fn list_active_unbound_submitted_before(
         &self,
         _submitted_before: DateTime<Utc>,
-    ) -> AppResult<Vec<DownloadSubmission>> {
+    ) -> AppResult<Vec<crate::contracts::UnconfirmedDownloadSubmission>> {
         Ok(Vec::new())
     }
 
@@ -10851,6 +10852,16 @@ pub struct DownloadClientSnapshotOutcome {
     /// neither this set nor `authoritative_client_ids`; per-client status
     /// judges only clients that were actually consulted.
     pub failed_client_ids: std::collections::HashSet<String>,
+    /// Clients whose recent-activity read filled the requested limit, so the
+    /// client may hold older history the snapshot never saw.
+    ///
+    /// The value is the oldest activity timestamp in the returned window
+    /// (clients answer newest first), or `None` when a returned row carried
+    /// no parseable timestamp. A client absent from this map answered with
+    /// fewer rows than the limit, so its returned history is all it holds.
+    /// Absence reasoning must treat a saturated client as covering only the
+    /// period after that timestamp.
+    pub saturated_activity_windows: std::collections::HashMap<String, Option<DateTime<Utc>>>,
     pub any_client_read_succeeded: bool,
 }
 

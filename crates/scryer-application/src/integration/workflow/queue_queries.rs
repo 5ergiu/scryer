@@ -1160,6 +1160,7 @@ impl AppUseCase {
             completed_downloads: snapshot.completed_downloads,
             authoritative_client_ids: snapshot.authoritative_client_ids,
             failed_client_ids: snapshot.failed_client_ids,
+            saturated_activity_windows: snapshot.saturated_activity_windows,
             any_client_read_succeeded: snapshot.any_client_read_succeeded,
         })
     }

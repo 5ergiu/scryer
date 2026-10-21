@@ -1599,6 +1599,12 @@ pub(crate) const UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES: i64 = 15;
 /// same depth the submission path reads to judge an existing submission.
 const UNCONFIRMED_GRAB_SNAPSHOT_ACTIVITY_LIMIT: usize = 100;
 
+/// How far before a submission a filled history window must reach before it
+/// proves the submission absent. A client's history clock is its own, so an
+/// accepted job's row may carry a stamp a little earlier than Scryer's
+/// `submitted_at`; the margin keeps clock skew from passing for coverage.
+const UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES: i64 = 60;
+
 /// Release grab intents no download client ever confirmed.
 ///
 /// An intent is old enough once it is past
@@ -1637,10 +1643,9 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
         {
             Ok(rows) => {
                 for row in rows {
-                    if !candidates
-                        .iter()
-                        .any(|(candidate, _)| candidate.download_id == row.download_id)
-                    {
+                    if !candidates.iter().any(|(candidate, _)| {
+                        candidate.submission.download_id == row.submission.download_id
+                    }) {
                         candidates.push((row, UnconfirmedGrabAge::BeforeRestart));
                     }
                 }
@@ -1700,7 +1705,8 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
         .map(|config| config.id.clone())
         .collect::<Vec<_>>();
 
-    for (submission, age) in candidates {
+    for (intent, age) in candidates {
+        let submission = &intent.submission;
         let listed = snapshot
             .items
             .iter()
@@ -1742,19 +1748,19 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
             continue;
         }
         if !unconfirmed_grab_absence_is_proven(
-            &submission,
-            &snapshot.authoritative_client_ids,
+            &intent,
+            &snapshot,
             &configured_client_ids,
             &enabled_client_ids,
         ) {
             debug!(
                 title_id = submission.title_id.as_str(),
                 download_id = %submission.download_id,
-                "a download client that could hold this unconfirmed grab did not answer; keeping it"
+                "a download client that could hold this unconfirmed grab did not answer in full; keeping it"
             );
             continue;
         }
-        release_unconfirmed_grab_intent(app, &submission, age).await;
+        release_unconfirmed_grab_intent(app, submission, age).await;
     }
 }
 
@@ -1768,25 +1774,62 @@ enum UnconfirmedGrabAge {
 /// Whether the snapshot proves no client holds this intent: the client it was
 /// sent to answered in full (or no longer exists), or, for an intent that
 /// never learned its client, every enabled client answered in full.
+///
+/// "In full" means both reads succeeded and the history window covers the
+/// submission. The queue is listed whole, but recent activity is bounded: a
+/// client whose window filled the limit may hold the job in history older
+/// than the rows it returned, so it covers the submission only when its
+/// oldest returned row predates the submission by
+/// [`UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES`].
 fn unconfirmed_grab_absence_is_proven(
-    submission: &DownloadSubmission,
-    authoritative_client_ids: &HashSet<String>,
+    intent: &crate::UnconfirmedDownloadSubmission,
+    snapshot: &crate::ports::DownloadClientSnapshotOutcome,
     configured_client_ids: &HashSet<String>,
     enabled_client_ids: &[String],
 ) -> bool {
-    match submission
+    let answered_in_full = |client_id: &str| {
+        snapshot.authoritative_client_ids.contains(client_id)
+            && unconfirmed_grab_window_covers_submission(
+                snapshot.saturated_activity_windows.get(client_id),
+                intent.submitted_at,
+            )
+    };
+    match intent
+        .submission
         .download_client_id
         .as_deref()
         .map(str::trim)
         .filter(|client_id| !client_id.is_empty())
     {
         Some(client_id) => {
-            authoritative_client_ids.contains(client_id)
-                || !configured_client_ids.contains(client_id)
+            answered_in_full(client_id) || !configured_client_ids.contains(client_id)
         }
         None => enabled_client_ids
             .iter()
-            .all(|client_id| authoritative_client_ids.contains(client_id)),
+            .all(|client_id| answered_in_full(client_id)),
+    }
+}
+
+/// Whether one client's recent-activity window reaches back to a submission.
+/// `saturated` is the client's entry in
+/// [`crate::ports::DownloadClientSnapshotOutcome::saturated_activity_windows`]:
+/// absent when the client returned fewer rows than the limit, which is its
+/// whole history.
+fn unconfirmed_grab_window_covers_submission(
+    saturated: Option<&Option<DateTime<Utc>>>,
+    submitted_at: Option<DateTime<Utc>>,
+) -> bool {
+    match saturated {
+        None => true,
+        Some(oldest) => match (*oldest, submitted_at) {
+            (Some(oldest), Some(submitted_at)) => {
+                oldest
+                    < submitted_at - Duration::minutes(UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES)
+            }
+            // A filled window of unknown age, or a submission of unknown
+            // time, cannot show that the window reaches the submission.
+            _ => false,
+        },
     }
 }
 

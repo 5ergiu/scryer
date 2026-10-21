@@ -221,6 +221,17 @@ pub struct DownloadSubmission {
     pub scope: SubmissionScope,
 }
 
+/// A grab intent no client job has bound yet, with the moment it was
+/// recorded. The cleanup that releases such intents needs `submitted_at` to
+/// judge whether a client's bounded history window reaches back far enough
+/// to prove the job absent. `None` when the stored timestamp does not parse,
+/// which proves nothing.
+#[derive(Clone, Debug)]
+pub struct UnconfirmedDownloadSubmission {
+    pub submission: DownloadSubmission,
+    pub submitted_at: Option<DateTime<Utc>>,
+}
+
 impl DownloadSubmission {
     /// Is this the tracker's observation stub rather than a Scryer submission?
     ///
