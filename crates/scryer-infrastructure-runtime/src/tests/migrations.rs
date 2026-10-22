@@ -7021,3 +7021,62 @@ async fn migration_0306_leaves_fresh_installs_on_the_no_glow_default() {
         );
     }
 }
+
+#[tokio::test]
+async fn migration_0307_removes_operator_keeps_and_nothing_else() {
+    let directory = tempfile::tempdir().expect("synthetic schema fixture");
+    let services = SqliteServices::new(directory.path().join("keeps-0307.db").to_string_lossy())
+        .await
+        .expect("migrations should apply");
+    let pool = services.pool().clone();
+    let mut conn = pool.acquire().await.expect("keep removal connection");
+
+    // A live keep, a released keep, the lease a keep replaced, and request
+    // claims on titles nobody kept by hand.
+    sqlx::query(
+        "INSERT INTO lifecycle_claims
+         (id, title_id, library_id, producer, producer_ref, kind, state, duration_days)
+         VALUES ('keep-live', 'title-kept', 'library-synthetic', 'operator_keep', NULL,
+                 'keep', 'active', NULL),
+                ('keep-released', 'title-released', 'library-synthetic', 'operator_keep', NULL,
+                 'keep', 'released', NULL),
+                ('lease-converted', 'title-converted', 'library-synthetic', 'request_lease',
+                 'request-converted', 'retain_until', 'converted', 30),
+                ('keep-converted', 'title-converted', 'library-synthetic', 'operator_keep', NULL,
+                 'keep', 'active', NULL),
+                ('lease-live', 'title-leased', 'library-synthetic', 'request_lease',
+                 'request-leased', 'retain_until', 'dormant', 30),
+                ('request-forever', 'title-forever', 'library-synthetic', 'request_permanent',
+                 'request-forever', 'keep', 'active', NULL)",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("seed claims");
+
+    for statement in include_str!(
+        "../../../scryer/src/db/migrations/0307_lifecycle_claims_remove_operator_keeps.sql"
+    )
+    .split(';')
+    .map(str::trim)
+    .filter(|statement| statement.contains("DELETE FROM"))
+    {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .expect("0307 should apply");
+    }
+
+    let remaining: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, state FROM lifecycle_claims ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("read claims");
+    assert_eq!(
+        remaining,
+        vec![
+            ("lease-converted".to_string(), "converted".to_string()),
+            ("lease-live".to_string(), "dormant".to_string()),
+            ("request-forever".to_string(), "active".to_string()),
+        ]
+    );
+}

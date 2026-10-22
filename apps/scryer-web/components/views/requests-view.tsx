@@ -651,9 +651,7 @@ function RequestClaimsPanel({
               {stateKey ? t(stateKey) : claim.state}
             </Badge>
             <span className="text-[var(--scry-muted3)]">
-              {claim.producer === "OPERATOR_KEEP"
-                ? t("label.kept")
-                : claim.kind === "KEEP"
+              {claim.kind === "KEEP"
                 ? t("requests.claimKindKeep")
                 : claim.expiresAt
                   ? t("requests.claimExpiresAt", {

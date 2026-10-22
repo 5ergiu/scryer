@@ -1732,32 +1732,56 @@ async fn an_administrator_can_extend_convert_and_release_a_claim() {
         Some(expires_at)
     );
 
-    // Converting leaves the original as history and produces an operator keep.
-    let replacement = harness
+    // Keeping it permanently ends the lease and adds nothing in its place:
+    // the title is left without an expiry, not with a new hold.
+    let converted = harness
         .app
         .convert_title_claim_to_permanent(&harness.manager, &claim_id)
         .await
         .expect("convert should succeed");
-    assert_eq!(replacement.producer, LifecycleClaimProducer::OperatorKeep);
-    assert_eq!(replacement.kind, LifecycleClaimKind::Keep);
-    assert_eq!(replacement.state, LifecycleClaimState::Active);
-    assert_eq!(replacement.producer_ref, None);
-    let original = harness
+    assert_eq!(converted.id, claim_id);
+    assert_eq!(converted.state, LifecycleClaimState::Converted);
+    assert_eq!(
+        converted.released_reason.as_deref(),
+        Some("converted_to_permanent")
+    );
+    let claims = harness.lifecycle_claims.all().await;
+    assert_eq!(claims.len(), 1, "converting must not write a replacement");
+    assert!(!claims[0].is_live());
+    let again = harness
+        .app
+        .convert_title_claim_to_permanent(&harness.manager, &claim_id)
+        .await
+        .expect_err("a converted lease cannot convert again");
+    assert!(matches!(again, AppError::Validation(_)));
+
+    // A request approved without a lease holds a keep, which has no expiry to
+    // drop.
+    let harness = bootstrap_media_request_app();
+    let forever = submit(&harness, &library_id, 9063, None).await;
+    harness
+        .app
+        .approve_media_request(&harness.manager, &forever, "1080p", None, None, None, None)
+        .await
+        .expect("approval should succeed");
+    let keep_id = harness
         .lifecycle_claims
         .all()
         .await
         .into_iter()
-        .find(|claim| claim.id == claim_id)
-        .expect("the original claim is kept as history");
-    assert_eq!(original.state, LifecycleClaimState::Converted);
+        .find(|claim| claim.kind == LifecycleClaimKind::Keep)
+        .expect("the forever request holds a keep")
+        .id;
+    let refused = harness
+        .app
+        .convert_title_claim_to_permanent(&harness.manager, &keep_id)
+        .await
+        .expect_err("only a finite lease can be made permanent");
+    assert!(matches!(refused, AppError::Validation(_)));
 
     let released = harness
         .app
-        .release_title_claim(
-            &harness.manager,
-            &replacement.id,
-            "operator changed their mind",
-        )
+        .release_title_claim(&harness.manager, &keep_id, "operator changed their mind")
         .await
         .expect("release should succeed");
     assert_eq!(released.state, LifecycleClaimState::Released);
@@ -1768,7 +1792,7 @@ async fn an_administrator_can_extend_convert_and_release_a_claim() {
 
     let blank = harness
         .app
-        .release_title_claim(&harness.manager, &replacement.id, "   ")
+        .release_title_claim(&harness.manager, &keep_id, "   ")
         .await
         .expect_err("a release reason is required");
     assert!(matches!(blank, AppError::Validation(_)));

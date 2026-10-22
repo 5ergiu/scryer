@@ -63,8 +63,6 @@ pub enum LifecycleClaimProducerValue {
     RequestLease,
     /// A request approved as "forever": a permanent keep.
     RequestPermanent,
-    /// An administrator pinned the title by hand.
-    OperatorKeep,
 }
 
 /// What a lifecycle claim holds.
@@ -482,8 +480,8 @@ pub struct ExtendTitleClaimInput {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Replaces a live claim with a permanent operator keep. The original stays as
-/// history in the `CONVERTED` state.
+/// Ends a live lease so the title carries no expiry. The lease stays as history
+/// in the `CONVERTED` state.
 #[derive(InputObject)]
 pub struct ConvertTitleClaimToPermanentInput {
     /// Claim to convert.

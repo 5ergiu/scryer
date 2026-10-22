@@ -1450,27 +1450,29 @@ impl AppUseCase {
         self.reload_claim(&claim.id).await
     }
 
-    /// Replace a live claim with an operator keep.
+    /// Keep a title permanently: end its lease, so the title carries no
+    /// expiry.
     ///
-    /// The replacement is a *new* claim with a different producer, not a mutated
-    /// one: the original stays as history in the `converted` state, so the trail
-    /// still says a request produced the original hold and an administrator
-    /// chose to make it permanent.
+    /// Nothing replaces the lease. The original stays as history in the
+    /// `converted` state, so the trail still says a request produced it and an
+    /// administrator chose to drop the expiry.
     pub async fn convert_title_claim_to_permanent(
         &self,
         actor: &User,
         claim_id: &str,
     ) -> AppResult<LifecycleClaim> {
         let claim = self.require_manageable_claim(actor, claim_id).await?;
-        let now = chrono::Utc::now();
-        let replacement = operator_keep(claim.title_id, claim.library_id, &actor.id, now);
-        let keep_id = self
-            .services
+        if claim.kind != LifecycleClaimKind::RetainUntil {
+            return Err(AppError::Validation(
+                "only a finite lease can be made permanent".into(),
+            ));
+        }
+        self.services
             .catalog
             .lifecycle_claims
-            .convert_to_permanent(&claim.id, &replacement, now)
+            .convert_to_permanent(&claim.id, chrono::Utc::now())
             .await?;
-        self.reload_claim(&keep_id).await
+        self.reload_claim(&claim.id).await
     }
 
     /// Withdraw a claim by hand.
@@ -1969,33 +1971,6 @@ fn new_request_lifecycle_claim(
         state,
         duration_days: lease_days,
         starts_at,
-        expires_at: None,
-        created_by: Some(created_by.to_string()),
-        created_at: now,
-        updated_at: now,
-        released_reason: None,
-    }
-}
-
-/// A live operator keep. No `producer_ref`: an operator keep has nothing
-/// upstream to release against, and it is what keeps two keeps on one title
-/// from colliding on the live-claim unique index.
-fn operator_keep(
-    title_id: String,
-    library_id: String,
-    created_by: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> LifecycleClaim {
-    LifecycleClaim {
-        id: Id::new().0,
-        title_id,
-        library_id,
-        producer: LifecycleClaimProducer::OperatorKeep,
-        producer_ref: None,
-        kind: LifecycleClaimKind::Keep,
-        state: LifecycleClaimState::Active,
-        duration_days: None,
-        starts_at: Some(now),
         expires_at: None,
         created_by: Some(created_by.to_string()),
         created_at: now,

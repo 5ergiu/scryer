@@ -1992,8 +1992,8 @@ enum ConvergenceStateValue {
 }
 
 """
-Replaces a live claim with a permanent operator keep. The original stays as
-history in the `CONVERTED` state.
+Ends a live lease so the title carries no expiry. The lease stays as history
+in the `CONVERTED` state.
 """
 input ConvertTitleClaimToPermanentInput {
 	"""
@@ -10259,10 +10259,6 @@ enum LifecycleClaimProducerValue {
 	A request approved as "forever": a permanent keep.
 	"""
 	REQUEST_PERMANENT
-	"""
-	An administrator pinned the title by hand.
-	"""
-	OPERATOR_KEEP
 }
 
 """
@@ -14806,10 +14802,6 @@ type MaintenanceCandidate {
 	conditions as `storageRootFileCount`.
 	"""
 	storageRootTotalSizeBytes: Int
-	"""
-	The live operator keep on the subject's title, or null when it is not kept.
-	"""
-	operatorKeepClaimId: ID
 	"""
 	Exact subject display label, falling back to its ID if unavailable.
 	"""
@@ -20403,11 +20395,11 @@ type MutationRoot {
 		input: ExtendTitleClaimInput!
 	): TitleClaim!
 	"""
-	Replace a live claim with a permanent operator keep.
+	Keep a title permanently by ending its lease, so it carries no expiry.
 	
-	The replacement is a new claim rather than a mutated one, so the original
-	stays as history and the trail still says a request produced the hold and
-	an administrator chose to make it permanent.
+	The lease stays as history in the `CONVERTED` state, so the trail still
+	says a request produced it and an administrator chose to drop the
+	expiry.
 	"""
 	convertTitleClaimToPermanent(
 		"""

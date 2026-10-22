@@ -2747,9 +2747,9 @@ export const previewRequestRuleMutation = `mutation PreviewRequestRule($input: P
 
 // ── Title retention claims ────────────────────────────────────────────
 //
-// Converting a lease to a permanent hold leaves the original CONVERTED as
-// history and writes a fresh OPERATOR_KEEP beside it, so the three mutations
-// each return the claim the operator should now be looking at.
+// Keeping a title permanently ends its lease: the lease is left CONVERTED as
+// history and nothing replaces it, so the title carries no expiry. Each of the
+// three mutations returns the claim it changed.
 
 export const extendTitleClaimMutation = `mutation ExtendTitleClaim($input: ExtendTitleClaimInput!) {
   extendTitleClaim(input: $input) {${TITLE_CLAIM_FIELDS}
