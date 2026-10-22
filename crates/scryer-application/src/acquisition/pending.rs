@@ -492,7 +492,13 @@ impl AppUseCase {
             release_identity: String::new(),
             coverage_identity: String::new(),
             role: PendingReleaseRole::Primary,
-            last_decision_code: None,
+            // Every caller parks for exactly one reason, so the row names it and
+            // the Pending view can say why the release is waiting on a human.
+            last_decision_code: Some(
+                crate::acquisition_release_search::ReleaseAutoDecisionCode::AmbiguousIdentity
+                    .as_str()
+                    .to_string(),
+            ),
             release_age_unknown: false,
             release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, now),
         };

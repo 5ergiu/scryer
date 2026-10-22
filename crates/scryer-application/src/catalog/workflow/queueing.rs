@@ -1355,6 +1355,19 @@ impl AppUseCase {
                 .as_ref()
                 .map(|decision| decision.preference_score)
                 .unwrap_or_default();
+            // The background lane records this verdict for every candidate it
+            // walks; this lane does not, so record the one it parks so the
+            // title's acquisition diagnostics explain the review row.
+            crate::acquisition_workflow::record_release_decision(
+                self,
+                wanted,
+                &title,
+                candidate,
+                crate::acquisition_release_search::ReleaseAutoDecisionCode::AmbiguousIdentity,
+                None,
+                &now,
+            )
+            .await;
             self.park_pending_release_for_review(
                 wanted,
                 &title,
