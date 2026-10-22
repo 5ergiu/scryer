@@ -821,8 +821,10 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // arming mutations, and enabling a request rule replaces its mode setter
     // while the request-rule instance gate setter goes: 275->273.
     // Keeping a title adds `createOperatorKeepClaim`: 273->274.
+    // Keeping a title is a tag rule's job, so `createOperatorKeepClaim` goes:
+    // 274->273.
     assert_eq!(
-        mutation_field_count, 274,
+        mutation_field_count, 273,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title

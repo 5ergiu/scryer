@@ -261,9 +261,6 @@ pub(super) struct InMemoryLifecycleClaimRepo {
     /// them — so a double with no way to reach it would leave that behaviour
     /// untested.
     unreadable: AtomicBool,
-    /// When set, every `create` waits here before it touches the claims, so
-    /// a test can line concurrent writers up after their reads.
-    create_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl InMemoryLifecycleClaimRepo {
@@ -273,15 +270,7 @@ impl InMemoryLifecycleClaimRepo {
             media_requests: Some(media_requests),
             unreadable: AtomicBool::new(false),
             read_guard_probe: Mutex::new(None),
-            create_barrier: Mutex::new(None),
         }
-    }
-
-    /// Hold every `create` until `writers` of them are waiting, so each has
-    /// already read the store before any of them writes.
-    #[allow(dead_code)]
-    pub(super) async fn line_up_creates(&self, writers: usize) {
-        *self.create_barrier.lock().await = Some(Arc::new(tokio::sync::Barrier::new(writers)));
     }
 
     /// Read by the lease wave's tests.
@@ -330,10 +319,6 @@ impl crate::ports::LifecycleClaimRepository for InMemoryLifecycleClaimRepo {
     /// Enforces the partial unique indexes: one live claim per
     /// (producer, producer_ref), and one live operator keep per title.
     async fn create(&self, claim: &LifecycleClaim) -> AppResult<()> {
-        let barrier = self.create_barrier.lock().await.clone();
-        if let Some(barrier) = barrier {
-            barrier.wait().await;
-        }
         let mut claims = self.claims.lock().await;
         if live_operator_keep_index(&claims, claim).is_some() {
             return Err(AppError::Repository(format!(

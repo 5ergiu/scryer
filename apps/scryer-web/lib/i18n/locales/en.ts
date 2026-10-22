@@ -105,7 +105,6 @@ const en: LocaleDictionary = {
   "label.autoSearch": "Auto Search",
   "label.interactiveSearch": "Interactive Search",
   "label.interactive": "Interactive",
-  "label.keep": "Keep",
   "label.kept": "Kept",
   "label.searching": "Searching",
   "help.autoSearchTooltip":
@@ -4907,7 +4906,6 @@ const en: LocaleDictionary = {
   "status.claimExtended": "Hold extended.",
   "status.claimMadePermanent": "The title is now held permanently.",
   "status.claimReleased": "Hold released.",
-  "status.titleKept": "Kept. Maintenance will not delete this title.",
 
   // ── Request rules context reference ─────────────────────────────────
   "settings.refReqSectionInput": "— The request being decided",

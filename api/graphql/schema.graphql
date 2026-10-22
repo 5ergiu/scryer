@@ -20416,16 +20416,6 @@ type MutationRoot {
 		input: ConvertTitleClaimToPermanentInput!
 	): TitleClaim!
 	"""
-	Keep a title: place an operator keep on it, or return the live one it
-	already has. Requires title management on the title's own library.
-	"""
-	createOperatorKeepClaim(
-		"""
-		Title to keep.
-		"""
-		titleId: ID!
-	): TitleClaim!
-	"""
 	Withdraw a claim by hand. The reason is required and kept as history.
 	"""
 	releaseTitleClaim(
