@@ -1212,6 +1212,29 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_reason_the_host_does_not_know_is_carried_verbatim() {
+        use scryer_application::{PluginFailure, PluginFailureReason};
+
+        let error = to_gql_error(AppError::PluginFailed {
+            message: "indexer connection test failed: plugin error invalid_username_password"
+                .into(),
+            failure: PluginFailure {
+                reason: PluginFailureReason::PluginCode("PLUGIN_INVALID_USERNAME_PASSWORD".into()),
+                detail: Some("Login refused".into()),
+            },
+        });
+        assert_eq!(graphql_error_code(&error), Some("PLUGIN_FAILED"));
+        assert_eq!(
+            graphql_error_extension_string(&error, "reason"),
+            Some("PLUGIN_INVALID_USERNAME_PASSWORD")
+        );
+        assert_eq!(
+            graphql_error_extension_string(&error, "detail"),
+            Some("Login refused")
+        );
+    }
+
+    #[test]
     fn a_named_validation_failure_stays_a_validation_error_and_carries_its_reason() {
         let named = AppError::validation_refused("SAMPLE_ALREADY_PRESENT", "that is already here");
         assert_eq!(named.to_string(), "validation: that is already here");

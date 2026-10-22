@@ -3158,6 +3158,26 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_code_the_sdk_never_named_reaches_the_client_as_its_own_reason() {
+        // What a guest writes for a code newer than any host or SDK release.
+        let bytes = br#"{"err":{"code":"invalid_username_password","public_message":"Login refused: wrong username or password","debug_message":"form answered 200 with key=example-secret"}}"#;
+        let result = serde_json::from_slice::<PluginResult<PluginSearchResponse>>(bytes)
+            .expect("an unknown code decodes unchanged");
+
+        let error = decode_search_result(result, true, "indexer search")
+            .err()
+            .expect("a plugin error must fail the search");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_USERNAME_PASSWORD");
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("Login refused: wrong username or password")
+        );
+        assert!(!format!("{error:?}").contains("example-secret"));
+    }
+
+    #[test]
     fn a_plugin_search_error_names_its_reason_and_keeps_its_public_sentence() {
         let error = decode_search_result(
             PluginResult::Err(PluginError {
@@ -3878,7 +3898,7 @@ mod tests {
             "indexer component newznab indexer_search failed: wasm trap".to_string(),
         );
         assert_eq!(
-            error.plugin_failure().map(|failure| failure.reason),
+            error.plugin_failure().map(|failure| failure.reason.clone()),
             Some(PluginFailureReason::ResourceLimit)
         );
         let message = error.to_string();
@@ -3894,7 +3914,7 @@ mod tests {
             "boom".into(),
         );
         assert_eq!(
-            plain.plugin_failure().map(|failure| failure.reason),
+            plain.plugin_failure().map(|failure| failure.reason.clone()),
             Some(PluginFailureReason::TimedOut)
         );
         let plain = plain.to_string();

@@ -23,7 +23,12 @@ const DETAIL_MAX_CHARS: usize = 300;
 /// for them.
 const GENERIC_PUBLIC_MESSAGES: &[&str] = &["indexer component failed"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The longest reason id a failure carries, in characters, `PLUGIN_` included.
+const REASON_MAX_CHARS: usize = 64;
+
+const REASON_PREFIX: &str = "PLUGIN_";
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PluginFailureReason {
     /// The plugin found its configuration unusable.
     InvalidConfig,
@@ -45,12 +50,17 @@ pub enum PluginFailureReason {
     TimedOut,
     /// The plugin exceeded the memory the host allows it.
     ResourceLimit,
+    /// A code the plugin named beyond the well-known set, holding its reason
+    /// id as [`PluginFailureReason::from_code`] derives it. Build it only
+    /// through `from_code`, so an id that names a known reason is that reason.
+    PluginCode(String),
 }
 
 impl PluginFailureReason {
-    /// Every reason a plugin failure can name. Clients key translations on
-    /// these, so adding, renaming, or removing one must be deliberate.
-    pub const ALL: &[Self] = &[
+    /// The reasons the host names on its own. Clients key translations on
+    /// these, so renaming or removing one must be deliberate. A plugin can add
+    /// more without a host change: see [`PluginFailureReason::from_code`].
+    pub const KNOWN: &[Self] = &[
         Self::InvalidConfig,
         Self::AuthFailed,
         Self::RateLimited,
@@ -63,7 +73,7 @@ impl PluginFailureReason {
         Self::ResourceLimit,
     ];
 
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::InvalidConfig => "PLUGIN_INVALID_CONFIG",
             Self::AuthFailed => "PLUGIN_AUTH_FAILED",
@@ -75,21 +85,63 @@ impl PluginFailureReason {
             Self::HostFailure => "PLUGIN_HOST_FAILURE",
             Self::TimedOut => "PLUGIN_TIMED_OUT",
             Self::ResourceLimit => "PLUGIN_RESOURCE_LIMIT",
+            Self::PluginCode(id) => id,
         }
     }
 
-    /// The reason for the code a plugin answered with. Exhaustive, so a code
-    /// added to the SDK cannot fall into a generic reason unnoticed.
-    pub const fn from_code(code: PluginErrorCode) -> Self {
+    /// Whether this is one of the reasons in [`PluginFailureReason::KNOWN`].
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Self::PluginCode(_))
+    }
+
+    /// The reason for the code a plugin answered with.
+    ///
+    /// The seven well-known codes keep their fixed ids. Any other code becomes
+    /// `PLUGIN_` plus the code upper-cased, so `invalid_username_password` is
+    /// `PLUGIN_INVALID_USERNAME_PASSWORD`: every character outside `[A-Z0-9_]`
+    /// becomes `_`, runs of `_` collapse to one, leading and trailing `_` are
+    /// dropped, and the id is cut to [`REASON_MAX_CHARS`]. A code that leaves
+    /// nothing is a permanent failure, and a code whose id is already a known
+    /// reason is that reason.
+    pub fn from_code(code: &PluginErrorCode) -> Self {
         match code {
-            PluginErrorCode::InvalidConfig => Self::InvalidConfig,
-            PluginErrorCode::AuthFailed => Self::AuthFailed,
-            PluginErrorCode::RateLimited => Self::RateLimited,
-            PluginErrorCode::UpstreamUnavailable => Self::UpstreamUnavailable,
-            PluginErrorCode::Unsupported => Self::Unsupported,
-            PluginErrorCode::Temporary => Self::Temporary,
-            PluginErrorCode::Permanent => Self::Permanent,
+            PluginErrorCode::InvalidConfig => return Self::InvalidConfig,
+            PluginErrorCode::AuthFailed => return Self::AuthFailed,
+            PluginErrorCode::RateLimited => return Self::RateLimited,
+            PluginErrorCode::UpstreamUnavailable => return Self::UpstreamUnavailable,
+            PluginErrorCode::Unsupported => return Self::Unsupported,
+            PluginErrorCode::Temporary => return Self::Temporary,
+            PluginErrorCode::Permanent => return Self::Permanent,
+            PluginErrorCode::Other(_) => {}
         }
+        let known = PluginErrorCode::from(code.as_str());
+        if known.is_known() {
+            return Self::from_code(&known);
+        }
+
+        let mut id = String::from(REASON_PREFIX);
+        for character in code.as_str().chars() {
+            let character = match character.to_ascii_uppercase() {
+                upper @ ('A'..='Z' | '0'..='9') => upper,
+                _ => '_',
+            };
+            if character == '_' && id.ends_with('_') {
+                continue;
+            }
+            if id.len() == REASON_MAX_CHARS {
+                break;
+            }
+            id.push(character);
+        }
+        let id = id.trim_end_matches('_');
+        if id.len() < REASON_PREFIX.len() {
+            return Self::Permanent;
+        }
+        Self::KNOWN
+            .iter()
+            .find(|reason| reason.as_str() == id)
+            .cloned()
+            .unwrap_or_else(|| Self::PluginCode(id.to_string()))
     }
 }
 
@@ -115,7 +167,7 @@ impl PluginFailure {
     /// leaves the host.
     pub fn from_plugin_error(error: &PluginError) -> Self {
         Self {
-            reason: PluginFailureReason::from_code(error.code),
+            reason: PluginFailureReason::from_code(&error.code),
             detail: public_detail(&error.public_message),
         }
     }
@@ -207,11 +259,11 @@ mod tests {
 
     #[test]
     fn every_reason_is_a_distinct_plugin_name_in_screaming_snake() {
-        let distinct = PluginFailureReason::ALL
+        let distinct = PluginFailureReason::KNOWN
             .iter()
             .map(|reason| reason.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(distinct.len(), PluginFailureReason::ALL.len());
+        assert_eq!(distinct.len(), PluginFailureReason::KNOWN.len());
         for reason in distinct {
             assert!(reason.starts_with("PLUGIN_"), "{reason}");
             assert!(
@@ -240,10 +292,91 @@ mod tests {
         ];
         let mut seen = BTreeSet::new();
         for (code, expected) in codes {
-            let reason = PluginFailureReason::from_code(code);
+            let reason = PluginFailureReason::from_code(&code);
             assert_eq!(reason.as_str(), expected, "{code:?}");
-            assert!(PluginFailureReason::ALL.contains(&reason));
-            assert!(seen.insert(reason.as_str()), "{code:?} shares a reason");
+            assert!(reason.is_known(), "{code:?}");
+            assert!(PluginFailureReason::KNOWN.contains(&reason));
+            assert!(
+                seen.insert(reason.as_str().to_string()),
+                "{code:?} shares a reason"
+            );
+
+            // The same code arriving as its wire string names the same reason.
+            let wire = serde_json::to_string(&code).expect("encode code");
+            let decoded: PluginErrorCode = serde_json::from_str(&wire).expect("decode code");
+            assert_eq!(PluginFailureReason::from_code(&decoded), reason, "{wire}");
+            assert_eq!(
+                PluginFailureReason::from_code(&PluginErrorCode::Other(code.as_str().into())),
+                reason,
+                "{wire}"
+            );
+        }
+        assert_eq!(seen.len(), PluginErrorCode::KNOWN.len());
+    }
+
+    #[test]
+    fn a_new_plugin_code_names_its_own_reason_end_to_end() {
+        let error: PluginError = serde_json::from_str(
+            r#"{"code":"invalid_username_password","public_message":"Login refused: check the username and password"}"#,
+        )
+        .expect("a plugin error with a new code decodes");
+        assert_eq!(error.code.as_str(), "invalid_username_password");
+
+        let failed = AppError::plugin_failed(&error, "indexer indexer_test component");
+        let failure = failed.plugin_failure().expect("a plugin failure");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_USERNAME_PASSWORD");
+        assert!(!failure.reason.is_known());
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("Login refused: check the username and password")
+        );
+        assert_eq!(
+            failed.to_string(),
+            "indexer indexer_test component: plugin error invalid_username_password: \
+             Login refused: check the username and password"
+        );
+    }
+
+    #[test]
+    fn a_new_plugin_code_is_sanitised_into_a_bounded_reason_id() {
+        let reason = |code: &str| PluginFailureReason::from_code(&PluginErrorCode::from(code));
+        assert_eq!(reason("Quota-Exceeded").as_str(), "PLUGIN_QUOTA_EXCEEDED");
+        assert_eq!(reason("__two__words__").as_str(), "PLUGIN_TWO_WORDS");
+        assert_eq!(
+            reason("captcha required!").as_str(),
+            "PLUGIN_CAPTCHA_REQUIRED"
+        );
+        assert_eq!(reason("geo\u{e9}blocked").as_str(), "PLUGIN_GEO_BLOCKED");
+        assert_eq!(reason("http_429").as_str(), "PLUGIN_HTTP_429");
+
+        let long = reason(&"abc_".repeat(40));
+        assert!(long.as_str().len() <= REASON_MAX_CHARS, "{}", long.as_str());
+        assert!(
+            long.as_str().starts_with("PLUGIN_ABC_ABC"),
+            "{}",
+            long.as_str()
+        );
+        assert!(!long.as_str().ends_with('_'), "{}", long.as_str());
+
+        // Nothing usable left: a permanent failure, never a bare prefix.
+        for empty in ["", "___", "!!!", "\u{e9}"] {
+            assert_eq!(reason(empty), PluginFailureReason::Permanent, "{empty:?}");
+        }
+
+        // An id that already names a known reason is that reason.
+        assert_eq!(reason("timed_out"), PluginFailureReason::TimedOut);
+        assert_eq!(reason("AUTH_FAILED"), PluginFailureReason::AuthFailed);
+
+        for code in ["Quota-Exceeded", "captcha required!", &"z".repeat(200)] {
+            let id = reason(code);
+            assert!(
+                id.as_str()
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                "{}",
+                id.as_str()
+            );
+            assert!(!id.as_str().contains("__"), "{}", id.as_str());
         }
     }
 

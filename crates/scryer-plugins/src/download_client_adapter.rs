@@ -382,7 +382,9 @@ fn map_download_add_plugin_error(error: PluginError, context: &str) -> AppError 
         PluginErrorCode::InvalidConfig
         | PluginErrorCode::AuthFailed
         | PluginErrorCode::Unsupported
-        | PluginErrorCode::Permanent => AppError::DownloadSubmitRejected(message),
+        | PluginErrorCode::Permanent
+        // A code this host does not know is not retried.
+        | PluginErrorCode::Other(_) => AppError::DownloadSubmitRejected(message),
     }
 }
 
@@ -2238,6 +2240,29 @@ mod tests {
 
             assert!(error.is_retryable_download_submit_failure());
         }
+    }
+
+    #[test]
+    fn command_add_unknown_plugin_code_is_rejected_not_retried() {
+        let error = decode_download_add_result::<()>(
+            PluginResult::Err(PluginError {
+                details: None,
+                code: PluginErrorCode::from("quota_exhausted_for_today"),
+                public_message: "the client refused the job".to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+            }),
+            "download add",
+        )
+        .expect_err("an unknown plugin code should fail the submission");
+
+        assert!(!error.is_retryable_download_submit_failure());
+        assert!(matches!(
+            error,
+            AppError::DownloadSubmitRejected(message)
+                if message.contains("quota_exhausted_for_today")
+                    && message.contains("the client refused the job")
+        ));
     }
 
     #[test]
