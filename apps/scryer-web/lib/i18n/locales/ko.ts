@@ -1923,6 +1923,7 @@ const ko: LocaleDictionary = {
   "appUpgrade.restartNotice": "이 업그레이드 중에 Scryer가 다시 시작됩니다.",
   "appUpgrade.uacNotice": "Windows에서 로컬 권한 상승 메시지를 표시합니다.",
   "appUpgrade.startFailed": "업그레이드를 시작할 수 없습니다.",
+  "appUpgrade.targetChanged": "사용 가능한 업데이트가 변경되었습니다. 확인한 후 다시 시도하세요.",
   "appUpgrade.loading": "업그레이드 상태를 불러오는 중…",
   "appUpgrade.currentVersion": "현재 버전",
   "appUpgrade.availableVersion": "사용 가능한 버전",

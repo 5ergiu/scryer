@@ -2005,6 +2005,7 @@ const pt_BR: LocaleDictionary = {
   "appUpgrade.restartNotice": "O Scryer será reiniciado durante esta atualização.",
   "appUpgrade.uacNotice": "O Windows mostrará uma solicitação local de elevação.",
   "appUpgrade.startFailed": "Não foi possível iniciar a atualização.",
+  "appUpgrade.targetChanged": "A atualização disponível mudou. Revise-a e tente novamente.",
   "appUpgrade.loading": "Carregando status da atualização…",
   "appUpgrade.currentVersion": "Versão atual",
   "appUpgrade.availableVersion": "Versão disponível",

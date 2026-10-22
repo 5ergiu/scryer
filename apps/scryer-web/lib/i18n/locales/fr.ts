@@ -2024,6 +2024,7 @@ const fr: LocaleDictionary = {
   "appUpgrade.restartNotice": "Scryer redémarrera pendant cette mise à niveau.",
   "appUpgrade.uacNotice": "Windows affichera une invite locale d’élévation.",
   "appUpgrade.startFailed": "Impossible de démarrer la mise à niveau.",
+  "appUpgrade.targetChanged": "La mise à niveau disponible a changé. Vérifiez-la et réessayez.",
   "appUpgrade.loading": "Chargement de l’état de mise à niveau…",
   "appUpgrade.currentVersion": "Version actuelle",
   "appUpgrade.availableVersion": "Version disponible",
