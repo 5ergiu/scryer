@@ -171,6 +171,13 @@ const INDEXERS_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
 };
 
+// The Search pane carries its own refine rail beside the results table, so it
+// keeps the wider pane it had before it carried the plugins rail.
+const INDEXER_SEARCH_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
+  contentWidth: 1640,
+  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
+};
+
 const SUBTITLES_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   contentWidth: 1280,
   rail: { minWidth: 320, maxWidth: 560, gap: 0, inset: 30 },
@@ -491,10 +498,9 @@ export const SettingsContainer = memo(function SettingsContainer({
     settingsSection !== "notifications" &&
     settingsSection !== "subtitles";
   // Pages that render an inline plugins rail anchored to the top of the content
-  // pane. The Search pane owns its full width (its own refine rail plus a
-  // 1020px table), so the plugins rail stays with the provider panes.
+  // pane.
   const showReferenceRail =
-    (settingsSection === "indexers" && effectiveIndexerSettingsTab !== "search") ||
+    settingsSection === "indexers" ||
     settingsSection === "downloadClients" ||
     settingsSection === "notifications" ||
     settingsSection === "subtitles";
@@ -503,7 +509,9 @@ export const SettingsContainer = memo(function SettingsContainer({
     ? isSubtitlesSection
       ? SUBTITLES_FILTERED_PLUGIN_LAYOUT
       : settingsSection === "indexers"
-        ? INDEXERS_FILTERED_PLUGIN_LAYOUT
+        ? effectiveIndexerSettingsTab === "search"
+          ? INDEXER_SEARCH_FILTERED_PLUGIN_LAYOUT
+          : INDEXERS_FILTERED_PLUGIN_LAYOUT
         : STANDARD_FILTERED_PLUGIN_LAYOUT
     : null;
   const settingsContentRef = useRef<HTMLElement | null>(null);
@@ -830,9 +838,7 @@ export const SettingsContainer = memo(function SettingsContainer({
                 ? "max-w-none"
                 : settingsSection === "users"
                   ? "max-w-[1620px]"
-                  : settingsSection === "indexers"
-                    ? "max-w-[1640px]"
-                    : "max-w-[1280px]",
+                  : "max-w-[1280px]",
           )}
         >
           <div className="contents">

@@ -168,14 +168,15 @@ export function ListsView(props: ListsViewProps) {
 
   const detailFallback = detail ? (subscriptions.find((entry) => entry.id === detail.id) ?? null) : null;
   const detailSubscription = detail?.subscription ?? detailFallback;
-  const showPlugins = props.canManageProviderApps && (section === "public" || section === "personal");
+  // Every tab keeps the same rail so switching tabs never opens or closes it.
+  const showPlugins = props.canManageProviderApps;
   const scrollRef = React.useRef<HTMLElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   const pluginsWidth = useGutterRailWidth(scrollRef, contentRef, showPlugins ? PLUGIN_RAIL_SIZE : null);
   const pluginsDocked = pluginsWidth !== null;
   const [pluginsOpen, setPluginsOpen] = React.useState(false);
 
-  React.useEffect(() => setPluginsOpen(false), [pluginsDocked, section]);
+  React.useEffect(() => setPluginsOpen(false), [pluginsDocked]);
 
   const plugins = showPlugins ? (
     <FilteredPluginList
