@@ -651,15 +651,13 @@ function RequestClaimsPanel({
               {stateKey ? t(stateKey) : claim.state}
             </Badge>
             <span className="text-[var(--scry-muted3)]">
-              {claim.kind === "KEEP"
-                ? t("requests.claimKindKeep")
-                : claim.expiresAt
-                  ? t("requests.claimExpiresAt", {
-                      date: formatUiDateTime(claim.expiresAt, dateTimeFormat),
-                    })
-                  : t("requests.claimDurationDays", {
-                      count: claim.durationDays ?? 0,
-                    })}
+              {claim.expiresAt
+                ? t("requests.claimExpiresAt", {
+                    date: formatUiDateTime(claim.expiresAt, dateTimeFormat),
+                  })
+                : t("requests.claimDurationDays", {
+                    count: claim.durationDays ?? 0,
+                  })}
             </span>
             {claim.releasedReason ? (
               <span className="text-[var(--scry-muted3)]">
@@ -670,31 +668,26 @@ function RequestClaimsPanel({
             ) : null}
             {live ? (
               <div className="ml-auto flex flex-wrap gap-1">
-                {/* A keep has no window: the API refuses to extend one. */}
-                {claim.kind === "RETAIN_UNTIL" ? (
-                  <>
-                    <Button
-                      id={titleClaimExtendId(claim.id)}
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      disabled={busy}
-                      onClick={() => onStartExtend(claim)}
-                    >
-                      {t("requests.claimExtend")}
-                    </Button>
-                    <Button
-                      id={titleClaimPermanentId(claim.id)}
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      disabled={busy}
-                      onClick={() => onConvertClaim(claim)}
-                    >
-                      {t("requests.claimMakePermanent")}
-                    </Button>
-                  </>
-                ) : null}
+                <Button
+                  id={titleClaimExtendId(claim.id)}
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => onStartExtend(claim)}
+                >
+                  {t("requests.claimExtend")}
+                </Button>
+                <Button
+                  id={titleClaimPermanentId(claim.id)}
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => onConvertClaim(claim)}
+                >
+                  {t("requests.claimMakePermanent")}
+                </Button>
                 <Button
                   id={titleClaimReleaseId(claim.id)}
                   type="button"

@@ -3443,6 +3443,23 @@ file = "postgres/migrations/0307_lifecycle_claims_remove_operator_keeps.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 308
+description = "lifecycle claims ttl only"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0308_lifecycle_claims_ttl_only.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0308_lifecycle_claims_ttl_only.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

@@ -6488,50 +6488,42 @@ pub enum LifecycleClaimProducer {
     /// A finite lease approved on a media request.
     #[default]
     RequestLease,
-    /// A "forever" request: a permanent keep.
-    RequestPermanent,
 }
 
 impl LifecycleClaimProducer {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::RequestLease => "request_lease",
-            Self::RequestPermanent => "request_permanent",
         }
     }
 
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "request_lease" => Some(Self::RequestLease),
-            "request_permanent" => Some(Self::RequestPermanent),
             _ => None,
         }
     }
 }
 
-/// What a lifecycle claim holds (plan 0003 §5).
+/// What a lifecycle claim is (plan 0003 §5).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleClaimKind {
-    /// Holds until `expires_at`, which starts running at first import.
+    /// A time to delete, `expires_at`, which starts running at first import.
     #[default]
     RetainUntil,
-    /// Holds indefinitely.
-    Keep,
 }
 
 impl LifecycleClaimKind {
     pub const fn as_storage_str(self) -> &'static str {
         match self {
             Self::RetainUntil => "retain_until",
-            Self::Keep => "keep",
         }
     }
 
     pub fn parse_storage(value: &str) -> Option<Self> {
         match value {
             "retain_until" => Some(Self::RetainUntil),
-            "keep" => Some(Self::Keep),
             _ => None,
         }
     }
@@ -6539,8 +6531,8 @@ impl LifecycleClaimKind {
 
 /// Lifecycle state of one claim (plan 0003 §5).
 ///
-/// Claims are released, never deleted (constitution C3): the terminal states are
-/// history, and only [`Self::Dormant`] and [`Self::Active`] hold anything.
+/// The terminal states are history, and only [`Self::Dormant`] and
+/// [`Self::Active`] are live.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleClaimState {
@@ -6553,7 +6545,8 @@ pub enum LifecycleClaimState {
     Expired,
     /// Withdrawn before it ran out (request canceled, title deleted, admin).
     Released,
-    /// Superseded by a permanent keep.
+    /// Ended by an administrator keeping the title permanently, which leaves
+    /// it with no expiry.
     Converted,
 }
 
