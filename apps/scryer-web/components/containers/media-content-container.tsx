@@ -49,7 +49,13 @@ import {
   buildTitlesQuery,
 } from "@/lib/graphql/queries";
 import { createCatalogSummaryLoader } from "@/lib/utils/catalog-summary-loader";
-import { mergePreferLoadedImageFields } from "@/lib/utils/catalog-title-merge";
+import {
+  type ActiveCatalogListFilters,
+  applyRefreshedCatalogTitle,
+  buildActiveCatalogListFilters,
+  mergePreferLoadedImageFields,
+  upsertCatalogTitleRecord,
+} from "@/lib/utils/catalog-title-merge";
 import { selectedOverviewUsesMovieRecord } from "@/lib/utils/selected-overview-policy";
 import {
   CATEGORY_SCOPE_MAP,
@@ -323,12 +329,6 @@ const CATALOG_DISCOVERY_LIMIT_PER_GROUP = 12;
 const CATALOG_DISCOVERY_MAX_GROUPS = 6;
 const DISCOVERY_FACETS: Facet[] = ["MOVIE", "SERIES", "ANIME"];
 
-type ActiveCatalogListFilters = {
-  facet: TitleRecord["facet"];
-  query: string;
-  libraryIds: readonly string[];
-};
-
 function mergeCatalogTitlesPreservingImages(
   currentTitles: TitleRecord[],
   incomingTitles: TitleRecord[],
@@ -369,66 +369,6 @@ function appendCatalogTitlesPreservingImages(
     next.push(title);
   }
 
-  return next;
-}
-
-function buildActiveCatalogListFilters(
-  facet: TitleRecord["facet"],
-  query: string,
-  libraryIds: readonly string[],
-): ActiveCatalogListFilters {
-  return {
-    facet,
-    query: query.trim().toLocaleLowerCase(),
-    libraryIds: [...libraryIds],
-  };
-}
-
-function catalogTitleMatchesActiveListFilters(
-  title: TitleRecord,
-  filters: ActiveCatalogListFilters,
-): boolean {
-  if (title.facet !== filters.facet) {
-    return false;
-  }
-
-  if (
-    filters.libraryIds.length > 0 &&
-    !filters.libraryIds.includes(title.libraryId)
-  ) {
-    return false;
-  }
-
-  return (
-    filters.query.length === 0 ||
-    title.name.toLocaleLowerCase().includes(filters.query)
-  );
-}
-
-function upsertCatalogTitleRecord(
-  titles: TitleRecord[],
-  title: TitleRecord,
-  filters?: ActiveCatalogListFilters,
-): TitleRecord[] {
-  const existingIndex = titles.findIndex((item) => item.id === title.id);
-  if (filters && !catalogTitleMatchesActiveListFilters(title, filters)) {
-    if (existingIndex === -1) {
-      return titles;
-    }
-    const next = [...titles];
-    next.splice(existingIndex, 1);
-    return next;
-  }
-
-  const next = [...titles];
-  if (existingIndex === -1) {
-    next.push(title);
-  } else {
-    next[existingIndex] = mergePreferLoadedImageFields(
-      next[existingIndex],
-      title,
-    );
-  }
   return next;
 }
 
@@ -2750,7 +2690,12 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
   );
 
   const applyRefreshedTitleRecord = React.useCallback(
-    (titleId: string, title: TitleRecord | null, requestEpoch: number) => {
+    (
+      titleId: string,
+      title: TitleRecord | null,
+      requestEpoch: number,
+      options?: { insertIfMissing?: boolean },
+    ) => {
       if (requestEpoch <= latestCriticalMutationEpochRef.current) {
         return;
       }
@@ -2773,30 +2718,21 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
           return next;
         }
 
-        if (
-          !catalogTitleMatchesActiveListFilters(
-            title,
-            activeCatalogListFiltersRef.current,
-          )
-        ) {
-          if (existingIndex === -1) {
-            return current;
-          }
-          next.splice(existingIndex, 1);
-          setTitleStatus(t("title.statusTemplate", { count: next.length }));
-          return next;
-        }
-
-        if (existingIndex === -1) {
-          return current;
-        } else {
-          next[existingIndex] = mergePreferLoadedImageFields(
-            next[existingIndex],
-            title,
+        // A title added elsewhere (another tab, a list import, automation)
+        // arrives here first, so a match for the active filters is inserted
+        // rather than waiting for the next reload.
+        const upserted = applyRefreshedCatalogTitle(
+          current,
+          title,
+          activeCatalogListFiltersRef.current,
+          options?.insertIfMissing === true,
+        );
+        if (upserted !== current) {
+          setTitleStatus(
+            t("title.statusTemplate", { count: upserted.length }),
           );
         }
-        setTitleStatus(t("title.statusTemplate", { count: next.length }));
-        return next;
+        return upserted;
       });
     },
     [applySelectedOverviewDetail, setMonitoredTitles, setTitleStatus, t],
@@ -2835,10 +2771,12 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     facet: activeFacet,
     pause: !shouldLoadCatalogTitles,
     projection: titleCatalogProjection,
-    onTitleRefreshed: (titleId, title, requestEpoch) => {
+    onTitleRefreshed: (titleId, title, requestEpoch, { added }) => {
       refreshCatalogSummaries(activeCatalogQueryRef.current.trim(), selectedLibraryIds,
         effectiveAdvancedTitleFilters, true);
-      applyRefreshedTitleRecord(titleId, title, requestEpoch);
+      applyRefreshedTitleRecord(titleId, title, requestEpoch, {
+        insertIfMissing: added,
+      });
     },
   });
 
@@ -4918,19 +4856,8 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
             configuredCatalogLibraries(scopedLibraries);
           let hasConfiguredRoots = configuredLibraries.length > 0;
 
-          const rootConfigurationPhase = resolveCatalogSurfacePhase({
-            canManageLibrarySettings,
-            hasConfiguredRoots,
-            loadedTitleCount: null,
-            rootValidationState: "notRun",
-          });
-          if (rootConfigurationPhase === "rootsMissing") {
-            setMonitoredTitles([]);
-            setCatalogPaginationState({ ...emptyTitleCatalogState });
-            commitBootstrapState(rootConfigurationPhase);
-            return;
-          }
-
+          // Titles are loaded even without a configured root: the root prompt
+          // only replaces an empty catalog, never one that has titles.
           const nextTitles = await reloadTitles(
             debouncedTitleFilter,
             normalizedSelectedLibraryIds,

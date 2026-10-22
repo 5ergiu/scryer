@@ -12330,6 +12330,11 @@ async fn background_acquisition_parks_ambiguous_best_candidate_for_review() {
     assert_eq!(parked[0].status, PendingReleaseStatus::NeedsReview);
     assert_eq!(parked[0].wanted_item_id, wanted_id);
     assert_eq!(parked[0].release_title, "Tide.Chart.1080p.WEB-DL.x264-GRP");
+    assert_eq!(
+        parked[0].last_decision_code.as_deref(),
+        Some("ambiguous_identity"),
+        "the review row names why it is waiting on a human"
+    );
     assert!(
         download_client
             .submitted_release_titles
@@ -12431,8 +12436,16 @@ async fn queue_best_release_parks_ambiguous_candidate_while_queuing_eligible_rel
     let ambiguous = "Tide.Chart.1080p.WEB-DL.x264-GRP";
 
     for release_titles in [[eligible, ambiguous], [ambiguous, eligible]] {
-        let (app, user, title, wanted_id, pending_releases, _release_attempts, download_client, _) =
-            ambiguous_identity_fixture_with_releases(&release_titles).await;
+        let (
+            app,
+            user,
+            title,
+            wanted_id,
+            pending_releases,
+            _release_attempts,
+            download_client,
+            wanted_items,
+        ) = ambiguous_identity_fixture_with_releases(&release_titles).await;
 
         let outcome = app
             .queue_best_release(
@@ -12456,6 +12469,30 @@ async fn queue_best_release_parks_ambiguous_candidate_while_queuing_eligible_rel
         assert_eq!(parked[0].status, PendingReleaseStatus::NeedsReview);
         assert_eq!(parked[0].wanted_item_id, wanted_id);
         assert_eq!(parked[0].release_title, ambiguous);
+        assert_eq!(
+            parked[0].last_decision_code.as_deref(),
+            Some("ambiguous_identity"),
+            "the review row names why it is waiting on a human"
+        );
+        {
+            let decisions = wanted_items.release_decisions.lock().await;
+            assert!(
+                decisions
+                    .iter()
+                    .any(|decision| decision.title_id == title.id
+                        && decision.wanted_item_id == wanted_id
+                        && decision.release_title == ambiguous
+                        && decision.decision_code == "ambiguous_identity"),
+                "the parked rejection is recorded for diagnostics, got {:?}",
+                decisions
+                    .iter()
+                    .map(|decision| format!(
+                        "{}:{}",
+                        decision.release_title, decision.decision_code
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
         let parked_listing = parked[0].release_listing_json.as_deref();
         assert!(
             parked_listing.is_some(),
