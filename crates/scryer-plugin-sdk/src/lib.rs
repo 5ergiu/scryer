@@ -44,7 +44,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.17.0";
+pub const SDK_VERSION: &str = "3.18.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)
@@ -785,6 +785,31 @@ pub struct IndexerCapabilities {
     /// Declared by indexers whose `protocols` include `Http`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<IndexerHttpCapabilities>,
+    /// The plugin answers the reserved
+    /// [`CONFIG_FIELDS_ACTION`](crate::command::CONFIG_FIELDS_ACTION) action
+    /// with config fields that depend on the values entered so far. Absent
+    /// keeps the static `config_fields` list as the whole form, and a host
+    /// older than SDK 3.18 ignores it the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_config_fields: Option<DynamicConfigFieldsCapability>,
+}
+
+/// Opt-in to config fields that depend on the values the operator has
+/// entered so far, such as the settings of a selected tracker definition.
+///
+/// The host asks the plugin through the reserved
+/// [`CONFIG_FIELDS_ACTION`](crate::command::CONFIG_FIELDS_ACTION) action,
+/// sending the current values of `trigger_keys` only. The answer must be a
+/// pure function of those values: the host caches it per plugin version and
+/// trigger values, and re-asks only when a trigger value changes. Values the
+/// operator types into dynamic fields are stored as ordinary config entries
+/// keyed by the field key, exactly like static fields.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DynamicConfigFieldsCapability {
+    /// Keys of static `config_fields` whose values decide the dynamic
+    /// fields. Must be non-empty; keys that do not name a static field are
+    /// ignored by the host.
+    pub trigger_keys: Vec<String>,
 }
 
 /// What an HTTP-family indexer's releases offer, so Scryer can tell before
@@ -824,6 +849,7 @@ impl Default for IndexerCapabilities {
             torrent: None,
             response_features: None,
             http: None,
+            dynamic_config_fields: None,
         }
     }
 }
@@ -3608,6 +3634,8 @@ struct PluginSdkSchemaDocument {
     indexer_search_request: PluginSearchRequest,
     indexer_search_response: PluginSearchResponse,
     resolve_network_endpoints_response: command::ResolveNetworkEndpointsResponse,
+    config_fields_request: command::ConfigFieldsRequest,
+    config_fields_response: command::ConfigFieldsResponse,
     indexer_search_plan_request: PluginSearchPlanRequest,
     indexer_search_strategy_event: PluginSearchStrategyEvent,
     indexer_search_plan_summary: PluginSearchPlanSummary,
@@ -4967,6 +4995,91 @@ mod tests {
     fn category_scoped_feedback_capability_defaults_to_disabled() {
         let capabilities: DownloadClientCapabilities = serde_json::from_str("{}").unwrap();
         assert!(!capabilities.category_scoped_feedback);
+    }
+
+    #[test]
+    fn dynamic_config_fields_capability_is_opt_in_and_omitted_for_old_plugins() {
+        let capabilities: IndexerCapabilities = serde_json::from_str("{}").unwrap();
+        assert!(capabilities.dynamic_config_fields.is_none());
+        assert!(
+            serde_json::to_value(IndexerCapabilities::default())
+                .unwrap()
+                .get("dynamic_config_fields")
+                .is_none()
+        );
+        let declared: IndexerCapabilities = serde_json::from_value(serde_json::json!({
+            "dynamic_config_fields": { "trigger_keys": ["definition"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            declared.dynamic_config_fields,
+            Some(DynamicConfigFieldsCapability {
+                trigger_keys: vec!["definition".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn config_fields_action_payloads_round_trip_through_the_action_envelope() {
+        use crate::command::{
+            CONFIG_FIELDS_ACTION, ConfigFieldsRequest, ConfigFieldsResponse, PluginActionRequest,
+            PluginActionResponse,
+        };
+
+        let request = PluginActionRequest {
+            action: CONFIG_FIELDS_ACTION.into(),
+            payload: serde_json::to_value(ConfigFieldsRequest {
+                values: BTreeMap::from([("definition".into(), "sample-tracker".into())]),
+            })
+            .unwrap(),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "action": "config_fields",
+                "payload": { "values": { "definition": "sample-tracker" } }
+            })
+        );
+        let parsed: ConfigFieldsRequest = serde_json::from_value(
+            serde_json::from_value::<PluginActionRequest>(wire)
+                .unwrap()
+                .payload,
+        )
+        .unwrap();
+        assert_eq!(parsed.values["definition"], "sample-tracker");
+        let empty: ConfigFieldsRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.values.is_empty());
+
+        let response = ConfigFieldsResponse {
+            fields: vec![ConfigFieldDef {
+                key: "apikey".into(),
+                label: "API Key".into(),
+                field_type: ConfigFieldType::Password,
+                required: true,
+                ..ConfigFieldDef::default()
+            }],
+            hidden_field_keys: vec!["username".into(), "password".into()],
+        };
+        let envelope = PluginActionResponse {
+            payload: serde_json::to_value(&response).unwrap(),
+        };
+        let wire = serde_json::to_value(PluginResult::Ok(envelope)).unwrap();
+        let PluginResult::Ok(decoded) =
+            serde_json::from_value::<PluginResult<PluginActionResponse>>(wire).unwrap()
+        else {
+            panic!("expected an ok action response");
+        };
+        let decoded: ConfigFieldsResponse = serde_json::from_value(decoded.payload).unwrap();
+        assert_eq!(decoded, response);
+
+        // A plugin with nothing to add may answer with an empty object.
+        let nothing: ConfigFieldsResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(nothing, ConfigFieldsResponse::default());
+        assert_eq!(
+            serde_json::to_value(ConfigFieldsResponse::default()).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

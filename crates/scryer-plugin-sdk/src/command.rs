@@ -6,11 +6,13 @@
 //! `scryer.plugin.command_abi` custom section and [`COMMAND_ABI_VERSION`] pin
 //! which revision of the envelope an artifact speaks.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ListPluginAccountRequest, ListPluginAccountResponse, ListPluginFetchRequest,
+    ConfigFieldDef, ListPluginAccountRequest, ListPluginAccountResponse, ListPluginFetchRequest,
     ListPluginFetchResponse, ListPluginHealthRequest, ListPluginHealthResponse,
     PluginCompletedDownload, PluginDownloadClientAddRequest, PluginDownloadClientAddResponse,
     PluginDownloadClientControlRequest, PluginDownloadClientMarkImportedRequest,
@@ -109,6 +111,46 @@ pub struct PluginActionResponse {
 #[serde(deny_unknown_fields)]
 pub struct ResolveNetworkEndpointsResponse {
     pub origins: Vec<String>,
+}
+
+/// Reserved action a plugin that declares
+/// [`DynamicConfigFieldsCapability`](crate::DynamicConfigFieldsCapability)
+/// answers with the config fields for the values entered so far. The action
+/// payload is a [`ConfigFieldsRequest`] and the response payload a
+/// [`ConfigFieldsResponse`]. A plugin that does not support it returns the
+/// usual `unsupported` error, which the host treats as "no extra fields".
+pub const CONFIG_FIELDS_ACTION: &str = "config_fields";
+
+/// Payload of the [`CONFIG_FIELDS_ACTION`] action.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigFieldsRequest {
+    /// Current values of the descriptor's trigger keys, in the same string
+    /// form the plugin reads as host config. A trigger key the operator has
+    /// not filled in is absent.
+    #[serde(default)]
+    pub values: BTreeMap<String, String>,
+}
+
+/// Response payload of the [`CONFIG_FIELDS_ACTION`] action.
+///
+/// The host validates the answer before it reaches a form: keys must be
+/// unique and must not reuse a static field key, fields are operator-entered
+/// (no host binding, no connection-URL role), select fields carry options,
+/// and conditions and option overrides may only name known fields. A
+/// response that breaks a rule is rejected as a whole.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigFieldsResponse {
+    /// Fields shown after the static ones, in this order. `visible_when`,
+    /// `required_when`, `advanced` and the `password` type behave exactly as
+    /// on static fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ConfigFieldDef>,
+    /// Static field keys the form hides for these values, for example
+    /// `username` and `password` when the selected definition uses an API
+    /// key. A hidden static field is never required. Trigger keys cannot be
+    /// hidden.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_field_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
