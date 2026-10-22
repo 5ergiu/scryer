@@ -1030,6 +1030,11 @@ fn decode_search_result(
 fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
     // Built first so the debug detail is logged on every path.
     let failed = AppError::plugin_failed(&error, context);
+    if let Some(sentence) = credential_rejection_sentence(&error.code) {
+        return AppError::Validation(sentence.to_string());
+    }
+    // Plugins built before the shared credential codes said only this generic
+    // sentence and named the rejected key in their debug text.
     let is_api_key_rejection = error.public_message == "indexer component failed"
         && error.debug_message.as_deref().is_some_and(|message| {
             let normalized = message.to_ascii_lowercase();
@@ -1043,6 +1048,18 @@ fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
     }
 
     failed
+}
+
+/// The sentence for a search the indexer refused because of the credential a
+/// shared code names, or `None` for any other failure.
+fn credential_rejection_sentence(code: &PluginErrorCode) -> Option<&'static str> {
+    match code.as_str() {
+        "invalid_api_key" => Some("The indexer rejected the API key."),
+        "invalid_passkey" => Some("The indexer rejected the passkey."),
+        "invalid_cookie" => Some("The indexer rejected the session cookie."),
+        "invalid_username_password" => Some("The indexer rejected the username or password."),
+        _ => None,
+    }
 }
 
 fn host_incomplete_reason(reason: PluginIncompleteReason) -> HostIncompleteReason {
@@ -3340,7 +3357,7 @@ mod tests {
     #[test]
     fn a_plugin_code_the_sdk_never_named_reaches_the_client_as_its_own_reason() {
         // What a guest writes for a code newer than any host or SDK release.
-        let bytes = br#"{"err":{"code":"invalid_username_password","public_message":"Login refused: wrong username or password","debug_message":"form answered 200 with key=example-secret"}}"#;
+        let bytes = br#"{"err":{"code":"geo_blocked","public_message":"The site refuses requests from this region","debug_message":"form answered 451 with key=example-secret"}}"#;
         let result = serde_json::from_slice::<PluginResult<PluginSearchResponse>>(bytes)
             .expect("an unknown code decodes unchanged");
 
@@ -3349,12 +3366,75 @@ mod tests {
             .expect("a plugin error must fail the search");
 
         let failure = error.plugin_failure().expect("a typed plugin failure");
-        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_USERNAME_PASSWORD");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_GEO_BLOCKED");
         assert_eq!(
             failure.detail.as_deref(),
-            Some("Login refused: wrong username or password")
+            Some("The site refuses requests from this region")
         );
         assert!(!format!("{error:?}").contains("example-secret"));
+    }
+
+    fn coded_search_error(code: &str, public_message: &str, debug_message: &str) -> AppError {
+        decode_search_result(
+            PluginResult::Err(PluginError {
+                code: PluginErrorCode::from(code),
+                public_message: public_message.to_string(),
+                debug_message: Some(debug_message.to_string()),
+                retry_after_seconds: None,
+                details: None,
+            }),
+            true,
+            "indexer search",
+        )
+        .err()
+        .expect("a plugin error must fail the search")
+    }
+
+    #[test]
+    fn a_rejected_credential_code_is_a_validation_error_naming_the_credential() {
+        for (code, sentence) in [
+            ("invalid_api_key", "The indexer rejected the API key."),
+            ("invalid_passkey", "The indexer rejected the passkey."),
+            ("invalid_cookie", "The indexer rejected the session cookie."),
+            (
+                "invalid_username_password",
+                "The indexer rejected the username or password.",
+            ),
+        ] {
+            // The plugin's sentence does not matter: the code alone decides.
+            let error = coded_search_error(
+                code,
+                "the plugin could not complete the request",
+                "upstream answered 401 for key=example-secret",
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("validation: {sentence}"),
+                "{code}"
+            );
+            assert!(!format!("{error:?}").contains("example-secret"), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_code_that_names_no_credential_stays_a_plugin_failure() {
+        for code in ["captcha_required", "quota_exceeded", "tls_error"] {
+            let error = coded_search_error(
+                code,
+                "the plugin could not complete the request",
+                "api key error: rejected",
+            );
+            let failure = error
+                .plugin_failure()
+                .unwrap_or_else(|| panic!("{code} stays a typed plugin failure"));
+            assert_eq!(
+                failure.reason.as_str(),
+                format!("PLUGIN_{}", code.to_ascii_uppercase()),
+                "{code}"
+            );
+            // The PDK's generic sentence adds nothing beside the reason.
+            assert_eq!(failure.detail, None, "{code}");
+        }
     }
 
     #[test]

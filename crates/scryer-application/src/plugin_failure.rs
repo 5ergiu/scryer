@@ -21,7 +21,11 @@ const DETAIL_MAX_CHARS: usize = 300;
 /// Generic sentences plugin kits put on an error they know nothing about.
 /// They add nothing beside a translated reason, so a failure carries no detail
 /// for them.
-const GENERIC_PUBLIC_MESSAGES: &[&str] = &["indexer component failed"];
+const GENERIC_PUBLIC_MESSAGES: &[&str] = &[
+    "indexer component failed",
+    "the plugin could not complete the request",
+    "the download client plugin could not complete the request",
+];
 
 /// The longest reason id a failure carries, in characters, `PLUGIN_` included.
 const REASON_MAX_CHARS: usize = 64;
@@ -335,6 +339,58 @@ mod tests {
             "indexer indexer_test component: plugin error invalid_username_password: \
              Login refused: check the username and password"
         );
+    }
+
+    #[test]
+    fn each_shared_plugin_code_names_the_reason_clients_translate() {
+        // The open codes the plugin kit shares. Clients key a translation on
+        // each reason id, so these ids must not drift.
+        for (code, reason) in [
+            (
+                "invalid_username_password",
+                "PLUGIN_INVALID_USERNAME_PASSWORD",
+            ),
+            ("invalid_api_key", "PLUGIN_INVALID_API_KEY"),
+            ("invalid_passkey", "PLUGIN_INVALID_PASSKEY"),
+            ("invalid_cookie", "PLUGIN_INVALID_COOKIE"),
+            ("captcha_required", "PLUGIN_CAPTCHA_REQUIRED"),
+            ("two_factor_required", "PLUGIN_TWO_FACTOR_REQUIRED"),
+            ("account_banned", "PLUGIN_ACCOUNT_BANNED"),
+            ("account_disabled", "PLUGIN_ACCOUNT_DISABLED"),
+            ("endpoint_not_found", "PLUGIN_ENDPOINT_NOT_FOUND"),
+            ("tls_error", "PLUGIN_TLS_ERROR"),
+            ("invalid_response", "PLUGIN_INVALID_RESPONSE"),
+            ("quota_exceeded", "PLUGIN_QUOTA_EXCEEDED"),
+            ("item_not_found", "PLUGIN_ITEM_NOT_FOUND"),
+            ("download_rejected", "PLUGIN_DOWNLOAD_REJECTED"),
+            ("path_not_writable", "PLUGIN_PATH_NOT_WRITABLE"),
+        ] {
+            let failure = PluginFailureReason::from_code(&PluginErrorCode::from(code));
+            assert_eq!(failure.as_str(), reason, "{code}");
+            assert!(!failure.is_known(), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_plugin_kits_generic_sentences_carry_no_detail() {
+        for message in [
+            "indexer component failed",
+            "the plugin could not complete the request",
+            "the download client plugin could not complete the request",
+        ] {
+            let error = PluginError {
+                code: PluginErrorCode::from("invalid_api_key"),
+                public_message: message.to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+                details: None,
+            };
+            assert_eq!(
+                PluginFailure::from_plugin_error(&error).detail,
+                None,
+                "{message}"
+            );
+        }
     }
 
     #[test]

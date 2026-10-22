@@ -2266,6 +2266,29 @@ mod tests {
     }
 
     #[test]
+    fn command_add_download_rejected_surfaces_on_the_grab_and_is_not_retried() {
+        let error = decode_download_add_result::<()>(
+            PluginResult::Err(PluginError {
+                details: None,
+                code: PluginErrorCode::from("download_rejected"),
+                public_message: "the client refused the job".to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+            }),
+            "download add",
+        )
+        .expect_err("a rejected download should fail the submission");
+
+        assert!(!error.is_retryable_download_submit_failure());
+        assert!(matches!(
+            error,
+            AppError::DownloadSubmitRejected(message)
+                if message.contains("download_rejected")
+                    && message.contains("the client refused the job")
+        ));
+    }
+
+    #[test]
     fn add_permanent_plugin_error_is_rejected() {
         let error = decode_download_add_result::<PluginDownloadClientAddResponse>(
             PluginResult::Err(PluginError {

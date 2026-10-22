@@ -142,6 +142,20 @@ test("every reason the server can name has a translation in every locale", () =>
     "PLUGIN_TIMED_OUT",
     "PLUGIN_RESOURCE_LIMIT",
     "PLUGIN_INVALID_USERNAME_PASSWORD",
+    "PLUGIN_INVALID_API_KEY",
+    "PLUGIN_INVALID_PASSKEY",
+    "PLUGIN_INVALID_COOKIE",
+    "PLUGIN_CAPTCHA_REQUIRED",
+    "PLUGIN_TWO_FACTOR_REQUIRED",
+    "PLUGIN_ACCOUNT_BANNED",
+    "PLUGIN_ACCOUNT_DISABLED",
+    "PLUGIN_ENDPOINT_NOT_FOUND",
+    "PLUGIN_TLS_ERROR",
+    "PLUGIN_INVALID_RESPONSE",
+    "PLUGIN_QUOTA_EXCEEDED",
+    "PLUGIN_ITEM_NOT_FOUND",
+    "PLUGIN_DOWNLOAD_REJECTED",
+    "PLUGIN_PATH_NOT_WRITABLE",
   ];
   assert.deepEqual(Object.keys(PLUGIN_FAILURE_KEYS).sort(), [...reasons].sort());
 
@@ -164,4 +178,35 @@ test("every reason the server can name has a translation in every locale", () =>
     const unknown = source.match(/"plugins\.failure\.unknown":\s*"([^"]*)"/)?.[1] ?? "";
     assert.ok(unknown.includes("{{code}}"), `${file} unknown must keep its placeholder`);
   }
+});
+
+test("every plugin reason resolves to a sentence of its own in every locale", async () => {
+  const localesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../i18n/locales");
+  const files = readdirSync(localesDir).filter((name) => name.endsWith(".ts"));
+  assert.equal(files.length, 13);
+  for (const file of files) {
+    const locale = (await import(path.join(localesDir, file))).default as Record<string, string>;
+    const sentences = new Set<string>();
+    for (const [reason, key] of Object.entries(PLUGIN_FAILURE_KEYS)) {
+      const sentence = locale[key];
+      assert.equal(typeof sentence, "string", `${file} has no ${key} for ${reason}`);
+      assert.ok(sentence.trim().length > 0, `${file} ${key} is empty`);
+      assert.ok(!sentences.has(sentence), `${file} ${key} repeats another reason's sentence`);
+      sentences.add(sentence);
+    }
+  }
+});
+
+test("each shared plugin code is shown in translation, with the plugin's sentence after it", () => {
+  const error = failure("plugin error invalid_api_key: Key refused", {
+    code: "PLUGIN_FAILED",
+    reason: "PLUGIN_INVALID_API_KEY",
+    detail: "Key refused",
+  });
+  assert.equal(pluginFailureKey(error), "plugins.failure.invalidApiKey");
+  assert.equal(unknownPluginFailureReason(error), null);
+  assert.equal(
+    pluginErrorMessage(error, t, "Test failed"),
+    "The service rejected the API key. Check the key and try again. Details: Key refused",
+  );
 });
