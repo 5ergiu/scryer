@@ -343,6 +343,18 @@ fn feedback_scope_is_empty(scope: &DownloadClientFeedbackScope) -> bool {
             .any(|category| category.trim().is_empty())
 }
 
+/// The test is the one answer an operator reads directly, so it keeps the
+/// reason the plugin named instead of the masked repository error the other
+/// commands report.
+fn decode_test_connection_result(result: PluginResult<String>) -> AppResult<String> {
+    match result {
+        PluginResult::Ok(value) => Ok(value),
+        PluginResult::Err(error) => {
+            Err(AppError::plugin_failed(&error, "download test_connection"))
+        }
+    }
+}
+
 fn decode_download_add_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
     match result {
         PluginResult::Ok(value) => Ok(value),
@@ -370,7 +382,9 @@ fn map_download_add_plugin_error(error: PluginError, context: &str) -> AppError 
         PluginErrorCode::InvalidConfig
         | PluginErrorCode::AuthFailed
         | PluginErrorCode::Unsupported
-        | PluginErrorCode::Permanent => AppError::DownloadSubmitRejected(message),
+        | PluginErrorCode::Permanent
+        // A code this host does not know is not retried.
+        | PluginErrorCode::Other(_) => AppError::DownloadSubmitRejected(message),
     }
 }
 
@@ -1665,7 +1679,7 @@ impl DownloadClient for WasmDownloadClient {
                 "download-client command returned the wrong result for test_connection".to_string(),
             ));
         };
-        decode_command_result(result, "download test_connection")
+        decode_test_connection_result(result)
     }
 }
 
@@ -2161,6 +2175,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_connection_test_names_the_plugin_reason() {
+        let error = decode_test_connection_result(PluginResult::Err(PluginError {
+            details: None,
+            code: PluginErrorCode::AuthFailed,
+            public_message: "the client rejected the username or password".to_string(),
+            debug_message: Some("HTTP 401 from the web UI".to_string()),
+            retry_after_seconds: None,
+        }))
+        .expect_err("a plugin error must fail the test");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(
+            failure.reason,
+            scryer_application::PluginFailureReason::AuthFailed
+        );
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("the client rejected the username or password")
+        );
+        assert!(!error.to_string().contains("HTTP 401"));
+    }
+
+    #[test]
     fn command_add_permanent_plugin_error_is_rejected_without_losing_its_message() {
         let error = decode_download_add_result::<()>(
             PluginResult::Err(PluginError {
@@ -2203,6 +2240,29 @@ mod tests {
 
             assert!(error.is_retryable_download_submit_failure());
         }
+    }
+
+    #[test]
+    fn command_add_unknown_plugin_code_is_rejected_not_retried() {
+        let error = decode_download_add_result::<()>(
+            PluginResult::Err(PluginError {
+                details: None,
+                code: PluginErrorCode::from("quota_exhausted_for_today"),
+                public_message: "the client refused the job".to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+            }),
+            "download add",
+        )
+        .expect_err("an unknown plugin code should fail the submission");
+
+        assert!(!error.is_retryable_download_submit_failure());
+        assert!(matches!(
+            error,
+            AppError::DownloadSubmitRejected(message)
+                if message.contains("quota_exhausted_for_today")
+                    && message.contains("the client refused the job")
+        ));
     }
 
     #[test]

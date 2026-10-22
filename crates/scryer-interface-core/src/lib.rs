@@ -721,6 +721,19 @@ pub fn to_gql_error(err: AppError) -> Error {
         AppError::ManualReconciliationRequired(message) => {
             coded_gql_error(message, "MANUAL_RECONCILIATION_REQUIRED")
         }
+        // A plugin's failure is the plugin's, not Scryer's, so it is not
+        // masked: the sentence is the host's own, the reason names the
+        // condition for clients that translate it, and the plugin's own public
+        // sentence, when it gave one, rides beside it as the detail.
+        AppError::PluginFailed { message, failure } => {
+            Error::new(message).extend_with(|_, extensions| {
+                extensions.set("code", "PLUGIN_FAILED");
+                extensions.set("reason", failure.reason.as_str());
+                if let Some(detail) = failure.detail {
+                    extensions.set("detail", detail);
+                }
+            })
+        }
         AppError::ImportEvidenceUnavailable(message) => repository_gql_error(message),
         error @ AppError::ImportSourceInspection { .. }
         | error @ AppError::UnsupportedImportSource { .. }
@@ -821,6 +834,7 @@ fn app_error_kind(err: &AppError) -> &'static str {
         AppError::UnsupportedImportSource { .. } => "UnsupportedImportSource",
         AppError::ImportSourceChanged { .. } => "ImportSourceChanged",
         AppError::DiscoveryPresentationSuperseded { .. } => "DiscoveryPresentationSuperseded",
+        AppError::PluginFailed { .. } => "PluginFailed",
         AppError::Repository(_) => "Repository",
     }
 }
@@ -1154,6 +1168,69 @@ mod tests {
         assert_eq!(
             graphql_error_extension_string(&error, "reason"),
             Some("WILDCARD_HOST")
+        );
+    }
+
+    #[test]
+    fn a_plugin_failure_is_unmasked_and_carries_its_reason_and_detail() {
+        use scryer_application::{PluginFailure, PluginFailureReason};
+
+        let failed = AppError::PluginFailed {
+            message: "indexer connection test failed: tracker login refused".into(),
+            failure: PluginFailure {
+                reason: PluginFailureReason::AuthFailed,
+                detail: Some("Tracker login failed: wrong password".into()),
+            },
+        };
+        assert_eq!(app_error_kind(&failed), "PluginFailed");
+
+        let error = to_gql_error(failed);
+        assert_eq!(
+            error.message,
+            "indexer connection test failed: tracker login refused"
+        );
+        assert_eq!(graphql_error_code(&error), Some("PLUGIN_FAILED"));
+        assert_eq!(
+            graphql_error_extension_string(&error, "reason"),
+            Some("PLUGIN_AUTH_FAILED")
+        );
+        assert_eq!(
+            graphql_error_extension_string(&error, "detail"),
+            Some("Tracker login failed: wrong password")
+        );
+
+        let bare = to_gql_error(AppError::plugin_host_failed(
+            PluginFailureReason::TimedOut,
+            "indexer component timed out",
+        ));
+        assert_eq!(graphql_error_code(&bare), Some("PLUGIN_FAILED"));
+        assert_eq!(
+            graphql_error_extension_string(&bare, "reason"),
+            Some("PLUGIN_TIMED_OUT")
+        );
+        assert_eq!(graphql_error_extension_string(&bare, "detail"), None);
+    }
+
+    #[test]
+    fn a_plugin_reason_the_host_does_not_know_is_carried_verbatim() {
+        use scryer_application::{PluginFailure, PluginFailureReason};
+
+        let error = to_gql_error(AppError::PluginFailed {
+            message: "indexer connection test failed: plugin error invalid_username_password"
+                .into(),
+            failure: PluginFailure {
+                reason: PluginFailureReason::PluginCode("PLUGIN_INVALID_USERNAME_PASSWORD".into()),
+                detail: Some("Login refused".into()),
+            },
+        });
+        assert_eq!(graphql_error_code(&error), Some("PLUGIN_FAILED"));
+        assert_eq!(
+            graphql_error_extension_string(&error, "reason"),
+            Some("PLUGIN_INVALID_USERNAME_PASSWORD")
+        );
+        assert_eq!(
+            graphql_error_extension_string(&error, "detail"),
+            Some("Login refused")
         );
     }
 

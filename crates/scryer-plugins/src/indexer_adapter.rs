@@ -5,8 +5,8 @@ use scryer_application::{
     IndexerSearchIncompleteReason as HostIncompleteReason, IndexerSearchPlanCapability,
     IndexerSearchPlanRequest, IndexerSearchPlanSummary, IndexerSearchResponse, IndexerSearchResult,
     IndexerSearchStrategyEvent, IndexerSearchStrategyEventSink, IndexerSearchStrategyRequest,
-    IndexerStatsTracker, NullIndexerStatsTracker, ResolvedDownloadArtifact, SearchMode,
-    extract_magnet_info_hash, is_valid_magnet_uri, normalize_release_password,
+    IndexerStatsTracker, NullIndexerStatsTracker, PluginFailureReason, ResolvedDownloadArtifact,
+    SearchMode, extract_magnet_info_hash, is_valid_magnet_uri, normalize_release_password,
 };
 use scryer_domain::{IndexerConfig, ProxyConfig, TaggedAlias};
 use scryer_plugin_sdk::command::{
@@ -414,17 +414,21 @@ impl WasmIndexerClient {
         &self,
         operation: &str,
         usage: Option<GuestMemoryUsage>,
+        reason: PluginFailureReason,
         message: String,
     ) -> AppError {
         match usage {
-            Some(usage) if usage.denied => AppError::Repository(format!(
-                "indexer component {} for indexer '{}' ({}) {operation} exceeded its guest memory cap of {} MiB and was discarded; set {INDEXER_MEMORY_CAP_ENV} to raise the cap ({message})",
-                self.descriptor.id,
-                self.indexer_name,
-                self.indexer_id,
-                usage.cap_bytes / (1024 * 1024),
-            )),
-            _ => AppError::Repository(message),
+            Some(usage) if usage.denied => AppError::plugin_host_failed(
+                PluginFailureReason::ResourceLimit,
+                format!(
+                    "indexer component {} for indexer '{}' ({}) {operation} exceeded its guest memory cap of {} MiB and was discarded; set {INDEXER_MEMORY_CAP_ENV} to raise the cap ({message})",
+                    self.descriptor.id,
+                    self.indexer_name,
+                    self.indexer_id,
+                    usage.cap_bytes / (1024 * 1024),
+                ),
+            ),
+            _ => AppError::plugin_host_failed(reason, message),
         }
     }
 
@@ -486,6 +490,7 @@ impl WasmIndexerClient {
                     return Err(self.component_call_error(
                         operation,
                         usage,
+                        PluginFailureReason::HostFailure,
                         format!("indexer component {} {operation} failed: {error}", self.descriptor.id),
                     ));
                 }
@@ -495,6 +500,7 @@ impl WasmIndexerClient {
                     return Err(self.component_call_error(
                         operation,
                         usage,
+                        PluginFailureReason::TimedOut,
                         format!(
                             "indexer component {} {operation} timed out after {} ms",
                             self.descriptor.id,
@@ -519,6 +525,7 @@ impl WasmIndexerClient {
                 return Err(self.component_call_error(
                     operation,
                     usage,
+                    PluginFailureReason::HostFailure,
                     format!(
                         "indexer component {} {operation} returned invocation error {error:?}",
                         self.descriptor.id
@@ -651,9 +658,13 @@ impl WasmIndexerClient {
                 );
                 indexer.host.finish_indexer_error_capture(true);
                 return Err(match usage {
-                    Some(usage) if usage.denied && !error.is_canceled() => {
-                        self.component_call_error(PLAN_OPERATION, Some(usage), error.to_string())
-                    }
+                    Some(usage) if usage.denied && !error.is_canceled() => self
+                        .component_call_error(
+                            PLAN_OPERATION,
+                            Some(usage),
+                            PluginFailureReason::HostFailure,
+                            error.to_string(),
+                        ),
                     _ => error,
                 });
             }
@@ -686,6 +697,7 @@ impl WasmIndexerClient {
             self.component_call_error(
                 PLAN_OPERATION,
                 usage,
+                PluginFailureReason::HostFailure,
                 format!(
                     "indexer component {} strategy plan returned invocation error {error:?}",
                     self.descriptor.id
@@ -832,13 +844,7 @@ impl WasmIndexerClient {
 fn decode_command_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
     match result {
         PluginResult::Ok(value) => Ok(value),
-        PluginResult::Err(PluginError {
-            code,
-            public_message,
-            ..
-        }) => Err(AppError::Repository(format!(
-            "{context}: plugin error {code:?}: {public_message}"
-        ))),
+        PluginResult::Err(error) => Err(AppError::plugin_failed(&error, context)),
     }
 }
 
@@ -877,14 +883,11 @@ fn decode_grab_result(
     let payload = match result {
         PluginResult::Ok(response) => response.payload,
         PluginResult::Err(error) if error.code == PluginErrorCode::Unsupported => return Ok(None),
-        PluginResult::Err(PluginError {
-            code,
-            public_message,
-            ..
-        }) => {
-            return Err(AppError::Repository(format!(
-                "indexer download resolution: plugin error {code:?}: {public_message}"
-            )));
+        PluginResult::Err(error) => {
+            return Err(AppError::plugin_failed(
+                &error,
+                "indexer download resolution",
+            ));
         }
     };
     // Shipped Newznab-family plugins report unknown actions with an empty
@@ -1023,6 +1026,8 @@ fn decode_search_result(
 /// information, though, and the guest currently carries it only in that debug
 /// detail. Promote the category without relaying the untrusted detail itself.
 fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
+    // Built first so the debug detail is logged on every path.
+    let failed = AppError::plugin_failed(&error, context);
     let is_api_key_rejection = error.public_message == "indexer component failed"
         && error.debug_message.as_deref().is_some_and(|message| {
             let normalized = message.to_ascii_lowercase();
@@ -1035,10 +1040,7 @@ fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
         return AppError::Validation("The indexer rejected the API key.".to_string());
     }
 
-    AppError::Repository(format!(
-        "{context}: plugin error {:?}: {}",
-        error.code, error.public_message
-    ))
+    failed
 }
 
 fn host_incomplete_reason(reason: PluginIncompleteReason) -> HostIncompleteReason {
@@ -2552,14 +2554,8 @@ fn decode_http_resolve_result(
     let payload = match result {
         PluginResult::Ok(response) => response.payload,
         PluginResult::Err(error) if error.code == PluginErrorCode::Unsupported => return Ok(None),
-        PluginResult::Err(PluginError {
-            code,
-            public_message,
-            ..
-        }) => {
-            return Err(AppError::Repository(format!(
-                "indexer http resolve: plugin error {code:?}: {public_message}"
-            )));
+        PluginResult::Err(error) => {
+            return Err(AppError::plugin_failed(&error, "indexer http resolve"));
         }
     };
     serde_json::from_value(payload).map(Some).map_err(|error| {
@@ -3159,6 +3155,55 @@ mod tests {
             "validation: The indexer rejected the API key."
         );
         assert!(!error.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn a_plugin_code_the_sdk_never_named_reaches_the_client_as_its_own_reason() {
+        // What a guest writes for a code newer than any host or SDK release.
+        let bytes = br#"{"err":{"code":"invalid_username_password","public_message":"Login refused: wrong username or password","debug_message":"form answered 200 with key=example-secret"}}"#;
+        let result = serde_json::from_slice::<PluginResult<PluginSearchResponse>>(bytes)
+            .expect("an unknown code decodes unchanged");
+
+        let error = decode_search_result(result, true, "indexer search")
+            .err()
+            .expect("a plugin error must fail the search");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_USERNAME_PASSWORD");
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("Login refused: wrong username or password")
+        );
+        assert!(!format!("{error:?}").contains("example-secret"));
+    }
+
+    #[test]
+    fn a_plugin_search_error_names_its_reason_and_keeps_its_public_sentence() {
+        let error = decode_search_result(
+            PluginResult::Err(PluginError {
+                code: PluginErrorCode::AuthFailed,
+                public_message: "Tracker login failed: account disabled".to_string(),
+                debug_message: Some("login form answered 200 with key=example-secret".to_string()),
+                retry_after_seconds: None,
+                details: None,
+            }),
+            true,
+            "indexer search",
+        )
+        .err()
+        .expect("a plugin error must fail the search");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(failure.reason, PluginFailureReason::AuthFailed);
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("Tracker login failed: account disabled")
+        );
+        assert_eq!(
+            error.to_string(),
+            "indexer search: plugin error AuthFailed: Tracker login failed: account disabled"
+        );
+        assert!(!format!("{error:?}").contains("example-secret"));
     }
 
     #[test]
@@ -3849,7 +3894,12 @@ mod tests {
         let error = client.component_call_error(
             "indexer_search",
             Some(usage(64 * 1024 * 1024, true)),
+            PluginFailureReason::HostFailure,
             "indexer component newznab indexer_search failed: wasm trap".to_string(),
+        );
+        assert_eq!(
+            error.plugin_failure().map(|failure| failure.reason.clone()),
+            Some(PluginFailureReason::ResourceLimit)
         );
         let message = error.to_string();
         assert!(message.contains("'Test' (cfg)"), "{message}");
@@ -3857,9 +3907,17 @@ mod tests {
         assert!(message.contains(INDEXER_MEMORY_CAP_ENV), "{message}");
         assert!(message.contains("wasm trap"), "{message}");
 
-        let plain = client
-            .component_call_error("indexer_search", Some(usage(1024, false)), "boom".into())
-            .to_string();
+        let plain = client.component_call_error(
+            "indexer_search",
+            Some(usage(1024, false)),
+            PluginFailureReason::TimedOut,
+            "boom".into(),
+        );
+        assert_eq!(
+            plain.plugin_failure().map(|failure| failure.reason.clone()),
+            Some(PluginFailureReason::TimedOut)
+        );
+        let plain = plain.to_string();
         assert!(!plain.contains("memory cap"), "{plain}");
     }
 

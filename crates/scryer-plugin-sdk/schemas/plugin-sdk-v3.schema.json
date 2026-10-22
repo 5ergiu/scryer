@@ -7379,8 +7379,10 @@
       ]
     },
     "PluginErrorCode": {
+      "description": "What kind of failure a plugin is reporting. Open: any snake_case code is valid, and a code is API once a released plugin sends it. The well-known codes are listed in `examples`; hosts treat any other code like `permanent`.",
       "type": "string",
-      "enum": [
+      "pattern": "^[a-z0-9_]+$",
+      "examples": [
         "invalid_config",
         "auth_failed",
         "rate_limited",

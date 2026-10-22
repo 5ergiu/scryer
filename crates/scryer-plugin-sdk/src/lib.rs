@@ -44,7 +44,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.17.0";
+pub const SDK_VERSION: &str = "3.18.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)
@@ -1163,8 +1163,27 @@ pub struct ConfigFieldOption {
     pub config_overrides: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+/// What kind of failure a plugin is reporting.
+///
+/// The code is open: any snake_case string is a valid code. A plugin can start
+/// reporting a new kind of failure — say `invalid_username_password` — by
+/// returning `PluginErrorCode::from("invalid_username_password")`, with no SDK
+/// release; the host carries it through unchanged and clients key on it. Once
+/// a released plugin sends a code, that code is API: keep its meaning and its
+/// spelling. Use lower-case ASCII letters, digits, and underscores.
+///
+/// The seven named variants are the well-known codes the host itself acts on
+/// (retry, reconnect, fall back). They are frozen: a new code is an
+/// [`PluginErrorCode::Other`] string, never a new variant. Hosts treat a code
+/// they do not know like [`PluginErrorCode::Permanent`] — not retried, shown to
+/// the operator.
+///
+/// On JSON every code is its bare string (`"auth_failed"`). On binary formats
+/// such as the postcard host-call transport the well-known codes keep the
+/// variant encoding guests built before codes were open decode, and any other
+/// code is the next variant carrying its string. Compare codes with `==` or
+/// [`PluginErrorCode::as_str`]: `Other("auth_failed")` equals `AuthFailed`.
+#[derive(Clone)]
 pub enum PluginErrorCode {
     InvalidConfig,
     AuthFailed,
@@ -1173,6 +1192,185 @@ pub enum PluginErrorCode {
     Unsupported,
     Temporary,
     Permanent,
+    /// Any code beyond the well-known seven.
+    Other(String),
+}
+
+impl PluginErrorCode {
+    /// The well-known codes, in wire order.
+    pub const KNOWN: [Self; 7] = [
+        Self::InvalidConfig,
+        Self::AuthFailed,
+        Self::RateLimited,
+        Self::UpstreamUnavailable,
+        Self::Unsupported,
+        Self::Temporary,
+        Self::Permanent,
+    ];
+
+    /// The code's wire string.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::InvalidConfig => "invalid_config",
+            Self::AuthFailed => "auth_failed",
+            Self::RateLimited => "rate_limited",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::Unsupported => "unsupported",
+            Self::Temporary => "temporary",
+            Self::Permanent => "permanent",
+            Self::Other(code) => code,
+        }
+    }
+
+    /// Whether this is one of the seven well-known codes, however it was
+    /// spelled.
+    pub fn is_known(&self) -> bool {
+        !matches!(self.normalized(), Self::Other(_))
+    }
+
+    /// The well-known variant for a well-known string, else `self`.
+    fn normalized(&self) -> Self {
+        match self {
+            Self::Other(code) => Self::from(code.as_str()),
+            known => known.clone(),
+        }
+    }
+
+    fn variant_name(&self) -> Option<&'static str> {
+        Some(match self.normalized() {
+            Self::InvalidConfig => "InvalidConfig",
+            Self::AuthFailed => "AuthFailed",
+            Self::RateLimited => "RateLimited",
+            Self::UpstreamUnavailable => "UpstreamUnavailable",
+            Self::Unsupported => "Unsupported",
+            Self::Temporary => "Temporary",
+            Self::Permanent => "Permanent",
+            Self::Other(_) => return None,
+        })
+    }
+}
+
+impl From<&str> for PluginErrorCode {
+    fn from(code: &str) -> Self {
+        Self::KNOWN
+            .into_iter()
+            .find(|known| known.as_str() == code)
+            .unwrap_or_else(|| Self::Other(code.to_string()))
+    }
+}
+
+impl From<String> for PluginErrorCode {
+    fn from(code: String) -> Self {
+        match Self::from(code.as_str()) {
+            Self::Other(_) => Self::Other(code),
+            known => known,
+        }
+    }
+}
+
+impl PartialEq for PluginErrorCode {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for PluginErrorCode {}
+
+impl std::hash::Hash for PluginErrorCode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl std::fmt::Display for PluginErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Well-known codes print as their variant name, as they always have in logs;
+/// any other code prints as its string.
+impl std::fmt::Debug for PluginErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.variant_name() {
+            Some(name) => f.write_str(name),
+            None => f.write_str(self.as_str()),
+        }
+    }
+}
+
+/// The binary-format shape: the variant layout `PluginErrorCode` had as a
+/// closed enum, plus one trailing variant for every other code.
+#[derive(Serialize, Deserialize)]
+enum PluginErrorCodeWire {
+    InvalidConfig,
+    AuthFailed,
+    RateLimited,
+    UpstreamUnavailable,
+    Unsupported,
+    Temporary,
+    Permanent,
+    Other(String),
+}
+
+impl Serialize for PluginErrorCode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return serializer.serialize_str(self.as_str());
+        }
+        let wire = match self.normalized() {
+            Self::InvalidConfig => PluginErrorCodeWire::InvalidConfig,
+            Self::AuthFailed => PluginErrorCodeWire::AuthFailed,
+            Self::RateLimited => PluginErrorCodeWire::RateLimited,
+            Self::UpstreamUnavailable => PluginErrorCodeWire::UpstreamUnavailable,
+            Self::Unsupported => PluginErrorCodeWire::Unsupported,
+            Self::Temporary => PluginErrorCodeWire::Temporary,
+            Self::Permanent => PluginErrorCodeWire::Permanent,
+            Self::Other(code) => PluginErrorCodeWire::Other(code),
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginErrorCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            return String::deserialize(deserializer).map(Self::from);
+        }
+        Ok(match PluginErrorCodeWire::deserialize(deserializer)? {
+            PluginErrorCodeWire::InvalidConfig => Self::InvalidConfig,
+            PluginErrorCodeWire::AuthFailed => Self::AuthFailed,
+            PluginErrorCodeWire::RateLimited => Self::RateLimited,
+            PluginErrorCodeWire::UpstreamUnavailable => Self::UpstreamUnavailable,
+            PluginErrorCodeWire::Unsupported => Self::Unsupported,
+            PluginErrorCodeWire::Temporary => Self::Temporary,
+            PluginErrorCodeWire::Permanent => Self::Permanent,
+            PluginErrorCodeWire::Other(code) => Self::from(code),
+        })
+    }
+}
+
+impl JsonSchema for PluginErrorCode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PluginErrorCode".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "What kind of failure a plugin is reporting. Open: any snake_case code is valid, and a code is API once a released plugin sends it. The well-known codes are listed in `examples`; hosts treat any other code like `permanent`.",
+            "pattern": "^[a-z0-9_]+$",
+            "examples": [
+                "invalid_config",
+                "auth_failed",
+                "rate_limited",
+                "upstream_unavailable",
+                "unsupported",
+                "temporary",
+                "permanent"
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -4221,6 +4419,123 @@ mod tests {
                 .expect("missing torrent capability");
             assert!(!torrent.supported_sources.is_empty());
         }
+    }
+
+    /// The closed enum `PluginErrorCode` was through SDK 3.17.0, exactly as it
+    /// was derived. Guests built against it still decode host-call replies.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum LegacyPluginErrorCode {
+        InvalidConfig,
+        AuthFailed,
+        RateLimited,
+        UpstreamUnavailable,
+        Unsupported,
+        Temporary,
+        Permanent,
+    }
+
+    const LEGACY_CODES: [(PluginErrorCode, LegacyPluginErrorCode); 7] = [
+        (
+            PluginErrorCode::InvalidConfig,
+            LegacyPluginErrorCode::InvalidConfig,
+        ),
+        (
+            PluginErrorCode::AuthFailed,
+            LegacyPluginErrorCode::AuthFailed,
+        ),
+        (
+            PluginErrorCode::RateLimited,
+            LegacyPluginErrorCode::RateLimited,
+        ),
+        (
+            PluginErrorCode::UpstreamUnavailable,
+            LegacyPluginErrorCode::UpstreamUnavailable,
+        ),
+        (
+            PluginErrorCode::Unsupported,
+            LegacyPluginErrorCode::Unsupported,
+        ),
+        (PluginErrorCode::Temporary, LegacyPluginErrorCode::Temporary),
+        (PluginErrorCode::Permanent, LegacyPluginErrorCode::Permanent),
+    ];
+
+    #[test]
+    fn well_known_codes_keep_the_closed_enum_wire_form_on_json_and_postcard() {
+        for (code, legacy) in LEGACY_CODES {
+            assert_eq!(
+                serde_json::to_string(&code).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+            );
+            assert_eq!(
+                postcard::to_stdvec(&code).unwrap(),
+                postcard::to_stdvec(&legacy).unwrap(),
+                "{code:?}"
+            );
+            // Spelled as a string, a well-known code still takes the legacy form.
+            let spelled = PluginErrorCode::Other(code.as_str().to_string());
+            assert_eq!(spelled, code);
+            assert_eq!(
+                postcard::to_stdvec(&spelled).unwrap(),
+                postcard::to_stdvec(&legacy).unwrap(),
+                "{code:?}"
+            );
+
+            let from_old_guest: PluginErrorCode =
+                postcard::from_bytes(&postcard::to_stdvec(&legacy).unwrap()).unwrap();
+            assert!(matches!(
+                (&from_old_guest, &code),
+                (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b)
+            ));
+            let to_old_guest: LegacyPluginErrorCode =
+                postcard::from_bytes(&postcard::to_stdvec(&code).unwrap()).unwrap();
+            assert_eq!(to_old_guest, legacy);
+            let from_old_json: PluginErrorCode =
+                serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+            assert!(std::mem::discriminant(&from_old_json) == std::mem::discriminant(&code));
+        }
+    }
+
+    #[test]
+    fn any_other_code_is_open_and_round_trips_on_json_and_postcard() {
+        let code = PluginErrorCode::from("invalid_username_password");
+        assert!(!code.is_known());
+        assert_eq!(code.as_str(), "invalid_username_password");
+        assert_eq!(code.to_string(), "invalid_username_password");
+        assert_eq!(format!("{code:?}"), "invalid_username_password");
+        assert_eq!(
+            PluginErrorCode::from(String::from("auth_failed")),
+            PluginErrorCode::AuthFailed
+        );
+        assert!(matches!(
+            PluginErrorCode::from("auth_failed"),
+            PluginErrorCode::AuthFailed
+        ));
+        assert_eq!(format!("{:?}", PluginErrorCode::AuthFailed), "AuthFailed");
+
+        assert_eq!(
+            serde_json::to_string(&code).unwrap(),
+            r#""invalid_username_password""#
+        );
+        let json: PluginErrorCode = serde_json::from_str(r#""invalid_username_password""#).unwrap();
+        assert_eq!(json, code);
+        let binary: PluginErrorCode =
+            postcard::from_bytes(&postcard::to_stdvec(&code).unwrap()).unwrap();
+        assert_eq!(binary, code);
+
+        let error = PluginError {
+            code: code.clone(),
+            public_message: "Login refused".to_string(),
+            debug_message: None,
+            retry_after_seconds: None,
+            details: None,
+        };
+        let decoded: PluginError =
+            postcard::from_bytes(&postcard::to_stdvec(&error).unwrap()).unwrap();
+        assert_eq!(decoded.code, code);
+        let decoded: PluginError =
+            serde_json::from_str(&serde_json::to_string(&error).unwrap()).unwrap();
+        assert_eq!(decoded.code, code);
     }
 
     /// `PluginError` crosses the component host-call transport as postcard,
