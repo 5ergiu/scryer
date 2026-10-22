@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { GutterPanel, GutterPanelButton } from "@/components/common/gutter-panel";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
 import { useTranslate } from "@/lib/context/translate-context";
-import { type GutterPanelSize, useGutterPanel } from "@/lib/hooks/use-gutter-panel";
+import { type GutterPanelMemory, type GutterPanelSize, useGutterPanel } from "@/lib/hooks/use-gutter-panel";
 import type { ListAccountMemberKey } from "@/lib/hooks/use-list-account-link";
 import type {
   ListAccount,
@@ -66,6 +66,7 @@ type ListsViewProps = {
   tabCounts: ListTabCounts;
   canManageLists: boolean;
   canManageProviderApps: boolean;
+  pluginsPanelMemory: GutterPanelMemory;
   onRefreshProviders: () => Promise<void>;
   accounts: ListAccount[];
   managedAccounts: ListAccount[];
@@ -171,7 +172,13 @@ export function ListsView(props: ListsViewProps) {
   const showPlugins = props.canManageProviderApps;
   const scrollRef = React.useRef<HTMLElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const pluginsPanel = useGutterPanel(scrollRef, contentRef, showPlugins ? PLUGIN_PANEL_SIZE : null);
+  const pluginsPanel = useGutterPanel(
+    scrollRef,
+    contentRef,
+    showPlugins ? PLUGIN_PANEL_SIZE : null,
+    undefined,
+    props.pluginsPanelMemory,
+  );
 
 
   const plugins = showPlugins ? (

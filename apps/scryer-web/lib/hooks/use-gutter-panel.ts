@@ -16,6 +16,13 @@ export type GutterPanelFrame = {
   right: number;
 };
 
+/**
+ * The panel's last frame and open state, kept by a parent that outlives the
+ * page body so a remounted body shows the panel where it was instead of
+ * sliding it in again.
+ */
+export type GutterPanelMemory = React.RefObject<{ frame: GutterPanelFrame; open: boolean } | null>;
+
 const UNDOCKED_FRAME: GutterPanelFrame = {
   docked: false,
   width: 0,
@@ -41,6 +48,7 @@ function sameFrame(a: GutterPanelFrame, b: GutterPanelFrame) {
  *
  * `resetKey` reopens or closes the panel to its default whenever it changes,
  * so a panel the operator dismissed on one page comes back on the next.
+ * `memory` carries the panel across a remount of the same page.
  *
  * The container must reserve its scrollbar gutter (`scrollbar-gutter: stable`)
  * so content taller than the page cannot change the measured gutter.
@@ -50,9 +58,10 @@ export function useGutterPanel(
   contentRef: React.RefObject<HTMLElement | null>,
   size: GutterPanelSize | null,
   resetKey?: unknown,
+  memory?: GutterPanelMemory,
 ) {
-  const [frame, setFrame] = React.useState<GutterPanelFrame>(UNDOCKED_FRAME);
-  const [open, setOpen] = React.useState(false);
+  const [frame, setFrame] = React.useState<GutterPanelFrame>(() => memory?.current?.frame ?? UNDOCKED_FRAME);
+  const [open, setOpen] = React.useState(() => memory?.current?.open ?? false);
   const width = size?.width;
   const gap = size?.gap;
 
@@ -100,6 +109,10 @@ export function useGutterPanel(
     setDefaultFor({ docked: frame.docked, resetKey });
     setOpen(frame.docked);
   }
+
+  React.useLayoutEffect(() => {
+    if (memory) memory.current = { frame, open };
+  }, [frame, memory, open]);
 
   return { frame, open, setOpen };
 }
