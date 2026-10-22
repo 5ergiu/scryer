@@ -2761,13 +2761,6 @@ export const convertTitleClaimToPermanentMutation = `mutation ConvertTitleClaimT
   }
 }`;
 
-/// Keep a title. Returns the live operator keep it already has instead of
-/// stacking a second one.
-export const createOperatorKeepClaimMutation = `mutation CreateOperatorKeepClaim($titleId: ID!) {
-  createOperatorKeepClaim(titleId: $titleId) {${TITLE_CLAIM_FIELDS}
-  }
-}`;
-
 export const releaseTitleClaimMutation = `mutation ReleaseTitleClaim($input: ReleaseTitleClaimInput!) {
   releaseTitleClaim(input: $input) {${TITLE_CLAIM_FIELDS}
   }

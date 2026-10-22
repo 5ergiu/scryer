@@ -269,23 +269,6 @@ impl RequestRuleMutations {
         Ok(crate::mappers::from_title_claim(claim))
     }
 
-    /// Keep a title: place an operator keep on it, or return the live one it
-    /// already has. Requires title management on the title's own library.
-    async fn create_operator_keep_claim(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(desc = "Title to keep.")] title_id: ID,
-    ) -> GqlResult<TitleClaim> {
-        let app = app_from_ctx(ctx)?;
-        let actor = crate::context::actor_from_ctx(ctx)?;
-
-        let claim = app
-            .create_operator_keep_claim(&actor, title_id.as_ref())
-            .await
-            .map_err(to_gql_error)?;
-        Ok(crate::mappers::from_title_claim(claim))
-    }
-
     /// Withdraw a claim by hand. The reason is required and kept as history.
     async fn release_title_claim(
         &self,

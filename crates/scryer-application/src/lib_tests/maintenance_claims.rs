@@ -195,12 +195,19 @@ fn keep(id: &str, title_id: &str) -> LifecycleClaim {
     claim
 }
 
+fn operator_keep(id: &str, title_id: &str) -> LifecycleClaim {
+    let mut claim = keep(id, title_id);
+    claim.producer = LifecycleClaimProducer::OperatorKeep;
+    claim.producer_ref = None;
+    claim
+}
+
 // ── The executor's hold (FR-042) ────────────────────────────────────────────
 
 /// What sits on the title when the destructive action comes due.
 enum Claim {
     Lease(LifecycleClaimState),
-    /// Placed through the same entry point the Keep button calls.
+    /// An operator keep already stored on the title.
     OperatorKeep,
 }
 
@@ -265,10 +272,9 @@ async fn assert_destructive_hold(claim: Claim, expected_hold: Option<&str>) {
         }
         Claim::OperatorKeep => {
             fixture
-                .app
-                .create_operator_keep_claim(&fixture.user, &title.id)
-                .await
-                .expect("keep the title");
+                .claims
+                .seed(operator_keep("operator-keep", &title.id))
+                .await;
         }
     }
 
@@ -414,11 +420,8 @@ async fn a_candidate_row_carries_its_titles_operator_keep() {
     let unkept = seed_title(&fixture.app, &fixture.user, "Unkept subject").await;
     fixture.claims.seed(keep("request-keep", &unkept.id)).await;
     fixture.evaluate().await;
-    let keep = fixture
-        .app
-        .create_operator_keep_claim(&fixture.user, &kept.id)
-        .await
-        .expect("keep the title");
+    let keep = operator_keep("operator-keep", &kept.id);
+    fixture.claims.seed(keep.clone()).await;
 
     let rows = fixture
         .app
@@ -439,7 +442,7 @@ async fn a_candidate_row_carries_its_titles_operator_keep() {
     assert_eq!(
         keep_for(&unkept.id),
         None,
-        "a request's keep is not the operator's, so it offers Keep"
+        "a request's keep is not an operator keep"
     );
 }
 

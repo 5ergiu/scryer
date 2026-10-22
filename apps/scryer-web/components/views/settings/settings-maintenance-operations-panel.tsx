@@ -542,7 +542,6 @@ export function MaintenanceCandidatesPanel({
                     <TableCell className="space-x-2 whitespace-nowrap text-right">
                       <TitleKeepControl
                         id={selectorId("settings-maintenance-candidate-keep", candidate.id)}
-                        titleId={candidate.titleId}
                         keepClaimId={candidate.operatorKeepClaimId}
                         onChanged={refreshCandidates}
                       />

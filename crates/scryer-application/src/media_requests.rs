@@ -1419,51 +1419,6 @@ impl AppUseCase {
             .await
     }
 
-    /// Keep a title: place an operator keep on it, or return the one already
-    /// live, so a second click never stacks a second hold to release.
-    pub async fn create_operator_keep_claim(
-        &self,
-        actor: &User,
-        title_id: &str,
-    ) -> AppResult<LifecycleClaim> {
-        let title = self
-            .services
-            .catalog
-            .titles
-            .get_by_id_without_external_ids(title_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("title not found".into()))?;
-        self.require_library_permission(actor, &title.library_id, LibraryPermission::ManageTitles)
-            .await?;
-        if let Some(existing) = self.live_operator_keep(title_id).await? {
-            return Ok(existing);
-        }
-        let now = chrono::Utc::now();
-        let keep = operator_keep(title.id, title.library_id, &actor.id, now);
-        if let Err(error) = self.services.catalog.lifecycle_claims.create(&keep).await {
-            // A title holds one live operator keep. A concurrent Keep that won
-            // the race is the keep this click asked for.
-            return match self.live_operator_keep(title_id).await? {
-                Some(existing) => Ok(existing),
-                None => Err(error),
-            };
-        }
-        self.reload_claim(&keep.id).await
-    }
-
-    async fn live_operator_keep(&self, title_id: &str) -> AppResult<Option<LifecycleClaim>> {
-        Ok(self
-            .services
-            .catalog
-            .lifecycle_claims
-            .list_for_title(title_id)
-            .await?
-            .into_iter()
-            .find(|claim| {
-                claim.producer == LifecycleClaimProducer::OperatorKeep && claim.is_live()
-            }))
-    }
-
     /// Push a live claim's window out to `expires_at`.
     ///
     /// The repository refuses this for a claim that is not live — an expired

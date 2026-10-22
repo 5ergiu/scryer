@@ -1,5 +1,4 @@
 import * as React from "react";
-import { Shield } from "lucide-react";
 import { useClient } from "urql";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,24 +13,21 @@ import {
 import { Input } from "@/components/ui/input";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
-import {
-  createOperatorKeepClaimMutation,
-  releaseTitleClaimMutation,
-} from "@/lib/graphql/mutations";
+import { releaseTitleClaimMutation } from "@/lib/graphql/mutations";
 import { titleClaimsQuery } from "@/lib/graphql/queries";
 import type { TitleClaimRecord } from "@/lib/types/request-rule-sets";
 import { liveOperatorKeep } from "@/lib/utils/request-rule-sets";
 
-/// Keep a title with one click, or show it as kept with the release control
-/// for that keep. The release asks for a reason: the API refuses a blank one.
+/// Show a title's operator keep with the release control for that keep, or
+/// nothing when it has none. Keeping a title is a tag rule's job; these keeps
+/// come from converted request holds and earlier releases. The release asks for
+/// a reason: the API refuses a blank one.
 export function TitleKeepControl({
   id,
-  titleId,
   keepClaimId,
   onChanged,
 }: {
   id: string;
-  titleId: string;
   keepClaimId: string | null;
   onChanged: () => void;
 }) {
@@ -57,26 +53,7 @@ export function TitleKeepControl({
     }
   };
 
-  if (!keepClaimId) {
-    return (
-      <Button
-        id={id}
-        type="button"
-        size="sm"
-        variant="secondary"
-        disabled={busy}
-        onClick={() =>
-          void run(
-            client.mutation(createOperatorKeepClaimMutation, { titleId }).toPromise(),
-            "status.titleKept",
-          )
-        }
-      >
-        <Shield className="h-4 w-4" />
-        {t("label.keep")}
-      </Button>
-    );
-  }
+  if (!keepClaimId) return null;
 
   return (
     <span className="inline-flex items-center gap-2">
@@ -147,8 +124,8 @@ export function TitleKeepControl({
   );
 }
 
-/// The title page's Keep: reads the title's claims once, then rereads them
-/// after each keep or release. Render it only for a reader who manages the
+/// The title page's operator keep, when it has one: reads the title's claims
+/// once, then rereads them after a release. Render it only for a reader who manages the
 /// title; the claims query refuses anyone else.
 export function TitleKeepAction({ titleId }: { titleId: string }) {
   const client = useClient();
@@ -165,13 +142,13 @@ export function TitleKeepAction({ titleId }: { titleId: string }) {
     void load();
   }, [load]);
 
-  if (!claims) return null;
+  const keep = claims ? liveOperatorKeep(claims) : null;
+  if (!keep) return null;
   return (
     <div className="mb-3 flex justify-end">
       <TitleKeepControl
         id="title-overview-keep"
-        titleId={titleId}
-        keepClaimId={liveOperatorKeep(claims)?.id ?? null}
+        keepClaimId={keep.id}
         onChanged={() => void load()}
       />
     </div>
