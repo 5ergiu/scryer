@@ -3917,7 +3917,6 @@ export const maintenanceCandidatesQuery = `query MaintenanceCandidates($ruleSetI
       totalSizeBytes
       storageRootFileCount
       storageRootTotalSizeBytes
-    operatorKeepClaimId
     revisionNumber
     subjectKind
     subjectId

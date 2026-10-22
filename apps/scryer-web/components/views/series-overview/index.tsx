@@ -1257,7 +1257,6 @@ function SeriesOverviewViewImpl({
         <div>
           <TitleOverviewActions
             key={title.id}
-            titleId={title.id}
             monitored={title.monitored}
             monitoredUpdating={monitoredUpdating}
             onToggleMonitoring={

@@ -6490,8 +6490,6 @@ pub enum LifecycleClaimProducer {
     RequestLease,
     /// A "forever" request: a permanent keep.
     RequestPermanent,
-    /// An administrator pinned the title by hand.
-    OperatorKeep,
 }
 
 impl LifecycleClaimProducer {
@@ -6499,7 +6497,6 @@ impl LifecycleClaimProducer {
         match self {
             Self::RequestLease => "request_lease",
             Self::RequestPermanent => "request_permanent",
-            Self::OperatorKeep => "operator_keep",
         }
     }
 
@@ -6507,7 +6504,6 @@ impl LifecycleClaimProducer {
         match value {
             "request_lease" => Some(Self::RequestLease),
             "request_permanent" => Some(Self::RequestPermanent),
-            "operator_keep" => Some(Self::OperatorKeep),
             _ => None,
         }
     }

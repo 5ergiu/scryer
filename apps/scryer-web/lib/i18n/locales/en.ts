@@ -105,7 +105,6 @@ const en: LocaleDictionary = {
   "label.autoSearch": "Auto Search",
   "label.interactiveSearch": "Interactive Search",
   "label.interactive": "Interactive",
-  "label.kept": "Kept",
   "label.searching": "Searching",
   "help.autoSearchTooltip":
     "Auto search and queue the latest matching release for this item.",

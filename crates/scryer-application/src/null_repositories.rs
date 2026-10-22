@@ -3645,12 +3645,7 @@ impl crate::ports::LifecycleClaimRepository for NullLifecycleClaimRepository {
             LIFECYCLE_CLAIM_NOT_CONFIGURED.to_string(),
         ))
     }
-    async fn convert_to_permanent(
-        &self,
-        _id: &str,
-        _replacement: &scryer_domain::LifecycleClaim,
-        _now: DateTime<Utc>,
-    ) -> AppResult<String> {
+    async fn convert_to_permanent(&self, _id: &str, _now: DateTime<Utc>) -> AppResult<()> {
         Err(AppError::Repository(
             LIFECYCLE_CLAIM_NOT_CONFIGURED.to_string(),
         ))

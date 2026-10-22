@@ -82,7 +82,6 @@ fn lifecycle_claim_producer_value(producer: LifecycleClaimProducer) -> Lifecycle
     match producer {
         LifecycleClaimProducer::RequestLease => LifecycleClaimProducerValue::RequestLease,
         LifecycleClaimProducer::RequestPermanent => LifecycleClaimProducerValue::RequestPermanent,
-        LifecycleClaimProducer::OperatorKeep => LifecycleClaimProducerValue::OperatorKeep,
     }
 }
 

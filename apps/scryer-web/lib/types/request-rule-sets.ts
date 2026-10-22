@@ -16,12 +16,8 @@ export type RequestDecisionOutcome = "AUTO_APPROVE" | "MANUAL_REVIEW" | "DENY";
 export type RequestVote = "APPROVE" | "DENY" | "MANUAL" | "ABSTAIN";
 
 /// What wrote a lifecycle claim. `REQUEST_LEASE` is a finite window a request
-/// asked for, `REQUEST_PERMANENT` a request approved forever, and
-/// `OPERATOR_KEEP` a hold an administrator placed by hand.
-export type LifecycleClaimProducer =
-  | "REQUEST_LEASE"
-  | "REQUEST_PERMANENT"
-  | "OPERATOR_KEEP";
+/// asked for, and `REQUEST_PERMANENT` a request approved forever.
+export type LifecycleClaimProducer = "REQUEST_LEASE" | "REQUEST_PERMANENT";
 
 export type LifecycleClaimKind = "RETAIN_UNTIL" | "KEEP";
 

@@ -249,11 +249,11 @@ impl RequestRuleMutations {
         Ok(crate::mappers::from_title_claim(claim))
     }
 
-    /// Replace a live claim with a permanent operator keep.
+    /// Keep a title permanently by ending its lease, so it carries no expiry.
     ///
-    /// The replacement is a new claim rather than a mutated one, so the original
-    /// stays as history and the trail still says a request produced the hold and
-    /// an administrator chose to make it permanent.
+    /// The lease stays as history in the `CONVERTED` state, so the trail still
+    /// says a request produced it and an administrator chose to drop the
+    /// expiry.
     async fn convert_title_claim_to_permanent(
         &self,
         ctx: &Context<'_>,
