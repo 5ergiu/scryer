@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
 import { useTranslate } from "@/lib/context/translate-context";
+import { type GutterRailSize, useGutterRailWidth } from "@/lib/hooks/use-gutter-rail-width";
 import type { ListAccountMemberKey } from "@/lib/hooks/use-list-account-link";
 import type {
   ListAccount,
@@ -34,6 +35,11 @@ import { ListTable } from "./list-table";
 import { ProviderBrowser } from "./provider-browser";
 import { PersonalAccounts } from "./personal-accounts";
 import { ProviderAppsPanel } from "./provider-apps-panel";
+
+// The plugins rail sits in the right gutter beside the centered lists and
+// moves behind the Plugins button before the lists would have to narrow. The
+// inset matches the page's widest side padding.
+const PLUGIN_RAIL_SIZE: GutterRailSize = { minWidth: 288, maxWidth: 720, gap: 20, inset: 32 };
 
 export type ListRouteOptions = {
   libraries: LibraryRecord[];
@@ -163,20 +169,11 @@ export function ListsView(props: ListsViewProps) {
   const detailFallback = detail ? (subscriptions.find((entry) => entry.id === detail.id) ?? null) : null;
   const detailSubscription = detail?.subscription ?? detailFallback;
   const showPlugins = props.canManageProviderApps && (section === "public" || section === "personal");
+  const scrollRef = React.useRef<HTMLElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const [pluginsDocked, setPluginsDocked] = React.useState(false);
+  const pluginsWidth = useGutterRailWidth(scrollRef, contentRef, showPlugins ? PLUGIN_RAIL_SIZE : null);
+  const pluginsDocked = pluginsWidth !== null;
   const [pluginsOpen, setPluginsOpen] = React.useState(false);
-
-  React.useEffect(() => {
-    const content = contentRef.current;
-    if (!content || !showPlugins) return;
-    // Match the settings pages' minimum main width, plugin rail width and gap.
-    const update = () => setPluginsDocked(content.clientWidth >= 1080 + 288 + 20);
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [showPlugins]);
 
   React.useEffect(() => setPluginsOpen(false), [pluginsDocked, section]);
 
@@ -189,10 +186,9 @@ export function ListsView(props: ListsViewProps) {
   ) : null;
 
   return (
-    <section id="lists-view" className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-[var(--scry-surfE)]">
+    <section ref={scrollRef} id="lists-view" className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-[var(--scry-surfE)] [scrollbar-gutter:stable]">
       <div className="w-full px-4 py-6 sm:px-6 lg:px-8">
-      <div ref={contentRef} className="flex items-start justify-center gap-5">
-      <div className="flex min-w-0 max-w-[1280px] flex-[1_1_1280px] flex-col gap-4">
+      <div ref={contentRef} className="relative mx-auto flex max-w-[1280px] flex-col gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-11 w-11 flex-none items-center justify-center rounded-[13px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.16)] text-[var(--scry-accent-text)]">
             <ListPlus className="h-5 w-5" />
@@ -342,10 +338,13 @@ export function ListsView(props: ListsViewProps) {
             ) : null}
           </div>
         )}
-      </div>
       {showPlugins && pluginsDocked ? (
-        <aside aria-label={t("settings.plugins")} className="sticky top-[26px] min-w-[288px] max-w-[720px] flex-[1_1_720px]">
-          {plugins}
+        <aside
+          aria-label={t("settings.plugins")}
+          style={{ width: pluginsWidth, marginLeft: PLUGIN_RAIL_SIZE.gap }}
+          className="absolute bottom-0 left-full top-0"
+        >
+          <div className="sticky top-[26px]">{plugins}</div>
         </aside>
       ) : null}
       </div>

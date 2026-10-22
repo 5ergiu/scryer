@@ -43,6 +43,7 @@ import type {
 import type { LocaleCode, LanguageOption } from "@/lib/i18n";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
+import { type GutterRailSize, useGutterRailWidth } from "@/lib/hooks/use-gutter-rail-width";
 import { cn } from "@/lib/utils";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
@@ -147,38 +148,32 @@ const SettingsBackupsContainer = lazy(async () => ({
 export const SETTINGS_REFERENCE_SLOT_ID = "settings-content-reference";
 export const SETTINGS_HEADER_ACTIONS_SLOT_ID = "settings-header-actions";
 
-const DOCKED_REFERENCE_GAP_PX = 20;
-
-type DockedReferenceLayout = {
-  mainMinWidth: number;
-  railMinWidth: number;
-  contentClass: string;
-  mainClass: string;
-  railClass: string;
+/**
+ * The plugins rail lives in the right gutter beside the centered settings
+ * pane. The pane keeps `contentWidth` (padding included) whether the rail is
+ * docked or not, so the rail never narrows or shifts the content; it moves
+ * behind the Plugins button once the gutter cannot hold its minimum. The
+ * pane's own right padding separates the rail from the content, so the rail
+ * needs no gap of its own.
+ */
+type ReferenceRailLayout = {
+  contentWidth: number;
+  rail: GutterRailSize;
 };
 
-const STANDARD_FILTERED_PLUGIN_LAYOUT: DockedReferenceLayout = {
-  mainMinWidth: 1080,
-  railMinWidth: 288,
-  contentClass: "max-w-none",
-  mainClass: "min-w-0 max-w-[1280px] flex-[1_1_1280px]",
-  railClass: "sticky top-[26px] z-auto min-w-[288px] max-w-[720px] flex-[1_1_720px]",
+const STANDARD_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
+  contentWidth: 1280,
+  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
 };
 
-const INDEXERS_FILTERED_PLUGIN_LAYOUT: DockedReferenceLayout = {
-  mainMinWidth: 1360,
-  railMinWidth: 288,
-  contentClass: "max-w-none",
-  mainClass: "min-w-[1360px] max-w-[1520px] flex-[1_1_1520px]",
-  railClass: "sticky top-[26px] z-auto min-w-[288px] max-w-[720px] flex-[1_1_720px]",
+const INDEXERS_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
+  contentWidth: 1460,
+  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
 };
 
-const SUBTITLES_FILTERED_PLUGIN_LAYOUT: DockedReferenceLayout = {
-  mainMinWidth: 960,
-  railMinWidth: 320,
-  contentClass: "max-w-none",
-  mainClass: "min-w-0 max-w-[1120px] flex-[1_1_960px]",
-  railClass: "sticky top-[26px] z-auto min-w-[320px] max-w-[560px] flex-[1_1_560px]",
+const SUBTITLES_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
+  contentWidth: 1280,
+  rail: { minWidth: 320, maxWidth: 560, gap: 0, inset: 30 },
 };
 
 const INDEXER_SETTINGS_TAB_ITEMS: Record<
@@ -512,45 +507,18 @@ export const SettingsContainer = memo(function SettingsContainer({
         : STANDARD_FILTERED_PLUGIN_LAYOUT
     : null;
   const settingsContentRef = useRef<HTMLElement | null>(null);
+  const settingsPaneRef = useRef<HTMLDivElement | null>(null);
   const [referenceRailOpen, setReferenceRailOpen] = useState(false);
-  const [referenceRailDocked, setReferenceRailDocked] = useState(false);
+  const referenceRailWidth = useGutterRailWidth(
+    settingsContentRef,
+    settingsPaneRef,
+    referenceLayout?.rail ?? null,
+  );
+  const referenceRailDocked = referenceRailWidth !== null;
 
   useEffect(() => {
     setReferenceRailOpen(false);
   }, [referenceRailDocked, settingsSection]);
-
-  useEffect(() => {
-    if (!referenceLayout) {
-      setReferenceRailDocked(false);
-      return;
-    }
-
-    const contentElement = settingsContentRef.current;
-    if (!contentElement) {
-      setReferenceRailDocked(false);
-      return;
-    }
-
-    const minimumDockedWidth =
-      referenceLayout.mainMinWidth +
-      referenceLayout.railMinWidth +
-      DOCKED_REFERENCE_GAP_PX;
-    const syncReferenceRailMode = () => {
-      setReferenceRailDocked(
-        contentElement.getBoundingClientRect().width >= minimumDockedWidth,
-      );
-    };
-
-    syncReferenceRailMode();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", syncReferenceRailMode);
-      return () => window.removeEventListener("resize", syncReferenceRailMode);
-    }
-
-    const resizeObserver = new ResizeObserver(syncReferenceRailMode);
-    resizeObserver.observe(contentElement);
-    return () => resizeObserver.disconnect();
-  }, [referenceLayout]);
 
   useEffect(() => {
     if (!referenceRailOpen || referenceRailDocked) {
@@ -843,17 +811,18 @@ export const SettingsContainer = memo(function SettingsContainer({
       <main
         ref={settingsContentRef}
         data-slot="settings-main-scroll"
-        className="min-w-0 flex-1 overflow-visible bg-transparent min-[981px]:overflow-y-auto"
+        className={cn(
+          "min-w-0 flex-1 overflow-visible bg-transparent min-[981px]:overflow-y-auto",
+          showReferenceRail && "[scrollbar-gutter:stable]",
+        )}
       >
         <div
+          ref={settingsPaneRef}
+          style={referenceLayout ? { maxWidth: referenceLayout.contentWidth } : undefined}
           className={cn(
             "mx-auto w-full px-4 py-5 pb-[calc(env(safe-area-inset-bottom)+5rem)] sm:px-6 md:px-[30px] md:py-[26px] md:pb-[60px]",
             showReferenceRail
-              ? referenceRailDocked
-                ? referenceLayout?.contentClass
-                : settingsSection === "indexers"
-                  ? "max-w-none"
-                  : "max-w-[1280px]"
+              ? "relative"
               : settingsSection === "rules" ||
                   settingsSection === "maintenanceRules" ||
                   settingsSection === "requestRules" ||
@@ -866,22 +835,8 @@ export const SettingsContainer = memo(function SettingsContainer({
                     : "max-w-[1280px]",
           )}
         >
-          <div
-            className={cn(
-              showReferenceRail && referenceRailDocked
-                ? "flex items-start justify-center gap-5"
-                : "contents",
-            )}
-          >
-            <div
-              className={cn(
-                showReferenceRail && referenceRailDocked
-                  ? referenceLayout?.mainClass
-                  : showReferenceRail
-                    ? "min-w-0"
-                  : "contents",
-              )}
-            >
+          <div className="contents">
+            <div className={showReferenceRail ? "min-w-0" : "contents"}>
           <div className="mb-4 flex items-center gap-1.5 text-[12.5px] text-[var(--scry-faint)]">
             <span>{breadcrumbRootLabel}</span>
             <ChevronRight className="h-3.5 w-3.5" />
@@ -1081,9 +1036,10 @@ export const SettingsContainer = memo(function SettingsContainer({
                 ) : null}
                 <aside
                   aria-label={t("settings.plugins")}
+                  style={referenceRailDocked ? { width: referenceRailWidth } : undefined}
                   className={cn(
                     referenceRailDocked
-                      ? referenceLayout?.railClass
+                      ? "absolute bottom-[60px] left-full top-[26px]"
                       : "fixed bottom-4 right-4 top-[118px] z-50 flex w-[min(420px,calc(100vw-2rem))] min-w-0 flex-col gap-3 overflow-y-auto rounded-[16px] border border-[var(--scry-border)] bg-[var(--scry-bg)] p-3 shadow-[0_20px_50px_rgba(0,0,0,0.38)] transition duration-200",
                     !referenceRailDocked &&
                       (referenceRailOpen
@@ -1110,7 +1066,7 @@ export const SettingsContainer = memo(function SettingsContainer({
                   <div
                     id={SETTINGS_REFERENCE_SLOT_ID}
                     data-slot="settings-reference"
-                    className="min-w-0"
+                    className={cn("min-w-0", referenceRailDocked && "sticky top-[26px]")}
                   />
                 </aside>
               </>
