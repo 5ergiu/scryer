@@ -2032,6 +2032,8 @@ const en: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Filter by provider type",
   "settings.noIndexersFound": "No indexers found.",
   "settings.indexerConfig": "Provider Configuration",
+  "settings.indexerDynamicFieldsLoading": "Loading the fields for this selection…",
+  "settings.indexerDynamicFieldsError": "Couldn't load the fields for this selection: {{error}}",
   "settings.advancedConfig": "Advanced",
   "settings.managedIndexerBadge": "Managed",
   "settings.managedByIndexer": "Managed by {{name}}",

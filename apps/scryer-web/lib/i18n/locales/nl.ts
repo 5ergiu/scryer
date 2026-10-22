@@ -1676,6 +1676,8 @@ const nl: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Filteren op providertype",
   "settings.noIndexersFound": "Geen indexers gevonden.",
   "settings.indexerConfig": "Providerconfiguratie",
+  "settings.indexerDynamicFieldsLoading": "Velden voor deze selectie laden…",
+  "settings.indexerDynamicFieldsError": "Kan de velden voor deze selectie niet laden: {{error}}",
   "settings.managedIndexerBadge": "Beheerd",
   "settings.managedByIndexer": "Beheerd door {{name}}",
   "settings.managedByParent": "Beheerd door parent",

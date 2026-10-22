@@ -1953,6 +1953,8 @@ const ru: LocaleDictionary = {
 
     "settings.noIndexersFound": "Индексаторы не найдены.",
     "settings.indexerConfig": "Настройки провайдера",
+    "settings.indexerDynamicFieldsLoading": "Загрузка полей для этого выбора…",
+    "settings.indexerDynamicFieldsError": "Не удалось загрузить поля для этого выбора: {{error}}",
 
     "settings.managedIndexerBadge": "Управляемый",
     "settings.managedByIndexer": "Управляется: {{name}}",

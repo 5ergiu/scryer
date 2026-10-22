@@ -1225,6 +1225,8 @@ const ja: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "プロバイダータイプでフィルター",
   "settings.noIndexersFound": "インデクサーが見つかりません。",
   "settings.indexerConfig": "プラグイン設定",
+  "settings.indexerDynamicFieldsLoading": "この選択の項目を読み込み中…",
+  "settings.indexerDynamicFieldsError": "この選択の項目を読み込めませんでした: {{error}}",
   "settings.newPassword": "新しいパスワード",
   "settings.rules": "カスタムルール",
   "settings.noRulesFound": "カスタムルールが設定されていません。",

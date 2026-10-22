@@ -3,6 +3,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -43,6 +44,7 @@ import {
 } from "@/lib/utils/indexer-download-client-mapping";
 import {
   indexerProviderTypesQuery,
+  pluginConfigFieldsQuery,
   proxyConfigsQuery,
   indexersInitQuery,
   indexersQuery,
@@ -63,6 +65,16 @@ import {
   providerConfigValuesToRecord,
 } from "@/lib/utils/provider-config";
 import { useSeedingProfileOptions } from "@/lib/hooks/use-seeding-profile-options";
+import {
+  createRequestEpoch,
+  dynamicTriggerSignature,
+  dynamicTriggerValues,
+  mergeDynamicConfigFields,
+  omitHiddenConfigValues,
+  reconcileDynamicConfigValues,
+  type DynamicConfigFields,
+  type DynamicConfigFieldsStatus,
+} from "@/lib/utils/dynamic-config-fields";
 import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 import {
   buildIndexerSavePayload,
@@ -75,6 +87,10 @@ import {
 type SettingsIndexersSectionProps = ComponentProps<
   typeof SettingsIndexersSection
 >;
+
+/// How long the form waits after the last trigger-field change before asking the
+/// plugin for its fields, so typing does not fire one request per keystroke.
+const DYNAMIC_CONFIG_FIELDS_DEBOUNCE_MS = 300;
 
 const INDEXER_INITIAL_DRAFT = {
   name: "",
@@ -372,6 +388,148 @@ export function SettingsIndexersContainer({
 
   const isDraftDirty =
     JSON.stringify(indexerDraft) !== JSON.stringify(draftBaseline);
+
+  // Fields the selected plugin adds for the values entered so far. Asked for on
+  // open and whenever a trigger value changes; the request epoch makes sure a
+  // slow answer for an earlier selection never lands over a later one.
+  const [dynamicConfigFields, setDynamicConfigFields] =
+    useState<DynamicConfigFields | null>(null);
+  const [dynamicConfigFieldsStatus, setDynamicConfigFieldsStatus] =
+    useState<DynamicConfigFieldsStatus>({ state: "idle" });
+  const dynamicConfigFieldsRef = useRef<DynamicConfigFields | null>(null);
+  const dynamicConfigFieldsEpochRef = useRef(createRequestEpoch());
+  const normalizedDraftProviderType = indexerDraft.providerType
+    .trim()
+    .toLowerCase();
+  const staticSelectedProvider =
+    providerTypes.find(
+      (pt) => pt.providerType === normalizedDraftProviderType,
+    ) ?? null;
+  const dynamicTriggerKeys = staticSelectedProvider?.dynamicConfigTriggerKeys;
+  const dynamicTriggers =
+    isEditorOpen && dynamicTriggerKeys && dynamicTriggerKeys.length > 0
+      ? dynamicTriggerValues(
+          dynamicTriggerKeys,
+          staticSelectedProvider?.configFields ?? [],
+          indexerDraft.configValues,
+        )
+      : null;
+  const dynamicTriggersSignature = dynamicTriggers
+    ? dynamicTriggerSignature(dynamicTriggers)
+    : null;
+
+  const applyDynamicConfigFields = useCallback(
+    (next: DynamicConfigFields | null) => {
+      const previous = dynamicConfigFieldsRef.current;
+      dynamicConfigFieldsRef.current = next;
+      setDynamicConfigFields(next);
+      // The baseline moves with the draft, so fields arriving for a stored
+      // selection do not count as an unsaved edit.
+      setIndexerDraft((prev) => {
+        const configValues = reconcileDynamicConfigValues(
+          prev.configValues,
+          previous,
+          next,
+        );
+        return configValues === prev.configValues
+          ? prev
+          : { ...prev, configValues };
+      });
+      setDraftBaseline((prev) => {
+        const configValues = reconcileDynamicConfigValues(
+          prev.configValues,
+          previous,
+          next,
+        );
+        return configValues === prev.configValues
+          ? prev
+          : { ...prev, configValues };
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const epoch = dynamicConfigFieldsEpochRef.current.next();
+    if (dynamicTriggersSignature === null || !normalizedDraftProviderType) {
+      dynamicConfigFieldsRef.current = null;
+      setDynamicConfigFields(null);
+      setDynamicConfigFieldsStatus({ state: "idle" });
+      return;
+    }
+    const triggers = Object.fromEntries(
+      JSON.parse(dynamicTriggersSignature) as Array<[string, string]>,
+    );
+    setDynamicConfigFieldsStatus({ state: "loading" });
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const { data, error } = await client
+            .query(
+              pluginConfigFieldsQuery,
+              {
+                providerType: normalizedDraftProviderType,
+                values: providerConfigRecordToValues(triggers),
+              },
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
+          if (!dynamicConfigFieldsEpochRef.current.isCurrent(epoch)) {
+            return;
+          }
+          if (error) throw error;
+          const answer = data?.pluginConfigFields as
+            | DynamicConfigFields
+            | undefined;
+          applyDynamicConfigFields(
+            answer &&
+              (answer.fields.length > 0 || answer.hiddenFieldKeys.length > 0)
+              ? answer
+              : null,
+          );
+          setDynamicConfigFieldsStatus({ state: "idle" });
+        } catch (error) {
+          if (!dynamicConfigFieldsEpochRef.current.isCurrent(epoch)) {
+            return;
+          }
+          // Keep the draft values: the save path still validates them, and
+          // the next answer reconciles them.
+          setDynamicConfigFieldsStatus({
+            state: "error",
+            message: userFacingGraphQlErrorMessage(
+              error,
+              t("status.failedToLoad"),
+            ),
+          });
+        }
+      })();
+    }, DYNAMIC_CONFIG_FIELDS_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [
+    applyDynamicConfigFields,
+    client,
+    dynamicTriggersSignature,
+    normalizedDraftProviderType,
+    t,
+  ]);
+
+  const effectiveProviderTypes = useMemo(
+    () =>
+      dynamicConfigFields && staticSelectedProvider
+        ? providerTypes.map((pt) =>
+            pt === staticSelectedProvider
+              ? {
+                  ...pt,
+                  configFields: mergeDynamicConfigFields(
+                    pt.configFields,
+                    dynamicConfigFields,
+                  ),
+                }
+              : pt,
+          )
+        : providerTypes,
+    [dynamicConfigFields, providerTypes, staticSelectedProvider],
+  );
 
   const refreshIndexers = useCallback(async () => {
     try {
@@ -699,19 +857,24 @@ export function SettingsIndexersContainer({
       .trim()
       .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
-      null;
+      effectiveProviderTypes.find(
+        (pt) => pt.providerType === normalizedProviderType,
+      ) ?? null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so
     // nothing is decided behind their back.
-    const configValues = normalizeIndexerConfigValues(
+    const draftConfigValues = normalizeIndexerConfigValues(
       selectedProvider?.configFields ?? [],
       indexerDraft.configValues,
     );
-    if (configValues !== indexerDraft.configValues) {
-      setIndexerDraft((prev) => ({ ...prev, configValues }));
+    if (draftConfigValues !== indexerDraft.configValues) {
+      setIndexerDraft((prev) => ({ ...prev, configValues: draftConfigValues }));
     }
+    const configValues = omitHiddenConfigValues(
+      draftConfigValues,
+      dynamicConfigFields,
+    );
     const missingRequiredConfigField = findMissingRequiredConfigField(
       selectedProvider?.configFields ?? [],
       configValues,
@@ -1314,19 +1477,24 @@ export function SettingsIndexersContainer({
       .trim()
       .toLowerCase();
     const selectedProvider =
-      providerTypes.find((pt) => pt.providerType === normalizedProviderType) ??
-      null;
+      effectiveProviderTypes.find(
+        (pt) => pt.providerType === normalizedProviderType,
+      ) ?? null;
     // Parse on save: an operator pastes a tracker's address out of an email or
     // their browser, so `nzbgeek.info` and `192.168.1.5:9117` mean what they
     // plainly mean. The form is put back with the scheme that was chosen, so
     // nothing is decided behind their back.
-    const configValues = normalizeIndexerConfigValues(
+    const draftConfigValues = normalizeIndexerConfigValues(
       selectedProvider?.configFields ?? [],
       indexerDraft.configValues,
     );
-    if (configValues !== indexerDraft.configValues) {
-      setIndexerDraft((prev) => ({ ...prev, configValues }));
+    if (draftConfigValues !== indexerDraft.configValues) {
+      setIndexerDraft((prev) => ({ ...prev, configValues: draftConfigValues }));
     }
+    const configValues = omitHiddenConfigValues(
+      draftConfigValues,
+      dynamicConfigFields,
+    );
     const missingRequiredConfigField = findMissingRequiredConfigField(
       selectedProvider?.configFields ?? [],
       configValues,
@@ -1428,7 +1596,8 @@ export function SettingsIndexersContainer({
         updateIndexerRateLimits={updateIndexerRateLimits}
         deleteIndexer={deleteIndexer}
         syncIndexer={syncIndexer}
-        providerTypes={providerTypes}
+        providerTypes={effectiveProviderTypes}
+        dynamicConfigFieldsStatus={dynamicConfigFieldsStatus}
         testIndexerConnection={testIndexerConnection}
         isTestingConnection={isTestingConnection}
         isEditorOpen={isEditorOpen}

@@ -1239,6 +1239,8 @@ const it: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Filtra per tipo di provider",
   "settings.noIndexersFound": "Nessun indexer trovato.",
   "settings.indexerConfig": "Configurazione plugin",
+  "settings.indexerDynamicFieldsLoading": "Caricamento dei campi per questa selezione…",
+  "settings.indexerDynamicFieldsError": "Impossibile caricare i campi per questa selezione: {{error}}",
   "settings.newPassword": "Nuova password",
   "settings.rules": "Regole personalizzate",
   "settings.noRulesFound": "Nessuna regola personalizzata configurata.",

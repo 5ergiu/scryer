@@ -837,15 +837,7 @@ const IMPORT_HISTORY_FIELDS = `
     finishedAt
     createdAt`;
 
-const PROVIDER_TYPE_FIELDS = `
-    providerType
-    name
-    defaultBaseUrl
-    availableHostBindings
-    recommendedFacets
-    supportedEvents
-    supportsTest
-    configFields {
+const CONFIG_FIELD_SELECTION = `
       key
       label
       fieldType
@@ -858,7 +850,18 @@ const PROVIDER_TYPE_FIELDS = `
       helpText
       visibleWhen { key op values }
       requiredWhen { key op values }
-      advanced
+      advanced`;
+
+const PROVIDER_TYPE_FIELDS = `
+    providerType
+    name
+    defaultBaseUrl
+    availableHostBindings
+    recommendedFacets
+    supportedEvents
+    supportsTest
+    dynamicConfigTriggerKeys
+    configFields {${CONFIG_FIELD_SELECTION}
     }`;
 
 export const SUBTITLE_SETTINGS_FIELDS = `
@@ -2368,6 +2371,14 @@ export const indexersQuery = `query Indexers($providerType: String) {
 
 export const indexerProviderTypesQuery = `query IndexerProviderTypes {
   indexerProviderTypes {${PROVIDER_TYPE_FIELDS}
+  }
+}`;
+
+export const pluginConfigFieldsQuery = `query PluginConfigFields($providerType: String!, $values: [ProviderConfigValueInput!]!) {
+  pluginConfigFields(providerType: $providerType, values: $values) {
+    fields {${CONFIG_FIELD_SELECTION}
+    }
+    hiddenFieldKeys
   }
 }`;
 

@@ -69,6 +69,7 @@ import {
   splitAdvancedConfigFields,
 } from "@/lib/utils/provider-config-fields";
 import { applyIndexerConfigOption } from "@/lib/utils/indexer-setup";
+import type { DynamicConfigFieldsStatus } from "@/lib/utils/dynamic-config-fields";
 import { cn } from "@/lib/utils";
 import type { BoxedActionButtonTone } from "@/lib/utils/action-button-styles";
 import {
@@ -154,6 +155,9 @@ type SettingsIndexersSectionProps = {
   deleteIndexer: (indexer: IndexerRecord) => Promise<void> | void;
   syncIndexer: (indexer: IndexerRecord) => Promise<void> | void;
   providerTypes: ProviderTypeInfo[];
+  /// Where the request for the selected plugin's value-dependent fields
+  /// stands. Their fields are already merged into `providerTypes`.
+  dynamicConfigFieldsStatus?: DynamicConfigFieldsStatus;
   testIndexerConnection: () => Promise<void> | void;
   isTestingConnection: boolean;
   isEditorOpen: boolean;
@@ -1138,6 +1142,7 @@ export function SettingsIndexersSection({
   deleteIndexer,
   syncIndexer,
   providerTypes,
+  dynamicConfigFieldsStatus = { state: "idle" },
   testIndexerConnection,
   isTestingConnection,
   isEditorOpen,
@@ -2082,6 +2087,26 @@ export function SettingsIndexersSection({
                             draft={indexerDraft}
                             onChange={handleConfigValueChange}
                           />
+                          {dynamicConfigFieldsStatus.state === "loading" ? (
+                            <p
+                              id="settings-indexer-dynamic-fields-loading"
+                              role="status"
+                              className="flex items-center gap-2 text-xs text-muted-foreground"
+                            >
+                              <LoadingMark className="h-4 w-4" />
+                              {t("settings.indexerDynamicFieldsLoading")}
+                            </p>
+                          ) : dynamicConfigFieldsStatus.state === "error" ? (
+                            <p
+                              id="settings-indexer-dynamic-fields-error"
+                              role="alert"
+                              className="text-xs text-[var(--scry-danger-text-soft)]"
+                            >
+                              {t("settings.indexerDynamicFieldsError", {
+                                error: dynamicConfigFieldsStatus.message,
+                              })}
+                            </p>
+                          ) : null}
                           {advancedProviderFields.length > 0 ? (
                             <Collapsible
                               open={advancedConfigOpen}

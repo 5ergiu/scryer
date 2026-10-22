@@ -1241,6 +1241,8 @@ const pt_BR: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Filtrar por tipo de provedor",
   "settings.noIndexersFound": "Nenhum indexador encontrado.",
   "settings.indexerConfig": "Configuração do plugin",
+  "settings.indexerDynamicFieldsLoading": "Carregando os campos desta seleção…",
+  "settings.indexerDynamicFieldsError": "Não foi possível carregar os campos desta seleção: {{error}}",
   "settings.newPassword": "Nova senha",
   "settings.rules": "Regras personalizadas",
   "settings.noRulesFound": "Nenhuma regra personalizada configurada.",
