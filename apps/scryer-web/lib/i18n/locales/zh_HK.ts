@@ -2485,6 +2485,8 @@ const zh_HK: LocaleDictionary = {
   "plugins.failure.timedOut": "插件回應時間過長。",
   "plugins.failure.resourceLimit": "插件記憶體不足。",
   "plugins.failure.withDetail": "{{reason}} 詳細資料：{{detail}}",
+  "plugins.failure.invalidUsernamePassword": "服務拒絕了用戶名稱或密碼。請檢查後再試。",
+  "plugins.failure.unknown": "插件報告了一個問題：{{code}}",
   "status.testingIndexerConnection": "正在測試連接…",
   "status.indexerConnectionTestPassed": "索引器連接測試通過。",
   "status.indexerConnectionTestFailed": "索引器連接測試失敗。",

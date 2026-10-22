@@ -1523,6 +1523,8 @@ const zh_CN: LocaleDictionary = {
   "plugins.failure.timedOut": "插件响应时间过长。",
   "plugins.failure.resourceLimit": "插件内存不足。",
   "plugins.failure.withDetail": "{{reason}} 详细信息：{{detail}}",
+  "plugins.failure.invalidUsernamePassword": "服务拒绝了用户名或密码。请检查后重试。",
+  "plugins.failure.unknown": "插件报告了一个问题：{{code}}",
   "status.testingIndexerConnection": "正在测试连接…",
   "status.indexerConnectionTestPassed": "索引器连接测试通过。",
   "status.indexerConnectionTestFailed": "索引器连接测试失败。",

@@ -3279,6 +3279,8 @@ const ru: LocaleDictionary = {
     "plugins.failure.timedOut": "Плагин слишком долго не отвечал.",
     "plugins.failure.resourceLimit": "Плагину не хватило памяти.",
     "plugins.failure.withDetail": "{{reason}} Подробности: {{detail}}",
+    "plugins.failure.invalidUsernamePassword": "Сервис отклонил имя пользователя или пароль. Проверьте их и повторите попытку.",
+    "plugins.failure.unknown": "Плагин сообщил о проблеме: {{code}}.",
 
     "status.testingIndexerConnection":
         "Проверка подключения...",

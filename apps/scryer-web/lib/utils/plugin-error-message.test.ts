@@ -7,9 +7,11 @@ import { fileURLToPath } from "node:url";
 import en from "../i18n/locales/en.ts";
 import {
   PLUGIN_FAILURE_KEYS,
+  humanisePluginReason,
   pluginErrorMessage,
   pluginFailureDetail,
   pluginFailureKey,
+  unknownPluginFailureReason,
 } from "./plugin-error-message.ts";
 
 const dictionary = en as Record<string, string>;
@@ -53,18 +55,64 @@ test("the plugin's own sentence follows the translated reason", () => {
   );
 });
 
-test("a reason this client does not know falls back to the server's sentence", () => {
-  const error = failure("plugin error Mystery: the dial is set to eleven", {
+test("a reason this client does not know shows the plugin's own sentence", () => {
+  const error = failure("plugin error quota_exhausted: the dial is set to eleven", {
     code: "PLUGIN_FAILED",
-    reason: "PLUGIN_SOMETHING_NEW",
+    reason: "PLUGIN_QUOTA_EXHAUSTED",
     detail: "the dial is set to eleven",
   });
 
   assert.equal(pluginFailureKey(error), null);
+  assert.equal(unknownPluginFailureReason(error), "PLUGIN_QUOTA_EXHAUSTED");
+  assert.equal(pluginErrorMessage(error, t, "Test failed"), "the dial is set to eleven");
+});
+
+test("a reason this client does not know, with no sentence, names the code in translation", () => {
+  const error = failure("plugin error quota_exhausted: indexer component failed", {
+    code: "PLUGIN_FAILED",
+    reason: "PLUGIN_QUOTA_EXHAUSTED",
+  });
+
   assert.equal(
     pluginErrorMessage(error, t, "Test failed"),
-    "plugin error Mystery: the dial is set to eleven",
+    "The plugin reported a problem: quota exhausted.",
   );
+});
+
+test("a new plugin reason translates once it is registered, with no other change", () => {
+  const reason = "PLUGIN_INVALID_USERNAME_PASSWORD";
+  const error = failure("plugin error invalid_username_password: Login refused", {
+    code: "PLUGIN_FAILED",
+    reason,
+    detail: "Login refused",
+  });
+  assert.equal(pluginFailureKey(error), "plugins.failure.invalidUsernamePassword");
+  assert.equal(unknownPluginFailureReason(error), null);
+  assert.equal(
+    pluginErrorMessage(error, t, "Test failed"),
+    "The service rejected the username or password. Check both and try again. Details: Login refused",
+  );
+
+  // The same failure before the client knew the reason: the plugin's sentence.
+  const unregistered = failure("plugin error invalid_username_password: Login refused", {
+    code: "PLUGIN_FAILED",
+    reason: "PLUGIN_INVALID_USERNAME_PASSWORDS",
+    detail: "Login refused",
+  });
+  assert.equal(pluginErrorMessage(unregistered, t, "Test failed"), "Login refused");
+});
+
+test("a reason without the plugin prefix is not read as a plugin reason", () => {
+  for (const reason of ["SOMETHING_ELSE", "PLUGIN_"]) {
+    const error = failure("plugin error: boom", { code: "PLUGIN_FAILED", reason, detail: "boom" });
+    assert.equal(unknownPluginFailureReason(error), null, reason);
+    assert.equal(pluginErrorMessage(error, t, "Test failed"), "plugin error: boom", reason);
+  }
+});
+
+test("a plugin reason reads as words", () => {
+  assert.equal(humanisePluginReason("PLUGIN_INVALID_USERNAME_PASSWORD"), "invalid username password");
+  assert.equal(humanisePluginReason("PLUGIN_HTTP_429"), "http 429");
 });
 
 test("a reason on another kind of error is not read as a plugin failure", () => {
@@ -93,11 +141,16 @@ test("every reason the server can name has a translation in every locale", () =>
     "PLUGIN_HOST_FAILURE",
     "PLUGIN_TIMED_OUT",
     "PLUGIN_RESOURCE_LIMIT",
+    "PLUGIN_INVALID_USERNAME_PASSWORD",
   ];
   assert.deepEqual(Object.keys(PLUGIN_FAILURE_KEYS).sort(), [...reasons].sort());
 
   const localesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../i18n/locales");
-  const keys = [...Object.values(PLUGIN_FAILURE_KEYS), "plugins.failure.withDetail"];
+  const keys = [
+    ...Object.values(PLUGIN_FAILURE_KEYS),
+    "plugins.failure.withDetail",
+    "plugins.failure.unknown",
+  ];
   for (const file of readdirSync(localesDir).filter((name) => name.endsWith(".ts"))) {
     const source = readFileSync(path.join(localesDir, file), "utf8");
     for (const key of keys) {
@@ -108,5 +161,7 @@ test("every reason the server can name has a translation in every locale", () =>
       withDetail.includes("{{reason}}") && withDetail.includes("{{detail}}"),
       `${file} withDetail must keep both placeholders`,
     );
+    const unknown = source.match(/"plugins\.failure\.unknown":\s*"([^"]*)"/)?.[1] ?? "";
+    assert.ok(unknown.includes("{{code}}"), `${file} unknown must keep its placeholder`);
   }
 });

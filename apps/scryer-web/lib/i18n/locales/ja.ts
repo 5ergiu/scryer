@@ -1612,6 +1612,8 @@ const ja: LocaleDictionary = {
   "plugins.failure.timedOut": "プラグインの応答に時間がかかりすぎました。",
   "plugins.failure.resourceLimit": "プラグインのメモリが不足しました。",
   "plugins.failure.withDetail": "{{reason}} 詳細: {{detail}}",
+  "plugins.failure.invalidUsernamePassword": "サービスがユーザー名またはパスワードを拒否しました。両方を確認して、もう一度お試しください。",
+  "plugins.failure.unknown": "プラグインが問題を報告しました: {{code}}",
   "status.testingIndexerConnection": "接続をテスト中…",
   "status.indexerConnectionTestPassed":
     "インデクサー接続テストに成功しました。",

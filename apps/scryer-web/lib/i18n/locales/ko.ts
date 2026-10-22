@@ -1581,6 +1581,8 @@ const ko: LocaleDictionary = {
   "plugins.failure.timedOut": "플러그인 응답 시간이 너무 오래 걸렸습니다.",
   "plugins.failure.resourceLimit": "플러그인의 메모리가 부족합니다.",
   "plugins.failure.withDetail": "{{reason}} 세부 정보: {{detail}}",
+  "plugins.failure.invalidUsernamePassword": "서비스가 사용자 이름 또는 비밀번호를 거부했습니다. 둘 다 확인한 후 다시 시도하세요.",
+  "plugins.failure.unknown": "플러그인이 문제를 보고했습니다: {{code}}",
   "status.testingIndexerConnection": "연결 테스트 중…",
   "status.indexerConnectionTestPassed": "인덱서 연결 테스트를 통과했습니다.",
   "status.indexerConnectionTestFailed": "인덱서 연결 테스트에 실패했습니다.",

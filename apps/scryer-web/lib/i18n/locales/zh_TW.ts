@@ -2485,6 +2485,8 @@ const zh_TW: LocaleDictionary = {
   "plugins.failure.timedOut": "外掛程式回應時間過長。",
   "plugins.failure.resourceLimit": "外掛程式記憶體不足。",
   "plugins.failure.withDetail": "{{reason}} 詳細資訊：{{detail}}",
+  "plugins.failure.invalidUsernamePassword": "服務拒絕了使用者名稱或密碼。請檢查後再試。",
+  "plugins.failure.unknown": "外掛程式回報了一個問題：{{code}}",
   "status.testingIndexerConnection": "正在測試連線…",
   "status.indexerConnectionTestPassed": "索引器連線測試通過。",
   "status.indexerConnectionTestFailed": "索引器連線測試失敗。",

@@ -2565,6 +2565,8 @@ const nl: LocaleDictionary = {
   "plugins.failure.timedOut": "De plug-in deed er te lang over om te antwoorden.",
   "plugins.failure.resourceLimit": "De plug-in had onvoldoende geheugen.",
   "plugins.failure.withDetail": "{{reason}} Details: {{detail}}",
+  "plugins.failure.invalidUsernamePassword": "De dienst heeft de gebruikersnaam of het wachtwoord geweigerd. Controleer beide en probeer het opnieuw.",
+  "plugins.failure.unknown": "De plug-in heeft een probleem gemeld: {{code}}.",
   "status.testingIndexerConnection": "Verbinding testen…",
   "status.indexerConnectionTestPassed": "Verbindingstest voor indexer geslaagd.",
   "status.indexerConnectionTestFailed": "Verbindingstest voor indexer mislukt.",

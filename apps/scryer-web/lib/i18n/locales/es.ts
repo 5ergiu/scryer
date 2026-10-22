@@ -1641,6 +1641,8 @@ const es: LocaleDictionary = {
   "plugins.failure.timedOut": "El plugin tardó demasiado en responder.",
   "plugins.failure.resourceLimit": "El plugin se quedó sin memoria.",
   "plugins.failure.withDetail": "{{reason}} Detalles: {{detail}}",
+  "plugins.failure.invalidUsernamePassword": "El servicio rechazó el usuario o la contraseña. Revisa ambos e inténtalo de nuevo.",
+  "plugins.failure.unknown": "El plugin informó de un problema: {{code}}.",
   "status.testingIndexerConnection": "Probando conexión…",
   "status.indexerConnectionTestPassed":
     "Prueba de conexión del indexador exitosa.",
