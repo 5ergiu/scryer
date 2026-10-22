@@ -22257,6 +22257,20 @@ enum PluginConfigValueSourceValue {
 }
 
 """
+Config fields a plugin adds for the values entered so far.
+"""
+type PluginDynamicConfigFieldsPayload {
+	"""
+	Extra fields, shown after the provider's static fields.
+	"""
+	fields: [PluginConfigFieldPayload!]!
+	"""
+	Static field keys to hide; hidden fields are never required.
+	"""
+	hiddenFieldKeys: [String!]!
+}
+
+"""
 Predicate over another configuration field's current value.
 """
 type PluginFieldConditionPayload {
@@ -22878,6 +22892,13 @@ type ProviderTypePayload {
 	Whether a connection test is supported.
 	"""
 	supportsTest: Boolean!
+	"""
+	Static field keys whose values decide extra fields the plugin adds.
+	When this is non-empty the form asks `pluginConfigFields` again
+	whenever one of these values changes. Empty when the provider adds no
+	fields.
+	"""
+	dynamicConfigTriggerKeys: [String!]!
 }
 
 """
@@ -24948,6 +24969,22 @@ type QueryRoot {
 	Return available indexer provider types and their configuration fields; requires system-settings permission.
 	"""
 	indexerProviderTypes: [ProviderTypePayload!]!
+	"""
+	Return the extra config fields an indexer plugin adds for the values
+	entered so far, and the static fields it hides; requires
+	system-settings permission. Only the provider's trigger-key values are
+	sent to the plugin. Empty when the provider adds no fields.
+	"""
+	pluginConfigFields(
+		"""
+		Indexer provider type whose plugin is asked.
+		"""
+		providerType: String!,
+		"""
+		Current form values; only the provider's trigger keys are used.
+		"""
+		values: [ProviderConfigValueInput!]!
+	): PluginDynamicConfigFieldsPayload!
 	"""
 	Return available download-client provider types and their configuration fields; requires system-settings permission.
 	"""

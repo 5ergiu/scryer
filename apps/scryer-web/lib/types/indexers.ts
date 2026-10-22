@@ -137,6 +137,9 @@ export type ProviderTypeInfo = {
   configFields: ConfigFieldDef[];
   availableHostBindings: string[];
   recommendedFacets: Array<"MOVIE" | "SERIES" | "ANIME">;
+  /// Static field keys whose values decide extra fields the plugin adds.
+  /// Empty (or absent on hand-built records) when it adds none.
+  dynamicConfigTriggerKeys?: string[];
 };
 
 /// Which of a provider's declared fields the form offers.

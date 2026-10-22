@@ -537,6 +537,20 @@ pub struct ProviderTypePayload {
     pub supported_events: Vec<String>,
     /// Whether a connection test is supported.
     pub supports_test: bool,
+    /// Static field keys whose values decide extra fields the plugin adds.
+    /// When this is non-empty the form asks `pluginConfigFields` again
+    /// whenever one of these values changes. Empty when the provider adds no
+    /// fields.
+    pub dynamic_config_trigger_keys: Vec<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Config fields a plugin adds for the values entered so far.
+pub struct PluginDynamicConfigFieldsPayload {
+    /// Extra fields, shown after the provider's static fields.
+    pub fields: Vec<PluginConfigFieldPayload>,
+    /// Static field keys to hide; hidden fields are never required.
+    pub hidden_field_keys: Vec<String>,
 }
 
 #[derive(SimpleObject, Clone)]

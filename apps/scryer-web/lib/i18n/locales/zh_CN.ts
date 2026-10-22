@@ -1165,6 +1165,8 @@ const zh_CN: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "按提供者类型过滤",
   "settings.noIndexersFound": "未找到索引器。",
   "settings.indexerConfig": "插件配置",
+  "settings.indexerDynamicFieldsLoading": "正在加载此选项的字段…",
+  "settings.indexerDynamicFieldsError": "无法加载此选项的字段：{{error}}",
   "settings.newPassword": "新密码",
   "settings.rules": "自定义规则",
   "settings.noRulesFound": "未配置自定义规则。",

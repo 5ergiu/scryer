@@ -27,6 +27,12 @@
     "resolve_network_endpoints_response": {
       "$ref": "#/$defs/ResolveNetworkEndpointsResponse"
     },
+    "config_fields_request": {
+      "$ref": "#/$defs/ConfigFieldsRequest"
+    },
+    "config_fields_response": {
+      "$ref": "#/$defs/ConfigFieldsResponse"
+    },
     "indexer_search_plan_request": {
       "$ref": "#/$defs/PluginSearchPlanRequest"
     },
@@ -151,6 +157,8 @@
     "indexer_search_request",
     "indexer_search_response",
     "resolve_network_endpoints_response",
+    "config_fields_request",
+    "config_fields_response",
     "indexer_search_plan_request",
     "indexer_search_strategy_event",
     "indexer_search_plan_summary",
@@ -969,6 +977,17 @@
               "type": "null"
             }
           ]
+        },
+        "dynamic_config_fields": {
+          "description": "The plugin answers the reserved\n[`CONFIG_FIELDS_ACTION`](crate::command::CONFIG_FIELDS_ACTION) action\nwith config fields that depend on the values entered so far. Absent\nkeeps the static `config_fields` list as the whole form, and a host\nolder than SDK 3.18 ignores it the same way.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DynamicConfigFieldsCapability"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -1241,6 +1260,22 @@
           "type": "string",
           "const": "provider_page"
         }
+      ]
+    },
+    "DynamicConfigFieldsCapability": {
+      "description": "Opt-in to config fields that depend on the values the operator has\nentered so far, such as the settings of a selected tracker definition.\n\nThe host asks the plugin through the reserved\n[`CONFIG_FIELDS_ACTION`](crate::command::CONFIG_FIELDS_ACTION) action,\nsending the current values of `trigger_keys` only. The answer must be a\npure function of those values: the host caches it per plugin version and\ntrigger values, and re-asks only when a trigger value changes. Values the\noperator types into dynamic fields are stored as ordinary config entries\nkeyed by the field key, exactly like static fields.",
+      "type": "object",
+      "properties": {
+        "trigger_keys": {
+          "description": "Keys of static `config_fields` whose values decide the dynamic\nfields. Must be non-empty; keys that do not name a static field are\nignored by the host.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "trigger_keys"
       ]
     },
     "PluginScoringPolicy": {
@@ -10943,6 +10978,40 @@
       "required": [
         "origins"
       ]
+    },
+    "ConfigFieldsRequest": {
+      "description": "Payload of the [`CONFIG_FIELDS_ACTION`] action.",
+      "type": "object",
+      "properties": {
+        "values": {
+          "description": "Current values of the descriptor's trigger keys, in the same string\nform the plugin reads as host config. A trigger key the operator has\nnot filled in is absent.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      }
+    },
+    "ConfigFieldsResponse": {
+      "description": "Response payload of the [`CONFIG_FIELDS_ACTION`] action.\n\nThe host validates the answer before it reaches a form: keys must be\nunique and must not reuse a static field key, fields are operator-entered\n(no host binding, no connection-URL role), select fields carry options,\nand conditions and option overrides may only name known fields. A\nresponse that breaks a rule is rejected as a whole.",
+      "type": "object",
+      "properties": {
+        "fields": {
+          "description": "Fields shown after the static ones, in this order. `visible_when`,\n`required_when`, `advanced` and the `password` type behave exactly as\non static fields.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigFieldDef"
+          }
+        },
+        "hidden_field_keys": {
+          "description": "Static field keys the form hides for these values, for example\n`username` and `password` when the selected definition uses an API\nkey. A hidden static field is never required. Trigger keys cannot be\nhidden.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "PluginSearchPlanRequest": {
       "type": "object",

@@ -1677,6 +1677,8 @@ const zh_HK: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "按提供者類型過濾",
   "settings.noIndexersFound": "未找到索引器。",
   "settings.indexerConfig": "插件配置",
+  "settings.indexerDynamicFieldsLoading": "正在載入此選項的欄位…",
+  "settings.indexerDynamicFieldsError": "無法載入此選項的欄位：{{error}}",
   "settings.advancedConfig": "進階設定",
   "settings.managedIndexerBadge": "受管理",
   "settings.managedByIndexer": "由 {{name}} 管理",

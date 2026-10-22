@@ -1240,6 +1240,8 @@ const de: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Nach Anbietertyp filtern",
   "settings.noIndexersFound": "Keine Indexer gefunden.",
   "settings.indexerConfig": "Plugin-Konfiguration",
+  "settings.indexerDynamicFieldsLoading": "Felder für diese Auswahl werden geladen…",
+  "settings.indexerDynamicFieldsError": "Die Felder für diese Auswahl konnten nicht geladen werden: {{error}}",
   "settings.newPassword": "Neues Passwort",
   "settings.rules": "Benutzerdefinierte Regeln",
   "settings.noRulesFound": "Keine benutzerdefinierten Regeln konfiguriert.",

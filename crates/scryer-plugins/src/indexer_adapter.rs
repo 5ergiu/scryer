@@ -5,12 +5,14 @@ use scryer_application::{
     IndexerSearchIncompleteReason as HostIncompleteReason, IndexerSearchPlanCapability,
     IndexerSearchPlanRequest, IndexerSearchPlanSummary, IndexerSearchResponse, IndexerSearchResult,
     IndexerSearchStrategyEvent, IndexerSearchStrategyEventSink, IndexerSearchStrategyRequest,
-    IndexerStatsTracker, NullIndexerStatsTracker, PluginFailureReason, ResolvedDownloadArtifact,
-    SearchMode, extract_magnet_info_hash, is_valid_magnet_uri, normalize_release_password,
+    IndexerStatsTracker, NullIndexerStatsTracker, PluginDynamicConfigFields, PluginFailureReason,
+    ResolvedDownloadArtifact, SearchMode, extract_magnet_info_hash, is_valid_magnet_uri,
+    normalize_release_password,
 };
 use scryer_domain::{IndexerConfig, ProxyConfig, TaggedAlias};
 use scryer_plugin_sdk::command::{
-    PluginActionRequest, PluginActionResponse, PluginIndexerCommand, PluginIndexerCommandResult,
+    CONFIG_FIELDS_ACTION, ConfigFieldsRequest, ConfigFieldsResponse, PluginActionRequest,
+    PluginActionResponse, PluginIndexerCommand, PluginIndexerCommandResult,
 };
 use scryer_plugin_sdk::{
     IndexerSearchIncompleteReason as PluginIncompleteReason, IndexerSearchPluginError, PluginError,
@@ -2218,8 +2220,121 @@ impl WasmIndexerClient {
     }
 }
 
+/// Upper bound on one `config_fields` answer. A tracker definition carries a
+/// few dozen settings; anything near this is a broken plugin, not a form.
+const MAX_CONFIG_FIELDS_RESPONSE_BYTES: usize = 1024 * 1024;
+
+impl WasmIndexerClient {
+    /// Run the reserved `config_fields` action on a throwaway instance.
+    ///
+    /// The answer is a function of the trigger values alone, so the instance
+    /// skips endpoint resolution (no network grants are derived from draft
+    /// values) and is dropped afterwards instead of replacing the retained
+    /// actor.
+    async fn call_config_fields_action(&self, request: Vec<u8>) -> AppResult<Vec<u8>> {
+        let indexer = &self.component;
+        let _operation_guard = indexer.invocation_lock.lock().await;
+        let _actor_guard = indexer.actor.lock().await;
+        let token = CancellationToken::new();
+        indexer.host.bind_cancellation(token);
+        let plugin = self.descriptor.id.as_str();
+        let call = async {
+            let mut actor = indexer
+                .runtime
+                .instantiate(&indexer.host)
+                .await
+                .map_err(|error| {
+                    AppError::Repository(format!(
+                        "indexer component {plugin} config_fields initialization failed: {error}"
+                    ))
+                })?;
+            actor
+                .action(request)
+                .await
+                .map_err(|error| {
+                    AppError::Repository(format!(
+                        "indexer component {plugin} config_fields failed: {error}"
+                    ))
+                })?
+                .map_err(|error| {
+                    AppError::Repository(format!(
+                        "indexer component {plugin} config_fields returned invocation error {error:?}"
+                    ))
+                })
+        };
+        tokio::time::timeout(indexer.timeout, call)
+            .await
+            .map_err(|_| {
+                AppError::Repository(format!(
+                    "indexer component {plugin} config_fields timed out after {} ms",
+                    indexer.timeout.as_millis()
+                ))
+            })?
+    }
+}
+
+/// Decode one `config_fields` answer. An `unsupported` error means the plugin
+/// has no fields to add, not that the form is broken.
+fn decode_config_fields_response(
+    plugin: &str,
+    bytes: &[u8],
+) -> AppResult<Option<PluginDynamicConfigFields>> {
+    if bytes.len() > MAX_CONFIG_FIELDS_RESPONSE_BYTES {
+        return Err(AppError::Repository(format!(
+            "indexer component {plugin} config_fields response exceeds {MAX_CONFIG_FIELDS_RESPONSE_BYTES} bytes"
+        )));
+    }
+    let result =
+        serde_json::from_slice::<PluginResult<PluginActionResponse>>(bytes).map_err(|error| {
+            AppError::Repository(format!(
+                "indexer component {plugin} config_fields returned invalid JSON response: {error}"
+            ))
+        })?;
+    if let PluginResult::Err(error) = &result
+        && error.code == PluginErrorCode::Unsupported
+    {
+        return Ok(None);
+    }
+    let response = decode_command_result(result, "indexer config_fields component")?;
+    let response: ConfigFieldsResponse =
+        serde_json::from_value(response.payload).map_err(|error| {
+            AppError::Repository(format!(
+                "indexer component {plugin} config_fields returned an invalid payload: {error}"
+            ))
+        })?;
+    Ok(Some(PluginDynamicConfigFields {
+        fields: crate::types::config_fields_to_domain(&response.fields),
+        hidden_field_keys: response.hidden_field_keys,
+    }))
+}
+
 #[async_trait]
 impl IndexerClient for WasmIndexerClient {
+    async fn dynamic_config_fields(
+        &self,
+        values: &BTreeMap<String, String>,
+    ) -> AppResult<Option<PluginDynamicConfigFields>> {
+        if self
+            .descriptor
+            .indexer()
+            .and_then(|indexer| indexer.capabilities.dynamic_config_fields.as_ref())
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let payload = serde_json::to_value(ConfigFieldsRequest {
+            values: values.clone(),
+        })
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+        let request = serde_json::to_vec(&PluginActionRequest {
+            action: CONFIG_FIELDS_ACTION.to_string(),
+            payload,
+        })
+        .map_err(|error| AppError::Repository(error.to_string()))?;
+        let bytes = self.call_config_fields_action(request).await?;
+        decode_config_fields_response(&self.descriptor.id, &bytes)
+    }
+
     async fn probe_connection(&self) -> AppResult<bool> {
         if !self
             .descriptor
@@ -2604,6 +2719,71 @@ mod tests {
             payload: serde_json::json!({"provider": "mediathek"}),
         }));
         assert!(malformed.is_err());
+    }
+
+    #[test]
+    fn config_fields_reply_decodes_fields_and_treats_unsupported_as_none() {
+        let response = scryer_plugin_sdk::command::ConfigFieldsResponse {
+            fields: vec![scryer_plugin_sdk::ConfigFieldDef {
+                key: "cookie".to_string(),
+                label: "Cookie".to_string(),
+                field_type: scryer_plugin_sdk::ConfigFieldType::Password,
+                required: true,
+                ..Default::default()
+            }],
+            hidden_field_keys: vec!["username".to_string()],
+        };
+        let bytes = serde_json::to_vec(&PluginResult::Ok(PluginActionResponse {
+            payload: serde_json::to_value(&response).unwrap(),
+        }))
+        .unwrap();
+        let decoded = decode_config_fields_response("cardigann", &bytes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.fields.len(), 1);
+        assert_eq!(decoded.fields[0].key, "cookie");
+        assert_eq!(
+            decoded.fields[0].field_type,
+            scryer_domain::ConfigFieldType::Password
+        );
+        assert_eq!(decoded.hidden_field_keys, vec!["username".to_string()]);
+
+        let unsupported =
+            serde_json::to_vec(&PluginResult::<PluginActionResponse>::Err(PluginError {
+                code: PluginErrorCode::Unsupported,
+                public_message: "no config fields".to_string(),
+                debug_message: None,
+                details: None,
+                retry_after_seconds: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            decode_config_fields_response("cardigann", &unsupported).unwrap(),
+            None
+        );
+
+        let failed = serde_json::to_vec(&PluginResult::<PluginActionResponse>::Err(PluginError {
+            code: PluginErrorCode::InvalidConfig,
+            public_message: "unknown definition".to_string(),
+            debug_message: None,
+            details: None,
+            retry_after_seconds: None,
+        }))
+        .unwrap();
+        assert!(decode_config_fields_response("cardigann", &failed).is_err());
+
+        let malformed = serde_json::to_vec(&PluginResult::Ok(PluginActionResponse {
+            payload: serde_json::json!({"fields": "nope"}),
+        }))
+        .unwrap();
+        assert!(decode_config_fields_response("cardigann", &malformed).is_err());
+        assert!(
+            decode_config_fields_response(
+                "cardigann",
+                &vec![b' '; MAX_CONFIG_FIELDS_RESPONSE_BYTES + 1]
+            )
+            .is_err()
+        );
     }
 
     #[test]

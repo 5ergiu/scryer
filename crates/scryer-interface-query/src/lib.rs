@@ -4313,7 +4313,8 @@ impl AcquisitionQueries {
         Ok(provider_types
             .into_iter()
             .map(|(pt, name, fields, default_base_url)| {
-                from_provider_type(
+                let trigger_keys = app.indexer_dynamic_config_trigger_keys(&pt);
+                let mut payload = from_provider_type(
                     pt,
                     name,
                     fields,
@@ -4322,9 +4323,32 @@ impl AcquisitionQueries {
                     Vec::new(),
                     Vec::new(),
                     false,
-                )
+                );
+                payload.dynamic_config_trigger_keys = trigger_keys;
+                payload
             })
             .collect())
+    }
+
+    /// Return the extra config fields an indexer plugin adds for the values
+    /// entered so far, and the static fields it hides; requires
+    /// system-settings permission. Only the provider's trigger-key values are
+    /// sent to the plugin. Empty when the provider adds no fields.
+    async fn plugin_config_fields(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Indexer provider type whose plugin is asked.")] provider_type: String,
+        #[graphql(desc = "Current form values; only the provider's trigger keys are used.")]
+        values: Vec<ProviderConfigValueInput>,
+    ) -> GqlResult<PluginDynamicConfigFieldsPayload> {
+        let app = app_from_ctx(ctx)?;
+        let actor = require_app_permission(ctx, AppPermission::ManageSystemSettings).await?;
+        let values = mappers::provider_config_values_to_string_map(values).map_err(to_gql_error)?;
+        let dynamic = app
+            .indexer_dynamic_config_fields(&actor, &provider_type, &values)
+            .await
+            .map_err(to_gql_error)?;
+        Ok(mappers::from_plugin_dynamic_config_fields(dynamic))
     }
 
     /// Return available download-client provider types and their configuration fields; requires system-settings permission.

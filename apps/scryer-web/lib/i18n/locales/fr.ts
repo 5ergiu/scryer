@@ -1252,6 +1252,8 @@ const fr: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "Filtrer par type de fournisseur",
   "settings.noIndexersFound": "Aucun indexeur trouvé.",
   "settings.indexerConfig": "Configuration du plugin",
+  "settings.indexerDynamicFieldsLoading": "Chargement des champs pour cette sélection…",
+  "settings.indexerDynamicFieldsError": "Impossible de charger les champs pour cette sélection : {{error}}",
   "settings.newPassword": "Nouveau mot de passe",
   "settings.rules": "Règles personnalisées",
   "settings.noRulesFound": "Aucune règle personnalisée configurée.",

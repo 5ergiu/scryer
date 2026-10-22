@@ -9461,6 +9461,18 @@ pub trait IndexerClient: Send + Sync {
         Ok(false)
     }
 
+    /// Ask the plugin for the config fields that depend on `values`, the
+    /// current values of its declared trigger keys. `None` means it has none
+    /// to offer: it does not declare the capability or answered
+    /// `unsupported`. The answer is unvalidated; callers go through the
+    /// application's dynamic-field validation before using it.
+    async fn dynamic_config_fields(
+        &self,
+        _values: &std::collections::BTreeMap<String, String>,
+    ) -> AppResult<Option<PluginDynamicConfigFields>> {
+        Ok(None)
+    }
+
     async fn finalize_search_session(
         &self,
         _search_session_id: &str,
@@ -9835,6 +9847,14 @@ impl IndexerAccountingContext {
     }
 }
 
+/// Config fields a plugin adds for the values entered so far, plus the
+/// static field keys it hides for those values.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginDynamicConfigFields {
+    pub fields: Vec<scryer_domain::ConfigFieldDef>,
+    pub hidden_field_keys: Vec<String>,
+}
+
 pub trait IndexerPluginProvider: Send + Sync {
     /// Validate normalized instance configuration using provider-owned
     /// descriptor metadata. Providers without such metadata accept it.
@@ -9958,6 +9978,11 @@ pub trait IndexerPluginProvider: Send + Sync {
         &self,
         _provider_type: &str,
     ) -> Vec<scryer_domain::ConfigFieldDef> {
+        vec![]
+    }
+    /// Static config field keys whose values decide the plugin's dynamic
+    /// config fields. Empty when the plugin declares none.
+    fn dynamic_config_trigger_keys_for_provider(&self, _provider_type: &str) -> Vec<String> {
         vec![]
     }
     fn plugin_name_for_provider(&self, _provider_type: &str) -> Option<String> {

@@ -1207,6 +1207,8 @@ const ko: LocaleDictionary = {
   "settings.indexerFilterPlaceholder": "제공자 유형으로 필터",
   "settings.noIndexersFound": "인덱서를 찾을 수 없습니다.",
   "settings.indexerConfig": "플러그인 설정",
+  "settings.indexerDynamicFieldsLoading": "이 선택에 대한 필드를 불러오는 중…",
+  "settings.indexerDynamicFieldsError": "이 선택에 대한 필드를 불러오지 못했습니다: {{error}}",
   "settings.newPassword": "새 비밀번호",
   "settings.rules": "커스텀 규칙",
   "settings.noRulesFound": "커스텀 규칙이 설정되지 않았습니다.",

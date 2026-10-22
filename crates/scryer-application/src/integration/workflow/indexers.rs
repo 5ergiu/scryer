@@ -765,7 +765,9 @@ impl AppUseCase {
             return Err(AppError::Validation("provider type is required".into()));
         }
 
-        let fields = self.indexer_config_fields_for_provider_type(&provider_type)?;
+        let fields = self
+            .effective_indexer_config_fields(&provider_type, &[input.config_json.as_deref()])
+            .await?;
         let management_capabilities =
             self.indexer_management_capabilities_for_provider_type(&provider_type);
         let max_queries_per_minute = validate_max_queries_per_minute(
@@ -977,7 +979,18 @@ impl AppUseCase {
                 .map(|id| id.trim().to_string())
                 .filter(|id| !id.is_empty())
         });
-        let fields = self.indexer_config_fields_for_provider_type(&effective_provider)?;
+        let same_provider_existing_json = existing
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case(effective_provider.trim())
+            .then_some(existing.config_json.as_deref())
+            .flatten();
+        let fields = self
+            .effective_indexer_config_fields(
+                &effective_provider,
+                &[update.config_json.as_deref(), same_provider_existing_json],
+            )
+            .await?;
         let normalized_config_json = update
             .config_json
             .as_deref()
