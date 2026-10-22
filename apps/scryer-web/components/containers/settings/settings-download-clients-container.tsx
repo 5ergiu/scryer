@@ -519,6 +519,7 @@ export function SettingsDownloadClientsContainer({
       if (isBuiltInDownloadClientType(payload.clientType)) {
         await runConnectionFeedback({
           setGlobalStatus,
+          t,
           startMessage: t("status.testingDownloadClient", {
             client: selectedDownloadClientLabel,
           }),
@@ -634,6 +635,7 @@ export function SettingsDownloadClientsContainer({
     try {
       await runConnectionFeedback({
         setGlobalStatus,
+        t,
         startMessage: t("status.testingDownloadClient", {
           client: selectedDownloadClientLabel,
         }),

@@ -3268,6 +3268,18 @@ const ru: LocaleDictionary = {
     "status.indexerDeleted":
         "Индексатор {{name}} удалён.",
 
+    "plugins.failure.invalidConfig": "Плагин не может использовать эти настройки. Проверьте их и повторите попытку.",
+    "plugins.failure.authFailed": "Сервис отклонил данные для входа. Проверьте API-ключ, имя пользователя или пароль.",
+    "plugins.failure.rateLimited": "Сервис попросил Scryer снизить частоту запросов. Повторите попытку немного позже.",
+    "plugins.failure.upstreamUnavailable": "Не удалось связаться с сервисом, или он не ответил. Проверьте адрес и повторите попытку.",
+    "plugins.failure.unsupported": "Плагин не поддерживает эту операцию.",
+    "plugins.failure.temporary": "У плагина возникла временная проблема. Повторите попытку немного позже.",
+    "plugins.failure.permanent": "Плагину не удалось выполнить этот запрос. Повторная попытка не поможет, пока что-то не изменится.",
+    "plugins.failure.hostFailure": "Плагин неожиданно остановился. Подробности есть в журнале Scryer.",
+    "plugins.failure.timedOut": "Плагин слишком долго не отвечал.",
+    "plugins.failure.resourceLimit": "Плагину не хватило памяти.",
+    "plugins.failure.withDetail": "{{reason}} Подробности: {{detail}}",
+
     "status.testingIndexerConnection":
         "Проверка подключения...",
     "status.indexerConnectionTestPassed":

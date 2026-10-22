@@ -1357,6 +1357,7 @@ export function SettingsIndexersContainer({
     try {
       await runConnectionFeedback({
         setGlobalStatus,
+        t,
         startMessage: t("status.testingIndexerConnection"),
         successMessage: t("status.indexerConnectionTestPassed"),
         failureFallbackMessage: t("status.indexerConnectionTestFailed"),
