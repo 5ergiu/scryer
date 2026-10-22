@@ -1,5 +1,5 @@
 
-import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 import { useClient } from "urql";
 import {
@@ -28,12 +28,11 @@ import {
   User,
   Users,
   Wrench,
-  X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { IconButton } from "@/components/ui/icon-button";
+import { GutterPanel, GutterPanelContext } from "@/components/common/gutter-panel";
 import type {
   IndexerSettingsTab,
   MaintenanceRulesSection,
@@ -43,7 +42,7 @@ import type {
 import type { LocaleCode, LanguageOption } from "@/lib/i18n";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
-import { type GutterRailSize, useGutterRailWidth } from "@/lib/hooks/use-gutter-rail-width";
+import { type GutterPanelSize, useGutterPanel } from "@/lib/hooks/use-gutter-panel";
 import { cn } from "@/lib/utils";
 import { selectorId } from "@/lib/utils/dom-ids";
 import {
@@ -147,40 +146,41 @@ const SettingsBackupsContainer = lazy(async () => ({
  * so they anchor to the top of the pane. */
 export const SETTINGS_REFERENCE_SLOT_ID = "settings-content-reference";
 export const SETTINGS_HEADER_ACTIONS_SLOT_ID = "settings-header-actions";
+const SETTINGS_PLUGINS_PANEL_ID = "settings-plugins-panel";
 
 /**
- * The plugins rail lives in the right gutter beside the centered settings
- * pane. The pane keeps `contentWidth` (padding included) whether the rail is
- * docked or not, so the rail never narrows or shifts the content; it moves
+ * The plugins panel is pinned to the right edge beside the centered settings
+ * pane. The pane keeps `contentWidth` (padding included) whether the panel is
+ * open or not, so the panel never narrows or shifts the content; it closes
  * behind the Plugins button once the gutter cannot hold its minimum. The
- * pane's own right padding separates the rail from the content, so the rail
+ * pane's own right padding separates the panel from the content, so the panel
  * needs no gap of its own.
  */
 type ReferenceRailLayout = {
   contentWidth: number;
-  rail: GutterRailSize;
+  rail: GutterPanelSize;
 };
 
 const STANDARD_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   contentWidth: 1280,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
+  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
 };
 
 const INDEXERS_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   contentWidth: 1460,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
+  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
 };
 
 // The Search pane carries its own refine rail beside the results table, so it
 // keeps the wider pane it had before it carried the plugins rail.
 const INDEXER_SEARCH_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   contentWidth: 1640,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0, inset: 30 },
+  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
 };
 
 const SUBTITLES_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
   contentWidth: 1280,
-  rail: { minWidth: 320, maxWidth: 560, gap: 0, inset: 30 },
+  rail: { minWidth: 320, maxWidth: 560, gap: 0 },
 };
 
 const INDEXER_SETTINGS_TAB_ITEMS: Record<
@@ -516,32 +516,20 @@ export const SettingsContainer = memo(function SettingsContainer({
     : null;
   const settingsContentRef = useRef<HTMLElement | null>(null);
   const settingsPaneRef = useRef<HTMLDivElement | null>(null);
-  const [referenceRailOpen, setReferenceRailOpen] = useState(false);
-  const referenceRailWidth = useGutterRailWidth(
+  const referencePanel = useGutterPanel(
     settingsContentRef,
     settingsPaneRef,
     referenceLayout?.rail ?? null,
+    settingsSection,
   );
-  const referenceRailDocked = referenceRailWidth !== null;
-
-  useEffect(() => {
-    setReferenceRailOpen(false);
-  }, [referenceRailDocked, settingsSection]);
-
-  useEffect(() => {
-    if (!referenceRailOpen || referenceRailDocked) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setReferenceRailOpen(false);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [referenceRailDocked, referenceRailOpen]);
+  const setReferencePanelOpen = referencePanel.setOpen;
+  const referencePanelClosed = showReferenceRail && !referencePanel.open;
+  // The plugin lists are portaled into the panel from the section containers,
+  // so the panel's context has to wrap the content they render from.
+  const referencePanelContext = useMemo(
+    () => ({ close: () => setReferencePanelOpen(false) }),
+    [setReferencePanelOpen],
+  );
 
   const settingsSectionLabel =
     settingsSection === "profile"
@@ -830,7 +818,7 @@ export const SettingsContainer = memo(function SettingsContainer({
           className={cn(
             "mx-auto w-full px-4 py-5 pb-[calc(env(safe-area-inset-bottom)+5rem)] sm:px-6 md:px-[30px] md:py-[26px] md:pb-[60px]",
             showReferenceRail
-              ? "relative"
+              ? null
               : settingsSection === "rules" ||
                   settingsSection === "maintenanceRules" ||
                   settingsSection === "requestRules" ||
@@ -866,7 +854,7 @@ export const SettingsContainer = memo(function SettingsContainer({
           <div
             className={cn(
               "mb-6 flex gap-3",
-              showReferenceRail && !referenceRailDocked
+              referencePanelClosed
                 ? "flex-row items-center justify-between"
                 : "flex-col sm:flex-row sm:items-center sm:justify-between",
             )}
@@ -908,14 +896,14 @@ export const SettingsContainer = memo(function SettingsContainer({
                 ) : null}
               </div>
             </div>
-            {showReferenceRail && !referenceRailDocked ? (
+            {referencePanelClosed ? (
               <Button
                 type="button"
                 variant="primary"
                 className="h-10 w-auto shrink-0 self-start rounded-[10px] px-3 text-[13px]"
-                onClick={() => setReferenceRailOpen(true)}
-                aria-expanded={referenceRailOpen}
-                aria-controls={SETTINGS_REFERENCE_SLOT_ID}
+                onClick={() => setReferencePanelOpen(true)}
+                aria-expanded={false}
+                aria-controls={SETTINGS_PLUGINS_PANEL_ID}
               >
                 <Puzzle className="h-4 w-4" />
                 {t("settings.plugins")}
@@ -931,6 +919,7 @@ export const SettingsContainer = memo(function SettingsContainer({
               </Button>
             ) : null}
           </div>
+          <GutterPanelContext.Provider value={showReferenceRail ? referencePanelContext : null}>
           <Suspense fallback={<div className="py-6 text-sm text-[var(--scry-muted3)]">{t("label.loading")}</div>}>
           {settingsSection === "profile" ? (
             <SettingsProfileContainer
@@ -1024,58 +1013,22 @@ export const SettingsContainer = memo(function SettingsContainer({
             <SettingsQualityProfilesContainer />
           )}
           </Suspense>
+          </GutterPanelContext.Provider>
             </div>
             {showReferenceRail ? (
-              <>
-                {!referenceRailDocked ? (
-                  <button
-                    type="button"
-                    aria-label={t("label.close")}
-                    className={cn(
-                      "fixed inset-0 z-40 bg-black/45 backdrop-blur-[2px] transition-opacity",
-                      referenceRailOpen
-                        ? "opacity-100"
-                        : "pointer-events-none opacity-0",
-                    )}
-                    onClick={() => setReferenceRailOpen(false)}
-                  />
-                ) : null}
-                <aside
-                  aria-label={t("settings.plugins")}
-                  style={referenceRailDocked ? { width: referenceRailWidth } : undefined}
-                  className={cn(
-                    referenceRailDocked
-                      ? "absolute bottom-[60px] left-full top-[26px]"
-                      : "fixed bottom-4 right-4 top-[118px] z-50 flex w-[min(420px,calc(100vw-2rem))] min-w-0 flex-col gap-3 overflow-y-auto rounded-[16px] border border-[var(--scry-border)] bg-[var(--scry-bg)] p-3 shadow-[0_20px_50px_rgba(0,0,0,0.38)] transition duration-200",
-                    !referenceRailDocked &&
-                      (referenceRailOpen
-                        ? "translate-x-0 opacity-100"
-                        : "pointer-events-none translate-x-[calc(100%+1rem)] opacity-0"),
-                  )}
-                >
-                  {!referenceRailDocked ? (
-                    <div className="flex items-center justify-between gap-3 rounded-[14px] border border-[var(--scry-border)] bg-[var(--scry-bg)] px-3 py-2 shadow-[0_10px_24px_rgba(0,0,0,0.16)]">
-                      <div className="flex min-w-0 items-center gap-2 text-[15px] font-semibold text-[var(--scry-ink2)]">
-                        <Puzzle className="h-4 w-4 shrink-0" />
-                        <span className="truncate">{t("settings.plugins")}</span>
-                      </div>
-                      <IconButton
-                        id="settings-plugins-panel-close"
-                        label={t("label.close")}
-                        tone="neutral"
-                        onClick={() => setReferenceRailOpen(false)}
-                      >
-                        <X className="h-4 w-4" />
-                      </IconButton>
-                    </div>
-                  ) : null}
-                  <div
-                    id={SETTINGS_REFERENCE_SLOT_ID}
-                    data-slot="settings-reference"
-                    className={cn("min-w-0", referenceRailDocked && "sticky top-[26px]")}
-                  />
-                </aside>
-              </>
+              <GutterPanel
+                id={SETTINGS_PLUGINS_PANEL_ID}
+                label={t("settings.plugins")}
+                frame={referencePanel.frame}
+                open={referencePanel.open}
+                onOpenChange={setReferencePanelOpen}
+              >
+                <div
+                  id={SETTINGS_REFERENCE_SLOT_ID}
+                  data-slot="settings-reference"
+                  className="min-w-0"
+                />
+              </GutterPanel>
             ) : null}
           </div>
         </div>

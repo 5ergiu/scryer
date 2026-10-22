@@ -6,10 +6,10 @@ import { UnderlineFilterButton } from "@/components/common/underline-filter-butt
 import type { ListsSection } from "@/components/root/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { GutterPanel } from "@/components/common/gutter-panel";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
 import { useTranslate } from "@/lib/context/translate-context";
-import { type GutterRailSize, useGutterRailWidth } from "@/lib/hooks/use-gutter-rail-width";
+import { type GutterPanelSize, useGutterPanel } from "@/lib/hooks/use-gutter-panel";
 import type { ListAccountMemberKey } from "@/lib/hooks/use-list-account-link";
 import type {
   ListAccount,
@@ -36,10 +36,9 @@ import { ProviderBrowser } from "./provider-browser";
 import { PersonalAccounts } from "./personal-accounts";
 import { ProviderAppsPanel } from "./provider-apps-panel";
 
-// The plugins rail sits in the right gutter beside the centered lists and
-// moves behind the Plugins button before the lists would have to narrow. The
-// inset matches the page's widest side padding.
-const PLUGIN_RAIL_SIZE: GutterRailSize = { minWidth: 288, maxWidth: 720, gap: 20, inset: 32 };
+// The plugins panel is pinned to the right edge beside the centered lists and
+// closes behind the Plugins button before it would cover them.
+const PLUGIN_PANEL_SIZE: GutterPanelSize = { minWidth: 288, maxWidth: 720, gap: 32 };
 
 export type ListRouteOptions = {
   libraries: LibraryRecord[];
@@ -172,11 +171,8 @@ export function ListsView(props: ListsViewProps) {
   const showPlugins = props.canManageProviderApps;
   const scrollRef = React.useRef<HTMLElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const pluginsWidth = useGutterRailWidth(scrollRef, contentRef, showPlugins ? PLUGIN_RAIL_SIZE : null);
-  const pluginsDocked = pluginsWidth !== null;
-  const [pluginsOpen, setPluginsOpen] = React.useState(false);
+  const pluginsPanel = useGutterPanel(scrollRef, contentRef, showPlugins ? PLUGIN_PANEL_SIZE : null);
 
-  React.useEffect(() => setPluginsOpen(false), [pluginsDocked]);
 
   const plugins = showPlugins ? (
     <FilteredPluginList
@@ -189,7 +185,7 @@ export function ListsView(props: ListsViewProps) {
   return (
     <section ref={scrollRef} id="lists-view" className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-[var(--scry-surfE)] [scrollbar-gutter:stable]">
       <div className="w-full px-4 py-6 sm:px-6 lg:px-8">
-      <div ref={contentRef} className="relative mx-auto flex max-w-[1280px] flex-col gap-4">
+      <div ref={contentRef} className="mx-auto flex max-w-[1280px] flex-col gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-11 w-11 flex-none items-center justify-center rounded-[13px] border border-[var(--scry-baccent)] bg-[rgba(var(--scry-accent-rgb),0.16)] text-[var(--scry-accent-text)]">
             <ListPlus className="h-5 w-5" />
@@ -202,8 +198,8 @@ export function ListsView(props: ListsViewProps) {
               </Badge>
             </h1>
           </div>
-          {showPlugins && !pluginsDocked ? (
-            <Button type="button" variant="outline" size="sm" aria-expanded={pluginsOpen} aria-controls="lists-plugins-panel" onClick={() => setPluginsOpen(true)}>
+          {showPlugins && !pluginsPanel.open ? (
+            <Button type="button" variant="outline" size="sm" aria-expanded={false} aria-controls="lists-plugins-panel" onClick={() => pluginsPanel.setOpen(true)}>
               <Puzzle className="h-4 w-4" />
               {t("settings.plugins")}
             </Button>
@@ -339,24 +335,18 @@ export function ListsView(props: ListsViewProps) {
             ) : null}
           </div>
         )}
-      {showPlugins && pluginsDocked ? (
-        <aside
-          aria-label={t("settings.plugins")}
-          style={{ width: pluginsWidth, marginLeft: PLUGIN_RAIL_SIZE.gap }}
-          className="absolute bottom-0 left-full top-0"
+      </div>
+      </div>
+      {showPlugins ? (
+        <GutterPanel
+          id="lists-plugins-panel"
+          label={t("settings.plugins")}
+          frame={pluginsPanel.frame}
+          open={pluginsPanel.open}
+          onOpenChange={pluginsPanel.setOpen}
         >
-          <div className="sticky top-[26px]">{plugins}</div>
-        </aside>
-      ) : null}
-      </div>
-      </div>
-      {showPlugins && !pluginsDocked ? (
-        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}>
-          <SheetContent id="lists-plugins-panel" side="right" className="w-[min(420px,calc(100vw-2rem))] overflow-y-auto">
-            <SheetHeader><SheetTitle>{t("settings.plugins")}</SheetTitle></SheetHeader>
-            <div className="px-3 pb-3">{plugins}</div>
-          </SheetContent>
-        </Sheet>
+          {plugins}
+        </GutterPanel>
       ) : null}
 
       <ListDetailPanel
