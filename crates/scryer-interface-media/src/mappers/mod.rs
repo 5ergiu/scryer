@@ -65,7 +65,7 @@ mod tests {
         discovery_home_query_from_input, from_download_queue_item, from_import_record,
         from_indexer_config_with_fields, from_proxy_config, from_title_history_record,
         from_wanted_item, provider_config_values_from_json_with_fields,
-        provider_config_values_to_json,
+        provider_config_values_to_json, provider_config_values_to_string_map,
     };
     use crate::types::{
         BoolConfigValuePayload, DiscoveryHomeFiltersInput, DiscoveryHomeInput,
@@ -291,6 +291,31 @@ mod tests {
         assert_eq!(value["api_key"], json!("replacement-secret"));
         assert_eq!(value["optional_password"], Value::Null);
         assert_eq!(value["base_url"], json!("https://example.test"));
+    }
+
+    #[test]
+    fn provider_config_inputs_flatten_to_plugin_strings_without_cleared_secrets() {
+        let mut definition = config_input("definition");
+        definition.string_value = Some("alpha".to_string());
+        let mut enabled = config_input("enabled");
+        enabled.bool_value = Some(true);
+        let mut limit = config_input("limit");
+        limit.int_value = Some(50);
+        let mut cleared = config_input("cookie");
+        cleared.clear_secret = Some(true);
+
+        let values =
+            provider_config_values_to_string_map(vec![definition, enabled, limit, cleared])
+                .expect("typed config values should flatten");
+
+        assert_eq!(
+            values.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("definition".to_string(), "alpha".to_string()),
+                ("enabled".to_string(), "true".to_string()),
+                ("limit".to_string(), "50".to_string()),
+            ]
+        );
     }
 
     #[test]

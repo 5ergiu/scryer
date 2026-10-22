@@ -1251,9 +1251,7 @@ impl SettingsQueries {
             .map_err(to_gql_error)?;
         let mut payloads = Vec::with_capacity(configs.len());
         for config in configs {
-            let config_fields = app
-                .indexer_config_fields_for_provider_type(&config.provider_type)
-                .unwrap_or_default();
+            let config_fields = app.indexer_config_fields_for_config(&config).await;
             payloads.push(from_indexer_config_with_fields(config, &config_fields));
         }
         for payload in &mut payloads {

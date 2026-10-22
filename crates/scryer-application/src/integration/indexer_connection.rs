@@ -77,7 +77,8 @@ impl AppUseCase {
         self.ensure_provider_plugin_not_blocked(provider_type)
             .await?;
 
-        let fields = self.indexer_config_fields_for_provider_type(provider_type)?;
+        // Fails early for an unknown provider, before any stored config is read.
+        self.indexer_config_fields_for_provider_type(provider_type)?;
         let persisted_config = if let Some(indexer_id) = indexer_id {
             self.services
                 .integrations
@@ -87,6 +88,21 @@ impl AppUseCase {
         } else {
             None
         };
+        let same_provider_persisted_json = persisted_config
+            .as_ref()
+            .filter(|config| {
+                config
+                    .provider_type
+                    .trim()
+                    .eq_ignore_ascii_case(provider_type.trim())
+            })
+            .and_then(|config| config.config_json.as_deref());
+        let fields = self
+            .effective_indexer_config_fields(
+                provider_type,
+                &[config_json, same_provider_persisted_json],
+            )
+            .await?;
         let persisted_config_json = persisted_config
             .as_ref()
             .filter(|config| {
@@ -1131,6 +1147,8 @@ mod tests {
         pruned_indexers: Arc<std::sync::Mutex<Vec<String>>>,
         search_error: Option<String>,
         probe_result: bool,
+        dynamic_fields: Option<crate::PluginDynamicConfigFields>,
+        dynamic_calls: Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
     }
 
     impl RecordingIndexerClient {
@@ -1145,7 +1163,18 @@ mod tests {
                 pruned_indexers: Arc::new(std::sync::Mutex::new(Vec::new())),
                 search_error,
                 probe_result: false,
+                dynamic_fields: None,
+                dynamic_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        fn with_dynamic_fields(mut self, fields: crate::PluginDynamicConfigFields) -> Self {
+            self.dynamic_fields = Some(fields);
+            self
+        }
+
+        fn dynamic_calls(&self) -> Vec<std::collections::BTreeMap<String, String>> {
+            self.dynamic_calls.lock().unwrap().clone()
         }
 
         fn with_connection_probe(mut self) -> Self {
@@ -1162,6 +1191,14 @@ mod tests {
     impl IndexerClient for RecordingIndexerClient {
         async fn probe_connection(&self) -> AppResult<bool> {
             Ok(self.probe_result)
+        }
+
+        async fn dynamic_config_fields(
+            &self,
+            values: &std::collections::BTreeMap<String, String>,
+        ) -> AppResult<Option<crate::PluginDynamicConfigFields>> {
+            self.dynamic_calls.lock().unwrap().push(values.clone());
+            Ok(self.dynamic_fields.clone())
         }
 
         async fn search(
@@ -1628,6 +1665,7 @@ mod tests {
         plan_sync_delay: Option<Duration>,
         active_plan_sync_calls: Arc<AtomicUsize>,
         max_concurrent_plan_sync_calls: Arc<AtomicUsize>,
+        dynamic_trigger_keys: Vec<String>,
     }
 
     impl RecordingPluginProvider {
@@ -1660,6 +1698,7 @@ mod tests {
                 plan_sync_delay: None,
                 active_plan_sync_calls: Arc::new(AtomicUsize::new(0)),
                 max_concurrent_plan_sync_calls: Arc::new(AtomicUsize::new(0)),
+                dynamic_trigger_keys: Vec::new(),
             }
         }
 
@@ -1871,6 +1910,14 @@ mod tests {
 
         fn scoring_policies(&self) -> Vec<scryer_rules::UserPolicy> {
             vec![]
+        }
+
+        fn dynamic_config_trigger_keys_for_provider(&self, provider_type: &str) -> Vec<String> {
+            if provider_type == self.provider_type {
+                self.dynamic_trigger_keys.clone()
+            } else {
+                Vec::new()
+            }
         }
     }
 
@@ -6192,5 +6239,279 @@ mod tests {
             (0, vec![])
         );
         assert_eq!(repo.get_by_id(&config.id).await.unwrap().unwrap(), saved);
+    }
+
+    mod dynamic_config_fields {
+        use super::*;
+        use std::collections::BTreeMap;
+
+        fn dynamic_answer() -> crate::PluginDynamicConfigFields {
+            crate::PluginDynamicConfigFields {
+                fields: vec![
+                    scryer_domain::ConfigFieldDef {
+                        key: "cookie".into(),
+                        label: "Cookie".into(),
+                        field_type: scryer_domain::ConfigFieldType::Password,
+                        required: true,
+                        ..Default::default()
+                    },
+                    scryer_domain::ConfigFieldDef {
+                        key: "sort".into(),
+                        label: "Sort".into(),
+                        field_type: scryer_domain::ConfigFieldType::Select,
+                        options: vec![scryer_domain::ConfigFieldOption {
+                            value: "new".into(),
+                            label: "Newest".into(),
+                            config_overrides: Default::default(),
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                hidden_field_keys: vec!["username".into()],
+            }
+        }
+
+        fn dynamic_app(
+            trigger_keys: &[&str],
+            client: RecordingIndexerClient,
+        ) -> (
+            AppUseCase,
+            Arc<RecordingIndexerConfigRepo>,
+            Arc<RecordingIndexerClient>,
+        ) {
+            let client = Arc::new(client);
+            let mut provider = RecordingPluginProvider::new(
+                "cardigann",
+                vec![
+                    string_field("definition", "Definition", None),
+                    string_field("username", "Username", None),
+                    password_field("api_key", "API key"),
+                ],
+                searchable_capabilities(),
+                client.clone(),
+            );
+            provider.fields[2].required = false;
+            provider.dynamic_trigger_keys =
+                trigger_keys.iter().map(|key| key.to_string()).collect();
+            let repo = Arc::new(RecordingIndexerConfigRepo::new());
+            let app = test_app(
+                repo.clone(),
+                Some(Arc::new(provider)),
+                Arc::new(NullSettingsRepository),
+            );
+            (app, repo, client)
+        }
+
+        fn new_config(config_json: &str) -> NewIndexerConfig {
+            NewIndexerConfig {
+                name: "Tracker".into(),
+                provider_type: "cardigann".into(),
+                rate_limit_seconds: None,
+                rate_limit_burst: None,
+                max_queries_per_minute: None,
+                is_enabled: false,
+                enable_interactive_search: true,
+                enable_auto_search: true,
+                proxy_config_id: None,
+                download_client_id: None,
+                config_json: Some(config_json.into()),
+            }
+        }
+
+        fn stored_value(config: &IndexerConfig, key: &str) -> Option<String> {
+            serde_json::from_str::<serde_json::Value>(config.config_json.as_deref()?)
+                .ok()?
+                .get(key)?
+                .as_str()
+                .map(str::to_string)
+        }
+
+        #[tokio::test]
+        async fn query_sends_only_trigger_values_and_caches_per_value() {
+            let (app, _, client) = dynamic_app(
+                &["definition", "api_key"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+            let values = BTreeMap::from([
+                ("definition".to_string(), "alpha".to_string()),
+                ("username".to_string(), "someone".to_string()),
+                ("api_key".to_string(), "hunter2".to_string()),
+            ]);
+
+            let first = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap();
+            let second = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap();
+
+            assert_eq!(first, dynamic_answer());
+            assert_eq!(second, first);
+            // A password field is never a trigger, so the key never reaches
+            // the plugin, and the repeat is answered from the cache.
+            assert_eq!(
+                client.dynamic_calls(),
+                vec![BTreeMap::from([(
+                    "definition".to_string(),
+                    "alpha".to_string()
+                )])]
+            );
+
+            let beta = BTreeMap::from([("definition".to_string(), "beta".to_string())]);
+            app.indexer_dynamic_config_fields(&test_admin(), "cardigann", &beta)
+                .await
+                .unwrap();
+            assert_eq!(client.dynamic_calls().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn provider_without_trigger_keys_answers_empty_without_starting_plugin() {
+            let (app, _, client) = dynamic_app(
+                &[],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+            let values = BTreeMap::from([("definition".to_string(), "alpha".to_string())]);
+
+            let answer = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap();
+
+            assert_eq!(answer, crate::PluginDynamicConfigFields::default());
+            assert!(client.dynamic_calls().is_empty());
+        }
+
+        #[tokio::test]
+        async fn unsupported_answer_is_empty_not_an_error() {
+            let (app, _, client) = dynamic_app(&["definition"], RecordingIndexerClient::new(false));
+            let values = BTreeMap::from([("definition".to_string(), "alpha".to_string())]);
+
+            let answer = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap();
+
+            assert_eq!(answer, crate::PluginDynamicConfigFields::default());
+            assert_eq!(client.dynamic_calls().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn answer_reusing_a_static_key_is_refused_whole() {
+            let mut answer = dynamic_answer();
+            answer.fields[1].key = "username".into();
+            let (app, _, _) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(answer),
+            );
+            let values = BTreeMap::from([("definition".to_string(), "alpha".to_string())]);
+
+            let error = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains("reuses a static field key"),
+                "{error}"
+            );
+        }
+
+        #[tokio::test]
+        async fn save_demands_dynamic_required_fields_but_not_hidden_static_ones() {
+            let (app, _, _) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+
+            let error = app
+                .create_indexer_config(&test_admin(), new_config(r#"{"definition":"alpha"}"#))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Cookie is required"), "{error}");
+
+            // `username` is required statically but hidden for this
+            // definition, so the save must not ask for it.
+            let created = app
+                .create_indexer_config(
+                    &test_admin(),
+                    new_config(r#"{"definition":"alpha","cookie":"c1","sort":"new"}"#),
+                )
+                .await
+                .unwrap();
+            assert_eq!(stored_value(&created, "cookie").as_deref(), Some("c1"));
+            assert_eq!(stored_value(&created, "sort").as_deref(), Some("new"));
+        }
+
+        #[tokio::test]
+        async fn edit_restores_stored_dynamic_secret_and_reuses_stored_trigger_value() {
+            let (app, _, client) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+            let created = app
+                .create_indexer_config(
+                    &test_admin(),
+                    new_config(r#"{"definition":"alpha","cookie":"c1"}"#),
+                )
+                .await
+                .unwrap();
+
+            // The edit form omits a stored secret it did not change, and may
+            // omit the trigger too; both come back from the stored config.
+            let updated = app
+                .update_indexer_config(
+                    &test_admin(),
+                    IndexerConfigUpdate {
+                        id: created.id.clone(),
+                        config_json: Some(r#"{"sort":"new"}"#.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stored_value(&updated, "cookie").as_deref(), Some("c1"));
+            assert_eq!(
+                stored_value(&updated, "definition").as_deref(),
+                Some("alpha")
+            );
+            assert!(
+                client.dynamic_calls().iter().all(|values| {
+                    values.get("definition").map(String::as_str) == Some("alpha")
+                })
+            );
+
+            // Payloads redact the dynamic secret exactly like a static one.
+            let fields = app.indexer_config_fields_for_config(&updated).await;
+            let cookie = fields.iter().find(|field| field.key == "cookie").unwrap();
+            assert_eq!(cookie.field_type, scryer_domain::ConfigFieldType::Password);
+            let username = fields.iter().find(|field| field.key == "username").unwrap();
+            assert!(!username.required);
+        }
+
+        #[tokio::test]
+        async fn unreachable_plugin_treats_unknown_stored_keys_as_secrets() {
+            let (app, _, _) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields({
+                    let mut broken = dynamic_answer();
+                    broken.hidden_field_keys = vec!["definition".into()];
+                    broken
+                }),
+            );
+
+            let fields = app
+                .effective_indexer_config_fields(
+                    "cardigann",
+                    &[Some(r#"{"definition":"alpha","cookie":"c1"}"#)],
+                )
+                .await
+                .unwrap();
+
+            let cookie = fields.iter().find(|field| field.key == "cookie").unwrap();
+            assert_eq!(cookie.field_type, scryer_domain::ConfigFieldType::Password);
+            assert!(!cookie.required);
+        }
     }
 }

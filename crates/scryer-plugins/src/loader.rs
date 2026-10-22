@@ -911,6 +911,18 @@ impl IndexerPluginProvider for WasmIndexerPluginProvider {
             .unwrap_or_default()
     }
 
+    fn dynamic_config_trigger_keys_for_provider(&self, provider_type: &str) -> Vec<String> {
+        self.get_loaded(provider_type)
+            .and_then(|loaded| {
+                loaded
+                    .descriptor
+                    .indexer()
+                    .and_then(|indexer| indexer.capabilities.dynamic_config_fields.clone())
+            })
+            .map(|capability| capability.trigger_keys)
+            .unwrap_or_default()
+    }
+
     fn plugin_name_for_provider(&self, provider_type: &str) -> Option<String> {
         self.get_loaded(provider_type)
             .map(|loaded| loaded.descriptor.name.clone())
@@ -1318,6 +1330,14 @@ impl IndexerPluginProvider for DynamicPluginProvider {
             .read()
             .expect("DynamicPluginProvider lock poisoned");
         guard.config_fields_for_provider(provider_type)
+    }
+
+    fn dynamic_config_trigger_keys_for_provider(&self, provider_type: &str) -> Vec<String> {
+        let guard = self
+            .inner
+            .read()
+            .expect("DynamicPluginProvider lock poisoned");
+        guard.dynamic_config_trigger_keys_for_provider(provider_type)
     }
 
     fn plugin_name_for_provider(&self, provider_type: &str) -> Option<String> {
