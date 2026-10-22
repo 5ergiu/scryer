@@ -1023,43 +1023,31 @@ fn decode_search_result(
     }
 }
 
-/// Component plugins deliberately keep unexpected trap details out of their
-/// public error. An upstream's explicit API-key rejection is safe, actionable
-/// information, though, and the guest currently carries it only in that debug
-/// detail. Promote the category without relaying the untrusted detail itself.
+/// A credential the indexer rejected is a stable reason the client translates
+/// (`PLUGIN_INVALID_API_KEY` and friends), so a plugin that names the code
+/// needs nothing more. Plugins built before the shared codes said only the
+/// generic sentence and named the rejected key in their debug text; promote
+/// those to the same reason without relaying the untrusted detail itself.
 fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
-    // Built first so the debug detail is logged on every path.
-    let failed = AppError::plugin_failed(&error, context);
-    if let Some(sentence) = credential_rejection_sentence(&error.code) {
-        return AppError::Validation(sentence.to_string());
+    if is_legacy_api_key_rejection(&error) {
+        let promoted = PluginError {
+            code: PluginErrorCode::from("invalid_api_key"),
+            ..error
+        };
+        return AppError::plugin_failed(&promoted, context);
     }
-    // Plugins built before the shared credential codes said only this generic
-    // sentence and named the rejected key in their debug text.
-    let is_api_key_rejection = error.public_message == "indexer component failed"
+    AppError::plugin_failed(&error, context)
+}
+
+fn is_legacy_api_key_rejection(error: &PluginError) -> bool {
+    error.public_message == "indexer component failed"
         && error.debug_message.as_deref().is_some_and(|message| {
             let normalized = message.to_ascii_lowercase();
             (normalized.contains("api key") || normalized.contains("apikey"))
                 && (normalized.contains("invalid")
                     || normalized.contains("rejected")
                     || normalized.contains("error"))
-        });
-    if is_api_key_rejection {
-        return AppError::Validation("The indexer rejected the API key.".to_string());
-    }
-
-    failed
-}
-
-/// The sentence for a search the indexer refused because of the credential a
-/// shared code names, or `None` for any other failure.
-fn credential_rejection_sentence(code: &PluginErrorCode) -> Option<&'static str> {
-    match code.as_str() {
-        "invalid_api_key" => Some("The indexer rejected the API key."),
-        "invalid_passkey" => Some("The indexer rejected the passkey."),
-        "invalid_cookie" => Some("The indexer rejected the session cookie."),
-        "invalid_username_password" => Some("The indexer rejected the username or password."),
-        _ => None,
-    }
+        })
 }
 
 fn host_incomplete_reason(reason: PluginIncompleteReason) -> HostIncompleteReason {
@@ -3347,11 +3335,12 @@ mod tests {
         .err()
         .expect("an API-key rejection must fail the search");
 
-        assert_eq!(
-            error.to_string(),
-            "validation: The indexer rejected the API key."
-        );
-        assert!(!error.to_string().contains("secret"));
+        let failure = error
+            .plugin_failure()
+            .expect("a legacy API-key rejection is promoted to the shared reason");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_API_KEY");
+        assert_eq!(failure.detail, None);
+        assert!(!format!("{error:?}").contains("secret"));
     }
 
     #[test]
@@ -3391,15 +3380,12 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_credential_code_is_a_validation_error_naming_the_credential() {
-        for (code, sentence) in [
-            ("invalid_api_key", "The indexer rejected the API key."),
-            ("invalid_passkey", "The indexer rejected the passkey."),
-            ("invalid_cookie", "The indexer rejected the session cookie."),
-            (
-                "invalid_username_password",
-                "The indexer rejected the username or password.",
-            ),
+    fn a_rejected_credential_code_reaches_the_client_as_its_translated_reason() {
+        for code in [
+            "invalid_api_key",
+            "invalid_passkey",
+            "invalid_cookie",
+            "invalid_username_password",
         ] {
             // The plugin's sentence does not matter: the code alone decides.
             let error = coded_search_error(
@@ -3407,11 +3393,15 @@ mod tests {
                 "the plugin could not complete the request",
                 "upstream answered 401 for key=example-secret",
             );
+            let failure = error
+                .plugin_failure()
+                .unwrap_or_else(|| panic!("{code} stays a typed plugin failure"));
             assert_eq!(
-                error.to_string(),
-                format!("validation: {sentence}"),
+                failure.reason.as_str(),
+                format!("PLUGIN_{}", code.to_ascii_uppercase()),
                 "{code}"
             );
+            assert_eq!(failure.detail, None, "{code}");
             assert!(!format!("{error:?}").contains("example-secret"), "{code}");
         }
     }
