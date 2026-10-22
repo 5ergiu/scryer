@@ -16,6 +16,7 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   highContrastMode: false,
   reduceMotion: false,
   hideSponsorButton: false,
+  noGlow: true,
   density: "COMFORTABLE",
   sidebarMode: "EXPANDED",
   defaultLandingView: "MOVIES",
@@ -87,6 +88,7 @@ export function uiSettingsInputFromSettings(
     highContrastMode: settings.highContrastMode,
     reduceMotion: settings.reduceMotion,
     hideSponsorButton: settings.hideSponsorButton,
+    noGlow: settings.noGlow,
     density: settings.density,
     sidebarMode: settings.sidebarMode,
     defaultLandingView: settings.defaultLandingView,
@@ -213,6 +215,12 @@ export function UiSettingsProvider({ children }: { children: React.ReactNode }) 
       isDarkTheme(resolvedTheme ?? theme),
     );
   }, [uiSettings.highlightColor, resolvedTheme, theme]);
+
+  // Stylesheets drop the decorative accent glow under data-glow="off".
+  React.useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dataset.glow = uiSettings.noGlow ? "off" : "on";
+  }, [uiSettings.noGlow]);
 
   const value = React.useMemo<UiSettingsContextValue>(
     () => ({

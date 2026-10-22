@@ -460,6 +460,8 @@ pub struct UiSettingsPayload {
     pub reduce_motion: bool,
     /// Whether the sponsor button is hidden.
     pub hide_sponsor_button: bool,
+    /// Whether the decorative accent glow is turned off.
+    pub no_glow: bool,
     /// Selected density.
     pub density: UiDensityValue,
     /// Selected sidebar mode.
@@ -519,6 +521,8 @@ pub struct SetMyUiSettingsInput {
     pub reduce_motion: bool,
     /// Whether the sponsor button should be hidden.
     pub hide_sponsor_button: bool,
+    /// Optional glow preference; true turns the decorative accent glow off and null preserves the existing value.
+    pub no_glow: Option<bool>,
     /// Selected density.
     pub density: UiDensityValue,
     /// Selected sidebar mode.

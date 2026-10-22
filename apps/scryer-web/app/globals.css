@@ -174,6 +174,7 @@
   --scry-side1: rgba(255, 255, 255, 0.9);
   --scry-side2: rgba(248, 250, 253, 0.9);
   --scry-shell-left-glow: rgba(var(--scry-accent-rgb), 0.055);
+  --scry-glow: 1;
   --scry-shell-left-glow-reach: 34rem;
   --scry-shell-bg:
     radial-gradient(circle at 14% 10%, var(--scry-shell-left-glow), transparent var(--scry-shell-left-glow-reach)),
@@ -811,6 +812,36 @@ body {
     linear-gradient(180deg, rgba(11, 17, 33, 0.94), rgba(6, 11, 23, 0.92)),
     linear-gradient(90deg, rgba(91, 100, 255, 0.04), rgba(56, 189, 248, 0.018) 100%);
   backdrop-filter: blur(16px) saturate(124%);
+}
+
+/* The glow preference off: the accent-colored atmospheres and spread
+   shadows go, and the plain surfaces under them stay. */
+:root[data-glow="off"] {
+  --scry-glow: 0;
+  --scry-shell-bg: linear-gradient(180deg, var(--scry-page1) 0%, var(--scry-page2) 42%, var(--scry-page3) 100%);
+  --scry-shell-side-bg: linear-gradient(180deg, var(--scry-side1), var(--scry-side2));
+  --scry-search-panel-bg: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--card) 96%, var(--background) 4%) 0%,
+    var(--card) 56%,
+    color-mix(in srgb, var(--background) 90%, var(--card) 10%) 100%
+  );
+  --scry-search-overlay-bg: color-mix(in srgb, var(--background) 78%, transparent);
+  --scry-mobile-search-bg: linear-gradient(180deg, var(--background) 0%, color-mix(in srgb, var(--muted) 38%, transparent) 100%);
+  --dark-atmo-indigo: transparent;
+  --dark-atmo-cyan: transparent;
+}
+
+:root[data-glow="off"] [data-slot="sidebar-inner"]::before {
+  display: none;
+}
+
+:root.dark[data-glow="off"] [data-slot="global-search-overlay"] {
+  background: rgba(2, 4, 10, 0.66);
+}
+
+:root[data-glow="off"] .fc-scryer-hover-card-image-wrap {
+  background: var(--muted);
 }
 
 @keyframes scryer-progress-indeterminate {

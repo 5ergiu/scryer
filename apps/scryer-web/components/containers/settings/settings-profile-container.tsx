@@ -168,6 +168,7 @@ export function SettingsProfileContainer({ userId, username }: Props) {
     null,
   );
   const [savingSponsorPreference, setSavingSponsorPreference] = useState(false);
+  const [savingGlowPreference, setSavingGlowPreference] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -497,6 +498,53 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       savingSponsorPreference,
       setGlobalStatus,
       setUiSettings,
+      uiSettings,
+      uiSettingsLoaded,
+      uiSettingsLoading,
+    ],
+  );
+
+  const handleNoGlowChange = useCallback(
+    async (noGlow: boolean) => {
+      if (
+        !uiSettingsLoaded ||
+        uiSettingsLoading ||
+        savingGlowPreference ||
+        uiSettings.noGlow === noGlow
+      ) {
+        return;
+      }
+
+      const previous = uiSettings;
+      setSavingGlowPreference(true);
+      setUiSettings({ ...uiSettings, noGlow });
+      try {
+        const result = await saveUiSettings((latest) =>
+          uiSettingsInputFromSettings({ ...latest, noGlow }),
+        );
+        if (result.error || !result.data?.setMyUiSettings) {
+          setUiSettings(previous);
+          setGlobalStatus(result.error?.message ?? t("profile.glowSaveFailed"), { level: "ERROR" });
+          return;
+        }
+        setUiSettings(result.data.setMyUiSettings);
+        setGlobalStatus(t("profile.glowSaved"), { level: "SUCCESS" });
+      } catch (error) {
+        setUiSettings(previous);
+        setGlobalStatus(
+          error instanceof Error ? error.message : t("profile.glowSaveFailed"),
+          { level: "ERROR" },
+        );
+      } finally {
+        setSavingGlowPreference(false);
+      }
+    },
+    [
+      saveUiSettings,
+      savingGlowPreference,
+      setGlobalStatus,
+      setUiSettings,
+      t,
       uiSettings,
       uiSettingsLoaded,
       uiSettingsLoading,
@@ -1228,6 +1276,9 @@ export function SettingsProfileContainer({ userId, username }: Props) {
       hideSponsorButton={uiSettings.hideSponsorButton}
       savingSponsorPreference={savingSponsorPreference}
       onHideSponsorButtonChange={handleHideSponsorButtonChange}
+      noGlow={uiSettings.noGlow}
+      savingGlowPreference={savingGlowPreference}
+      onNoGlowChange={handleNoGlowChange}
       currentPassword={currentPassword}
       newPassword={newPassword}
       confirmPassword={confirmPassword}

@@ -4506,6 +4506,8 @@ pub struct UiSettings {
     pub high_contrast_mode: bool,
     pub reduce_motion: bool,
     pub hide_sponsor_button: bool,
+    /// Turns off the decorative accent glow in the interface.
+    pub no_glow: bool,
     pub density: UiDensity,
     pub sidebar_mode: UiSidebarMode,
     pub default_landing_view: UiDefaultLandingView,
@@ -4526,6 +4528,8 @@ pub struct UiSettingsUpdate {
     pub high_contrast_mode: bool,
     pub reduce_motion: bool,
     pub hide_sponsor_button: bool,
+    /// Turns off the decorative accent glow in the interface.
+    pub no_glow: bool,
     pub density: UiDensity,
     pub sidebar_mode: UiSidebarMode,
     pub default_landing_view: UiDefaultLandingView,
@@ -4546,6 +4550,9 @@ impl UiSettings {
             high_contrast_mode: false,
             reduce_motion: false,
             hide_sponsor_button: false,
+            // New users start without the glow; migration 0306 kept it for
+            // users of instances that were already in use.
+            no_glow: true,
             density: UiDensity::default(),
             sidebar_mode: UiSidebarMode::default(),
             default_landing_view: UiDefaultLandingView::default(),

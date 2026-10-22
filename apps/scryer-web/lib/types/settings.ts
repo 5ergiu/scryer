@@ -115,6 +115,8 @@ export type UiSettings = {
   highContrastMode: boolean;
   reduceMotion: boolean;
   hideSponsorButton: boolean;
+  /** Turns off the decorative accent glow. */
+  noGlow: boolean;
   density: "COMPACT" | "COMFORTABLE";
   sidebarMode: "EXPANDED" | "COLLAPSED";
   defaultLandingView:
