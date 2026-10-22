@@ -343,6 +343,18 @@ fn feedback_scope_is_empty(scope: &DownloadClientFeedbackScope) -> bool {
             .any(|category| category.trim().is_empty())
 }
 
+/// The test is the one answer an operator reads directly, so it keeps the
+/// reason the plugin named instead of the masked repository error the other
+/// commands report.
+fn decode_test_connection_result(result: PluginResult<String>) -> AppResult<String> {
+    match result {
+        PluginResult::Ok(value) => Ok(value),
+        PluginResult::Err(error) => {
+            Err(AppError::plugin_failed(&error, "download test_connection"))
+        }
+    }
+}
+
 fn decode_download_add_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
     match result {
         PluginResult::Ok(value) => Ok(value),
@@ -1665,7 +1677,7 @@ impl DownloadClient for WasmDownloadClient {
                 "download-client command returned the wrong result for test_connection".to_string(),
             ));
         };
-        decode_command_result(result, "download test_connection")
+        decode_test_connection_result(result)
     }
 }
 
@@ -2158,6 +2170,29 @@ mod tests {
                 DownloadInputKind::TorrentFile,
             ])
         );
+    }
+
+    #[test]
+    fn a_failed_connection_test_names_the_plugin_reason() {
+        let error = decode_test_connection_result(PluginResult::Err(PluginError {
+            details: None,
+            code: PluginErrorCode::AuthFailed,
+            public_message: "the client rejected the username or password".to_string(),
+            debug_message: Some("HTTP 401 from the web UI".to_string()),
+            retry_after_seconds: None,
+        }))
+        .expect_err("a plugin error must fail the test");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(
+            failure.reason,
+            scryer_application::PluginFailureReason::AuthFailed
+        );
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("the client rejected the username or password")
+        );
+        assert!(!error.to_string().contains("HTTP 401"));
     }
 
     #[test]

@@ -493,6 +493,12 @@ fn map_indexer_connection_test_error(error: AppError) -> AppError {
         | AppError::NotFound(_)
         | AppError::Canceled(_)
         | AppError::TemporaryUnavailable { .. } => error,
+        // Keeps the reason the plugin named, so a client can still say why
+        // in its own language; only the sentence says it was the test.
+        AppError::PluginFailed { message, failure } => AppError::PluginFailed {
+            message: format!("indexer connection test failed: {message}"),
+            failure,
+        },
         error => {
             // `Repository`'s Display prepends "repository: ", which is noise in
             // a toast, so unwrap it to the message the provider wrote.
@@ -1117,6 +1123,25 @@ mod tests {
             known_newznab_error_message("Newznab API error 777: Provider-specific oddity"),
             None
         );
+    }
+
+    #[test]
+    fn a_plugin_failure_survives_the_connection_test_with_its_reason() {
+        let failure = crate::PluginFailure {
+            reason: crate::PluginFailureReason::AuthFailed,
+            detail: Some("Tracker login failed: wrong password".to_string()),
+        };
+        let mapped = map_indexer_connection_test_error(AppError::PluginFailed {
+            message: "indexer indexer_search component: plugin error AuthFailed: x".to_string(),
+            failure: failure.clone(),
+        });
+
+        assert_eq!(
+            mapped.to_string(),
+            "indexer connection test failed: indexer indexer_search component: \
+             plugin error AuthFailed: x"
+        );
+        assert_eq!(mapped.plugin_failure(), Some(&failure));
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

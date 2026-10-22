@@ -90,6 +90,8 @@ mod notifications;
 mod null_repositories;
 mod oauth;
 pub mod persisted_records;
+pub mod plugin_failure;
+pub use plugin_failure::{PluginFailure, PluginFailureReason};
 mod plugins;
 mod polling_worker;
 mod ports;
@@ -1021,6 +1023,16 @@ pub enum AppError {
     /// rolled back; the language change already scheduled a fresh run.
     #[error("discovery run {run_id} was superseded by a presentation change")]
     DiscoveryPresentationSuperseded { run_id: String },
+
+    /// A plugin call failed. A repository failure to every workflow that
+    /// retries, records, or reports it, but `message` is the host's own
+    /// sentence and safe to show, and `failure` names why the call failed so a
+    /// client can say it in its own language. See `plugin_failure`.
+    #[error("{message}")]
+    PluginFailed {
+        message: String,
+        failure: PluginFailure,
+    },
 
     #[error("repository: {0}")]
     Repository(String),
