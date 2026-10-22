@@ -15,7 +15,6 @@ import {
   ListChecks,
   Puzzle,
   Rss,
-  ScanSearch,
   Server,
   Settings2,
   ShieldCheck,
@@ -24,15 +23,18 @@ import {
   SquareTerminal,
   Tag,
   Timer,
-  UploadCloud,
   User,
   Users,
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { UnderlineTabLink } from "@/components/common/underline-filter-button";
 import { Button } from "@/components/ui/button";
-import { GutterPanel, GutterPanelContext } from "@/components/common/gutter-panel";
+import {
+  GutterPanel,
+  GutterPanelButton,
+  GutterPanelContext,
+} from "@/components/common/gutter-panel";
 import type {
   IndexerSettingsTab,
   MaintenanceRulesSection,
@@ -163,20 +165,16 @@ const INDEXERS_FILTERED_PLUGIN_CONTENT_WIDTH = 1460;
 // keeps the wider pane it had before it carried the plugins rail.
 const INDEXER_SEARCH_FILTERED_PLUGIN_CONTENT_WIDTH = 1640;
 
-const INDEXER_SETTINGS_TAB_ITEMS: Record<
-  IndexerSettingsTab,
-  { labelKey: string; icon: LucideIcon }
-> = {
-  indexers: { labelKey: "settings.indexers", icon: Database },
-  search: { labelKey: "settings.indexerSearch", icon: ScanSearch },
-  seedingProfiles: { labelKey: "settings.seedingProfiles", icon: UploadCloud },
+const INDEXER_SETTINGS_TAB_LABEL_KEYS: Record<IndexerSettingsTab, string> = {
+  indexers: "settings.indexers",
+  search: "settings.indexerSearch",
+  seedingProfiles: "settings.seedingProfiles",
 };
 
-/// Pane switcher for the Indexers page. An indexer and the seeding profile it
+/// Pane tabs for the Indexers page. An indexer and the seeding profile it
 /// applies are two views of the same subject, so they share a page instead of
-/// scattering across the settings nav. Same shape as the Wanted view's section
-/// rail.
-function IndexerSettingsSubnav({
+/// scattering across the settings nav. Same shape as the Lists page's tabs.
+function IndexerSettingsTabs({
   activeTab,
   tabs,
   t,
@@ -186,40 +184,25 @@ function IndexerSettingsSubnav({
   t: ReturnType<typeof useTranslate>;
 }) {
   return (
-    <aside className="w-full shrink-0 border-b border-[var(--scry-border3)] bg-[var(--scry-surfF)] p-3 2xl:h-full 2xl:w-[218px] 2xl:overflow-y-auto 2xl:border-b-0 2xl:border-r 2xl:p-[22px_14px]">
-      <nav
+    <div className="mb-6 flex flex-wrap items-end gap-3 border-b border-[var(--scry-border3)]">
+      <div
         id="settings-indexers-subnav"
-        className="flex gap-2 overflow-x-auto pb-1 2xl:flex-col 2xl:overflow-visible 2xl:pb-0"
+        role="tablist"
         aria-label={t("settings.indexers")}
+        className="relative top-px flex min-h-12 flex-wrap gap-x-2"
       >
-        {tabs.map((tab) => {
-          const item = INDEXER_SETTINGS_TAB_ITEMS[tab];
-          const Icon = item.icon;
-          const active = activeTab === tab;
-          return (
-            <Link
-              key={tab}
-              id={selectorId("settings-indexers-subnav", tab)}
-              to={buildIndexerSettingsPath(tab)}
-              aria-current={active ? "page" : undefined}
-              className={cn(
-                "flex h-9 shrink-0 items-center gap-2 rounded-[9px] px-3 text-[13px] font-medium text-[var(--scry-muted)] transition hover:bg-[var(--scry-hover)] hover:text-[var(--scry-ink2)] 2xl:w-full",
-                active &&
-                  "bg-[linear-gradient(90deg,rgba(var(--scry-accent-rgb),0.26),rgba(var(--scry-accent-rgb),0.08))] text-[var(--scry-ink2)] shadow-[inset_2px_0_0_var(--scry-accent-ring)]",
-              )}
-            >
-              <Icon
-                className={cn(
-                  "h-[17px] w-[17px] text-[var(--scry-muted2)]",
-                  active && "text-[var(--scry-accent-text)]",
-                )}
-              />
-              <span className="whitespace-nowrap">{t(item.labelKey)}</span>
-            </Link>
-          );
-        })}
-      </nav>
-    </aside>
+        {tabs.map((tab) => (
+          <UnderlineTabLink
+            key={tab}
+            id={selectorId("settings-indexers-subnav", tab)}
+            to={buildIndexerSettingsPath(tab)}
+            selected={activeTab === tab}
+            label={t(INDEXER_SETTINGS_TAB_LABEL_KEYS[tab])}
+            badge={tab === "search" ? t("settings.pluginBeta") : undefined}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -655,14 +638,10 @@ export const SettingsContainer = memo(function SettingsContainer({
         );
     }
   })();
-  // The Indexers page's panes are pages in their own right, so the header and
-  // the breadcrumb name the pane rather than the section that hosts it.
-  const activeIndexerTab =
-    settingsSection === "indexers" && effectiveIndexerSettingsTab !== "indexers"
-      ? INDEXER_SETTINGS_TAB_ITEMS[effectiveIndexerSettingsTab]
-      : undefined;
-  // Same for the Maintenance Rules panes. The rule list is the page itself
-  // rather than a pane of it, so it adds no crumb and keeps the page's icon.
+  // The Maintenance Rules panes are pages in their own right, so the header
+  // and the breadcrumb name the pane rather than the section that hosts it.
+  // The rule list is the page itself rather than a pane of it, so it adds no
+  // crumb and keeps the page's icon.
   const activeMaintenancePane =
     settingsSection === "maintenanceRules" &&
     !maintenanceRulesHidden &&
@@ -671,7 +650,7 @@ export const SettingsContainer = memo(function SettingsContainer({
           (item) => item.section === maintenanceRulesSection,
         )
       : undefined;
-  const activePane = activeIndexerTab ?? activeMaintenancePane;
+  const activePane = activeMaintenancePane;
   const pageLabel = activePane ? t(activePane.labelKey) : settingsSectionLabel;
   const PageIcon = activePane ? activePane.icon : SettingsSectionIcon;
   const breadcrumbRootLabel =
@@ -701,11 +680,10 @@ export const SettingsContainer = memo(function SettingsContainer({
     subscribeToProviderCatalog,
   );
 
-  // The Indexers and Rules rails only become a side column at 2xl; below that
-  // they are a full-width strip, so the row has to stack or the strip takes
-  // the whole row and leaves the page content zero wide.
-  const showSectionSubnav =
-    settingsSection === "indexers" || (isRulesSection && rulesSections.length >= 2);
+  // The Rules rail only becomes a side column at 2xl; below that it is a
+  // full-width strip, so the row has to stack or the strip takes the whole
+  // row and leaves the page content zero wide.
+  const showSectionSubnav = isRulesSection && rulesSections.length >= 2;
 
   return (
     <div
@@ -765,13 +743,6 @@ export const SettingsContainer = memo(function SettingsContainer({
           </nav>
         </aside>
       ) : null}
-      {settingsSection === "indexers" ? (
-        <IndexerSettingsSubnav
-          activeTab={effectiveIndexerSettingsTab}
-          tabs={indexerSettingsTabs}
-          t={t}
-        />
-      ) : null}
       {isRulesSection ? (
         <RulesSubnav
           activeSection={effectiveRulesSection}
@@ -813,11 +784,7 @@ export const SettingsContainer = memo(function SettingsContainer({
             {activePane ? (
               <>
                 <Link
-                  to={
-                    activeIndexerTab
-                      ? buildIndexerSettingsPath("indexers")
-                      : buildRulesPath("maintenance")
-                  }
+                  to={buildRulesPath("maintenance")}
                   className="transition hover:text-[var(--scry-ink2)]"
                 >
                   {settingsSectionLabel}
@@ -835,11 +802,6 @@ export const SettingsContainer = memo(function SettingsContainer({
               <div className="min-w-0">
                 <h1 className="flex flex-wrap items-center gap-2.5 text-[25px] font-bold tracking-normal text-[var(--scry-ink2)]">
                   {pageLabel}
-                  {settingsSection === "indexers" && effectiveIndexerSettingsTab === "search" ? (
-                    <Badge id="settings-indexer-search-beta" tone="warning" className="text-[11px]">
-                      {t("settings.pluginBeta")}
-                    </Badge>
-                  ) : null}
                 </h1>
                 {settingsSection === "indexers" && effectiveIndexerSettingsTab === "search" ? (
                   <p
@@ -865,7 +827,16 @@ export const SettingsContainer = memo(function SettingsContainer({
                 ) : null}
               </div>
             </div>
-            {settingsSection === "plugins" ? (
+            {showReferenceRail ? (
+              <GutterPanelButton
+                panelId={SETTINGS_PLUGINS_PANEL_ID}
+                label={t("settings.plugins")}
+                icon={<Puzzle className="h-4 w-4" />}
+                frame={referencePanel.frame}
+                open={referencePanel.open}
+                onOpen={() => setReferencePanelOpen(true)}
+              />
+            ) : settingsSection === "plugins" ? (
               <div
                 id={SETTINGS_HEADER_ACTIONS_SLOT_ID}
                 className="flex min-h-10 shrink-0 flex-wrap items-center justify-end gap-2 sm:min-w-[29rem]"
@@ -876,6 +847,13 @@ export const SettingsContainer = memo(function SettingsContainer({
               </Button>
             ) : null}
           </div>
+          {settingsSection === "indexers" ? (
+            <IndexerSettingsTabs
+              activeTab={effectiveIndexerSettingsTab}
+              tabs={indexerSettingsTabs}
+              t={t}
+            />
+          ) : null}
           <GutterPanelContext.Provider value={showReferenceRail ? referencePanelContext : null}>
           <Suspense fallback={<div className="py-6 text-sm text-[var(--scry-muted3)]">{t("label.loading")}</div>}>
           {settingsSection === "profile" ? (

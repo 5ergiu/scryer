@@ -6,7 +6,7 @@ import { UnderlineFilterButton } from "@/components/common/underline-filter-butt
 import type { ListsSection } from "@/components/root/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { GutterPanel } from "@/components/common/gutter-panel";
+import { GutterPanel, GutterPanelButton } from "@/components/common/gutter-panel";
 import { FilteredPluginList } from "@/components/views/settings/filtered-plugin-list";
 import { useTranslate } from "@/lib/context/translate-context";
 import { type GutterPanelSize, useGutterPanel } from "@/lib/hooks/use-gutter-panel";
@@ -198,6 +198,16 @@ export function ListsView(props: ListsViewProps) {
               </Badge>
             </h1>
           </div>
+          {showPlugins ? (
+            <GutterPanelButton
+              panelId="lists-plugins-panel"
+              label={t("settings.plugins")}
+              icon={<Puzzle className="h-4 w-4" />}
+              frame={pluginsPanel.frame}
+              open={pluginsPanel.open}
+              onOpen={() => pluginsPanel.setOpen(true)}
+            />
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-end gap-3 border-b border-[var(--scry-border3)]">

@@ -11,20 +11,32 @@ export type GutterPanelSize = {
 export type GutterPanelFrame = {
   /** The right gutter holds the panel without covering any content. */
   docked: boolean;
+  /** The right gutter holds the edge tab that opens the closed panel. */
+  tabFits: boolean;
   width: number;
   top: number;
   right: number;
 };
 
+/** Width of the vertical edge tab that opens a closed panel. */
+export const GUTTER_PANEL_TAB_WIDTH = 44;
+
 const UNDOCKED_FRAME: GutterPanelFrame = {
   docked: false,
+  tabFits: false,
   width: 0,
   top: 0,
   right: 0,
 };
 
 function sameFrame(a: GutterPanelFrame, b: GutterPanelFrame) {
-  return a.docked === b.docked && a.width === b.width && a.top === b.top && a.right === b.right;
+  return (
+    a.docked === b.docked &&
+    a.tabFits === b.tabFits &&
+    a.width === b.width &&
+    a.top === b.top &&
+    a.right === b.right
+  );
 }
 
 /**
@@ -62,9 +74,10 @@ export function useGutterPanel(
     const measure = () => {
       const rect = container.getBoundingClientRect();
       const clientRight = rect.left + container.clientLeft + container.clientWidth;
-      const available = clientRight - content.getBoundingClientRect().right - gap;
+      const gutter = clientRight - content.getBoundingClientRect().right;
       const next: GutterPanelFrame = {
-        docked: available >= width,
+        docked: gutter - gap >= width,
+        tabFits: gutter >= GUTTER_PANEL_TAB_WIDTH,
         width: Math.min(width, container.clientWidth),
         top: Math.max(0, Math.round(rect.top)),
         right: Math.max(0, Math.round(document.documentElement.clientWidth - clientRight)),

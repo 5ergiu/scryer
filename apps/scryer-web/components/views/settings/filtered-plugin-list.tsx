@@ -33,7 +33,7 @@ const FILTERED_PLUGIN_HEADER_CLASS =
 // while a single column of plugins scrolls beneath it.
 const FILTERED_PLUGIN_PANEL_FLUSH_CLASS = "flex min-h-0 flex-col";
 const FILTERED_PLUGIN_HEADER_FLUSH_CLASS =
-  "sticky top-0 z-10 [background-color:var(--scry-bg)] py-1.5 pl-3 pr-1.5";
+  "sticky top-0 z-10 bg-none [background-color:var(--scry-bg)] py-1.5 pl-3 pr-1.5";
 const FILTERED_PLUGIN_TITLE_FLUSH_CLASS = "min-w-0 truncate text-[13px]";
 const FILTERED_PLUGIN_HEADER_BUTTON_FLUSH_CLASS = "size-7";
 const FILTERED_PLUGIN_TITLE_CLASS =
