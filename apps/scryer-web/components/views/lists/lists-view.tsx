@@ -37,8 +37,8 @@ import { PersonalAccounts } from "./personal-accounts";
 import { ProviderAppsPanel } from "./provider-apps-panel";
 
 // The plugins panel is pinned to the right edge beside the centered lists and
-// closes behind the Plugins button before it would cover them.
-const PLUGIN_PANEL_SIZE: GutterPanelSize = { minWidth: 288, maxWidth: 720, gap: 32 };
+// closes behind its edge tab before it would cover them.
+const PLUGIN_PANEL_SIZE: GutterPanelSize = { width: 320, gap: 32 };
 
 export type ListRouteOptions = {
   libraries: LibraryRecord[];
@@ -198,12 +198,6 @@ export function ListsView(props: ListsViewProps) {
               </Badge>
             </h1>
           </div>
-          {showPlugins && !pluginsPanel.open ? (
-            <Button type="button" variant="outline" size="sm" aria-expanded={false} aria-controls="lists-plugins-panel" onClick={() => pluginsPanel.setOpen(true)}>
-              <Puzzle className="h-4 w-4" />
-              {t("settings.plugins")}
-            </Button>
-          ) : null}
         </div>
 
         <div className="flex flex-wrap items-end gap-3 border-b border-[var(--scry-border3)]">
@@ -341,6 +335,7 @@ export function ListsView(props: ListsViewProps) {
         <GutterPanel
           id="lists-plugins-panel"
           label={t("settings.plugins")}
+          icon={<Puzzle className="h-4 w-4" />}
           frame={pluginsPanel.frame}
           open={pluginsPanel.open}
           onOpenChange={pluginsPanel.setOpen}

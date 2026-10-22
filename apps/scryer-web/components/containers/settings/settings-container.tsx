@@ -150,38 +150,18 @@ const SETTINGS_PLUGINS_PANEL_ID = "settings-plugins-panel";
 
 /**
  * The plugins panel is pinned to the right edge beside the centered settings
- * pane. The pane keeps `contentWidth` (padding included) whether the panel is
- * open or not, so the panel never narrows or shifts the content; it closes
- * behind the Plugins button once the gutter cannot hold its minimum. The
- * pane's own right padding separates the panel from the content, so the panel
- * needs no gap of its own.
+ * pane. The pane keeps its content width (padding included) whether the panel
+ * is open or not, so the panel never narrows or shifts the content; it closes
+ * behind its edge tab once the gutter cannot hold it. The pane's own right
+ * padding separates the panel from the content, so the panel needs no gap of
+ * its own.
  */
-type ReferenceRailLayout = {
-  contentWidth: number;
-  rail: GutterPanelSize;
-};
-
-const STANDARD_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
-  contentWidth: 1280,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
-};
-
-const INDEXERS_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
-  contentWidth: 1460,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
-};
-
+const SETTINGS_PLUGINS_PANEL_SIZE: GutterPanelSize = { width: 320, gap: 0 };
+const STANDARD_FILTERED_PLUGIN_CONTENT_WIDTH = 1280;
+const INDEXERS_FILTERED_PLUGIN_CONTENT_WIDTH = 1460;
 // The Search pane carries its own refine rail beside the results table, so it
 // keeps the wider pane it had before it carried the plugins rail.
-const INDEXER_SEARCH_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
-  contentWidth: 1640,
-  rail: { minWidth: 288, maxWidth: 720, gap: 0 },
-};
-
-const SUBTITLES_FILTERED_PLUGIN_LAYOUT: ReferenceRailLayout = {
-  contentWidth: 1280,
-  rail: { minWidth: 320, maxWidth: 560, gap: 0 },
-};
+const INDEXER_SEARCH_FILTERED_PLUGIN_CONTENT_WIDTH = 1640;
 
 const INDEXER_SETTINGS_TAB_ITEMS: Record<
   IndexerSettingsTab,
@@ -504,26 +484,22 @@ export const SettingsContainer = memo(function SettingsContainer({
     settingsSection === "downloadClients" ||
     settingsSection === "notifications" ||
     settingsSection === "subtitles";
-  const isSubtitlesSection = settingsSection === "subtitles";
-  const referenceLayout = showReferenceRail
-    ? isSubtitlesSection
-      ? SUBTITLES_FILTERED_PLUGIN_LAYOUT
-      : settingsSection === "indexers"
-        ? effectiveIndexerSettingsTab === "search"
-          ? INDEXER_SEARCH_FILTERED_PLUGIN_LAYOUT
-          : INDEXERS_FILTERED_PLUGIN_LAYOUT
-        : STANDARD_FILTERED_PLUGIN_LAYOUT
+  const referenceContentWidth = showReferenceRail
+    ? settingsSection === "indexers"
+      ? effectiveIndexerSettingsTab === "search"
+        ? INDEXER_SEARCH_FILTERED_PLUGIN_CONTENT_WIDTH
+        : INDEXERS_FILTERED_PLUGIN_CONTENT_WIDTH
+      : STANDARD_FILTERED_PLUGIN_CONTENT_WIDTH
     : null;
   const settingsContentRef = useRef<HTMLElement | null>(null);
   const settingsPaneRef = useRef<HTMLDivElement | null>(null);
   const referencePanel = useGutterPanel(
     settingsContentRef,
     settingsPaneRef,
-    referenceLayout?.rail ?? null,
+    showReferenceRail ? SETTINGS_PLUGINS_PANEL_SIZE : null,
     settingsSection,
   );
   const setReferencePanelOpen = referencePanel.setOpen;
-  const referencePanelClosed = showReferenceRail && !referencePanel.open;
   // The plugin lists are portaled into the panel from the section containers,
   // so the panel's context has to wrap the content they render from.
   const referencePanelContext = useMemo(
@@ -814,7 +790,7 @@ export const SettingsContainer = memo(function SettingsContainer({
       >
         <div
           ref={settingsPaneRef}
-          style={referenceLayout ? { maxWidth: referenceLayout.contentWidth } : undefined}
+          style={referenceContentWidth ? { maxWidth: referenceContentWidth } : undefined}
           className={cn(
             "mx-auto w-full px-4 py-5 pb-[calc(env(safe-area-inset-bottom)+5rem)] sm:px-6 md:px-[30px] md:py-[26px] md:pb-[60px]",
             showReferenceRail
@@ -851,14 +827,7 @@ export const SettingsContainer = memo(function SettingsContainer({
             ) : null}
             <span className="font-semibold text-[var(--scry-accent-text)]">{pageLabel}</span>
           </div>
-          <div
-            className={cn(
-              "mb-6 flex gap-3",
-              referencePanelClosed
-                ? "flex-row items-center justify-between"
-                : "flex-col sm:flex-row sm:items-center sm:justify-between",
-            )}
-          >
+          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-4">
               <div className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-[13px] border border-[var(--scry-baccent)] bg-[linear-gradient(135deg,rgba(var(--scry-accent-rgb),0.35),rgba(123,91,255,0.22))] text-[var(--scry-accent-text)]">
                 <PageIcon className="h-[23px] w-[23px]" />
@@ -896,19 +865,7 @@ export const SettingsContainer = memo(function SettingsContainer({
                 ) : null}
               </div>
             </div>
-            {referencePanelClosed ? (
-              <Button
-                type="button"
-                variant="primary"
-                className="h-10 w-auto shrink-0 self-start rounded-[10px] px-3 text-[13px]"
-                onClick={() => setReferencePanelOpen(true)}
-                aria-expanded={false}
-                aria-controls={SETTINGS_PLUGINS_PANEL_ID}
-              >
-                <Puzzle className="h-4 w-4" />
-                {t("settings.plugins")}
-              </Button>
-            ) : settingsSection === "plugins" ? (
+            {settingsSection === "plugins" ? (
               <div
                 id={SETTINGS_HEADER_ACTIONS_SLOT_ID}
                 className="flex min-h-10 shrink-0 flex-wrap items-center justify-end gap-2 sm:min-w-[29rem]"
@@ -1019,6 +976,7 @@ export const SettingsContainer = memo(function SettingsContainer({
               <GutterPanel
                 id={SETTINGS_PLUGINS_PANEL_ID}
                 label={t("settings.plugins")}
+                icon={<Puzzle className="h-4 w-4" />}
                 frame={referencePanel.frame}
                 open={referencePanel.open}
                 onOpenChange={setReferencePanelOpen}

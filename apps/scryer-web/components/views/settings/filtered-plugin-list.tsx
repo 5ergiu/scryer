@@ -29,15 +29,18 @@ const FILTERED_PLUGIN_PANEL_CLASS =
   "flex min-h-0 flex-col overflow-hidden rounded-[14px] border border-[var(--scry-border)] bg-[var(--scry-surf)] shadow-[0_10px_24px_rgba(0,0,0,0.16)]";
 const FILTERED_PLUGIN_HEADER_CLASS =
   "flex flex-row items-center justify-between gap-2 border-b border-[var(--scry-border3)] bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0))] px-4 py-3";
-// Inside a gutter panel the panel is the frame, and the header stays in view
-// while the plugins scroll beneath it.
+// Inside a gutter panel the panel is the frame: a slim header stays in view
+// while a single column of plugins scrolls beneath it.
 const FILTERED_PLUGIN_PANEL_FLUSH_CLASS = "flex min-h-0 flex-col";
 const FILTERED_PLUGIN_HEADER_FLUSH_CLASS =
-  "sticky top-0 z-10 [background-color:var(--scry-surf)] py-4";
+  "sticky top-0 z-10 [background-color:var(--scry-surf)] py-1.5 pl-3 pr-1.5";
+const FILTERED_PLUGIN_TITLE_FLUSH_CLASS = "min-w-0 truncate text-[13px]";
+const FILTERED_PLUGIN_HEADER_BUTTON_FLUSH_CLASS = "size-7";
 const FILTERED_PLUGIN_TITLE_CLASS =
   "text-[15px] font-semibold text-[var(--scry-ink2)]";
 const FILTERED_PLUGIN_BODY_CLASS =
   "grid grid-cols-[repeat(auto-fit,minmax(min(100%,256px),1fr))] gap-2 p-4";
+const FILTERED_PLUGIN_BODY_FLUSH_CLASS = "grid grid-cols-1 gap-2 p-3";
 const FILTERED_PLUGIN_MUTED_CLASS = "text-[var(--scry-muted3)]";
 
 /** Plugin `pluginType` values that belong to each provider-catalog family. */
@@ -172,15 +175,21 @@ export function FilteredPluginList({
             gutterPanel && FILTERED_PLUGIN_HEADER_FLUSH_CLASS,
           )}
         >
-          <h2 className={FILTERED_PLUGIN_TITLE_CLASS}>
+          <h2
+            className={cn(
+              FILTERED_PLUGIN_TITLE_CLASS,
+              gutterPanel && FILTERED_PLUGIN_TITLE_FLUSH_CLASS,
+            )}
+          >
             {title ?? t("settings.plugins")}
           </h2>
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1">
             {visibleUpgradeCount > 0 ? (
               <IconButton
                 label={updateAllLabel}
                 tooltip={updateAllTooltip}
                 tone="upgrade"
+                className={cn(gutterPanel && FILTERED_PLUGIN_HEADER_BUTTON_FLUSH_CLASS)}
                 onClick={() => void updateVisiblePlugins()}
                 disabled={upgradingVisiblePlugins}
               >
@@ -194,6 +203,8 @@ export function FilteredPluginList({
             <IconButton
               label={t("settings.pluginsRefresh")}
               tone="neutral"
+              appearance={gutterPanel ? "ghost" : "boxed"}
+              className={cn(gutterPanel && FILTERED_PLUGIN_HEADER_BUTTON_FLUSH_CLASS)}
               onClick={() => void refreshPluginsRegistry()}
               disabled={pluginsRefreshing}
             >
@@ -206,7 +217,8 @@ export function FilteredPluginList({
             {gutterPanel ? (
               <IconButton
                 label={t("label.close")}
-                tone="neutral"
+                appearance="ghost"
+                className={FILTERED_PLUGIN_HEADER_BUTTON_FLUSH_CLASS}
                 onClick={gutterPanel.close}
               >
                 <X className="h-4 w-4" />
@@ -214,7 +226,11 @@ export function FilteredPluginList({
             ) : null}
           </div>
         </div>
-        <div className={FILTERED_PLUGIN_BODY_CLASS}>
+        <div
+          className={
+            gutterPanel ? FILTERED_PLUGIN_BODY_FLUSH_CLASS : FILTERED_PLUGIN_BODY_CLASS
+          }
+        >
           {pluginsError ? (
             <p className="col-span-full text-xs text-[var(--scry-danger-text-soft)]">
               {pluginsError}

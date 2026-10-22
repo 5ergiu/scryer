@@ -1,10 +1,8 @@
 import * as React from "react";
 
 export type GutterPanelSize = {
-  /** Narrowest the panel may be and still stay open beside the content. */
-  minWidth: number;
-  /** Widest the panel grows when the gutter has room to spare. */
-  maxWidth: number;
+  /** Width of the panel, whether it sits in the gutter or over the content. */
+  width: number;
   /** Space kept between the content's right edge and the panel. */
   gap: number;
 };
@@ -18,11 +16,9 @@ export type GutterPanelFrame = {
   right: number;
 };
 
-// Width of the panel when it slides over the content on a narrow page.
-const OVERLAY_MAX_WIDTH = 420;
 const UNDOCKED_FRAME: GutterPanelFrame = {
   docked: false,
-  width: OVERLAY_MAX_WIDTH,
+  width: 0,
   top: 0,
   right: 0,
 };
@@ -34,7 +30,7 @@ function sameFrame(a: GutterPanelFrame, b: GutterPanelFrame) {
 /**
  * A side panel pinned to the right edge of a scroll container beside centered
  * content. The panel only ever takes gutter space: it is open by default while
- * the right gutter holds its minimum width, and closes on its own before it
+ * the right gutter holds its width, and closes on its own before it
  * would cover the content, so the content keeps its width and stays centered.
  * On a narrower page it can still be opened over the content.
  *
@@ -52,20 +48,13 @@ export function useGutterPanel(
 ) {
   const [frame, setFrame] = React.useState<GutterPanelFrame>(UNDOCKED_FRAME);
   const [open, setOpen] = React.useState(false);
-  const minWidth = size?.minWidth;
-  const maxWidth = size?.maxWidth;
+  const width = size?.width;
   const gap = size?.gap;
 
   React.useLayoutEffect(() => {
     const container = containerRef.current;
     const content = contentRef.current;
-    if (
-      !container ||
-      !content ||
-      minWidth === undefined ||
-      maxWidth === undefined ||
-      gap === undefined
-    ) {
+    if (!container || !content || width === undefined || gap === undefined) {
       setFrame(UNDOCKED_FRAME);
       return;
     }
@@ -74,12 +63,9 @@ export function useGutterPanel(
       const rect = container.getBoundingClientRect();
       const clientRight = rect.left + container.clientLeft + container.clientWidth;
       const available = clientRight - content.getBoundingClientRect().right - gap;
-      const docked = available >= minWidth;
       const next: GutterPanelFrame = {
-        docked,
-        width: Math.floor(
-          docked ? Math.min(maxWidth, available) : Math.min(OVERLAY_MAX_WIDTH, container.clientWidth),
-        ),
+        docked: available >= width,
+        width: Math.min(width, container.clientWidth),
         top: Math.max(0, Math.round(rect.top)),
         right: Math.max(0, Math.round(document.documentElement.clientWidth - clientRight)),
       };
@@ -99,7 +85,7 @@ export function useGutterPanel(
       window.removeEventListener("scroll", measure);
       observer?.disconnect();
     };
-  }, [containerRef, contentRef, minWidth, maxWidth, gap]);
+  }, [containerRef, contentRef, width, gap]);
 
   React.useEffect(() => setOpen(frame.docked), [frame.docked, resetKey]);
 
