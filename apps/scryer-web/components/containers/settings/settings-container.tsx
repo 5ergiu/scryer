@@ -791,7 +791,16 @@ export const SettingsContainer = memo(function SettingsContainer({
             ) : null}
             <span className="font-semibold text-[var(--scry-accent-text)]">{pageLabel}</span>
           </div>
-          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div
+            className={cn(
+              "mb-6 flex gap-3",
+              // The plugins button is small enough to share the title's row
+              // on any screen; other header actions stack below it on phones.
+              showReferenceRail
+                ? "flex-row items-center justify-between"
+                : "flex-col sm:flex-row sm:items-center sm:justify-between",
+            )}
+          >
             <div className="flex min-w-0 items-center gap-4">
               <div className="flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-[13px] border border-[var(--scry-baccent)] bg-[linear-gradient(135deg,rgba(var(--scry-accent-rgb),0.35),rgba(123,91,255,0.22))] text-[var(--scry-accent-text)]">
                 <PageIcon className="h-[23px] w-[23px]" />

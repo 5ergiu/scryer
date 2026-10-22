@@ -92,7 +92,14 @@ export function useGutterPanel(
     };
   }, [containerRef, contentRef, width, gap]);
 
-  React.useEffect(() => setOpen(frame.docked), [frame.docked, resetKey]);
+  // Follow the docking in the same render that changes it: an effect would
+  // commit one frame with the panel still open but no longer docked, which
+  // flashes it into its modal overlay before it slides away.
+  const [defaultFor, setDefaultFor] = React.useState({ docked: frame.docked, resetKey });
+  if (defaultFor.docked !== frame.docked || !Object.is(defaultFor.resetKey, resetKey)) {
+    setDefaultFor({ docked: frame.docked, resetKey });
+    setOpen(frame.docked);
+  }
 
   return { frame, open, setOpen };
 }

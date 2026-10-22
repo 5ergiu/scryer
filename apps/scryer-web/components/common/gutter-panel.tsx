@@ -173,7 +173,7 @@ export function GutterPanelButton({ panelId, label, icon, open, onOpenChange }: 
     <Button
       type="button"
       variant={open ? "outline" : "primary"}
-      className="h-10 shrink-0 self-start rounded-[10px] px-3 text-[13px] sm:self-auto"
+      className="h-10 shrink-0 rounded-[10px] px-3 text-[13px]"
       aria-controls={panelId}
       aria-expanded={open}
       onClick={() => onOpenChange(!open)}
