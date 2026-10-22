@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
-import { GutterPanelContext } from "@/components/common/gutter-panel";
+import { GutterPanelContext } from "@/lib/context/gutter-panel-context";
 import { PluginLogo } from "@/components/common/plugin-visual";
 import type { ProviderCatalogFamily } from "@/lib/hooks/use-provider-catalog-subscription";
 import { usePluginManagement } from "@/lib/hooks/use-plugin-management";

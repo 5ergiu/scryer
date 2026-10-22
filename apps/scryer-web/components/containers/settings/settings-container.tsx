@@ -30,11 +30,8 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { UnderlineTabLink } from "@/components/common/underline-filter-button";
 import { Button } from "@/components/ui/button";
-import {
-  GutterPanel,
-  GutterPanelButton,
-  GutterPanelContext,
-} from "@/components/common/gutter-panel";
+import { GutterPanel, GutterPanelButton } from "@/components/common/gutter-panel";
+import { GutterPanelContext } from "@/lib/context/gutter-panel-context";
 import type {
   IndexerSettingsTab,
   MaintenanceRulesSection,

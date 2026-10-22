@@ -3,15 +3,9 @@ import { ChevronDown } from "lucide-react";
 
 import { SCROLL_FADE_CONTROL_CLASS } from "@/components/common/horizontal-scroll-fade";
 import { Button } from "@/components/ui/button";
+import { GutterPanelContext } from "@/lib/context/gutter-panel-context";
 import type { GutterPanelFrame } from "@/lib/hooks/use-gutter-panel";
 import { cn } from "@/lib/utils";
-
-/**
- * Lets content rendered into a gutter panel, including content portaled in
- * from elsewhere in the tree, drop its own card frame and offer the panel's
- * close button in its header.
- */
-export const GutterPanelContext = React.createContext<{ close: () => void } | null>(null);
 
 type GutterPanelProps = {
   id: string;
