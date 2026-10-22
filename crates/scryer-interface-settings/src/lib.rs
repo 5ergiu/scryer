@@ -525,6 +525,7 @@ pub(crate) fn from_ui_settings(settings: scryer_application::UiSettings) -> UiSe
         high_contrast_mode: settings.high_contrast_mode,
         reduce_motion: settings.reduce_motion,
         hide_sponsor_button: settings.hide_sponsor_button,
+        no_glow: settings.no_glow,
         density: from_ui_density(settings.density),
         sidebar_mode: from_ui_sidebar_mode(settings.sidebar_mode),
         default_landing_view: from_ui_default_landing_view(settings.default_landing_view),
@@ -555,19 +556,20 @@ pub(crate) fn from_ui_settings(settings: scryer_application::UiSettings) -> UiSe
 
 pub(crate) fn ui_settings_update_from_input(
     input: SetMyUiSettingsInput,
-    current_date_time_format: scryer_application::UiDateTimeFormat,
+    current: &scryer_application::UiSettings,
 ) -> scryer_application::UiSettingsUpdate {
     scryer_application::UiSettingsUpdate {
         theme: to_app_ui_theme(input.theme),
         date_time_format: input
             .date_time_format
             .map(to_app_ui_date_time_format)
-            .unwrap_or(current_date_time_format),
+            .unwrap_or(current.date_time_format),
         highlight_color: input.highlight_color,
         secondary_color: input.secondary_color,
         high_contrast_mode: input.high_contrast_mode,
         reduce_motion: input.reduce_motion,
         hide_sponsor_button: input.hide_sponsor_button,
+        no_glow: input.no_glow.unwrap_or(current.no_glow),
         density: to_app_ui_density(input.density),
         sidebar_mode: to_app_ui_sidebar_mode(input.sidebar_mode),
         default_landing_view: to_app_ui_default_landing_view(input.default_landing_view),

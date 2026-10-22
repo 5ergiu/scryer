@@ -956,7 +956,7 @@ fn row_to_user(row: &SqlRow) -> AppResult<User> {
 // preferences live in user_ui_settings.
 const UI_SETTINGS_SELECT: &str =
     "SELECT user_id, theme, date_time_format, highlight_color, secondary_color, high_contrast_mode,
-            reduce_motion, hide_sponsor_button, density, sidebar_mode, default_landing_view,
+            reduce_motion, hide_sponsor_button, no_glow, density, sidebar_mode, default_landing_view,
             (SELECT locale FROM users WHERE users.id = user_ui_settings.user_id) AS language,
             created_at, updated_at
        FROM user_ui_settings
@@ -1009,9 +1009,9 @@ async fn upsert_ui_settings_tx(
     tx.execute(
         "INSERT INTO user_ui_settings (
              user_id, theme, date_time_format, highlight_color, secondary_color, high_contrast_mode, reduce_motion,
-             hide_sponsor_button, density, sidebar_mode, default_landing_view, created_at, updated_at
+             hide_sponsor_button, no_glow, density, sidebar_mode, default_landing_view, created_at, updated_at
          )
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
          ON CONFLICT(user_id) DO UPDATE SET
              theme = excluded.theme,
              date_time_format = excluded.date_time_format,
@@ -1020,6 +1020,7 @@ async fn upsert_ui_settings_tx(
              high_contrast_mode = excluded.high_contrast_mode,
              reduce_motion = excluded.reduce_motion,
              hide_sponsor_button = excluded.hide_sponsor_button,
+             no_glow = excluded.no_glow,
              density = excluded.density,
              sidebar_mode = excluded.sidebar_mode,
              default_landing_view = excluded.default_landing_view,
@@ -1033,6 +1034,7 @@ async fn upsert_ui_settings_tx(
             SqlArg::Bool(settings.high_contrast_mode),
             SqlArg::Bool(settings.reduce_motion),
             SqlArg::Bool(settings.hide_sponsor_button),
+            SqlArg::Bool(settings.no_glow),
             SqlArg::Text(settings.density.as_str().to_string()),
             SqlArg::Text(settings.sidebar_mode.as_str().to_string()),
             SqlArg::Text(settings.default_landing_view.as_str().to_string()),
@@ -1126,6 +1128,7 @@ fn row_to_ui_settings(row: &SqlRow) -> AppResult<UiSettings> {
         high_contrast_mode: row.bool("high_contrast_mode")?,
         reduce_motion: row.bool("reduce_motion")?,
         hide_sponsor_button: row.bool("hide_sponsor_button")?,
+        no_glow: row.bool("no_glow")?,
         density: parse_ui_density(row.text("density")?)?,
         sidebar_mode: parse_ui_sidebar_mode(row.text("sidebar_mode")?)?,
         default_landing_view: parse_ui_default_landing_view(row.text("default_landing_view")?)?,
@@ -1456,6 +1459,7 @@ mod tests {
                 high_contrast_mode INTEGER NOT NULL DEFAULT 0,
                 reduce_motion INTEGER NOT NULL DEFAULT 0,
                 hide_sponsor_button INTEGER NOT NULL DEFAULT 0,
+                no_glow INTEGER NOT NULL DEFAULT 0,
                 density TEXT NOT NULL DEFAULT 'comfortable',
                 sidebar_mode TEXT NOT NULL DEFAULT 'expanded',
                 default_landing_view TEXT NOT NULL DEFAULT 'movies',
@@ -1842,6 +1846,7 @@ mod tests {
                 high_contrast_mode: true,
                 reduce_motion: true,
                 hide_sponsor_button: true,
+                no_glow: false,
                 density: UiDensity::Compact,
                 sidebar_mode: UiSidebarMode::Collapsed,
                 default_landing_view: UiDefaultLandingView::Calendar,
@@ -1907,6 +1912,7 @@ mod tests {
                 high_contrast_mode: false,
                 reduce_motion: false,
                 hide_sponsor_button: false,
+                no_glow: true,
                 density: UiDensity::Comfortable,
                 sidebar_mode: UiSidebarMode::Expanded,
                 default_landing_view: UiDefaultLandingView::Movies,
@@ -2112,6 +2118,7 @@ mod tests {
             high_contrast_mode: false,
             reduce_motion: false,
             hide_sponsor_button: false,
+            no_glow: current.no_glow,
             density: current.density,
             sidebar_mode: current.sidebar_mode,
             default_landing_view: current.default_landing_view,
