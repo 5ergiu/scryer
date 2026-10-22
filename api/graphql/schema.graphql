@@ -10234,17 +10234,14 @@ type LibrarySettingsPayload {
 }
 
 """
-What a lifecycle claim holds.
+What a lifecycle claim is.
 """
 enum LifecycleClaimKindValue {
 	"""
-	Holds until `expiresAt`, whose clock starts at the title's first import.
+	A time to delete: `expiresAt`, whose clock starts at the title's first
+	import.
 	"""
 	RETAIN_UNTIL
-	"""
-	Holds indefinitely.
-	"""
-	KEEP
 }
 
 """
@@ -10255,15 +10252,11 @@ enum LifecycleClaimProducerValue {
 	A finite lease approved on a media request.
 	"""
 	REQUEST_LEASE
-	"""
-	A request approved as "forever": a permanent keep.
-	"""
-	REQUEST_PERMANENT
 }
 
 """
-Lifecycle state of one claim. Claims are released, never deleted, so the
-terminal states are history and only `DORMANT` and `ACTIVE` hold anything.
+Lifecycle state of one claim. The terminal states are history, and only
+`DORMANT` and `ACTIVE` are live.
 """
 enum LifecycleClaimStateValue {
 	"""
@@ -10283,7 +10276,8 @@ enum LifecycleClaimStateValue {
 	"""
 	RELEASED
 	"""
-	Superseded by a permanent keep.
+	Ended by an administrator keeping the title permanently, which leaves
+	it with no expiry.
 	"""
 	CONVERTED
 }
@@ -16780,8 +16774,9 @@ type MediaRequestExternalRatingPayload {
 }
 
 """
-The lease one media request holds, derived from the live claim it produced.
-Null on the request payload until an approval creates that claim.
+The lease one media request holds, derived from the claim it produced. Null
+on the request payload until an approval creates that claim, and for a
+request approved without a lease, which has none.
 """
 type MediaRequestLease {
 	"""
@@ -16793,7 +16788,7 @@ type MediaRequestLease {
 	"""
 	approvedDays: Int
 	"""
-	State of the claim holding the title.
+	State of the lease's claim.
 	"""
 	state: LifecycleClaimStateValue!
 	"""
@@ -16802,7 +16797,7 @@ type MediaRequestLease {
 	"""
 	startsAt: DateTime
 	"""
-	When the lease runs out. Null while dormant and for a forever request.
+	When the lease runs out. Null while dormant.
 	"""
 	expiresAt: DateTime
 }
@@ -29941,7 +29936,7 @@ enum TitleCatalogSortKeyValue {
 }
 
 """
-One hold on one title.
+One request lease on one title: a time to delete that rules read.
 """
 type TitleClaim {
 	"""
@@ -29949,7 +29944,7 @@ type TitleClaim {
 	"""
 	id: ID!
 	"""
-	Title the claim holds.
+	Title the claim is on.
 	"""
 	titleId: ID!
 	"""
@@ -29961,11 +29956,11 @@ type TitleClaim {
 	"""
 	producer: LifecycleClaimProducerValue!
 	"""
-	The producing media request's ID, or null for an operator pin.
+	The producing media request's ID.
 	"""
 	producerRef: String
 	"""
-	What the claim holds.
+	What the claim is.
 	"""
 	kind: LifecycleClaimKindValue!
 	"""
@@ -29973,7 +29968,7 @@ type TitleClaim {
 	"""
 	state: LifecycleClaimStateValue!
 	"""
-	Requested window in days for a retention claim; null for a keep.
+	Requested window in days.
 	"""
 	durationDays: Int
 	"""
@@ -29982,7 +29977,7 @@ type TitleClaim {
 	"""
 	startsAt: DateTime
 	"""
-	When the window closes. Null while dormant and for a keep.
+	When the window closes. Null while dormant.
 	"""
 	expiresAt: DateTime
 	"""

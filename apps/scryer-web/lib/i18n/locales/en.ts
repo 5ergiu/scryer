@@ -4347,7 +4347,7 @@ const en: LocaleDictionary = {
   "settings.maintenanceRuleStateEnabledHelp": "Acts on candidates when their grace period elapses.",
   "settings.maintenanceRuleEditedSinceEnabled": "Edited since it was enabled. Review the candidates and enable it again.",
   "settings.maintenanceRuleSystemOwned": "Built in",
-  "settings.expiredRequestLeasesHelp": "Deletes a requested title and its files once its request lease has expired and the grace period has passed, unless someone keeps it. Changing the grace period sets the rule to Dry run until you enable it again. Like every maintenance rule, it only runs while Maintenance is on.",
+  "settings.expiredRequestLeasesHelp": "Deletes a requested title and its files once its request lease has expired and the grace period has passed. Changing the grace period sets the rule to Dry run until you enable it again. Like every maintenance rule, it only runs while Maintenance is on.",
   "settings.maintenanceSwitchEnabled": "Maintenance",
   "settings.maintenanceSwitchEnabledHelp": "Evaluate rules and show their candidates on this instance.",
   "settings.maintenanceSwitchActionsPaused": "Pause all actions",
@@ -4527,8 +4527,6 @@ const en: LocaleDictionary = {
   "settings.refMaintFactsLastWatchedAt": "When the subject was last played by anyone",
   "settings.refMaintFactsWatchedByAnyRequester": "Whether at least one of the subject's requesters has played it",
   "settings.refMaintFactsWatchedByAllRequesters": "Whether every one of the subject's requesters has played it",
-  "settings.refMaintFactsKeepClaimActive":
-    "Whether a keep claim holds the subject permanently",
   "settings.refMaintFactsRequestLeaseState":
     "Aggregate state of the subject's request leases: none, dormant, active, or expired",
   "settings.refMaintFactsRequestLeaseExpiresAt":
@@ -4588,8 +4586,6 @@ const en: LocaleDictionary = {
   "settings.refMaintFactsLastWatchedAtValue": "RFC3339 timestamp of the most recent play; absent with reason never_watched when nobody has played it",
   "settings.refMaintFactsWatchedByAnyRequesterValue": "True when at least one requester played it; absent with reason title_not_requested when nobody requested the subject, and unknown with reason requester_not_linked when a requester has no linked media-server account",
   "settings.refMaintFactsWatchedByAllRequestersValue": "True when every requester played it; absent with reason title_not_requested when nobody requested the subject, and unknown with reason requester_not_linked when a requester has no linked media-server account",
-  "settings.refMaintFactsKeepClaimActiveValue":
-    "True when a request was approved forever, or an administrator pinned the subject. Every claim fact is unknown with reason claim_store_unreadable when the claim store could not be read for the pass.",
   "settings.refMaintFactsRequestLeaseStateValue":
     "none when no request lease was ever written for the subject, dormant when a lease is waiting for the first import, active while a lease is running, and expired once every lease has run out. A lease that was released or converted is withdrawn rather than spent, so it does not make the state expired. Expiry is measured against the evaluation time, so a lease reads as expired the moment its window closes.",
   "settings.refMaintFactsRequestLeaseExpiresAtValue":
@@ -4683,7 +4679,7 @@ const en: LocaleDictionary = {
     "Caution: this template deletes the title and its files. It matches requested movies that every one of their requesters has now played, after a 30-day grace period. Movies only: Scryer records plays per movie and per episode, never per show, so a series holds instead of matching. It also holds whenever a requester has no linked media-server account, or the last signal sync is over 48 hours old — a partial watch picture is not evidence to delete on.",
   "settings.maintenanceTemplateExpiredLeasesTitle": "Expired request leases",
   "settings.maintenanceTemplateExpiredLeasesDescription":
-    "Caution: this template deletes the title and its files. It matches titles whose request leases have all run out and that carry no keep claim, after a 7-day grace period. A lease that has not started yet — the title has not been imported — and a title anyone pinned to keep are both left alone.",
+    "Caution: this template deletes the title and its files. It matches titles whose request leases have all run out, after a 7-day grace period. A lease that has not started yet — the title has not been imported — is left alone, and so is a title that never had a lease.",
   "settings.maintenanceTemplateNoProfileTitle": "No quality profile",
   "settings.maintenanceTemplateNoProfileDescription":
     "Titles with no quality profile assigned. Takes no action at all: this one is for collecting a list to look at before deciding what should happen to it.",
@@ -4881,7 +4877,6 @@ const en: LocaleDictionary = {
   "requests.claimsShow": "Retention",
   "requests.claimsHide": "Hide retention",
   "requests.claimsEmpty": "Nothing is holding this title.",
-  "requests.claimKindKeep": "Held permanently",
   "requests.claimExpiresAt": "Held until {{date}}",
   "requests.claimDurationDays": "{{count}} days, starting at the first import",
   "requests.claimReleasedReason": "Released: {{reason}}",

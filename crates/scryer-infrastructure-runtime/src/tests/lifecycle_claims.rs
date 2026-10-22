@@ -31,26 +31,6 @@ fn claim(id: &str, title_id: &str, producer_ref: Option<&str>) -> LifecycleClaim
     }
 }
 
-fn keep(id: &str, title_id: &str, producer_ref: Option<&str>) -> LifecycleClaim {
-    let now = Utc::now();
-    LifecycleClaim {
-        id: id.to_string(),
-        title_id: title_id.to_string(),
-        library_id: "library-1".to_string(),
-        producer: LifecycleClaimProducer::RequestPermanent,
-        producer_ref: producer_ref.map(str::to_string),
-        kind: LifecycleClaimKind::Keep,
-        state: LifecycleClaimState::Active,
-        duration_days: None,
-        starts_at: Some(now),
-        expires_at: None,
-        created_by: Some("user-1".to_string()),
-        created_at: now,
-        updated_at: now,
-        released_reason: None,
-    }
-}
-
 async fn assert_claim_round_trip(store: &dyn LifecycleClaimRepository) -> AppResult<()> {
     store
         .create(&claim("claim-1", "title-1", Some("request-1")))
@@ -158,7 +138,7 @@ async fn assert_claim_round_trip(store: &dyn LifecycleClaimRepository) -> AppRes
 
     // Expiry only touches active retention claims whose window has elapsed.
     store
-        .create(&keep("forever", "title-forever", Some("request-forever")))
+        .create(&claim("waiting", "title-waiting", Some("request-waiting")))
         .await?;
     let past = Utc::now() - chrono::Duration::days(1);
     store
@@ -176,9 +156,9 @@ async fn assert_claim_round_trip(store: &dyn LifecycleClaimRepository) -> AppRes
         LifecycleClaimState::Expired
     );
     assert_eq!(
-        store.get("forever").await?.expect("keep exists").state,
-        LifecycleClaimState::Active,
-        "a keep has no expiry and must never expire"
+        store.get("waiting").await?.expect("lease exists").state,
+        LifecycleClaimState::Dormant,
+        "a lease whose clock never started has nothing to expire"
     );
 
     // An expired lease cannot be extended back into force: that is a new claim.

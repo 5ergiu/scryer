@@ -1313,22 +1313,20 @@ impl AppUseCase {
         for (request_id, lease_days) in targets {
             if existing.iter().any(|claim| {
                 claim.producer_ref.as_deref() == Some(&request_id)
-                    && matches!(
-                        claim.producer,
-                        LifecycleClaimProducer::RequestLease
-                            | LifecycleClaimProducer::RequestPermanent
-                    )
+                    && claim.producer == LifecycleClaimProducer::RequestLease
             }) {
                 continue;
             }
-            let claim = new_request_lifecycle_claim(
+            let Some(claim) = new_request_lifecycle_claim(
                 &request_id,
                 title_id,
                 &request.library_id,
                 lease_days,
                 &actor.id,
                 now,
-            );
+            ) else {
+                continue;
+            };
             if let Err(error) = self.services.catalog.lifecycle_claims.create(&claim).await {
                 tracing::error!(
                     request_id = request_id.as_str(),
@@ -1369,25 +1367,24 @@ impl AppUseCase {
     /// Withdraw whatever a request was holding. Best effort and idempotent: a
     /// request that never reached approval has no claim.
     async fn release_request_lifecycle_claims(&self, request_id: &str, reason: &str) {
-        let now = chrono::Utc::now();
-        for producer in [
-            LifecycleClaimProducer::RequestLease,
-            LifecycleClaimProducer::RequestPermanent,
-        ] {
-            if let Err(error) = self
-                .services
-                .catalog
-                .lifecycle_claims
-                .release_for_producer_ref(producer, request_id, reason, now)
-                .await
-            {
-                tracing::warn!(
-                    request_id,
-                    reason,
-                    error = %error,
-                    "could not release a request's lifecycle claim"
-                );
-            }
+        if let Err(error) = self
+            .services
+            .catalog
+            .lifecycle_claims
+            .release_for_producer_ref(
+                LifecycleClaimProducer::RequestLease,
+                request_id,
+                reason,
+                chrono::Utc::now(),
+            )
+            .await
+        {
+            tracing::warn!(
+                request_id,
+                reason,
+                error = %error,
+                "could not release a request's lifecycle claim"
+            );
         }
     }
 
@@ -1462,11 +1459,6 @@ impl AppUseCase {
         claim_id: &str,
     ) -> AppResult<LifecycleClaim> {
         let claim = self.require_manageable_claim(actor, claim_id).await?;
-        if claim.kind != LifecycleClaimKind::RetainUntil {
-            return Err(AppError::Validation(
-                "only a finite lease can be made permanent".into(),
-            ));
-        }
         self.services
             .catalog
             .lifecycle_claims
@@ -1935,8 +1927,9 @@ fn request_draft_from_new_media_request(
     }
 }
 
-/// A retention claim for one request. Finite ⇒ dormant `retain_until`; forever
-/// ⇒ active `keep`.
+/// The lease for one request: a dormant `retain_until` whose window starts at
+/// the title's first import. A request approved without a lease, or with a
+/// zero-day one, has no time to delete, so it gets no claim.
 fn new_request_lifecycle_claim(
     request_id: &str,
     title_id: &str,
@@ -1944,39 +1937,24 @@ fn new_request_lifecycle_claim(
     lease_days: Option<i64>,
     created_by: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> LifecycleClaim {
-    let (producer, kind, state, starts_at) = match lease_days {
-        // Dormant: the window starts at the title's first import, not now.
-        Some(_) => (
-            LifecycleClaimProducer::RequestLease,
-            LifecycleClaimKind::RetainUntil,
-            LifecycleClaimState::Dormant,
-            None,
-        ),
-        // A keep has no clock to start, so it is live from the moment it exists.
-        None => (
-            LifecycleClaimProducer::RequestPermanent,
-            LifecycleClaimKind::Keep,
-            LifecycleClaimState::Active,
-            Some(now),
-        ),
-    };
-    LifecycleClaim {
+) -> Option<LifecycleClaim> {
+    let lease_days = lease_days.filter(|days| *days > 0)?;
+    Some(LifecycleClaim {
         id: Id::new().0,
         title_id: title_id.to_string(),
         library_id: library_id.to_string(),
-        producer,
+        producer: LifecycleClaimProducer::RequestLease,
         producer_ref: Some(request_id.to_string()),
-        kind,
-        state,
-        duration_days: lease_days,
-        starts_at,
+        kind: LifecycleClaimKind::RetainUntil,
+        state: LifecycleClaimState::Dormant,
+        duration_days: Some(lease_days),
+        starts_at: None,
         expires_at: None,
         created_by: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,
         released_reason: None,
-    }
+    })
 }
 
 /// Overwrite the provenance fields the stored row cannot yet carry — at submit

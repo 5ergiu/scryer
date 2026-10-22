@@ -5228,8 +5228,6 @@ const ru: LocaleDictionary = {
     "settings.refMaintFactsLastWatchedAt": "Когда субъект в последний раз кто-либо смотрел",
     "settings.refMaintFactsWatchedByAnyRequester": "Смотрел ли субъект хотя бы один из запросивших его пользователей",
     "settings.refMaintFactsWatchedByAllRequesters": "Смотрели ли субъект все запросившие его пользователи",
-    "settings.refMaintFactsKeepClaimActive":
-      "Удерживается ли субъект постоянно заявкой на хранение",
     "settings.refMaintFactsRequestLeaseState":
       "Сводное состояние сроков хранения по запросам: none, dormant, active или expired",
     "settings.refMaintFactsRequestLeaseExpiresAt":
@@ -5265,8 +5263,6 @@ const ru: LocaleDictionary = {
     "settings.refMaintFactsLastWatchedAtValue": "Метка времени RFC3339 последнего просмотра; absent с причиной never_watched, если субъект никто не смотрел",
     "settings.refMaintFactsWatchedByAnyRequesterValue": "True, когда субъект смотрел хотя бы один запросивший; absent с причиной title_not_requested, если субъект никто не запрашивал, и unknown с причиной requester_not_linked, если у запросившего нет привязанной учётной записи медиасервера",
     "settings.refMaintFactsWatchedByAllRequestersValue": "True, когда субъект смотрели все запросившие; absent с причиной title_not_requested, если субъект никто не запрашивал, и unknown с причиной requester_not_linked, если у запросившего нет привязанной учётной записи медиасервера",
-    "settings.refMaintFactsKeepClaimActiveValue":
-      "True, когда запрос одобрен навсегда или администратор закрепил субъект. Любой факт об удержаниях становится unknown с причиной claim_store_unreadable, если хранилище удержаний не удалось прочитать в этом проходе.",
     "settings.refMaintFactsRequestLeaseStateValue":
       "none, когда для субъекта никогда не записывалось хранение по запросу; dormant, когда хранение ждёт первого импорта; active, пока хранение действует; expired, когда все сроки истекли. Снятое или заменённое хранение считается отозванным, а не истёкшим, поэтому оно не делает состояние expired. Истечение измеряется относительно времени оценки, поэтому хранение читается как expired в тот же момент, когда закрывается его окно.",
     "settings.refMaintFactsRequestLeaseExpiresAtValue":
@@ -5342,7 +5338,7 @@ const ru: LocaleDictionary = {
       "Внимание: этот шаблон удаляет тайтл вместе с файлами. Он совпадает с запрошенными фильмами, которые посмотрели все запросившие их пользователи, после отсрочки в 30 дней. Только фильмы: Scryer записывает просмотры по фильмам и эпизодам, но не по сериалам, поэтому сериал удерживается, а не совпадает. Правило также удерживается, если у запросившего нет привязанной учётной записи медиасервера или последняя синхронизация сигналов старше 48 часов — неполная картина просмотров не является основанием для удаления.",
     "settings.maintenanceTemplateExpiredLeasesTitle": "Истёкшее хранение запросов",
     "settings.maintenanceTemplateExpiredLeasesDescription":
-      "Внимание: этот шаблон удаляет тайтл вместе с файлами. Он совпадает с тайтлами, у которых истекли все сроки хранения по запросам и нет постоянного удержания, после отсрочки в 7 дней. Хранение, которое ещё не началось — тайтл не импортирован, — и тайтл, который кто-либо закрепил для постоянного хранения, остаются нетронутыми.",
+      "Внимание: этот шаблон удаляет тайтл вместе с файлами. Он совпадает с тайтлами, у которых истекли все сроки хранения по запросам, после отсрочки в 7 дней. Хранение, которое ещё не началось — тайтл не импортирован, — остаётся нетронутым, как и тайтл, у которого срока хранения никогда не было.",
     "settings.maintenanceTemplateNoProfileTitle": "Без профиля качества",
     "settings.maintenanceTemplateNoProfileDescription":
       "Тайтлы, которым не назначен профиль качества. Не выполняет никаких действий: этот шаблон нужен, чтобы собрать список и посмотреть на него, прежде чем решать, что с ним делать.",
@@ -5530,7 +5526,6 @@ const ru: LocaleDictionary = {
   "requests.claimsShow": "Хранение",
   "requests.claimsHide": "Скрыть хранение",
   "requests.claimsEmpty": "Этот тайтл ничем не удерживается.",
-  "requests.claimKindKeep": "Удерживается постоянно",
   "requests.claimExpiresAt": "Удерживается до {{date}}",
   "requests.claimDurationDays": "{{count}} дней, начиная с первого импорта",
   "requests.claimReleasedReason": "Снято: {{reason}}",
