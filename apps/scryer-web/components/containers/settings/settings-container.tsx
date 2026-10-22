@@ -832,9 +832,8 @@ export const SettingsContainer = memo(function SettingsContainer({
                 panelId={SETTINGS_PLUGINS_PANEL_ID}
                 label={t("settings.plugins")}
                 icon={<Puzzle className="h-4 w-4" />}
-                frame={referencePanel.frame}
                 open={referencePanel.open}
-                onOpen={() => setReferencePanelOpen(true)}
+                onOpenChange={setReferencePanelOpen}
               />
             ) : settingsSection === "plugins" ? (
               <div
@@ -954,7 +953,6 @@ export const SettingsContainer = memo(function SettingsContainer({
               <GutterPanel
                 id={SETTINGS_PLUGINS_PANEL_ID}
                 label={t("settings.plugins")}
-                icon={<Puzzle className="h-4 w-4" />}
                 frame={referencePanel.frame}
                 open={referencePanel.open}
                 onOpenChange={setReferencePanelOpen}

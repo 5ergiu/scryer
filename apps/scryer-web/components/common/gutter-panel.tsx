@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 
 import { SCROLL_FADE_CONTROL_CLASS } from "@/components/common/horizontal-scroll-fade";
 import { Button } from "@/components/ui/button";
-import { GUTTER_PANEL_TAB_WIDTH, type GutterPanelFrame } from "@/lib/hooks/use-gutter-panel";
+import type { GutterPanelFrame } from "@/lib/hooks/use-gutter-panel";
 import { cn } from "@/lib/utils";
 
 /**
@@ -16,8 +16,6 @@ export const GutterPanelContext = React.createContext<{ close: () => void } | nu
 type GutterPanelProps = {
   id: string;
   label: string;
-  /** Shown beside the label on the edge tab that opens the panel. */
-  icon: React.ReactNode;
   frame: GutterPanelFrame;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -27,12 +25,10 @@ type GutterPanelProps = {
 /**
  * A full-height side panel pinned to the right edge of the page content. It
  * is not modal: there is no backdrop and the page stays usable while it is
- * open. While closed, a vertical tab on the same edge opens it, unless the
- * page is too narrow to hold the tab beside its content; then the page shows
- * a `GutterPanelButton` instead. The panel stays mounted so content can be
- * portaled into it.
+ * open. The page's `GutterPanelButton` opens and closes it. The panel stays
+ * mounted so content can be portaled into it.
  */
-export function GutterPanel({ id, label, icon, frame, open, onOpenChange, children }: GutterPanelProps) {
+export function GutterPanel({ id, label, frame, open, onOpenChange, children }: GutterPanelProps) {
   const close = React.useCallback(() => onOpenChange(false), [onOpenChange]);
   const context = React.useMemo(() => ({ close }), [close]);
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -75,26 +71,6 @@ export function GutterPanel({ id, label, icon, frame, open, onOpenChange, childr
 
   return (
     <>
-      {frame.tabFits ? (
-        <button
-          type="button"
-          aria-controls={id}
-          aria-expanded={false}
-          onClick={() => onOpenChange(true)}
-          style={{
-            top: `calc(${frame.top}px + (100dvh - ${frame.top}px) / 2)`,
-            right: frame.right,
-            width: GUTTER_PANEL_TAB_WIDTH,
-          }}
-          className={cn(
-            "fixed z-30 flex -translate-y-1/2 items-center gap-2 rounded-l-[10px] border border-r-0 border-[var(--scry-border)] bg-[var(--scry-bg)] py-3 text-[12.5px] font-semibold text-[var(--scry-ink2)] shadow-[-6px_0_18px_rgba(0,0,0,0.22)] transition-[opacity,visibility,background-color] duration-300 [writing-mode:vertical-rl] hover:bg-[var(--scry-hover)]",
-            open ? "invisible opacity-0" : "visible opacity-100",
-          )}
-        >
-          {icon}
-          {label}
-        </button>
-      ) : null}
       <aside
         id={id}
         aria-label={label}
@@ -143,23 +119,20 @@ type GutterPanelButtonProps = {
   panelId: string;
   label: string;
   icon: React.ReactNode;
-  frame: GutterPanelFrame;
   open: boolean;
-  onOpen: () => void;
+  onOpenChange: (open: boolean) => void;
 };
 
-/** Opens a closed panel from the page header when its edge tab does not fit. */
-export function GutterPanelButton({ panelId, label, icon, frame, open, onOpen }: GutterPanelButtonProps) {
-  if (open || frame.tabFits) return null;
+/** Opens and closes a gutter panel from the page header: solid while the panel is closed, outlined while it is open. */
+export function GutterPanelButton({ panelId, label, icon, open, onOpenChange }: GutterPanelButtonProps) {
   return (
     <Button
       type="button"
-      variant="outline"
-      size="sm"
-      className="shrink-0 self-start sm:self-auto"
+      variant={open ? "outline" : "primary"}
+      className="h-10 shrink-0 self-start rounded-[10px] px-3 text-[13px] sm:self-auto"
       aria-controls={panelId}
-      aria-expanded={false}
-      onClick={onOpen}
+      aria-expanded={open}
+      onClick={() => onOpenChange(!open)}
     >
       {icon}
       {label}

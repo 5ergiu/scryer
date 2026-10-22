@@ -203,9 +203,8 @@ export function ListsView(props: ListsViewProps) {
               panelId="lists-plugins-panel"
               label={t("settings.plugins")}
               icon={<Puzzle className="h-4 w-4" />}
-              frame={pluginsPanel.frame}
               open={pluginsPanel.open}
-              onOpen={() => pluginsPanel.setOpen(true)}
+              onOpenChange={pluginsPanel.setOpen}
             />
           ) : null}
         </div>
@@ -345,7 +344,6 @@ export function ListsView(props: ListsViewProps) {
         <GutterPanel
           id="lists-plugins-panel"
           label={t("settings.plugins")}
-          icon={<Puzzle className="h-4 w-4" />}
           frame={pluginsPanel.frame}
           open={pluginsPanel.open}
           onOpenChange={pluginsPanel.setOpen}
