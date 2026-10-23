@@ -378,6 +378,7 @@ impl DownloadClient for HttpDownloadClient {
             forbidden_requests: 0,
             refused_variants: Vec::new(),
             geo_restricted,
+            progress_revision: 0,
         };
         self.engine.add_job(job).await?;
         if geo_restricted {

@@ -240,6 +240,7 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
         forbidden_requests: 0,
         refused_variants: Vec::new(),
         geo_restricted: false,
+        progress_revision: 0,
     }
 }
 
@@ -1588,4 +1589,176 @@ async fn media_that_passes_its_checks_completes() {
             .join("Synthetic.Show.S01E01.mp4")
             .exists()
     );
+}
+
+// ---------------------------------------------------------------------------
+// durable progress
+
+/// A one-shot HTTP server that answers every request with `body` sent as
+/// one HTTP chunk per entry, so the client reads it as that many pieces.
+/// Returns its base URL and the request heads it received.
+async fn chunked_server(chunks: Vec<Vec<u8>>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&heads);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let chunks = chunks.clone();
+            let log = Arc::clone(&log);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).into_owned());
+                let mut answer = format!(
+                    "HTTP/1.1 200 OK\r\nETag: {ETAG}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                )
+                .into_bytes();
+                for chunk in &chunks {
+                    answer.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                    answer.extend_from_slice(chunk);
+                    answer.extend_from_slice(b"\r\n");
+                }
+                answer.extend_from_slice(b"0\r\n\r\n");
+                let _ = stream.write_all(&answer).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{address}"), heads)
+}
+
+#[tokio::test]
+async fn checkpoints_write_progress_files_and_never_the_queue_document() {
+    let chunks: Vec<Vec<u8>> = BODY.chunks(2).map(<[u8]>::to_vec).collect();
+    let chunk_count = chunks.len() as u64;
+    let (base, _) = chunked_server(chunks).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    // A checkpoint after every byte: each piece of the body is one.
+    client
+        .engine()
+        .set_checkpoint_cadence(1, Duration::from_secs(3600));
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+
+    let engine = client.engine();
+    assert!(
+        engine.progress_writes() >= chunk_count,
+        "{} progress writes for {chunk_count} pieces",
+        engine.progress_writes()
+    );
+    // Added, started, file finished, job completed: the document follows the
+    // job's transitions, not its bytes.
+    assert!(
+        engine.document_writes() <= 4,
+        "{} document writes",
+        engine.document_writes()
+    );
+    // The finished job no longer carries fallbacks it will never use.
+    assert!(done.media_fallbacks.is_empty());
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    assert!(store.progress_path(&grab.job_id).exists());
+    // Compact on disk.
+    let raw = std::fs::read(store.path()).unwrap();
+    assert!(!raw.contains(&b'\n'));
+}
+
+#[tokio::test]
+async fn a_progress_file_newer_than_the_document_decides_the_resume_offset() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .and(header("range", "bytes=4-"))
+        .and(header("if-range", ETAG))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("etag", ETAG)
+                .insert_header(
+                    "content-range",
+                    format!("bytes 4-{}/{}", BODY.len() - 1, BODY.len()).as_str(),
+                )
+                .set_body_bytes(&BODY[4..]),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    // The document last recorded nothing of the file; the checkpoint after
+    // it went to the progress file.
+    let mut job = seeded_job(dir.path(), &format!("{}/media/clip.mp4", server.uri()), 0);
+    job.files[0].total_bytes = None;
+    job.files[0].validator = None;
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    tokio::fs::write(job.files[0].part_path(), &BODY[..4])
+        .await
+        .unwrap();
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    store
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+    let mut progressed = job.clone();
+    progressed.progress_revision = 1;
+    progressed.files[0].bytes_done = 4;
+    progressed.files[0].total_bytes = Some(BODY.len() as u64);
+    progressed.files[0].validator = Some(RecordedValidator {
+        etag: Some(ETAG.into()),
+        last_modified: None,
+    });
+    store
+        .save_progress(&job.id, &super::state::HttpJobProgress::of(&progressed))
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.files[0].attempt, 1);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn a_progress_file_older_than_the_document_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = HttpStateStore::for_client(dir.path(), "synthetic-client");
+    let mut job = seeded_job(dir.path(), "https://media.invalid/a.mp4", 4);
+    job.progress_revision = 5;
+    let mut stale = job.clone();
+    stale.progress_revision = 5;
+    stale.files[0].bytes_done = 30;
+    let progress = super::state::HttpJobProgress::of(&stale);
+    let mut loaded = job.clone();
+    assert!(!progress.apply_if_newer(&mut loaded));
+    assert_eq!(loaded, job);
+    store.save_progress(&job.id, &progress).await.unwrap();
+    assert_eq!(store.load_progress(&job.id).await, Some(progress));
+    assert_eq!(store.load_progress("absent-job").await, None);
 }

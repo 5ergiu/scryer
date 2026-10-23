@@ -2,9 +2,10 @@
 //! the bounded scheduler, and the workers that transfer each job.
 //!
 //! The queue document on disk is the record. Every state change is written
-//! there before it is reported, workers checkpoint progress only after the
-//! bytes are flushed, and a restart (or a configuration change) reloads the
-//! document and picks up whatever was queued or in flight.
+//! there before it is reported; byte progress goes to the job's own progress
+//! file, written only after the bytes are synced. A restart (or a
+//! configuration change) reloads both and picks up whatever was queued or in
+//! flight.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -24,12 +25,12 @@ use tracing::{info, warn};
 
 use super::selection::media_final_path;
 use super::state::{
-    HttpFileRole, HttpJob, HttpJobFile, HttpJobState, HttpQueueDocument, HttpStateStore,
-    RefusedVariant,
+    HttpFileRole, HttpJob, HttpJobFile, HttpJobProgress, HttpJobState, HttpQueueDocument,
+    HttpStateStore, RefusedVariant,
 };
 use super::transfer::{
-    BandwidthLimiter, Checkpoint, Egress, MediaCheck, MediaProbe, NativeMediaProbe,
-    TransferContext, TransferError, transfer_file,
+    BandwidthLimiter, CHECKPOINT_BYTES, CHECKPOINT_INTERVAL, Checkpoint, CheckpointCadence, Egress,
+    MediaCheck, MediaProbe, NativeMediaProbe, TransferContext, TransferError, transfer_file,
 };
 
 /// Jobs that may wait or run at once. Submissions past this are refused.
@@ -77,8 +78,18 @@ pub(crate) struct HttpEngine {
     limiter: Arc<BandwidthLimiter>,
     backoff_unit: std::sync::Mutex<Duration>,
     media_probe: std::sync::Mutex<Arc<dyn MediaProbe>>,
+    checkpoint_cadence: std::sync::Mutex<CheckpointCadence>,
     inner: Mutex<EngineInner>,
-    save_lock: Mutex<()>,
+    /// Document writes requested so far. A write covers every request made
+    /// before its snapshot was taken.
+    persist_requests: AtomicU64,
+    /// Held by the one writer; holds the request count its last write
+    /// covered.
+    save_lock: Mutex<u64>,
+    #[cfg(test)]
+    document_writes: AtomicU64,
+    #[cfg(test)]
+    progress_writes: AtomicU64,
     started: OnceCell<()>,
     predecessor: std::sync::Mutex<Option<Arc<HttpEngine>>>,
     shutdown: CancellationToken,
@@ -106,8 +117,17 @@ impl HttpEngine {
             egress: std::sync::Mutex::new(egress),
             backoff_unit: std::sync::Mutex::new(DEFAULT_BACKOFF_UNIT),
             media_probe: std::sync::Mutex::new(Arc::new(NativeMediaProbe)),
+            checkpoint_cadence: std::sync::Mutex::new(CheckpointCadence {
+                bytes: CHECKPOINT_BYTES,
+                interval: CHECKPOINT_INTERVAL,
+            }),
             inner: Mutex::new(EngineInner::default()),
-            save_lock: Mutex::new(()),
+            persist_requests: AtomicU64::new(0),
+            save_lock: Mutex::new(0),
+            #[cfg(test)]
+            document_writes: AtomicU64::new(0),
+            #[cfg(test)]
+            progress_writes: AtomicU64::new(0),
             started: OnceCell::new(),
             predecessor: std::sync::Mutex::new(predecessor),
             shutdown: CancellationToken::new(),
@@ -156,6 +176,35 @@ impl HttpEngine {
         *self.media_probe.lock().unwrap_or_else(|p| p.into_inner()) = probe;
     }
 
+    fn checkpoint_cadence(&self) -> CheckpointCadence {
+        *self
+            .checkpoint_cadence
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Checkpoint after fewer bytes, so tests see several checkpoints in a
+    /// small body.
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_cadence(&self, bytes: u64, interval: Duration) {
+        *self
+            .checkpoint_cadence
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = CheckpointCadence { bytes, interval };
+    }
+
+    /// Queue documents written since the engine started.
+    #[cfg(test)]
+    pub(crate) fn document_writes(&self) -> u64 {
+        self.document_writes.load(Ordering::Relaxed)
+    }
+
+    /// Progress files written since the engine started.
+    #[cfg(test)]
+    pub(crate) fn progress_writes(&self) -> u64 {
+        self.progress_writes.load(Ordering::Relaxed)
+    }
+
     /// Stop scheduling and ask every worker to checkpoint and stop. Their
     /// jobs stay recorded as they were, for the successor to resume.
     pub(crate) fn begin_shutdown(&self) {
@@ -194,6 +243,16 @@ impl HttpEngine {
                 let mut document = self.store.load().await?;
                 let mut changed = false;
                 for job in &mut document.jobs {
+                    if job.state.is_terminal() {
+                        continue;
+                    }
+                    // Checkpoints after the document's last write live in
+                    // the job's progress file.
+                    if let Some(progress) = self.store.load_progress(&job.id).await
+                        && progress.apply_if_newer(job)
+                    {
+                        changed = true;
+                    }
                     // Nothing runs before this point, so a job recorded as
                     // downloading was interrupted and goes back to the queue.
                     if job.state == HttpJobState::Downloading {
@@ -212,12 +271,26 @@ impl HttpEngine {
         Ok(())
     }
 
-    /// Write the current document. Serialized so the last write holds the
-    /// newest state.
+    /// Write the current document.
+    ///
+    /// One writer at a time, and a write covers every request made before it
+    /// took its snapshot: callers change the document first and request the
+    /// write after, so a burst of requests waiting behind one write is served
+    /// by the next single write of the newest state.
     async fn persist(&self) -> AppResult<()> {
-        let _guard = self.save_lock.lock().await;
+        let requested = self.persist_requests.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut covered = self.save_lock.lock().await;
+        if *covered >= requested {
+            return Ok(());
+        }
+        let covers = self.persist_requests.load(Ordering::Acquire);
+        // Copy under the lock, serialize and write after releasing it.
         let snapshot = self.inner.lock().await.document.clone();
         self.store.save(&snapshot).await?;
+        drop(snapshot);
+        *covered = covers;
+        #[cfg(test)]
+        self.document_writes.fetch_add(1, Ordering::Relaxed);
         self.revision.send_modify(|revision| *revision += 1);
         Ok(())
     }
@@ -455,6 +528,11 @@ impl HttpEngine {
                             job.error = Some(message);
                         }
                     }
+                    if job.state.is_terminal() {
+                        // Never tried again; only the refusals stay, for the
+                        // record.
+                        job.media_fallbacks = Vec::new();
+                    }
                     job.updated_at = Utc::now();
                     true
                 }
@@ -529,6 +607,7 @@ impl HttpEngine {
                 live_bytes: &live.current_file_bytes,
                 limiter: Some(self.limiter.as_ref()),
                 backoff_unit: self.backoff_unit(),
+                cadence: self.checkpoint_cadence(),
                 media_check: (file.role == HttpFileRole::Media).then(|| MediaCheck {
                     probe: probe.as_ref(),
                     expected_duration_seconds,
@@ -614,22 +693,35 @@ impl HttpEngine {
         outcome
     }
 
-    /// Record one file's durable progress.
+    /// Record one file's durable progress: in the job's progress file while
+    /// the file transfers, in the document once the file is finished.
     async fn record_file(&self, job_id: &str, index: usize, file: &HttpJobFile) -> AppResult<()> {
-        {
+        let progress = {
             let mut inner = self.inner.lock().await;
             let Some(job) = inner.document.jobs.iter_mut().find(|job| job.id == job_id) else {
                 // Removed while it ran; nothing left to record against.
                 return Ok(());
             };
+            let finishes = file.complete && job.files.get(index).is_some_and(|slot| !slot.complete);
             if let Some(slot) = job.files.get_mut(index) {
                 *slot = file.clone();
             }
+            job.progress_revision = job.progress_revision.saturating_add(1);
             job.updated_at = Utc::now();
-        }
-        // A successor loads the document only after every worker here has
+            (!finishes).then(|| HttpJobProgress::of(job))
+        };
+        // A successor loads the queue only after every worker here has
         // stopped, so a final checkpoint during shutdown still belongs here.
-        self.persist().await
+        match progress {
+            Some(progress) => {
+                self.store.save_progress(job_id, &progress).await?;
+                #[cfg(test)]
+                self.progress_writes.fetch_add(1, Ordering::Relaxed);
+                self.revision.send_modify(|revision| *revision += 1);
+                Ok(())
+            }
+            None => self.persist().await,
+        }
     }
 
     /// Record a `403 Forbidden` answer against the file and the job.

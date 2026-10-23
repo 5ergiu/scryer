@@ -34,7 +34,18 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// stalls are caught by the idle timeout instead.
 const WHOLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Bytes written between durable checkpoints.
-const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+/// The longest a transfer goes without a durable checkpoint, however slowly
+/// its bytes arrive.
+pub(crate) const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// When a transfer makes its written bytes durable and records them: after
+/// `bytes` more bytes or `interval` of wall time, whichever comes first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CheckpointCadence {
+    pub bytes: u64,
+    pub interval: Duration,
+}
 /// Transport failures (timeouts, resets, 5xx, 429) tolerated per file.
 const MAX_TRANSIENT_FAILURES: u32 = 5;
 /// Fresh attempts started because a resume could not be trusted.
@@ -577,6 +588,7 @@ pub(crate) struct TransferContext<'a> {
     pub limiter: Option<&'a BandwidthLimiter>,
     /// The first retry's wait; each further retry doubles it, up to a cap.
     pub backoff_unit: Duration,
+    pub cadence: CheckpointCadence,
     /// Set for the job's media file only; sidecars are not probed.
     pub media_check: Option<MediaCheck<'a>>,
 }
@@ -958,6 +970,7 @@ async fn stream_body(
 
     let mut written = offset;
     let mut unrecorded = 0u64;
+    let mut last_checkpoint = tokio::time::Instant::now();
     context.live_bytes.store(written, Ordering::Relaxed);
     loop {
         let chunk = tokio::select! {
@@ -998,9 +1011,12 @@ async fn stream_body(
         written += length;
         unrecorded += length;
         context.live_bytes.store(written, Ordering::Relaxed);
-        if unrecorded >= CHECKPOINT_BYTES {
+        if unrecorded >= context.cadence.bytes
+            || last_checkpoint.elapsed() >= context.cadence.interval
+        {
             checkpoint_written(context, file, &mut output, &part_path, written).await?;
             unrecorded = 0;
+            last_checkpoint = tokio::time::Instant::now();
         }
     }
 
