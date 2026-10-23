@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const zh_HK: LocaleDictionary = {
   "titleDelete.refusal.selection": "請選擇不重複的標題。",
   "titleDelete.refusal.busy": "刪除操作已在進行中。",
-  "titleDelete.refusal.downloadRetry": "使用密碼重試的下載正在等待狀態核對。請等待完成，或從 Scryer 的「活動 > 匯入」畫面移除該下載，然後重試刪除標題。",
   "titleDelete.refusal.preview": "請重新整理刪除預覽並確認。",
   "titleDelete.refusal.confirmation": "輸入 DELETE 以確認刪除。",
   "titleDelete.refusal.boundary": "標題資料夾必須位於媒體庫根目錄內，不能是根目錄本身。",

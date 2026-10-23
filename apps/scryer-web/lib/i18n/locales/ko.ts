@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const ko: LocaleDictionary = {
   "titleDelete.refusal.selection": "중복 없이 제목을 선택하세요.",
   "titleDelete.refusal.busy": "삭제가 이미 진행 중입니다.",
-  "titleDelete.refusal.downloadRetry": "비밀번호를 사용한 다운로드 재시도의 상태 확인을 기다리는 중입니다. 완료될 때까지 기다리거나 Scryer의 활동 내 가져오기 화면에서 다운로드를 제거한 후 제목 삭제를 다시 시도하세요.",
   "titleDelete.refusal.preview": "삭제 미리보기를 새로 고치고 확인하세요.",
   "titleDelete.refusal.confirmation": "삭제를 확인하려면 DELETE를 입력하세요.",
   "titleDelete.refusal.boundary": "제목 폴더는 라이브러리 루트 내부에 있어야 하며 루트 자체일 수 없습니다.",

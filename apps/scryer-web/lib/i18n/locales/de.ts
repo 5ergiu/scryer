@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const de: LocaleDictionary = {
   "titleDelete.refusal.selection": "Titel ohne Duplikate auswählen.",
   "titleDelete.refusal.busy": "Ein Löschvorgang läuft bereits.",
-  "titleDelete.refusal.downloadRetry": "Ein erneuter Downloadversuch mit Passwort wartet auf den Abgleich. Warte auf den Abschluss oder entferne den Download in Scryer unter Aktivität > Import. Versuche anschließend erneut, den Titel zu löschen.",
   "titleDelete.refusal.preview": "Löschvorschau aktualisieren und bestätigen.",
   "titleDelete.refusal.confirmation": "Zum Bestätigen DELETE eingeben.",
   "titleDelete.refusal.boundary": "Der Titelordner muss innerhalb eines Bibliotheksordners liegen und darf nicht dieser Ordner selbst sein.",

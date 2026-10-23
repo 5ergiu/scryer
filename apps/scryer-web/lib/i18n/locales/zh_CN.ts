@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const zh_CN: LocaleDictionary = {
   "titleDelete.refusal.selection": "请选择不重复的标题。",
   "titleDelete.refusal.busy": "删除操作已在进行中。",
-  "titleDelete.refusal.downloadRetry": "使用密码重试的下载正在等待状态核对。请等待完成，或从 Scryer 的「活动 > 导入」视图中移除该下载，然后重试删除标题。",
   "titleDelete.refusal.preview": "请刷新删除预览并确认。",
   "titleDelete.refusal.confirmation": "输入 DELETE 以确认删除。",
   "titleDelete.refusal.boundary": "标题文件夹必须位于媒体库根目录内，不能是根目录本身。",

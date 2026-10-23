@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const pt_BR: LocaleDictionary = {
   "titleDelete.refusal.selection": "Selecione títulos sem duplicatas.",
   "titleDelete.refusal.busy": "Uma exclusão já está em andamento.",
-  "titleDelete.refusal.downloadRetry": "Uma nova tentativa de download com senha aguarda reconciliação. Aguarde a conclusão ou remova o download da visualização de importações em Atividade no Scryer e tente excluir o título novamente.",
   "titleDelete.refusal.preview": "Atualize a prévia de exclusão e confirme.",
   "titleDelete.refusal.confirmation": "Digite DELETE para confirmar a exclusão.",
   "titleDelete.refusal.boundary": "A pasta do título deve estar dentro de uma raiz da biblioteca, não ser a própria raiz.",

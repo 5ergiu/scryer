@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const ja: LocaleDictionary = {
   "titleDelete.refusal.selection": "重複しないタイトルを選択してください。",
   "titleDelete.refusal.busy": "削除はすでに実行中です。",
-  "titleDelete.refusal.downloadRetry": "パスワードを使用したダウンロードの再試行は、状態の確認待ちです。完了を待つか、Scryer のアクティビティ内のインポート画面からダウンロードを削除してから、タイトルの削除を再試行してください。",
   "titleDelete.refusal.preview": "削除プレビューを更新して確認してください。",
   "titleDelete.refusal.confirmation": "削除を確認するには DELETE と入力してください。",
   "titleDelete.refusal.boundary": "タイトルフォルダーはライブラリのルート内にある必要があり、ルート自体は指定できません。",

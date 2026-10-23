@@ -1677,27 +1677,6 @@ impl AppUseCase {
             .await
     }
 
-    /// Called under the exclusive title-delete guard before any destructive work.
-    pub(crate) async fn preflight_title_download_retirement(
-        &self,
-        title_id: &str,
-    ) -> AppResult<()> {
-        let (_, ids) = self.explicit_title_submissions_to_retire(title_id).await?;
-        if self
-            .services
-            .workflow
-            .download_registry
-            .bindings_have_password_retry(&ids)
-            .await?
-        {
-            return Err(AppError::validation_refused(
-                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
-                "A download password retry is awaiting reconciliation. Let it settle, or remove the download from the Imports view in Scryer's Activity page, then retry title deletion.",
-            ));
-        }
-        Ok(())
-    }
-
     async fn explicit_title_submissions_to_retire(
         &self,
         title_id: &str,
@@ -1730,6 +1709,11 @@ impl AppUseCase {
         } else {
             self.title_submissions_to_retire(title_id).await
         };
+        let download_sources = download_submissions
+            .iter()
+            .map(ClientJobLocator::from_submission)
+            .collect::<HashSet<_>>();
+        let retired_download_ids = submitted_download_ids.clone();
 
         let mut seen_downloads = HashSet::new();
         for submission in download_submissions {
@@ -1795,7 +1779,78 @@ impl AppUseCase {
                 .await;
         }
 
+        let pending_imports = self
+            .delete_title_pending_imports(title_id, &retired_download_ids, &download_sources)
+            .await;
+        if explicit {
+            pending_imports?;
+        } else if let Err(err) = pending_imports {
+            warn!(
+                title_id = %title_id,
+                error = %err,
+                "failed to delete pending imports while deleting title"
+            );
+        }
+
         self.purge_title_records_after_downloads(title_id).await
+    }
+
+    /// Delete a deleted title's pending imports with its downloads: every
+    /// unfinished import (queued, pending, running or processing, which covers
+    /// a claimed automatic import retry and a queued manual import) that names
+    /// this title, or that names no title and came from one of the title's
+    /// downloads, and every manual-import selection made for the title. The
+    /// download password retries were retired with the bindings, and the
+    /// automatic retry markers with the tracked states. Finished imports are
+    /// history and stay. Only rows change: no file is touched here.
+    async fn delete_title_pending_imports(
+        &self,
+        title_id: &str,
+        download_ids: &[scryer_domain::download_identity::DownloadId],
+        download_sources: &HashSet<ClientJobLocator>,
+    ) -> AppResult<()> {
+        let imports = &self.services.workflow.imports;
+        let mut from_title_downloads = HashSet::new();
+        for download_id in download_ids {
+            from_title_downloads.extend(
+                imports
+                    .list_imports_for_canonical_download(download_id)
+                    .await?
+                    .into_iter()
+                    .map(|record| record.id),
+            );
+        }
+        let doomed = imports
+            .list_pending_imports()
+            .await?
+            .into_iter()
+            .filter(|record| {
+                match crate::maintenance_rules::safety::queued_import_title_id(record) {
+                    Some(owner) => owner == title_id,
+                    None => {
+                        from_title_downloads.contains(&record.id)
+                            || download_sources.contains(&ClientJobLocator::new(
+                                record.source_client_id.as_deref(),
+                                &record.source_system,
+                                &record.source_ref,
+                            ))
+                    }
+                }
+            })
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        let deleted = imports.delete_unfinished_imports(&doomed).await?;
+        imports
+            .delete_manual_import_selections_for_title(title_id)
+            .await?;
+        if deleted > 0 {
+            info!(
+                title_id = %title_id,
+                deleted,
+                "deleted pending imports of deleted title"
+            );
+        }
+        Ok(())
     }
 
     /// The merge counterpart of [`Self::purge_title_dependent_records`] for a
@@ -2074,10 +2129,11 @@ impl AppUseCase {
         title_id: &str,
         download_ids: Vec<scryer_domain::download_identity::DownloadId>,
     ) -> AppResult<()> {
+        // A pending password retry goes with the title instead of fencing it.
         self.services
             .workflow
             .download_registry
-            .end_bindings(&download_ids)
+            .end_bindings_for_deleted_title(&download_ids)
             .await?;
         self.runtime
             .acquisition
@@ -2101,7 +2157,8 @@ impl AppUseCase {
     /// Forget a deleted title's downloads, the way Sonarr drops a series'
     /// history when the series is deleted.
     ///
-    /// Deleting a title ends every binding its submissions held, removes the
+    /// Deleting a title ends every binding its submissions held (one fenced by
+    /// a pending password retry included, with its retry state), removes the
     /// terminal tracked-state markers recorded against those downloads, and
     /// drops their rows from the tracked-download cache. Without this a later
     /// grab of the same client item (the same torrent re-added for a new
@@ -2127,7 +2184,7 @@ impl AppUseCase {
                 .services
                 .workflow
                 .download_registry
-                .end_binding(download_id)
+                .end_bindings_for_deleted_title(std::slice::from_ref(download_id))
                 .await
             {
                 warn!(title_id, %download_id, error = %err, "failed to end download binding while retiring merged title");

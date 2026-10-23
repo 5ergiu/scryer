@@ -6,7 +6,6 @@ export const TITLE_DELETE_REFUSAL_KEYS: Readonly<Record<string, string>> = {
   TITLE_DELETE_DUPLICATE_TITLE: "titleDelete.refusal.selection",
   TITLE_DELETE_JOB_ALREADY_RUNNING: "titleDelete.refusal.busy",
   TITLE_DELETE_IN_PROGRESS: "titleDelete.refusal.busy",
-  TITLE_DELETE_DOWNLOAD_RETRY_IN_PROGRESS: "titleDelete.refusal.downloadRetry",
   TITLE_DELETE_CONFIRMATION_REQUIRED: "titleDelete.refusal.preview",
   TITLE_DELETE_PREVIEW_STALE: "titleDelete.refusal.preview",
   TITLE_DELETE_TYPED_CONFIRMATION_REQUIRED: "titleDelete.refusal.confirmation",

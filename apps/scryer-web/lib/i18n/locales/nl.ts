@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const nl: LocaleDictionary = {
   "titleDelete.refusal.selection": "Selecteer titels zonder duplicaten.",
   "titleDelete.refusal.busy": "Er wordt al een verwijdering uitgevoerd.",
-  "titleDelete.refusal.downloadRetry": "Een downloadpoging met wachtwoord wacht op controle. Wacht tot dit is afgerond of verwijder de download in Scryer onder Activiteit > Import en probeer daarna de titel opnieuw te verwijderen.",
   "titleDelete.refusal.preview": "Vernieuw het verwijdervoorbeeld en bevestig het.",
   "titleDelete.refusal.confirmation": "Typ DELETE om de verwijdering te bevestigen.",
   "titleDelete.refusal.boundary": "De titelmap moet binnen een bibliotheekhoofdmap liggen, niet de hoofdmap zelf zijn.",

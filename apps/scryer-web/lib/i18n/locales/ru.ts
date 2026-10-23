@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const ru: LocaleDictionary = {
   "titleDelete.refusal.selection": "Выберите названия без повторов.",
   "titleDelete.refusal.busy": "Удаление уже выполняется.",
-  "titleDelete.refusal.downloadRetry": "Повторная загрузка с паролем ожидает проверки состояния. Дождитесь её завершения или удалите загрузку в Scryer в разделе «Активность > Импорт», затем повторите удаление названия.",
   "titleDelete.refusal.preview": "Обновите и подтвердите предварительный просмотр удаления.",
   "titleDelete.refusal.confirmation": "Введите DELETE для подтверждения удаления.",
   "titleDelete.refusal.boundary": "Папка названия должна находиться внутри корня библиотеки, а не быть самим корнем.",

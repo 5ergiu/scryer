@@ -1916,14 +1916,49 @@ async fn merge_retires_a_source_download_it_cannot_move_and_still_succeeds() {
     assert!(download_client.deleted_requests.lock().await.is_empty());
 }
 
+async fn queue_synthetic_import(
+    imports: &TrackingImportRepo,
+    item_id: &str,
+    payload: serde_json::Value,
+    status: scryer_domain::ImportStatus,
+    canonical: Option<scryer_domain::download_identity::DownloadId>,
+) -> String {
+    let id = imports
+        .queue_import_request(
+            ClientJobLocator::new(Some("primary"), "sabnzbd", item_id),
+            "manual_import".to_string(),
+            payload.to_string(),
+        )
+        .await
+        .unwrap();
+    if status != scryer_domain::ImportStatus::Pending {
+        imports
+            .update_import_status(&id, status, None)
+            .await
+            .unwrap();
+    }
+    if let Some(canonical) = canonical {
+        imports
+            .canonical_ids
+            .lock()
+            .await
+            .insert(id.clone(), canonical);
+    }
+    id
+}
+
 #[tokio::test]
-async fn title_delete_password_retry_refuses_before_files_or_catalog_change() {
+async fn title_delete_takes_its_pending_imports_and_password_retry_with_it() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("library");
     let folder = root.join("Synthetic Retry Movie");
     std::fs::create_dir_all(&folder).unwrap();
     let media = folder.join("movie.mkv");
     std::fs::write(&media, b"synthetic media").unwrap();
+    let other_folder = root.join("Synthetic Bystander Movie");
+    std::fs::create_dir_all(&other_folder).unwrap();
+    let other_media = other_folder.join("movie.mkv");
+    std::fs::write(&other_media, b"synthetic bystander").unwrap();
     let (base_app, user, _) = bootstrap_with_cutoff_projection_state(
         Arc::new(StoredSettingsRepo::default()),
         Arc::new(StoredQualityProfileRepo::default()),
@@ -1931,10 +1966,12 @@ async fn title_delete_password_retry_refuses_before_files_or_catalog_change() {
     );
     let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
+    let imports = Arc::new(TrackingImportRepo::default());
     let app = base_app.with_test_overrides(|services| {
         services
             .with_download_submissions(submissions.clone())
             .with_download_registry(registry.clone())
+            .with_imports(imports.clone())
     });
     app.update_media_settings(
         &user,
@@ -1947,56 +1984,143 @@ async fn title_delete_password_retry_refuses_before_files_or_catalog_change() {
         .add_title(&user, synthetic_movie("Synthetic Retry Movie"))
         .await
         .unwrap();
-    app.services
-        .catalog
-        .titles
-        .set_folder_path(&title.id, &folder.to_string_lossy())
+    let other = app
+        .add_title(&user, synthetic_movie("Synthetic Bystander Movie"))
         .await
         .unwrap();
-    app.services
-        .library
-        .media_files
-        .insert_media_file(&InsertMediaFileInput {
-            title_id: title.id.clone(),
-            file_path: media.to_string_lossy().into_owned(),
-            size_bytes: 15,
-            role: MediaFileRole::Primary,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let id = scryer_domain::download_identity::DownloadId::new();
+    for (owner, path, file) in [
+        (&title, &folder, &media),
+        (&other, &other_folder, &other_media),
+    ] {
+        app.services
+            .catalog
+            .titles
+            .set_folder_path(&owner.id, &path.to_string_lossy())
+            .await
+            .unwrap();
+        app.services
+            .library
+            .media_files
+            .insert_media_file(&InsertMediaFileInput {
+                title_id: owner.id.clone(),
+                file_path: file.to_string_lossy().into_owned(),
+                size_bytes: 15,
+                role: MediaFileRole::Primary,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    // The deleted title: a download awaiting a password retry, plus a second
+    // download whose import is being retried automatically.
+    let retry_id = scryer_domain::download_identity::DownloadId::new();
+    let auto_id = scryer_domain::download_identity::DownloadId::new();
+    for (id, job) in [(retry_id, "retry-job"), (auto_id, "auto-job")] {
+        submissions
+            .record_submission(deleted_title_submission(&title.id, id, "sabnzbd", job))
+            .await
+            .unwrap();
+        registry
+            .bind(ClientJobLocator::new(Some("primary"), "sabnzbd", job), id)
+            .await;
+    }
+    registry.password_retry_ids.lock().await.insert(retry_id);
+    let password_import = queue_synthetic_import(
+        &imports,
+        "retry-job",
+        serde_json::json!({}),
+        scryer_domain::ImportStatus::Pending,
+        None,
+    )
+    .await;
+    let auto_import = queue_synthetic_import(
+        &imports,
+        "auto-job",
+        serde_json::json!({}),
+        scryer_domain::ImportStatus::Processing,
+        Some(auto_id),
+    )
+    .await;
+    let manual_import = queue_synthetic_import(
+        &imports,
+        "manual-job",
+        serde_json::json!({ "title_id": title.id }),
+        scryer_domain::ImportStatus::Pending,
+        None,
+    )
+    .await;
+    let finished_import = queue_synthetic_import(
+        &imports,
+        "manual-job",
+        serde_json::json!({ "title_id": title.id }),
+        scryer_domain::ImportStatus::Completed,
+        None,
+    )
+    .await;
+    *imports.manual_import_selection.lock().await = Some(crate::ManualImportSelection {
+        id: "synthetic-selection".to_string(),
+        actor_user_id: user.id.clone(),
+        title_id: title.id.clone(),
+        source_identity: ClientJobLocator::new(Some("primary"), "sabnzbd", "manual-job"),
+        canonical_download_id: None,
+        release_evidence_json: None,
+        trusted_source_root: temp.path().to_string_lossy().into_owned(),
+        archive_workspace_root: None,
+        candidates: Vec::new(),
+    });
+
+    // The bystander title keeps its own fenced download and pending imports.
+    let other_id = scryer_domain::download_identity::DownloadId::new();
     submissions
         .record_submission(deleted_title_submission(
-            &title.id,
-            id,
+            &other.id,
+            other_id,
             "sabnzbd",
-            "retry-job",
+            "other-job",
         ))
         .await
         .unwrap();
-    registry.password_retry_ids.lock().await.insert(id);
+    registry
+        .bind(
+            ClientJobLocator::new(Some("primary"), "sabnzbd", "other-job"),
+            other_id,
+        )
+        .await;
+    registry.password_retry_ids.lock().await.insert(other_id);
+    let other_download_import = queue_synthetic_import(
+        &imports,
+        "other-job",
+        serde_json::json!({}),
+        scryer_domain::ImportStatus::Processing,
+        Some(other_id),
+    )
+    .await;
+    let other_manual_import = queue_synthetic_import(
+        &imports,
+        "other-manual-job",
+        serde_json::json!({ "title_id": other.id }),
+        scryer_domain::ImportStatus::Pending,
+        None,
+    )
+    .await;
+
     let preview = app
         .preview_delete_title_files(&user, &title.id)
         .await
         .unwrap();
-    let error = app
-        .delete_title(
-            &user,
-            &title.id,
-            true,
-            Some(DeleteExecutionConfirmation {
-                preview_fingerprint: preview.fingerprint,
-                typed_confirmation: None,
-            }),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.validation_reason(),
-        Some(crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS)
-    );
-    assert_eq!(std::fs::read(&media).unwrap(), b"synthetic media");
+    app.delete_title(
+        &user,
+        &title.id,
+        true,
+        Some(DeleteExecutionConfirmation {
+            preview_fingerprint: preview.fingerprint,
+            typed_confirmation: None,
+        }),
+    )
+    .await
+    .unwrap();
+
     assert!(
         app.services
             .catalog
@@ -2004,20 +2128,51 @@ async fn title_delete_password_retry_refuses_before_files_or_catalog_change() {
             .get_by_id(&title.id)
             .await
             .unwrap()
-            .is_some()
+            .is_none()
     );
-    assert!(!registry.is_ended(&id).await);
+    assert!(!media.exists());
+    assert!(registry.is_ended(&retry_id).await);
+    assert!(registry.is_ended(&auto_id).await);
+    assert!(!registry.password_retry_ids.lock().await.contains(&retry_id));
+    let remaining = imports
+        .records
+        .lock()
+        .await
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<HashSet<_>>();
+    for gone in [&password_import, &auto_import, &manual_import] {
+        assert!(!remaining.contains(gone), "pending import {gone} survived");
+    }
     assert!(
-        submissions
-            .deleted_identity_state_download_ids
-            .lock()
+        remaining.contains(&finished_import),
+        "finished import history is kept"
+    );
+    assert!(imports.manual_import_selection.lock().await.is_none());
+
+    // Nothing of the bystander title changed.
+    assert!(remaining.contains(&other_download_import));
+    assert!(remaining.contains(&other_manual_import));
+    assert_eq!(std::fs::read(&other_media).unwrap(), b"synthetic bystander");
+    assert!(!registry.is_ended(&other_id).await);
+    assert!(registry.password_retry_ids.lock().await.contains(&other_id));
+    assert_eq!(
+        submissions.list_for_title(&other.id).await.unwrap().len(),
+        1
+    );
+    assert!(
+        app.services
+            .catalog
+            .titles
+            .get_by_id(&other.id)
             .await
-            .is_empty()
+            .unwrap()
+            .is_some()
     );
 }
 
 #[tokio::test]
-async fn legacy_title_cleanup_documents_retry_fence_orphaned_binding() {
+async fn policy_title_cleanup_retires_password_retry_binding() {
     let (base_app, user) = bootstrap();
     let submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
     let registry = Arc::new(super::downloads::RecordingDownloadRegistry::default());
@@ -2041,14 +2196,13 @@ async fn legacy_title_cleanup_documents_retry_fence_orphaned_binding() {
         .await
         .unwrap();
     registry.password_retry_ids.lock().await.insert(id);
-    // Known pre-existing hole outside explicit title deletion: library/policy
-    // cleanup proceeds after binding retirement fails, leaving a live binding
-    // without a submission. This documents the preserved behavior, not a safe
-    // end state; repairing it requires a separately scoped lifecycle change.
+    // Library/policy cleanup retires a pending password retry with the title,
+    // so no live binding outlives its submission.
     app.purge_title_dependent_records(&title.id, (&user).into())
         .await
         .unwrap();
-    assert!(!registry.is_ended(&id).await);
+    assert!(registry.is_ended(&id).await);
+    assert!(!registry.password_retry_ids.lock().await.contains(&id));
     assert!(
         submissions
             .list_for_title(&title.id)
@@ -2150,9 +2304,9 @@ async fn password_retry_claim_and_title_delete_exclude_each_other() {
 }
 
 #[tokio::test]
-async fn explicit_queue_removal_unblocks_password_retry_fenced_title() {
+async fn explicit_queue_removal_recovers_password_retry_fenced_download() {
     within_deadline(
-        "explicit_queue_removal_unblocks_password_retry_fenced_title",
+        "explicit_queue_removal_recovers_password_retry_fenced_download",
         async {
             let client = Arc::new(StubDownloadClient::default());
             // A job removed before observation can make any adapter return an error.
@@ -2194,14 +2348,6 @@ async fn explicit_queue_removal_unblocks_password_retry_fenced_title() {
             submissions.record_submission(submission).await.unwrap();
             registry.bind(locator.clone(), id).await;
             registry.password_retry_ids.lock().await.insert(id);
-            let error = app
-                .delete_title(&user, &title.id, false, None)
-                .await
-                .unwrap_err();
-            assert_eq!(
-                error.validation_reason(),
-                Some(crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS)
-            );
             assert_eq!(
                 app.list_download_import_page(&user, 50, 0, DownloadImportFilter::All)
                     .await
