@@ -82,21 +82,22 @@ pub(crate) fn require_http_release_for_http_source(
 
 /// Refuse a release the provider says cannot be downloaded now. These are
 /// safety guards, not user rules, so they apply to operator grabs as well:
-/// a live stream, an announcement, a removed item, a DRM-protected item and
-/// one behind a provider sign-in would all reach the client and fail there.
+/// a live stream, an announcement and a removed item would all reach the
+/// client and fail there.
 ///
-/// A geo-restricted release is still submitted, since the client retries a
-/// geo block and an assigned proxy may route around it. An expired one is
-/// submitted for the indexer to resolve again. `Unknown` is the default for
-/// indexers that do not report availability.
+/// Every other availability is submitted and left to the client. A
+/// geo-restricted release is submitted since the client retries a geo block
+/// and an assigned proxy may route around it. An expired one is submitted for
+/// the indexer to resolve again. `Unknown` is the default for indexers that do
+/// not report availability.
 pub(crate) fn refuse_unavailable_http_release(release: &PluginHttpRelease) -> AppResult<()> {
     let reason = match release.availability {
         HttpAvailability::Live => "this release is a live stream",
         HttpAvailability::Upcoming => "this release is not yet available",
         HttpAvailability::Removed => "this release was removed by the provider",
-        HttpAvailability::Drm => "this release is DRM-protected",
-        HttpAvailability::AuthRequired => "this release needs provider sign-in",
         HttpAvailability::Available
+        | HttpAvailability::Drm
+        | HttpAvailability::AuthRequired
         | HttpAvailability::Expired
         | HttpAvailability::GeoRestricted
         | HttpAvailability::Unknown => return Ok(()),
@@ -475,8 +476,6 @@ mod tests {
             (HttpAvailability::Live, "live stream"),
             (HttpAvailability::Upcoming, "not yet available"),
             (HttpAvailability::Removed, "removed by the provider"),
-            (HttpAvailability::Drm, "DRM-protected"),
-            (HttpAvailability::AuthRequired, "needs provider sign-in"),
         ] {
             let listed = PluginHttpRelease {
                 availability,
@@ -499,6 +498,8 @@ mod tests {
             HttpAvailability::Unknown,
             HttpAvailability::GeoRestricted,
             HttpAvailability::Expired,
+            HttpAvailability::Drm,
+            HttpAvailability::AuthRequired,
         ] {
             let listed = PluginHttpRelease {
                 availability,
