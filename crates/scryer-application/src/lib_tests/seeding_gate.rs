@@ -718,12 +718,14 @@ async fn durable_cleanup_recovers_an_untrackable_import_and_rejects_a_reused_loc
 }
 
 #[tokio::test]
-async fn durable_entry_only_cleanup_recovers_absence_but_not_unknown_or_reused_identity() {
+async fn durable_client_data_removal_recovers_absence_but_not_unknown_or_reused_identity() {
     let client = Arc::new(StubDownloadClient::default());
     let (app, user, repository) = bootstrap_with_torrent_clients(client.clone());
     let config = create_enabled_download_client_config(&app, &user, "Weaver", "weaver").await;
     set_download_client_cleanup_routing(&app, &user, "movie", &config.id, true, true).await;
     let title = movie_title(&app, &user, "Failed entry recovery").await;
+    // A failed job has no completed location for the host deletion, so the
+    // client's own data deletion is the one absence may later credit.
     let mut tracked = tracked_for(
         &config.id,
         "weaver",
@@ -748,8 +750,9 @@ async fn durable_entry_only_cleanup_recovers_absence_but_not_unknown_or_reused_i
         Some(repository.cleanup_checkpoints.lock().await[&record.download_id].clone());
     let checkpoint: serde_json::Value =
         serde_json::from_str(record.payload_checkpoint.as_ref().unwrap()).unwrap();
-    assert_eq!(checkpoint["entry_only_remove_requested"], true);
-    assert_eq!(checkpoint["native_remove_requested"], false);
+    assert_eq!(checkpoint["entry_only_remove_requested"], false);
+    assert_eq!(checkpoint["native_remove_requested"], true);
+    assert_eq!(checkpoint["native_remove_attempted"], true);
     client.history_items.lock().await.clear();
     *client.observation_error.lock().await = Some("offline".into());
     assert!(
@@ -783,7 +786,7 @@ async fn durable_entry_only_cleanup_recovers_absence_but_not_unknown_or_reused_i
     assert_eq!(recovered.2, TerminalDownloadCleanupOutcome::AlreadyGone);
     assert_eq!(
         last_finish(&repository.finished_cleanup.lock().await),
-        Some(("entry_absent".to_string(), true))
+        Some(("native_removal_recovered".to_string(), true))
     );
     assert!(client.deleted_requests.lock().await.is_empty());
 }
@@ -1695,16 +1698,16 @@ async fn weaver_import_cleanup_falls_back_to_host_payload_deletion_when_weaver_r
     );
 }
 
-// The refusal is remembered on the cleanup row: a later attempt goes straight
-// to host deletion (resuming its failure budget) instead of asking Weaver for
-// the files again.
+// Weaver refusing the files (an API key without admin scope) does not hold
+// the entry: the host deletion already ran as the backup, so the entry is
+// removed alone in the same attempt and the refusal is recorded.
 #[tokio::test]
-async fn weaver_payload_refusal_is_remembered_across_cleanup_attempts() {
+async fn weaver_payload_refusal_removes_the_entry_after_host_deletion() {
     let client = Arc::new(StubDownloadClient::default());
     let (app, user, repository) = bootstrap_with_torrent_clients(client.clone());
     let config = create_enabled_download_client_config(&app, &user, "Weaver", "weaver").await;
     set_download_client_cleanup_routing(&app, &user, "movie", &config.id, true, true).await;
-    let title = movie_title(&app, &user, "Refusal Memory").await;
+    let title = movie_title(&app, &user, "Refusal Fixture").await;
     let mut tracked = tracked_for(
         &config.id,
         "weaver",
@@ -1719,41 +1722,30 @@ async fn weaver_payload_refusal_is_remembered_across_cleanup_attempts() {
         .lock()
         .await
         .push(tracked.client_item.clone());
+    let (root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+    let unrelated = root.path().join("Unrelated.Fixture.1080p-GRP");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("keep.mkv"), b"other media").unwrap();
     *client.payload_delete_refusal.lock().await =
         Some("admin scope required to delete completed files".into());
-    let mut record = cleanup_record_for(&tracked);
 
-    // Weaver refuses the files and the host cannot find the payload yet: the
-    // row retries, with the refusal and the host failure both checkpointed.
-    let first = crate::import::import::run_claimed_download_cleanup(&app, record.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(first.2, TerminalDownloadCleanupOutcome::RetryableFailure);
+    let result = crate::import::import::run_claimed_download_cleanup(
+        &app,
+        cleanup_record_for(&tracked),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.2, TerminalDownloadCleanupOutcome::Removed);
     assert_eq!(
-        client.deleted_requests.lock().await.clone(),
-        vec![(
-            Some(config.id.clone()),
-            None,
-            "refused-job".to_string(),
-            true,
-            true
-        )]
+        result.2.client_payload,
+        crate::import::import::ClientPayloadDeletion::Refused
     );
-    let checkpoint = repository.cleanup_checkpoints.lock().await[&record.download_id].clone();
-    let checkpoint_json = serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap();
-    assert_eq!(checkpoint_json["client_refused_payload_deletion"], true);
-    assert_eq!(checkpoint_json["host_payload_failures"], 1);
-
-    // The payload is reachable now: the retry deletes it on the host and
-    // removes the entry without asking Weaver for the files again.
-    let (_root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
-    record.payload_checkpoint = Some(checkpoint);
-    record.attempts = 2;
-    let retry = crate::import::import::run_claimed_download_cleanup(&app, record, None)
-        .await
-        .unwrap();
-    assert_eq!(retry.2, TerminalDownloadCleanupOutcome::Removed);
     assert!(!payload.exists());
+    assert_eq!(
+        std::fs::read(unrelated.join("keep.mkv")).unwrap(),
+        b"other media"
+    );
     assert_eq!(
         client.deleted_requests.lock().await.clone(),
         vec![
@@ -1773,10 +1765,15 @@ async fn weaver_payload_refusal_is_remembered_across_cleanup_attempts() {
             ),
         ]
     );
-    let settled = repository.cleanup_checkpoints.lock().await[&tracked.download_id].clone();
-    let settled = serde_json::from_str::<serde_json::Value>(&settled).unwrap();
-    assert_eq!(settled["client_refused_payload_deletion"], true);
-    assert_eq!(settled["payload_removed"], true);
+    assert_eq!(
+        repository
+            .finished_cleanup
+            .lock()
+            .await
+            .last()
+            .map(|(_, outcome, complete)| (outcome.clone(), *complete)),
+        Some(("payload_and_entry_removed".to_string(), true))
+    );
 }
 
 // SABnzbd's nzo_id is not a canonical token, and the job name it hands back
@@ -2462,6 +2459,286 @@ async fn a_burned_usenet_failure_respects_remove_failed_routing() {
 
     assert_eq!(outcome, TerminalDownloadCleanupOutcome::NotConfigured);
     assert!(download_client.deleted_requests.lock().await.is_empty());
+}
+
+fn last_finished_cleanup(
+    finished: &[(scryer_domain::download_identity::DownloadId, String, bool)],
+) -> Option<(String, bool)> {
+    finished
+        .last()
+        .map(|(_, outcome, complete)| (outcome.clone(), *complete))
+}
+
+async fn client_failure_fixture(
+    client_type: &str,
+    remove_failed: bool,
+) -> (
+    AppUseCase,
+    User,
+    Arc<StubDownloadClient>,
+    Arc<TrackingDownloadSubmissionRepo>,
+    scryer_domain::DownloadClientConfig,
+    TrackedDownload,
+) {
+    let client = Arc::new(StubDownloadClient::default());
+    let (app, user, repository) = bootstrap_with_torrent_clients(client.clone());
+    let config = create_enabled_download_client_config(&app, &user, client_type, client_type).await;
+    set_download_client_cleanup_routing(&app, &user, "movie", &config.id, true, remove_failed)
+        .await;
+    let title = movie_title(&app, &user, "Client.Failure.Fixture.1080p-GRP").await;
+    let mut tracked = tracked_for(
+        &config.id,
+        client_type,
+        "client-failed-job",
+        &title,
+        TrackedDownloadState::Failed,
+        true,
+    );
+    tracked.client_item.download_id = Some(tracked.download_id.to_wire());
+    client
+        .history_items
+        .lock()
+        .await
+        .push(tracked.client_item.clone());
+    (app, user, client, repository, config, tracked)
+}
+
+// A failure the Usenet client reported takes the same path as an imported
+// download: the failure itself leaves the entry alone, and the next terminal
+// cleanup removes it with its payload. The host deletion runs first and the
+// client is asked to delete its own files too.
+#[tokio::test]
+async fn a_client_reported_usenet_failure_is_removed_with_its_payload() {
+    for client_type in ["sabnzbd", "weaver"] {
+        let (app, user, client, repository, config, tracked) =
+            client_failure_fixture(client_type, true).await;
+        let (root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+        let unrelated = root.path().join("Unrelated.Fixture.1080p-GRP");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.mkv"), b"other media").unwrap();
+
+        crate::acquisition_workflow::process_download_failure(
+            &app,
+            crate::acquisition_workflow::DownloadFailureContext {
+                wanted_item: None,
+                title_id: tracked.title_id.clone(),
+                client_id: tracked.client_id.clone(),
+                client_type: client_type.into(),
+                client_name: None,
+                client_item_id: "client-failed-job".into(),
+                release_title: tracked.source_title.clone().unwrap(),
+                reason: "par repair failed".into(),
+                blocklist_reason: None,
+                skip_reacquire: true,
+            },
+        )
+        .await;
+        assert!(
+            client.deleted_requests.lock().await.is_empty(),
+            "{client_type}"
+        );
+        assert!(payload.join("movie.mkv").exists(), "{client_type}");
+
+        let result = crate::import::import::run_claimed_download_cleanup(
+            &app,
+            cleanup_record_for(&tracked),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.2,
+            TerminalDownloadCleanupOutcome::Removed,
+            "{client_type}"
+        );
+        assert!(!payload.exists(), "{client_type}");
+        assert_eq!(
+            std::fs::read(unrelated.join("keep.mkv")).unwrap(),
+            b"other media",
+            "{client_type}"
+        );
+        assert_eq!(
+            client.deleted_requests.lock().await.clone(),
+            vec![(
+                Some(config.id.clone()),
+                None,
+                "client-failed-job".to_string(),
+                true,
+                true
+            )],
+            "{client_type}"
+        );
+        assert_eq!(
+            last_finished_cleanup(&repository.finished_cleanup.lock().await),
+            Some(("payload_and_entry_removed".to_string(), true)),
+            "{client_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_client_reported_usenet_failure_is_untouched_with_remove_failed_off() {
+    for client_type in ["sabnzbd", "weaver"] {
+        let (app, user, client, repository, _config, tracked) =
+            client_failure_fixture(client_type, false).await;
+        let (_root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+        let result = crate::import::import::run_claimed_download_cleanup(
+            &app,
+            cleanup_record_for(&tracked),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.2,
+            TerminalDownloadCleanupOutcome::NotConfigured,
+            "{client_type}"
+        );
+        assert_eq!(
+            std::fs::read(payload.join("movie.mkv")).unwrap(),
+            b"media",
+            "{client_type}"
+        );
+        assert!(
+            client.deleted_requests.lock().await.is_empty(),
+            "{client_type}"
+        );
+        assert_eq!(
+            last_finished_cleanup(&repository.finished_cleanup.lock().await),
+            Some(("policy_retained".to_string(), true)),
+            "{client_type}"
+        );
+    }
+}
+
+// A failed job never reaches the client's completed folder, so the client
+// reports no location for the host to inspect. The client's own deletion
+// covers it, and the outcome says the client did it.
+#[tokio::test]
+async fn a_failed_job_without_a_payload_location_is_deleted_by_its_client() {
+    for client_type in ["sabnzbd", "weaver"] {
+        let (app, _user, client, repository, config, tracked) =
+            client_failure_fixture(client_type, true).await;
+        let result = crate::import::import::run_claimed_download_cleanup(
+            &app,
+            cleanup_record_for(&tracked),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.2,
+            TerminalDownloadCleanupOutcome::Removed,
+            "{client_type}"
+        );
+        assert_eq!(result.2.payload, None, "{client_type}");
+        assert_eq!(
+            client.deleted_requests.lock().await.clone(),
+            vec![(
+                Some(config.id.clone()),
+                None,
+                "client-failed-job".to_string(),
+                true,
+                true
+            )],
+            "{client_type}"
+        );
+        assert_eq!(
+            last_finished_cleanup(&repository.finished_cleanup.lock().await),
+            Some(("entry_and_payload_removed_by_client".to_string(), true)),
+            "{client_type}"
+        );
+    }
+}
+
+// The host deletion is the backup: when the client already deleted the job
+// folder, the host finds it gone and the payload counts as removed.
+#[tokio::test]
+async fn a_payload_the_client_already_deleted_settles_cleanly() {
+    for client_type in ["sabnzbd", "weaver"] {
+        let (app, user, client, repository, _config, tracked) =
+            client_failure_fixture(client_type, true).await;
+        let (root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+        std::fs::remove_dir_all(&payload).unwrap();
+        let sibling = root.path().join("Unrelated.Fixture.1080p-GRP");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("keep.mkv"), b"other media").unwrap();
+        let result = crate::import::import::run_claimed_download_cleanup(
+            &app,
+            cleanup_record_for(&tracked),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.2,
+            TerminalDownloadCleanupOutcome::Removed,
+            "{client_type}"
+        );
+        assert_eq!(
+            result.2.payload,
+            Some(crate::import::import::HostPayloadDisposition::Removed),
+            "{client_type}"
+        );
+        assert_eq!(
+            std::fs::read(sibling.join("keep.mkv")).unwrap(),
+            b"other media"
+        );
+        assert_eq!(
+            last_finished_cleanup(&repository.finished_cleanup.lock().await),
+            Some(("payload_and_entry_removed".to_string(), true)),
+            "{client_type}"
+        );
+    }
+}
+
+// An entry-only removal says so; it never claims the payload went too.
+#[tokio::test]
+async fn an_entry_only_removal_is_recorded_as_entry_removed() {
+    let (app, user, client, repository, config, mut tracked) =
+        client_failure_fixture("weaver", true).await;
+    tracked.state = TrackedDownloadState::Ignored;
+    let (_root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+    let result = crate::import::import::run_claimed_download_cleanup(
+        &app,
+        cleanup_record_for(&tracked),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.2, TerminalDownloadCleanupOutcome::Removed);
+    assert_eq!(std::fs::read(payload.join("movie.mkv")).unwrap(), b"media");
+    assert_eq!(
+        client.deleted_requests.lock().await.clone(),
+        vec![(
+            Some(config.id.clone()),
+            None,
+            "client-failed-job".to_string(),
+            true,
+            false
+        )]
+    );
+    assert_eq!(
+        last_finished_cleanup(&repository.finished_cleanup.lock().await),
+        Some(("entry_removed".to_string(), true))
+    );
+}
+
+#[test]
+fn cleanup_settlements_round_trip_their_stored_strings() {
+    use crate::import::import::CleanupSettlement;
+    let stored: std::collections::HashSet<_> = CleanupSettlement::ALL
+        .iter()
+        .map(|settlement| settlement.as_str())
+        .collect();
+    assert_eq!(stored.len(), CleanupSettlement::ALL.len());
+    for settlement in CleanupSettlement::ALL {
+        assert_eq!(
+            CleanupSettlement::parse(settlement.as_str()),
+            Some(settlement)
+        );
+    }
+    assert_eq!(CleanupSettlement::parse("not_a_settlement"), None);
 }
 
 #[tokio::test]
@@ -5834,7 +6111,6 @@ async fn nzbget_script_failure_defers_history_until_verified_payload_cleanup() {
             client_item_id: "42".into(),
             release_title: tracked.source_title.clone().unwrap(),
             reason: "post-processing script failed".into(),
-            remove_from_client_if_configured: true,
             blocklist_reason: None,
             skip_reacquire: true,
         },
