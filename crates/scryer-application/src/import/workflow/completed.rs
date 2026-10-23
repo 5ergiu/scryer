@@ -420,7 +420,9 @@ impl TerminalDownloadCleanup {
     }
 }
 
-/// Whether terminal cleanup asked the client to delete its own files.
+/// Whether terminal cleanup asked the client to delete its own files. The
+/// strings are stored on the cleanup row's payload checkpoint: never rename
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientPayloadDeletion {
     /// The client was asked for the entry only.

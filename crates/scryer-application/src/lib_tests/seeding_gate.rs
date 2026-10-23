@@ -497,9 +497,17 @@ async fn durable_payload_checkpoint_does_not_delete_recreated_content() {
             std::fs::read(payload.join("unrelated.txt")).unwrap(),
             b"keep this new content"
         );
+        // The retry replays the stored deletion plan unchanged; settlement
+        // only adds the client's part.
+        let mut settled: serde_json::Value = serde_json::from_str(
+            &repository.cleanup_checkpoints.lock().await[&tracked.download_id],
+        )
+        .unwrap();
+        assert_eq!(settled["client_payload"], "not_requested");
+        settled.as_object_mut().unwrap().remove("client_payload");
         assert_eq!(
-            repository.cleanup_checkpoints.lock().await[&tracked.download_id],
-            checkpoint
+            settled,
+            serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap()
         );
         assert!(
             !client.deleted_requests.lock().await.last().unwrap().4,
@@ -1774,6 +1782,12 @@ async fn weaver_payload_refusal_removes_the_entry_after_host_deletion() {
             .map(|(_, outcome, complete)| (outcome.clone(), *complete)),
         Some(("payload_and_entry_removed".to_string(), true))
     );
+    assert_eq!(
+        stored_client_payload(&repository, &tracked.download_id)
+            .await
+            .as_deref(),
+        Some("refused")
+    );
 }
 
 // SABnzbd's nzo_id is not a canonical token, and the job name it hands back
@@ -2461,6 +2475,23 @@ async fn a_burned_usenet_failure_respects_remove_failed_routing() {
     assert!(download_client.deleted_requests.lock().await.is_empty());
 }
 
+async fn stored_client_payload(
+    repository: &TrackingDownloadSubmissionRepo,
+    download_id: &scryer_domain::download_identity::DownloadId,
+) -> Option<String> {
+    let checkpoint = repository
+        .cleanup_checkpoints
+        .lock()
+        .await
+        .get(download_id)?
+        .clone();
+    serde_json::from_str::<serde_json::Value>(&checkpoint)
+        .ok()?
+        .get("client_payload")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn last_finished_cleanup(
     finished: &[(scryer_domain::download_identity::DownloadId, String, bool)],
 ) -> Option<(String, bool)> {
@@ -2573,6 +2604,13 @@ async fn a_client_reported_usenet_failure_is_removed_with_its_payload() {
             Some(("payload_and_entry_removed".to_string(), true)),
             "{client_type}"
         );
+        assert_eq!(
+            stored_client_payload(&repository, &tracked.download_id)
+                .await
+                .as_deref(),
+            Some("requested"),
+            "{client_type}"
+        );
     }
 }
 
@@ -2646,6 +2684,13 @@ async fn a_failed_job_without_a_payload_location_is_deleted_by_its_client() {
         assert_eq!(
             last_finished_cleanup(&repository.finished_cleanup.lock().await),
             Some(("entry_and_payload_removed_by_client".to_string(), true)),
+            "{client_type}"
+        );
+        assert_eq!(
+            stored_client_payload(&repository, &tracked.download_id)
+                .await
+                .as_deref(),
+            Some("requested"),
             "{client_type}"
         );
     }

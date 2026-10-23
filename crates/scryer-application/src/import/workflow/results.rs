@@ -832,6 +832,11 @@ async fn reconcile_terminal_download_cleanup(
     } else {
         None
     };
+    // The row's payload checkpoint as this attempt last wrote it; each write
+    // replaces the whole value, so the settlement below extends this one.
+    let mut stored_checkpoint = record
+        .and_then(|record| record.payload_checkpoint.as_deref())
+        .and_then(|checkpoint| serde_json::from_str::<serde_json::Value>(checkpoint).ok());
     let payload_cleanup_checkpoint = if remove_data {
         match remove_host_payload_before_entry_cleanup(
             app,
@@ -848,6 +853,7 @@ async fn reconcile_terminal_download_cleanup(
         {
             Ok(Some(report)) => {
                 payload_disposition = Some(report.disposition);
+                stored_checkpoint = Some(report.stored_checkpoint);
                 report.filesystem_checkpoint
             }
             // The client reports no payload location for this job (a failed
@@ -903,6 +909,8 @@ async fn reconcile_terminal_download_cleanup(
                     {
                         tracing::warn!(client_id, download_client_item_id, error = %error,
                             "failed to checkpoint host payload failure count");
+                    } else {
+                        stored_checkpoint = Some(checkpoint);
                     }
                 }
                 let attempts = failures;
@@ -999,15 +1007,15 @@ async fn reconcile_terminal_download_cleanup(
         // eligibility pass, so authoritative absence can recover a lost
         // response for either the client's own data deletion or an
         // entry-only removal.
-        let checkpoint = serde_json::json!({
+        let intent = serde_json::json!({
             "native_remove_requested": native_intent,
             "entry_only_remove_requested": !remove_data,
             "download_id": record.download_id.to_string(),
             "client_id": record.client_id,
             "client_type": record.client_type,
             "item_id": record.item_id,
-        })
-        .to_string();
+        });
+        let checkpoint = intent.to_string();
         if let Err(error) = app
             .services
             .workflow
@@ -1019,6 +1027,7 @@ async fn reconcile_terminal_download_cleanup(
                 "failed to checkpoint native removal intent");
             return TerminalDownloadCleanup::bare(TerminalDownloadCleanupOutcome::RetryableFailure);
         }
+        stored_checkpoint = Some(intent);
         intent_record = Some(crate::DownloadCleanupRecord {
             payload_checkpoint: Some(checkpoint),
             ..record.clone()
@@ -1142,6 +1151,26 @@ async fn reconcile_terminal_download_cleanup(
         }
     };
 
+    // Kept beside the settlement so a client's refusal to delete its files
+    // stays distinguishable from a host deletion that went unverified.
+    if remove_data
+        && outcome == TerminalDownloadCleanupOutcome::Removed
+        && let Some(record) = record
+        && let Some(mut checkpoint) = stored_checkpoint.filter(serde_json::Value::is_object)
+    {
+        checkpoint[CLIENT_PAYLOAD_KEY] = serde_json::json!(client_payload.as_str());
+        if let Err(error) = app
+            .services
+            .workflow
+            .download_submissions
+            .checkpoint_download_cleanup_payload(&record.download_id, &checkpoint.to_string())
+            .await
+        {
+            tracing::warn!(client_id, download_client_item_id, error = %error,
+                "failed to checkpoint the client's payload deletion result");
+        }
+    }
+
     if matches!(
         outcome,
         TerminalDownloadCleanupOutcome::Removed | TerminalDownloadCleanupOutcome::AlreadyGone
@@ -1180,6 +1209,11 @@ async fn reconcile_terminal_download_cleanup(
 /// Logged when a client that deletes its own files refused to for this
 /// entry, and Scryer removed the entry alone.
 const CLIENT_PAYLOAD_DELETION_REFUSED: &str = "CLEANUP_CLIENT_PAYLOAD_DELETION_REFUSED";
+
+/// Payload checkpoint field recording, once the entry is removed, whether the
+/// client was asked to delete the files and whether it refused
+/// ([`ClientPayloadDeletion`]).
+const CLIENT_PAYLOAD_KEY: &str = "client_payload";
 
 /// Whether, and when, terminal cleanup asks a client to delete a job's files
 /// itself. It never decides whether the host deletion runs: that always does.
@@ -1295,6 +1329,8 @@ pub(crate) enum HostPayloadDisposition {
 struct HostPayloadCleanupReport {
     disposition: HostPayloadDisposition,
     filesystem_checkpoint: Option<std::path::PathBuf>,
+    /// The cleanup row's payload checkpoint as this deletion left it.
+    stored_checkpoint: serde_json::Value,
 }
 
 /// One file Scryer expects to delete, captured before the first deletion and
@@ -1877,6 +1913,7 @@ async fn remove_host_payload_before_entry_cleanup(
                 .get("filesystem_checkpoint")
                 .and_then(serde_json::Value::as_str)
                 .map(std::path::PathBuf::from),
+            stored_checkpoint: saved.clone(),
         }));
     }
 
@@ -2108,7 +2145,7 @@ async fn remove_host_payload_before_entry_cleanup(
                     .checkpoint_download_cleanup_payload(&record.download_id, &plan.to_string())
                     .await?;
             }
-            AppResult::Ok(())
+            AppResult::Ok(plan)
         }
     };
 
@@ -2386,7 +2423,7 @@ async fn remove_host_payload_before_entry_cleanup(
             disposition = HostPayloadDisposition::PartiallyRetained;
         }
     }
-    persist_plan(serde_json::json!({
+    let stored_checkpoint = persist_plan(serde_json::json!({
         "completed": authoritative_completed, "payload_removed": true,
         "target": target, "disposition": disposition,
         "filesystem_checkpoint": checkpoint,
@@ -2395,6 +2432,7 @@ async fn remove_host_payload_before_entry_cleanup(
     Ok(Some(HostPayloadCleanupReport {
         disposition,
         filesystem_checkpoint: checkpoint,
+        stored_checkpoint,
     }))
 }
 
