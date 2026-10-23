@@ -1186,6 +1186,9 @@ async fn preview_manual_import(
         available_episodes,
         anime_numbering_bridge.as_ref(),
         Some(&grabbed_episode_ids),
+        // The preview has no download completion time in hand; each member
+        // below reads its own file's mtime instead.
+        None,
     );
     let unresolved_pack = matches!(&pack_verification, EpisodePackVerification::Unresolved);
     let verified_pack = match pack_verification {

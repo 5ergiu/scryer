@@ -40,10 +40,13 @@ pub(crate) enum NumberingCandidateKind {
     /// The parsed season and episode read through a TVDB alternate (or DVD)
     /// order. Ranked above the literal reading because a group that numbers by
     /// that order says so with every release, but below a title-anchored one —
-    /// and, unlike every other kind, a reading that disagrees with the literal
-    /// one has to be corroborated before `select` will resolve it.
+    /// and a reading that disagrees with a valid literal one has to be
+    /// corroborated before `select` will resolve it.
     Alternate,
-    /// The parsed season read as a community season index.
+    /// The parsed season read as a community season index. Like `Alternate`,
+    /// a reading that disagrees with a literal reading the catalog holds has
+    /// to be corroborated before it may win: a community index that is also a
+    /// real TVDB season is otherwise just a second reading of the same digits.
     Community,
     /// The release names one community season's own title, which pins the
     /// season over a season token that agrees with it (`S01`, the cour's own
@@ -1387,6 +1390,20 @@ fn select(
         }
     }
 
+    // Several community readings left standing against a valid literal one
+    // are only a genuine ambiguity among the ones that are corroborated. A
+    // reading that agrees with the literal one stays; an uncorroborated one is
+    // dropped, and if nothing is left the literal reading stands.
+    if top.len() > 1
+        && best_kind == NumberingCandidateKind::Community
+        && let Some(official) = official
+    {
+        top.retain(|candidate| {
+            official.key() == candidate.key()
+                || bridge_reading_is_corroborated(input, candidate, Some(official))
+        });
+    }
+
     match top.len() {
         0 => NumberingResolution::Unchanged,
         1 => {
@@ -1399,13 +1416,21 @@ fn select(
                 || official.is_some_and(|official| official.key() == candidate.key())
             {
                 NumberingResolution::Unchanged
-            } else if candidate.kind == NumberingCandidateKind::Alternate
-                && !alternate_reading_is_corroborated(input, &candidate, official)
+            } else if matches!(
+                candidate.kind,
+                NumberingCandidateKind::Alternate | NumberingCandidateKind::Community
+            ) && !bridge_reading_is_corroborated(input, &candidate, official)
             {
                 // A TVDB alternate order is a plausible reading of the release,
                 // not a demonstrated one: the same `S01E27` is a perfectly good
                 // literal reading too, and most releases of an ordinary series
                 // carry nothing that tells the two apart.
+                //
+                // The same holds for a community season index that is also a
+                // real TVDB season: `S03E05` is community season 3 episode 5,
+                // but it is just as much the literal S03E05 the catalog holds,
+                // and on a series whose cours split TVDB seasons the two land
+                // in different seasons.
                 //
                 // `Unchanged` — the literal reading — is the only safe answer
                 // here. `Ambiguous` is a veto downstream (RSS and pending
@@ -1425,20 +1450,27 @@ fn select(
     }
 }
 
-/// Whether an alternate-order reading may resolve on its own.
+/// Whether a bridge reading (an alternate-order or a community one) may
+/// override the literal reading on its own.
 ///
-/// Three things license it, in the order they are cheapest to establish:
+/// These things license it, in the order they are cheapest to establish:
 ///
-/// - the operator pinned this title to that order (`release_numbering`), which
-///   is a standing statement that its releases are numbered that way;
-/// - the literal reading lands on no catalog episode at all, so the alternate
-///   one is not competing with a valid answer — it is the only answer;
-/// - the release names one of the episodes the alternate reading lands on, and
-///   names none of the ones the literal reading lands on.
+/// - the operator pinned this title to an alternate order
+///   (`release_numbering`), which is a standing statement that its releases
+///   are numbered that way;
+/// - the literal reading lands on no catalog episode at all, so the bridge
+///   reading is not competing with a valid answer — it is the only answer;
+/// - the release names one of the episodes the bridge reading lands on, and
+///   names none of the ones the literal reading lands on;
+/// - for a community reading only: the lane has a reference date (the posted
+///   date, a download's completion, a file's mtime), the community reading's
+///   episode aired near it and the literal one did not. A current cour is
+///   posted while it airs; a literal reading that aired years earlier is not
+///   what a group posting this week means.
 ///
 /// Anything else is a coin toss between two readings of the same digits, and
-/// the caller reports the ambiguity rather than picking.
-fn alternate_reading_is_corroborated(
+/// the caller keeps the literal reading rather than picking.
+fn bridge_reading_is_corroborated(
     input: &NumberingInput<'_>,
     candidate: &NumberingCandidate,
     official: Option<&NumberingCandidate>,
@@ -1459,7 +1491,14 @@ fn alternate_reading_is_corroborated(
                 .is_some_and(|name| release_text_names(input.parsed, name))
         })
     };
-    named(candidate) && !named(official)
+    if named(candidate) && !named(official) {
+        return true;
+    }
+    candidate.kind == NumberingCandidateKind::Community
+        && input.reference_date.is_some_and(|reference_date| {
+            candidate_airs_near(candidate, input.episodes, reference_date)
+                && !candidate_airs_near(official, input.episodes, reference_date)
+        })
 }
 
 /// Whether the release's own text carries an episode title, as a whole run of
