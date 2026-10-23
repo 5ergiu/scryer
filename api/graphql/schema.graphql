@@ -22191,6 +22191,10 @@ enum PluginConfigFieldRoleValue {
 	Field contains a connection URL.
 	"""
 	CONNECTION_URL
+	"""
+	Field takes the answer to the sign-in challenge shown beside it.
+	"""
+	LOGIN_CHALLENGE_ANSWER
 }
 
 """
@@ -22233,6 +22237,10 @@ enum PluginConfigFieldTypeValue {
 	Tag value.
 	"""
 	TAG
+	"""
+	Read-only guidance shown as plain text; never an input, never saved.
+	"""
+	INFO
 }
 
 """
@@ -22261,6 +22269,12 @@ type PluginDynamicConfigFieldsPayload {
 	Static field keys to hide; hidden fields are never required.
 	"""
 	hiddenFieldKeys: [String!]!
+	"""
+	The image challenge the plugin's sign-in asks for under the submitted
+	draft, fetched only when selected; null when it asks for nothing.
+	Shown once and never stored.
+	"""
+	loginChallenge: PluginLoginChallengePayload
 }
 
 """
@@ -22465,6 +22479,24 @@ type PluginInstallationPayload {
 	UTC last-update time.
 	"""
 	updatedAt: DateTime!
+}
+
+"""
+An image challenge an indexer's sign-in asks the operator to solve.
+"""
+type PluginLoginChallengePayload {
+	"""
+	Key of the field that takes the answer.
+	"""
+	answerFieldKey: String!
+	"""
+	The image's media type: a raster image type.
+	"""
+	contentType: String!
+	"""
+	The image bytes, standard base64.
+	"""
+	imageData: String!
 }
 
 """
@@ -24966,7 +24998,9 @@ type QueryRoot {
 	Return the extra config fields an indexer plugin adds for the values
 	entered so far, and the static fields it hides; requires
 	system-settings permission. Only the provider's trigger-key values are
-	sent to the plugin. Empty when the provider adds no fields.
+	sent to the plugin for fields. Empty when the provider adds no fields.
+	Selecting `loginChallenge` also runs the whole draft, the way a
+	connection test does, to fetch the sign-in challenge it asks for.
 	"""
 	pluginConfigFields(
 		"""
@@ -24974,9 +25008,17 @@ type QueryRoot {
 		"""
 		providerType: String!,
 		"""
-		Current form values; only the provider's trigger keys are used.
+		Current form values. Fields use only the provider's trigger keys; a login challenge uses them all.
 		"""
-		values: [ProviderConfigValueInput!]!
+		values: [ProviderConfigValueInput!]!,
+		"""
+		Existing indexer whose stored secrets fill the draft's blank ones for a login challenge.
+		"""
+		indexerId: ID,
+		"""
+		Proxy for a login challenge: omission keeps the stored association, null clears it, and a value replaces it.
+		"""
+		proxyConfigId: ID
 	): PluginDynamicConfigFieldsPayload!
 	"""
 	Return available download-client provider types and their configuration fields; requires system-settings permission.

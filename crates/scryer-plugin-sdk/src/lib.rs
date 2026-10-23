@@ -44,7 +44,7 @@ pub use notification::{
     PluginNotificationTargetResult, coalesce_media_updates, rich_embed_from_request,
     to_script_environment, to_webhook_json,
 };
-pub const SDK_VERSION: &str = "3.18.0";
+pub const SDK_VERSION: &str = "3.19.0";
 
 pub fn current_sdk_constraint() -> String {
     legacy_sdk_constraint(SDK_VERSION)
@@ -1089,6 +1089,12 @@ pub enum ConfigFieldType {
     Number,
     Path,
     Tag,
+    /// Read-only guidance for the operator, not a setting: the form shows the
+    /// `label` and `help_text` as plain text, never an input, and no value is
+    /// ever saved under its key. It is never required and carries no default
+    /// or options. Added in SDK 3.19.0; a host on an older SDK cannot read it,
+    /// so declare it only from a plugin whose SDK constraint requires 3.19.
+    Info,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1103,6 +1109,13 @@ pub enum ConfigFieldValueSource {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigFieldRole {
     ConnectionUrl,
+    /// The field that takes the operator's answer to the image challenge the
+    /// plugin's sign-in asks for. While this field is shown, the host asks the
+    /// plugin for the challenge through the
+    /// [`LOGIN_CHALLENGE_ACTION`](crate::command::LOGIN_CHALLENGE_ACTION)
+    /// action and shows the image beside it. Declare it on at most one static
+    /// field. Added in SDK 3.19.0; a host on an older SDK cannot read it.
+    LoginChallengeAnswer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -3834,6 +3847,7 @@ struct PluginSdkSchemaDocument {
     resolve_network_endpoints_response: command::ResolveNetworkEndpointsResponse,
     config_fields_request: command::ConfigFieldsRequest,
     config_fields_response: command::ConfigFieldsResponse,
+    login_challenge_response: command::LoginChallengeResponse,
     indexer_search_plan_request: PluginSearchPlanRequest,
     indexer_search_strategy_event: PluginSearchStrategyEvent,
     indexer_search_plan_summary: PluginSearchPlanSummary,
@@ -5988,5 +6002,60 @@ mod tests {
             serde_json::from_str("\"filtered_select\"").expect("variant should decode");
         assert_eq!(decoded, ConfigFieldType::FilteredSelect);
         assert_ne!(ConfigFieldType::FilteredSelect, ConfigFieldType::Select);
+    }
+
+    /// Adding `info` leaves every existing field type's wire name unchanged.
+    #[test]
+    fn info_field_type_is_additive_on_the_wire() {
+        for (field_type, wire) in [
+            (ConfigFieldType::String, "string"),
+            (ConfigFieldType::Password, "password"),
+            (ConfigFieldType::Multiline, "multiline"),
+            (ConfigFieldType::Bool, "bool"),
+            (ConfigFieldType::Select, "select"),
+            (ConfigFieldType::FilteredSelect, "filtered_select"),
+            (ConfigFieldType::Number, "number"),
+            (ConfigFieldType::Path, "path"),
+            (ConfigFieldType::Tag, "tag"),
+            (ConfigFieldType::Info, "info"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&field_type).unwrap(),
+                format!("\"{wire}\"")
+            );
+            let decoded: ConfigFieldType = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(decoded, field_type);
+        }
+        let decoded: ConfigFieldType = serde_json::from_str("\"secret\"").unwrap();
+        assert_eq!(decoded, ConfigFieldType::Password);
+    }
+
+    #[test]
+    fn login_challenge_role_and_response_are_additive_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldRole::ConnectionUrl).unwrap(),
+            "\"connection_url\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldRole::LoginChallengeAnswer).unwrap(),
+            "\"login_challenge_answer\""
+        );
+        // The shape the Cardigann engine already answers `checkCaptcha` with.
+        let decoded: crate::command::LoginChallengeResponse =
+            serde_json::from_value(serde_json::json!({
+                "captchaRequest": {
+                    "type": "image",
+                    "contentType": "image/png",
+                    "imageData": "AQID"
+                }
+            }))
+            .unwrap();
+        let request = decoded.captcha_request.unwrap();
+        assert_eq!(request.challenge_type, "image");
+        assert_eq!(request.content_type, "image/png");
+        assert_eq!(request.image_data, "AQID");
+        let nothing: crate::command::LoginChallengeResponse =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(nothing.captcha_request, None);
     }
 }

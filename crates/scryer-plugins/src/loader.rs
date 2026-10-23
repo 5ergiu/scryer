@@ -2172,6 +2172,29 @@ fn validate_indexer_config_contract(descriptor: &PluginDescriptor) -> bool {
         return false;
     }
 
+    // The host shows one sign-in challenge beside one answer field.
+    let login_challenge_answers = descriptor
+        .config_fields()
+        .iter()
+        .filter(|field| field.role == Some(ConfigFieldRole::LoginChallengeAnswer))
+        .collect::<Vec<_>>();
+    if login_challenge_answers.len() > 1
+        || login_challenge_answers.iter().any(|field| {
+            !matches!(
+                field.field_type,
+                scryer_plugin_sdk::ConfigFieldType::String
+                    | scryer_plugin_sdk::ConfigFieldType::Password
+            )
+        })
+    {
+        warn!(
+            plugin = descriptor.id.as_str(),
+            provider_type = descriptor.provider_type(),
+            "indexer descriptor rejected: login_challenge_answer must be one string or password field"
+        );
+        return false;
+    }
+
     true
 }
 
@@ -5057,6 +5080,35 @@ mod tests {
             &descriptor,
             PluginLoadSource::External { first_party: false }
         ));
+    }
+
+    /// One answer field takes the sign-in challenge; two, or one that is not
+    /// a text field, leaves the host nowhere sensible to show it.
+    #[test]
+    fn indexer_login_challenge_answer_role_is_one_text_field() {
+        let with_fields = |fields: Vec<ConfigFieldDef>| {
+            let mut descriptor = descriptor("torrent_indexer");
+            let ProviderDescriptor::Indexer(indexer) = &mut descriptor.provider else {
+                panic!("expected indexer descriptor");
+            };
+            indexer.config_fields = fields;
+            validate_indexer_descriptor(
+                &descriptor,
+                PluginLoadSource::External { first_party: false },
+            )
+        };
+        assert!(with_fields(vec![
+            indexer_config_field("base_url", Some(ConfigFieldRole::ConnectionUrl)),
+            indexer_config_field("answer", Some(ConfigFieldRole::LoginChallengeAnswer)),
+        ]));
+        assert!(!with_fields(vec![
+            indexer_config_field("answer", Some(ConfigFieldRole::LoginChallengeAnswer)),
+            indexer_config_field("again", Some(ConfigFieldRole::LoginChallengeAnswer)),
+        ]));
+        assert!(!with_fields(vec![ConfigFieldDef {
+            field_type: ConfigFieldType::Bool,
+            ..indexer_config_field("answer", Some(ConfigFieldRole::LoginChallengeAnswer))
+        }]));
     }
 
     #[test]

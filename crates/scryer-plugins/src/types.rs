@@ -14,6 +14,7 @@ pub(crate) fn config_field_to_domain(field: &ConfigFieldDef) -> scryer_domain::C
             ConfigFieldType::Number => scryer_domain::ConfigFieldType::Number,
             ConfigFieldType::Path => scryer_domain::ConfigFieldType::Path,
             ConfigFieldType::Tag => scryer_domain::ConfigFieldType::Tag,
+            ConfigFieldType::Info => scryer_domain::ConfigFieldType::Info,
         },
         required: field.required,
         default_value: field.default_value.clone(),
@@ -25,6 +26,9 @@ pub(crate) fn config_field_to_domain(field: &ConfigFieldDef) -> scryer_domain::C
         },
         role: field.role.map(|role| match role {
             ConfigFieldRole::ConnectionUrl => scryer_domain::ConfigFieldRole::ConnectionUrl,
+            ConfigFieldRole::LoginChallengeAnswer => {
+                scryer_domain::ConfigFieldRole::LoginChallengeAnswer
+            }
         }),
         host_binding: field.host_binding.map(host_binding_to_domain),
         options: field

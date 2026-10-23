@@ -251,6 +251,21 @@ pub(crate) fn normalize_indexer_config_json(
     let mut object = parse_indexer_config_json(config_json)?;
     let persisted = parse_indexer_config_json(persisted_config_json)?;
 
+    // Guidance fields are read-only text: whatever a client sends under their
+    // keys is dropped, never saved, defaulted, or required.
+    let value_fields = fields
+        .iter()
+        .filter(|field| field.field_type != scryer_domain::ConfigFieldType::Info)
+        .cloned()
+        .collect::<Vec<_>>();
+    for field in fields
+        .iter()
+        .filter(|field| field.field_type == scryer_domain::ConfigFieldType::Info)
+    {
+        object.remove(&field.key);
+    }
+    let fields = value_fields.as_slice();
+
     for field in fields {
         if field.role == Some(scryer_domain::ConfigFieldRole::ConnectionUrl)
             && let Some(value) = object

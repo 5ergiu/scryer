@@ -2382,6 +2382,17 @@ export const pluginConfigFieldsQuery = `query PluginConfigFields($providerType: 
   }
 }`;
 
+/** The sign-in image for the draft settings; `values` is the whole draft. */
+export const pluginLoginChallengeQuery = `query PluginLoginChallenge($providerType: String!, $values: [ProviderConfigValueInput!]!, $indexerId: ID, $proxyConfigId: ID) {
+  pluginConfigFields(providerType: $providerType, values: $values, indexerId: $indexerId, proxyConfigId: $proxyConfigId) {
+    loginChallenge {
+      answerFieldKey
+      contentType
+      imageData
+    }
+  }
+}`;
+
 const proxyConfigFieldSelection = `
     id
     name

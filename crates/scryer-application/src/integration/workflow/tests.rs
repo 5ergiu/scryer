@@ -121,6 +121,42 @@ mod tests {
         assert!(error.to_string().contains("Base URL is required"));
     }
 
+    #[test]
+    fn info_fields_are_never_saved_defaulted_or_required() {
+        let fields = vec![
+            ConfigFieldDef {
+                key: "base_url".to_string(),
+                label: "Base URL".to_string(),
+                field_type: ConfigFieldType::String,
+                required: true,
+                role: Some(ConfigFieldRole::ConnectionUrl),
+                ..Default::default()
+            },
+            ConfigFieldDef {
+                key: "info_activity".to_string(),
+                label: "Account Inactivity".to_string(),
+                field_type: ConfigFieldType::Info,
+                // A malformed static declaration still cannot make guidance
+                // take a value.
+                required: true,
+                default_value: Some("guidance".to_string()),
+                help_text: Some("Accounts idle for a while are removed.".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let normalized = normalize_indexer_config_json(
+            &fields,
+            Some(r#"{"base_url":"https://tracker.example","info_activity":"typed"}"#),
+            Some(r#"{"info_activity":"stored"}"#),
+        )
+        .expect("guidance never blocks a save");
+        let config: serde_json::Value = serde_json::from_str(&normalized).expect("normalized JSON");
+
+        assert_eq!(config["base_url"], "https://tracker.example");
+        assert!(config.get("info_activity").is_none(), "{config}");
+    }
+
     fn item(id: &str, state: DownloadQueueState) -> DownloadQueueItem {
         DownloadQueueItem {
             id: id.to_string(),

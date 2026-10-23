@@ -33,6 +33,9 @@
     "config_fields_response": {
       "$ref": "#/$defs/ConfigFieldsResponse"
     },
+    "login_challenge_response": {
+      "$ref": "#/$defs/LoginChallengeResponse"
+    },
     "indexer_search_plan_request": {
       "$ref": "#/$defs/PluginSearchPlanRequest"
     },
@@ -159,6 +162,7 @@
     "resolve_network_endpoints_response",
     "config_fields_request",
     "config_fields_response",
+    "login_challenge_response",
     "indexer_search_plan_request",
     "indexer_search_strategy_event",
     "indexer_search_plan_summary",
@@ -394,6 +398,11 @@
           "description": "Enumerated selection rendered with a filter box. Same `options` payload\nas `Select`; declare it when the list is long enough that scanning it\nunaided is the wrong ask.",
           "type": "string",
           "const": "filtered_select"
+        },
+        {
+          "description": "Read-only guidance for the operator, not a setting: the form shows the\n`label` and `help_text` as plain text, never an input, and no value is\never saved under its key. It is never required and carries no default\nor options. Added in SDK 3.19.0; a host on an older SDK cannot read it,\nso declare it only from a plugin whose SDK constraint requires 3.19.",
+          "type": "string",
+          "const": "info"
         }
       ]
     },
@@ -405,9 +414,18 @@
       ]
     },
     "ConfigFieldRole": {
-      "type": "string",
-      "enum": [
-        "connection_url"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "connection_url"
+          ]
+        },
+        {
+          "description": "The field that takes the operator's answer to the image challenge the\nplugin's sign-in asks for. While this field is shown, the host asks the\nplugin for the challenge through the\n[`LOGIN_CHALLENGE_ACTION`](crate::command::LOGIN_CHALLENGE_ACTION)\naction and shows the image beside it. Declare it on at most one static\nfield. Added in SDK 3.19.0; a host on an older SDK cannot read it.",
+          "type": "string",
+          "const": "login_challenge_answer"
+        }
       ]
     },
     "PluginHostBindingId": {
@@ -10964,7 +10982,7 @@
       ]
     },
     "ResolveNetworkEndpointsResponse": {
-      "description": "Payload of the `resolve_network_endpoints` action. Origins must contain\nonly an HTTP(S) scheme, hostname, and optional port.\nThe host validates these origins, then grants instance-scoped hostname\npermissions using the descriptor network policy. Scheme and port are not\npermission boundaries: other HTTP(S) ports on a declared host are allowed.",
+      "description": "Payload of the `resolve_network_endpoints` action. Origins must contain\nonly an HTTP(S) scheme, hostname, and optional port.\nThe host validates these origins, then grants instance-scoped hostname\npermissions using the descriptor network policy. Scheme and port are not\npermission boundaries: other HTTP(S) ports on a declared host are allowed.\nA declared domain name with at least two labels also covers its subdomains\n(`dl.tracker.example` for `tracker.example`), never a different domain; an\nIP literal or single-label name covers only itself.",
       "type": "object",
       "properties": {
         "origins": {
@@ -11012,6 +11030,45 @@
           }
         }
       }
+    },
+    "LoginChallengeResponse": {
+      "description": "Response payload of the [`LOGIN_CHALLENGE_ACTION`] action. No\n`captchaRequest` means the sign-in asks for nothing right now.",
+      "type": "object",
+      "properties": {
+        "captchaRequest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoginCaptchaRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "LoginCaptchaRequest": {
+      "description": "One challenge for the operator to solve. The host shows only raster images\n(`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/bmp`) of at\nmost 1 MiB and never stores them.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "The challenge kind. The host understands `image`.",
+          "type": "string"
+        },
+        "contentType": {
+          "description": "The image's media type, as the tracker sent it.",
+          "type": "string"
+        },
+        "imageData": {
+          "description": "The image bytes, standard base64.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "contentType",
+        "imageData"
+      ]
     },
     "PluginSearchPlanRequest": {
       "type": "object",

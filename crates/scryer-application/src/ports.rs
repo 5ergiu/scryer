@@ -9553,6 +9553,14 @@ pub trait IndexerClient: Send + Sync {
         Ok(None)
     }
 
+    /// Fetch the challenge the indexer's sign-in asks the operator to solve,
+    /// using this client's settings. `None` means it asks for nothing: the
+    /// provider has no sign-in challenge, or none right now. The image is
+    /// shown once and never stored.
+    async fn login_challenge(&self) -> AppResult<Option<IndexerLoginChallenge>> {
+        Ok(None)
+    }
+
     async fn finalize_search_session(
         &self,
         _search_session_id: &str,
@@ -9933,6 +9941,18 @@ impl IndexerAccountingContext {
 pub struct PluginDynamicConfigFields {
     pub fields: Vec<scryer_domain::ConfigFieldDef>,
     pub hidden_field_keys: Vec<String>,
+}
+
+/// An image challenge an indexer's sign-in asks the operator to solve. The
+/// answer goes in `answer_field_key`. Transient: never persisted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexerLoginChallenge {
+    pub answer_field_key: String,
+    /// One of [`crate::login_challenge_refusal::IMAGE_CONTENT_TYPES`].
+    pub content_type: String,
+    /// The image, standard base64, at most
+    /// [`crate::login_challenge_refusal::MAX_IMAGE_BYTES`] decoded.
+    pub image_base64: String,
 }
 
 pub trait IndexerPluginProvider: Send + Sync {

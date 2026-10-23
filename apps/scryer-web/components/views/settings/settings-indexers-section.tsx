@@ -57,6 +57,7 @@ import type {
   ProxyRecord,
   ProviderTypeInfo,
   ConfigFieldDef,
+  LoginChallengeStatus,
   IndexerDownloadClientMappingCatalog,
   IndexerDownloadClientMappingCatalogResource,
   IndexerCategoryRoutingSettings,
@@ -89,6 +90,7 @@ import {
   supportsSeedingProfileAssignment,
 } from "@/lib/utils/seeding-profiles";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { LoginChallengeImage } from "@/components/common/login-challenge-image";
 import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 import {
   indexerQueryBudgetDraftValue,
@@ -158,6 +160,9 @@ type SettingsIndexersSectionProps = {
   /// Where the request for the selected plugin's value-dependent fields
   /// stands. Their fields are already merged into `providerTypes`.
   dynamicConfigFieldsStatus?: DynamicConfigFieldsStatus;
+  /// The sign-in image for the draft, when the provider's login asks for one.
+  loginChallenge?: LoginChallengeStatus;
+  refreshLoginChallenge?: () => void;
   testIndexerConnection: () => Promise<void> | void;
   isTestingConnection: boolean;
   isEditorOpen: boolean;
@@ -495,15 +500,20 @@ function DynamicConfigField(props: {
 
 /// One provider's fields: everything that is not a checkbox in a grid, then the
 /// checkboxes in a row under it. Used once for the standard fields and once
-/// inside the advanced disclosure so the two groups lay out identically.
-function ProviderConfigFieldGroup({
+/// inside the advanced disclosure so the two groups lay out identically. The
+/// field that takes a sign-in image's answer shows that image under it.
+export function ProviderConfigFieldGroup({
   fields,
   draft,
   onChange,
+  loginChallenge,
+  onRefreshLoginChallenge,
 }: {
   fields: ConfigFieldDef[];
   draft: IndexerDraft;
   onChange: (key: string, value: string) => void;
+  loginChallenge?: LoginChallengeStatus;
+  onRefreshLoginChallenge?: () => void;
 }) {
   if (fields.length === 0) {
     return null;
@@ -517,15 +527,32 @@ function ProviderConfigFieldGroup({
       <div className="grid gap-3 md:grid-cols-3">
         {fields
           .filter((field) => field.fieldType !== "BOOL")
-          .map((field) => (
-            <DynamicConfigField
-              key={field.key}
-              field={field}
-              value={valueFor(field, "")}
-              hasStoredSecretValue={draft.storedSecretKeys.includes(field.key)}
-              onChange={onChange}
-            />
-          ))}
+          .map((field) => {
+            const input = (
+              <DynamicConfigField
+                key={field.key}
+                field={field}
+                value={valueFor(field, "")}
+                hasStoredSecretValue={draft.storedSecretKeys.includes(
+                  field.key,
+                )}
+                onChange={onChange}
+              />
+            );
+            if (field.role !== "LOGIN_CHALLENGE_ANSWER" || !loginChallenge) {
+              return input;
+            }
+            return (
+              <div key={field.key} className="space-y-2">
+                {input}
+                <LoginChallengeImage
+                  idPrefix="settings-indexer-login-challenge"
+                  status={loginChallenge}
+                  onRefresh={onRefreshLoginChallenge}
+                />
+              </div>
+            );
+          })}
       </div>
       {boolFields.length > 0 ? (
         <div className="flex items-center gap-6">
@@ -1143,6 +1170,8 @@ export function SettingsIndexersSection({
   syncIndexer,
   providerTypes,
   dynamicConfigFieldsStatus = { state: "idle" },
+  loginChallenge,
+  refreshLoginChallenge,
   testIndexerConnection,
   isTestingConnection,
   isEditorOpen,
@@ -1329,7 +1358,10 @@ export function SettingsIndexersSection({
       setIndexerDraft((prev: IndexerDraft) => {
         const nextConfigValues: Record<string, string> = {};
         for (const field of nextProvider?.configFields ?? []) {
-          if (field.valueSource === "HOST_BINDING") {
+          if (
+            field.valueSource === "HOST_BINDING" ||
+            field.fieldType === "INFO"
+          ) {
             continue;
           }
           nextConfigValues[field.key] =
@@ -2086,6 +2118,8 @@ export function SettingsIndexersSection({
                             fields={standardProviderFields}
                             draft={indexerDraft}
                             onChange={handleConfigValueChange}
+                            loginChallenge={loginChallenge}
+                            onRefreshLoginChallenge={refreshLoginChallenge}
                           />
                           {dynamicConfigFieldsStatus.state === "loading" ? (
                             <p
@@ -2135,6 +2169,8 @@ export function SettingsIndexersSection({
                                   fields={advancedProviderFields}
                                   draft={indexerDraft}
                                   onChange={handleConfigValueChange}
+                                  loginChallenge={loginChallenge}
+                                  onRefreshLoginChallenge={refreshLoginChallenge}
                                 />
                               </CollapsibleContent>
                             </Collapsible>

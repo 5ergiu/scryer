@@ -7603,6 +7603,8 @@ pub enum ConfigFieldType {
     Number,
     Path,
     Tag,
+    /// Read-only guidance: shown as plain text, never an input, never saved.
+    Info,
 }
 
 impl ConfigFieldType {
@@ -7617,6 +7619,7 @@ impl ConfigFieldType {
             Self::Number => "number",
             Self::Path => "path",
             Self::Tag => "tag",
+            Self::Info => "info",
         }
     }
 
@@ -7631,6 +7634,7 @@ impl ConfigFieldType {
             "number" => Some(Self::Number),
             "path" => Some(Self::Path),
             "tag" => Some(Self::Tag),
+            "info" => Some(Self::Info),
             _ => None,
         }
     }
@@ -7648,18 +7652,22 @@ pub enum ConfigFieldValueSource {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigFieldRole {
     ConnectionUrl,
+    /// Takes the operator's answer to the plugin's sign-in challenge.
+    LoginChallengeAnswer,
 }
 
 impl ConfigFieldRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ConnectionUrl => "connection_url",
+            Self::LoginChallengeAnswer => "login_challenge_answer",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "connection_url" => Some(Self::ConnectionUrl),
+            "login_challenge_answer" => Some(Self::LoginChallengeAnswer),
             _ => None,
         }
     }

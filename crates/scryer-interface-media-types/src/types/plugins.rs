@@ -385,6 +385,8 @@ pub enum PluginConfigFieldTypeValue {
     Path,
     /// Tag value.
     Tag,
+    /// Read-only guidance shown as plain text; never an input, never saved.
+    Info,
 }
 
 impl PluginConfigFieldTypeValue {
@@ -399,6 +401,7 @@ impl PluginConfigFieldTypeValue {
             ConfigFieldType::Number => Self::Number,
             ConfigFieldType::Path => Self::Path,
             ConfigFieldType::Tag => Self::Tag,
+            ConfigFieldType::Info => Self::Info,
         }
     }
 }
@@ -428,12 +431,15 @@ impl PluginConfigValueSourceValue {
 pub enum PluginConfigFieldRoleValue {
     /// Field contains a connection URL.
     ConnectionUrl,
+    /// Field takes the answer to the sign-in challenge shown beside it.
+    LoginChallengeAnswer,
 }
 
 impl PluginConfigFieldRoleValue {
     pub fn from_domain(value: ConfigFieldRole) -> Self {
         match value {
             ConfigFieldRole::ConnectionUrl => Self::ConnectionUrl,
+            ConfigFieldRole::LoginChallengeAnswer => Self::LoginChallengeAnswer,
         }
     }
 }
@@ -551,6 +557,21 @@ pub struct PluginDynamicConfigFieldsPayload {
     pub fields: Vec<PluginConfigFieldPayload>,
     /// Static field keys to hide; hidden fields are never required.
     pub hidden_field_keys: Vec<String>,
+    /// The image challenge the plugin's sign-in asks for under the submitted
+    /// draft, fetched only when selected; null when it asks for nothing.
+    /// Shown once and never stored.
+    pub login_challenge: Option<PluginLoginChallengePayload>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// An image challenge an indexer's sign-in asks the operator to solve.
+pub struct PluginLoginChallengePayload {
+    /// Key of the field that takes the answer.
+    pub answer_field_key: String,
+    /// The image's media type: a raster image type.
+    pub content_type: String,
+    /// The image bytes, standard base64.
+    pub image_data: String,
 }
 
 #[derive(SimpleObject, Clone)]

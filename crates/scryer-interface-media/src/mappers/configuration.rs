@@ -933,6 +933,17 @@ pub fn from_plugin_dynamic_config_fields(
             .map(plugin_config_field_payload)
             .collect(),
         hidden_field_keys: dynamic.hidden_field_keys,
+        login_challenge: None,
+    }
+}
+
+pub fn from_indexer_login_challenge(
+    challenge: scryer_application::IndexerLoginChallenge,
+) -> PluginLoginChallengePayload {
+    PluginLoginChallengePayload {
+        answer_field_key: challenge.answer_field_key,
+        content_type: challenge.content_type,
+        image_data: challenge.image_base64,
     }
 }
 

@@ -143,3 +143,22 @@ test("only the newest request epoch is current", () => {
   assert.equal(epoch.isCurrent(first), false);
   assert.equal(epoch.isCurrent(second), true);
 });
+
+test("reconcile never gives an informational field a value", () => {
+  const withNote: DynamicConfigFields = {
+    fields: [
+      field({
+        key: "info_cookie",
+        fieldType: "INFO",
+        defaultValue: "Sign in with a browser first.",
+      }),
+      field({ key: "cookie", defaultValue: "" }),
+    ],
+    hiddenFieldKeys: [],
+  };
+
+  const values = reconcileDynamicConfigValues({}, null, withNote);
+
+  assert.equal("info_cookie" in values, false);
+  assert.equal(values.cookie, "");
+});

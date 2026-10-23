@@ -107,6 +107,9 @@ pub struct PluginActionResponse {
 /// The host validates these origins, then grants instance-scoped hostname
 /// permissions using the descriptor network policy. Scheme and port are not
 /// permission boundaries: other HTTP(S) ports on a declared host are allowed.
+/// A declared domain name with at least two labels also covers its subdomains
+/// (`dl.tracker.example` for `tracker.example`), never a different domain; an
+/// IP literal or single-label name covers only itself.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveNetworkEndpointsResponse {
@@ -151,6 +154,43 @@ pub struct ConfigFieldsResponse {
     /// hidden.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_field_keys: Vec<String>,
+}
+
+/// Reserved action that fetches the challenge an indexer's sign-in asks the
+/// operator to solve. The host calls it with the operator's draft settings as
+/// host config, before they are saved, whenever the static field with the
+/// [`LoginChallengeAnswer`](crate::ConfigFieldRole::LoginChallengeAnswer)
+/// role is shown. The payload carries nothing the plugin needs; the response
+/// payload is a [`LoginChallengeResponse`]. The answer comes back to the
+/// plugin as that field's value. A plugin without the action returns the
+/// usual `unsupported` error, which the host treats as "no challenge".
+///
+/// The name matches the Cardigann `checkCaptcha` action so definitions ported
+/// from Prowlarr keep their wording.
+pub const LOGIN_CHALLENGE_ACTION: &str = "checkCaptcha";
+
+/// Response payload of the [`LOGIN_CHALLENGE_ACTION`] action. No
+/// `captchaRequest` means the sign-in asks for nothing right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginChallengeResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captcha_request: Option<LoginCaptchaRequest>,
+}
+
+/// One challenge for the operator to solve. The host shows only raster images
+/// (`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/bmp`) of at
+/// most 1 MiB and never stores them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginCaptchaRequest {
+    /// The challenge kind. The host understands `image`.
+    #[serde(rename = "type")]
+    pub challenge_type: String,
+    /// The image's media type, as the tracker sent it.
+    pub content_type: String,
+    /// The image bytes, standard base64.
+    pub image_data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
