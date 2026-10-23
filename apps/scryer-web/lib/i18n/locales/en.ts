@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const en: LocaleDictionary = {
   "titleDelete.refusal.selection": "Select titles without duplicates.",
   "titleDelete.refusal.busy": "A deletion is already running.",
-  "titleDelete.refusal.downloadRetry": "A download password retry is awaiting reconciliation. Let it settle, or remove the download from Scryer's Activity > Import view, then retry title deletion.",
   "titleDelete.refusal.preview": "Refresh the deletion preview and confirm it.",
   "titleDelete.refusal.confirmation": "Type DELETE to confirm deletion.",
   "titleDelete.refusal.boundary": "The title folder must be inside a library root, not the root itself.",

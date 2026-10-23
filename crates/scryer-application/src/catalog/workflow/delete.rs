@@ -592,8 +592,6 @@ impl AppUseCase {
         )
         .await?;
 
-        self.preflight_title_download_retirement(&item.title_id)
-            .await?;
         delete_guard.activate();
         let mut deleted_paths = Vec::new();
         if delete_files_on_disk {

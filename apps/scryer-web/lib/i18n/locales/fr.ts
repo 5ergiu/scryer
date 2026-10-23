@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const fr: LocaleDictionary = {
   "titleDelete.refusal.selection": "Sélectionnez des titres sans doublons.",
   "titleDelete.refusal.busy": "Une suppression est déjà en cours.",
-  "titleDelete.refusal.downloadRetry": "Une nouvelle tentative de téléchargement avec mot de passe attend une synchronisation. Attendez sa fin ou retirez le téléchargement de la vue des importations sous Activité dans Scryer, puis réessayez de supprimer le titre.",
   "titleDelete.refusal.preview": "Actualisez et confirmez l’aperçu de suppression.",
   "titleDelete.refusal.confirmation": "Saisissez DELETE pour confirmer la suppression.",
   "titleDelete.refusal.boundary": "Le dossier du titre doit être dans une racine de bibliothèque, sans être la racine elle-même.",

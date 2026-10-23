@@ -5552,7 +5552,7 @@ pub trait DownloadRegistryRepository: Send + Sync {
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
 
-    /// Check durable retry fences before title deletion performs filesystem work.
+    /// Whether any of these active bindings holds a durable password retry fence.
     /// Implementations without password retry support have no such fences.
     async fn bindings_have_password_retry(&self, _ids: &[DownloadId]) -> AppResult<bool> {
         Ok(false)
@@ -5564,6 +5564,14 @@ pub trait DownloadRegistryRepository: Send + Sync {
             self.end_binding(id).await?;
         }
         Ok(())
+    }
+
+    /// End the bindings of a deleted title's downloads. Unlike
+    /// [`Self::end_bindings`], a pending password retry does not preserve the
+    /// binding: its fence and stored retry state are removed with it, because
+    /// the title the retry would import into no longer exists.
+    async fn end_bindings_for_deleted_title(&self, ids: &[DownloadId]) -> AppResult<()> {
+        self.end_bindings(ids).await
     }
 
     /// Active bindings Scryer created by submitting a grab, created before
@@ -7150,6 +7158,19 @@ pub trait ImportRepository: Send + Sync {
         _source_identity: &ClientJobLocator,
     ) -> AppResult<()> {
         Ok(())
+    }
+
+    /// Delete the manual-import selections made for a deleted title, with
+    /// their candidates. Only rows change; no file is touched.
+    async fn delete_manual_import_selections_for_title(&self, _title_id: &str) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// Delete those of `import_ids` that are still unfinished (`queued`,
+    /// `pending`, `running` or `processing`), for a deleted title. A row that
+    /// finished meanwhile is history and is kept. Returns the rows deleted.
+    async fn delete_unfinished_imports(&self, _import_ids: &[String]) -> AppResult<u64> {
+        Ok(0)
     }
 
     async fn list_imports(&self, limit: usize) -> AppResult<Vec<ImportRecord>>;

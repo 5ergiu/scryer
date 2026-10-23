@@ -266,9 +266,8 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         id: &scryer_domain::download_identity::DownloadId,
     ) -> AppResult<()> {
         if self.password_retry_ids.lock().await.contains(id) {
-            return Err(AppError::validation_refused(
-                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
-                "Synthetic password retry fence preserves the binding.",
+            return Err(AppError::Validation(
+                "synthetic password retry fence preserves the binding".into(),
             ));
         }
         if self.failing_ends.lock().await.contains(id) {
@@ -277,6 +276,27 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
             ));
         }
         self.ended.lock().await.insert(*id);
+        Ok(())
+    }
+
+    async fn end_bindings_for_deleted_title(
+        &self,
+        ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<()> {
+        {
+            let failing = self.failing_ends.lock().await;
+            if let Some(id) = ids.iter().find(|id| failing.contains(id)) {
+                return Err(AppError::Repository(format!(
+                    "injected binding end failure for {id}"
+                )));
+            }
+        }
+        let mut retries = self.password_retry_ids.lock().await;
+        let mut ended = self.ended.lock().await;
+        for id in ids {
+            retries.remove(id);
+            ended.insert(*id);
+        }
         Ok(())
     }
 

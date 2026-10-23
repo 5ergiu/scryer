@@ -3,7 +3,6 @@ import type { LocaleDictionary } from "../types";
 const it: LocaleDictionary = {
   "titleDelete.refusal.selection": "Seleziona titoli senza duplicati.",
   "titleDelete.refusal.busy": "È già in corso un’eliminazione.",
-  "titleDelete.refusal.downloadRetry": "Un nuovo tentativo di download con password è in attesa di riconciliazione. Attendi il completamento oppure rimuovi il download dalla vista delle importazioni in Attività di Scryer, quindi riprova a eliminare il titolo.",
   "titleDelete.refusal.preview": "Aggiorna e conferma l’anteprima di eliminazione.",
   "titleDelete.refusal.confirmation": "Digita DELETE per confermare l’eliminazione.",
   "titleDelete.refusal.boundary": "La cartella del titolo deve trovarsi all’interno di una radice della libreria, non essere la radice stessa.",
