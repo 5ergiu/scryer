@@ -645,7 +645,7 @@ async fn delete_episode_files_rejects_a_stale_aggregate_fingerprint() {
         .expect_err("stale fingerprint must be rejected");
 
     assert!(
-        matches!(&error, AppError::Validation(message) if message.contains("stale")),
+        error.validation_reason() == Some(crate::title_delete::PREVIEW_STALE),
         "expected a stale-preview validation error, got {error:?}"
     );
     assert_eq!(fixture.remaining_file_ids().await, vec![file_id]);

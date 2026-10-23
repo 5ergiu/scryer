@@ -11,6 +11,7 @@ mod download_client_path_mappings;
 mod download_identity;
 pub mod public_url;
 pub mod rate_limit_proxy_policy;
+pub mod title_delete;
 
 /// Completed-history rows the poller considers each cycle.
 ///

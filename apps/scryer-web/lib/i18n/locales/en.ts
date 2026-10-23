@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Select titles without duplicates.",
+  "titleDelete.refusal.busy": "A deletion is already running.",
+  "titleDelete.refusal.preview": "Refresh the deletion preview and confirm it.",
+  "titleDelete.refusal.confirmation": "Type DELETE to confirm deletion.",
+  "titleDelete.refusal.boundary": "The title folder must be inside a library root, not the root itself.",
+  "titleDelete.refusal.ownership": "Folder ownership could not be verified. Files were preserved.",
+  "titleDelete.refusal.layout": "The folder or its contents are not safe to delete as one title.",
+  "titleDelete.refusal.unavailable": "A library root is unavailable. Restore access and preview again.",
+  "titleDelete.refusal.recycle": "The title was deleted, but some recycle entries could not be purged.",
+  "titleDelete.refusal.retry": "Catalog cleanup failed. Get a fresh preview before retrying.",
   "settings.downloadClientHttpDownloadDir": "Download folder",
   "settings.downloadClientHttpDownloadDirHelp": "Where finished files and their partials are written, as seen by Scryer. Scryer keeps this downloader's queue in a .scryer-http folder inside it.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Concurrent downloads",

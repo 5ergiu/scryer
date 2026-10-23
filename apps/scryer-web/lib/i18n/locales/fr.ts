@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const fr: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Sélectionnez des titres sans doublons.",
+  "titleDelete.refusal.busy": "Une suppression est déjà en cours.",
+  "titleDelete.refusal.preview": "Actualisez et confirmez l’aperçu de suppression.",
+  "titleDelete.refusal.confirmation": "Saisissez DELETE pour confirmer la suppression.",
+  "titleDelete.refusal.boundary": "Le dossier du titre doit être dans une racine de bibliothèque, sans être la racine elle-même.",
+  "titleDelete.refusal.ownership": "L’appartenance du dossier n’a pas pu être vérifiée. Les fichiers ont été conservés.",
+  "titleDelete.refusal.layout": "Le dossier ou son contenu ne peut pas être supprimé sans risque comme un seul titre.",
+  "titleDelete.refusal.unavailable": "Une racine de bibliothèque est indisponible. Rétablissez l’accès et actualisez l’aperçu.",
+  "titleDelete.refusal.recycle": "Le titre a été supprimé, mais certaines entrées de la corbeille n’ont pas pu être purgées.",
+  "titleDelete.refusal.retry": "Le nettoyage du catalogue a échoué. Obtenez un nouvel aperçu avant de réessayer.",
   "settings.downloadClientHttpDownloadDir": "Dossier de téléchargement",
   "settings.downloadClientHttpDownloadDirHelp": "Emplacement des fichiers terminés et de leurs parties, tel que Scryer le voit. Scryer y conserve la file de ce téléchargeur dans un dossier .scryer-http.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Téléchargements simultanés",

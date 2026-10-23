@@ -225,6 +225,12 @@ async fn delete_title_removes_title_from_catalog() {
         .await
         .expect("create title");
 
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &created.id, false, None)
         .await
         .expect("delete title");
@@ -1006,6 +1012,12 @@ async fn delete_title_queues_targeted_cancel_for_active_submission_only() {
         },
     ];
 
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &created.id, false, None)
         .await
         .expect("delete title");
@@ -1144,18 +1156,20 @@ async fn delete_title_ends_bindings_and_forgets_tracked_state_of_its_downloads()
 
     let tracked_responder = tokio::spawn(async move {
         match tracked_rx.recv().await.expect("forget-for-title command") {
-            crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
-                title_id,
+            crate::tracked_downloads::TrackedDownloadCommand::ForgetMany {
+                mut title_ids,
                 download_ids,
-                reply,
-            } => {
-                let _ = reply.send(Ok(download_ids.clone()));
-                (title_id, download_ids)
-            }
+            } => (title_ids.pop().expect("title id"), download_ids),
             _ => panic!("unexpected tracked-download command"),
         }
     });
 
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &created.id, false, None)
         .await
         .expect("delete title");
@@ -1212,19 +1226,21 @@ async fn delete_title_then_regrab_of_the_same_torrent_tracks_a_fresh_downloading
     ));
     let (tracked_tx, mut tracked_rx) = tokio::sync::mpsc::channel(4);
     let responder_tracker = tracker.clone();
+    let (forgotten_tx, mut forgotten_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         while let Some(command) = tracked_rx.recv().await {
             match command {
-                crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
-                    title_id,
+                crate::tracked_downloads::TrackedDownloadCommand::ForgetMany {
+                    title_ids,
                     download_ids,
-                    reply,
                 } => {
-                    let removed = responder_tracker
-                        .lock()
-                        .await
-                        .forget_for_title(&title_id, &download_ids);
-                    let _ = reply.send(Ok(removed));
+                    for title_id in title_ids {
+                        responder_tracker
+                            .lock()
+                            .await
+                            .forget_for_title(&title_id, &download_ids);
+                    }
+                    forgotten_tx.send(()).await.unwrap();
                 }
                 _ => panic!("unexpected tracked-download command"),
             }
@@ -1300,10 +1316,19 @@ async fn delete_title_then_regrab_of_the_same_torrent_tracks_a_fresh_downloading
         "the terminal marker is what revives the dead download's outcome"
     );
 
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &deleted.id, false, None)
         .await
         .expect("delete title");
 
+    within_deadline("tracker forget applied", forgotten_rx.recv())
+        .await
+        .expect("notification");
     assert!(tracker.lock().await.get_by_download_id(dead_id).is_none());
     assert!(registry.is_ended(&dead_id).await);
     assert_eq!(
@@ -1401,18 +1426,19 @@ async fn delete_title_ends_the_binding_of_a_grab_the_client_has_not_reported_yet
 
     let tracked_responder = tokio::spawn(async move {
         match tracked_rx.recv().await.expect("forget-for-title command") {
-            crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
-                download_ids,
-                reply,
-                ..
-            } => {
-                let _ = reply.send(Ok(download_ids.clone()));
-                download_ids
-            }
+            crate::tracked_downloads::TrackedDownloadCommand::ForgetMany {
+                download_ids, ..
+            } => download_ids,
             _ => panic!("unexpected tracked-download command"),
         }
     });
 
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &created.id, false, None)
         .await
         .expect("delete title");

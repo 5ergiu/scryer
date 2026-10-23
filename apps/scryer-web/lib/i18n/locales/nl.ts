@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const nl: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Selecteer titels zonder duplicaten.",
+  "titleDelete.refusal.busy": "Er wordt al een verwijdering uitgevoerd.",
+  "titleDelete.refusal.preview": "Vernieuw het verwijdervoorbeeld en bevestig het.",
+  "titleDelete.refusal.confirmation": "Typ DELETE om de verwijdering te bevestigen.",
+  "titleDelete.refusal.boundary": "De titelmap moet binnen een bibliotheekhoofdmap liggen, niet de hoofdmap zelf zijn.",
+  "titleDelete.refusal.ownership": "Het eigendom van de map kon niet worden vastgesteld. Bestanden zijn behouden.",
+  "titleDelete.refusal.layout": "De map of inhoud kan niet veilig als één titel worden verwijderd.",
+  "titleDelete.refusal.unavailable": "Een bibliotheekhoofdmap is niet beschikbaar. Herstel de toegang en bekijk een nieuw voorbeeld.",
+  "titleDelete.refusal.recycle": "De titel is verwijderd, maar sommige prullenbakitems konden niet worden gewist.",
+  "titleDelete.refusal.retry": "Het opschonen van de catalogus is mislukt. Bekijk een nieuw voorbeeld voordat je opnieuw probeert.",
   "settings.downloadClientHttpDownloadDir": "Downloadmap",
   "settings.downloadClientHttpDownloadDirHelp": "Waar voltooide bestanden en hun deelbestanden worden geschreven, zoals Scryer het pad ziet. Scryer bewaart de wachtrij van deze downloader in een map .scryer-http daarbinnen.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Gelijktijdige downloads",

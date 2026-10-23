@@ -5550,16 +5550,16 @@ async fn delete_title_settles_the_pending_cleanup_of_its_seeding_download() {
 
     let tracked_responder = tokio::spawn(async move {
         match tracked_rx.recv().await.expect("forget-for-title command") {
-            crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
-                download_ids,
-                reply,
-                ..
-            } => {
-                let _ = reply.send(Ok(download_ids));
-            }
+            crate::tracked_downloads::TrackedDownloadCommand::ForgetMany { .. } => {}
             _ => panic!("unexpected tracked-download command"),
         }
     });
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &title.id, false, None)
         .await
         .expect("delete title");

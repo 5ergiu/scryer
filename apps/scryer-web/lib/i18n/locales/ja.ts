@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const ja: LocaleDictionary = {
+  "titleDelete.refusal.selection": "重複しないタイトルを選択してください。",
+  "titleDelete.refusal.busy": "削除はすでに実行中です。",
+  "titleDelete.refusal.preview": "削除プレビューを更新して確認してください。",
+  "titleDelete.refusal.confirmation": "削除を確認するには DELETE と入力してください。",
+  "titleDelete.refusal.boundary": "タイトルフォルダーはライブラリのルート内にある必要があり、ルート自体は指定できません。",
+  "titleDelete.refusal.ownership": "フォルダーの所有関係を確認できませんでした。ファイルは保持されました。",
+  "titleDelete.refusal.layout": "このフォルダーまたは内容を単一のタイトルとして安全に削除できません。",
+  "titleDelete.refusal.unavailable": "ライブラリのルートにアクセスできません。アクセスを復旧して再度プレビューしてください。",
+  "titleDelete.refusal.recycle": "タイトルは削除されましたが、一部のごみ箱項目を完全に削除できませんでした。",
+  "titleDelete.refusal.retry": "カタログのクリーンアップに失敗しました。新しいプレビューを取得してから再試行してください。",
   "settings.downloadClientHttpDownloadDir": "ダウンロードフォルダー",
   "settings.downloadClientHttpDownloadDirHelp": "完了したファイルと途中のファイルを書き込む場所（Scryer から見たパス）。このダウンローダーのキューは中の .scryer-http フォルダーに保存されます。",
   "settings.downloadClientHttpMaxConcurrentDownloads": "同時ダウンロード数",

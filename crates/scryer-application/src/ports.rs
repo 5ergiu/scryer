@@ -2186,6 +2186,12 @@ pub trait TitleRepository: Send + Sync {
     ) -> AppResult<Title>;
     async fn delete(&self, id: &str) -> AppResult<()>;
     async fn set_folder_path(&self, id: &str, folder_path: &str) -> AppResult<()>;
+    /// Atomically claim a missing folder without overwriting another writer.
+    async fn claim_missing_folder_path(&self, _id: &str, _folder_path: &str) -> AppResult<bool> {
+        Err(AppError::Repository(
+            "atomic folder claims are unsupported by this repository".into(),
+        ))
+    }
     /// Move a title into another library and onto a root in that library, in one
     /// transaction, carrying its library projections with it (FR-056).
     ///
@@ -5519,6 +5525,21 @@ pub trait DownloadRegistryRepository: Send + Sync {
     async fn load_binding(&self, id: &DownloadId)
     -> AppResult<Option<DownloadClientBindingRecord>>;
 
+    /// Reconcile the in-memory tracker against durable retirements.
+    async fn ended_bindings(&self, ids: &[DownloadId]) -> AppResult<Vec<DownloadId>> {
+        let mut ended = Vec::new();
+        for id in ids {
+            if self
+                .load_binding(id)
+                .await?
+                .is_some_and(|binding| binding.ended_at.is_some())
+            {
+                ended.push(*id);
+            }
+        }
+        Ok(ended)
+    }
+
     /// Find a non-ended binding with an exact configured-client/type/native-item locator.
     ///
     /// Resolve the active binding for an exact locator (client id, client type
@@ -5530,6 +5551,14 @@ pub trait DownloadRegistryRepository: Send + Sync {
 
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
+
+    /// Retire one title's bindings together in stores supporting transactions.
+    async fn end_bindings(&self, ids: &[DownloadId]) -> AppResult<()> {
+        for id in ids {
+            self.end_binding(id).await?;
+        }
+        Ok(())
+    }
 
     /// Active bindings Scryer created by submitting a grab, created before
     /// `created_before`, whose download no client listing has ever carried.
@@ -5728,6 +5757,24 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         _history_offset: usize,
         _error: Option<&str>,
     ) -> AppResult<()> {
+        Ok(())
+    }
+
+    /// Settle cleanup locally when its title is explicitly deleted.
+    async fn abandon_title_download_cleanup(&self, ids: &[DownloadId]) -> AppResult<()> {
+        for id in ids {
+            if self.has_pending_download_cleanup(id).await? {
+                self.finish_download_cleanup(
+                    id,
+                    "cleanup_abandoned",
+                    true,
+                    0,
+                    0,
+                    Some("title deleted; the client entry is left for the operator"),
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 

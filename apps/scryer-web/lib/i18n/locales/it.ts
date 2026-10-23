@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const it: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Seleziona titoli senza duplicati.",
+  "titleDelete.refusal.busy": "È già in corso un’eliminazione.",
+  "titleDelete.refusal.preview": "Aggiorna e conferma l’anteprima di eliminazione.",
+  "titleDelete.refusal.confirmation": "Digita DELETE per confermare l’eliminazione.",
+  "titleDelete.refusal.boundary": "La cartella del titolo deve trovarsi all’interno di una radice della libreria, non essere la radice stessa.",
+  "titleDelete.refusal.ownership": "Impossibile verificare a quale titolo appartiene la cartella. I file sono stati conservati.",
+  "titleDelete.refusal.layout": "La cartella o il suo contenuto non possono essere eliminati in sicurezza come un solo titolo.",
+  "titleDelete.refusal.unavailable": "Una radice della libreria non è disponibile. Ripristina l’accesso e aggiorna l’anteprima.",
+  "titleDelete.refusal.recycle": "Il titolo è stato eliminato, ma alcune voci del cestino non sono state rimosse.",
+  "titleDelete.refusal.retry": "Pulizia del catalogo non riuscita. Ottieni una nuova anteprima prima di riprovare.",
   "settings.downloadClientHttpDownloadDir": "Cartella di download",
   "settings.downloadClientHttpDownloadDirHelp": "Dove vengono scritti i file completati e le loro parti, come Scryer vede il percorso. Scryer conserva la coda di questo downloader in una cartella .scryer-http al suo interno.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Download simultanei",

@@ -27,6 +27,7 @@ pub(super) struct MockTitleRepo {
     /// every bag carrying the old label, and a delete that strips it.
     pub(super) title_tag_definitions: Arc<Mutex<Vec<scryer_domain::TitleTagDefinition>>>,
     pub(super) fail_tag_reads: AtomicBool,
+    pub(super) lose_folder_claim: AtomicBool,
     pub(super) smg_identity_backfill_attempts: Arc<Mutex<HashMap<String, i64>>>,
     pub(super) metadata_hydration_due: Mutex<HashSet<String>>,
     pub(super) create_or_get_existing_error: Arc<Mutex<Option<String>>>,
@@ -1405,6 +1406,28 @@ impl TitleRepository for MockTitleRepo {
             .ok_or_else(|| AppError::NotFound(format!("title {}", id)))?;
         list.remove(position);
         Ok(())
+    }
+
+    async fn claim_missing_folder_path(&self, id: &str, folder_path: &str) -> AppResult<bool> {
+        if self.lose_folder_claim.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        if let Some(error) = self.folder_path_write_failure(id).await {
+            return Err(error);
+        }
+        let mut list = self.store.lock().await;
+        let Some(title) = list.iter_mut().find(|entry| entry.id == id) else {
+            return Ok(false);
+        };
+        if title
+            .folder_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+        {
+            return Ok(false);
+        }
+        title.folder_path = Some(folder_path.to_owned());
+        Ok(true)
     }
 
     async fn set_folder_path(&self, id: &str, folder_path: &str) -> AppResult<()> {

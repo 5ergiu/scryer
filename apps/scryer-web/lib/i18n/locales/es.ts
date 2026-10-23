@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const es: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Selecciona títulos sin duplicados.",
+  "titleDelete.refusal.busy": "Ya hay una eliminación en curso.",
+  "titleDelete.refusal.preview": "Actualiza la vista previa de eliminación y confírmala.",
+  "titleDelete.refusal.confirmation": "Escribe DELETE para confirmar la eliminación.",
+  "titleDelete.refusal.boundary": "La carpeta del título debe estar dentro de una raíz de biblioteca, no ser la raíz.",
+  "titleDelete.refusal.ownership": "No se pudo verificar a qué título pertenece la carpeta. Se conservaron los archivos.",
+  "titleDelete.refusal.layout": "La carpeta o su contenido no se pueden eliminar con seguridad como un solo título.",
+  "titleDelete.refusal.unavailable": "Una raíz de biblioteca no está disponible. Restablece el acceso y genera otra vista previa.",
+  "titleDelete.refusal.recycle": "Se eliminó el título, pero no se pudieron purgar algunas entradas de la papelera.",
+  "titleDelete.refusal.retry": "Falló la limpieza del catálogo. Obtén otra vista previa antes de reintentar.",
   "settings.downloadClientHttpDownloadDir": "Carpeta de descargas",
   "settings.downloadClientHttpDownloadDirHelp": "Donde se escriben los archivos terminados y sus partes, tal como Scryer ve la ruta. Scryer guarda la cola de este descargador en una carpeta .scryer-http dentro de ella.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Descargas simultáneas",

@@ -2087,6 +2087,11 @@ pub enum TrackedDownloadCommand {
         download_ids: Vec<DownloadId>,
         reply: oneshot::Sender<AppResult<Vec<DownloadId>>>,
     },
+    /// Best-effort cache retirement; durable binding retirement is already committed.
+    ForgetMany {
+        title_ids: Vec<String>,
+        download_ids: Vec<DownloadId>,
+    },
     /// Re-attribute the rows cached under `download_ids` from a merged source
     /// title to its destination; replies with the re-keyed rows.
     ReassignTitle {
@@ -2283,6 +2288,15 @@ impl TrackedDownloadHandle {
     /// under `download_ids` whatever title they resolved to (a row whose
     /// client item lost its token may carry no title). Replies with the
     /// removed rows.
+    pub fn forget_many(&self, title_ids: Vec<String>, download_ids: Vec<DownloadId>) {
+        if let Err(error) = self.tx.try_send(TrackedDownloadCommand::ForgetMany {
+            title_ids,
+            download_ids,
+        }) {
+            tracing::warn!(%error, "tracker cleanup notification unavailable; refresh will reconcile retired bindings");
+        }
+    }
+
     pub async fn forget_for_title(
         &self,
         title_id: String,

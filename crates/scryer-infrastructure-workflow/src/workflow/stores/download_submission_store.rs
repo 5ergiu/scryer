@@ -1045,6 +1045,24 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
             .await
     }
 
+    async fn abandon_title_download_cleanup(&self, ids: &[DownloadId]) -> AppResult<()> {
+        let ids = ids.to_vec();
+        SqlRuntime::run_in_transaction(&self.datastore, "abandon_title_download_cleanup", move |tx| {
+            let ids = ids.clone();
+            Box::pin(async move {
+                for chunk in ids.chunks(256) {
+                    let placeholders = vec!["{}"; chunk.len()].join(", ");
+                    let query = format!("UPDATE download_cleanup SET status = 'completed', outcome = 'cleanup_abandoned', last_error = {{}}, history_offset = 0, next_attempt_at = {{}}, lease_until = NULL, updated_at = {{}} WHERE status != 'completed' AND download_id IN ({placeholders})");
+                    let now = Utc::now();
+                    let mut args = vec![SqlArg::Text("title deleted; the client entry is left for the operator".into()), SqlArg::Timestamp(now), SqlArg::Timestamp(now)];
+                    args.extend(chunk.iter().map(|id| SqlArg::Text(id.to_string())));
+                    SqlRuntime::execute(SqlExec::Tx(tx), &query, &args).await?;
+                }
+                Ok(())
+            })
+        }).await
+    }
+
     async fn find_info_hash_for_title_release(
         &self,
         title_id: &str,

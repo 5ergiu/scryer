@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const de: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Titel ohne Duplikate auswählen.",
+  "titleDelete.refusal.busy": "Ein Löschvorgang läuft bereits.",
+  "titleDelete.refusal.preview": "Löschvorschau aktualisieren und bestätigen.",
+  "titleDelete.refusal.confirmation": "Zum Bestätigen DELETE eingeben.",
+  "titleDelete.refusal.boundary": "Der Titelordner muss innerhalb eines Bibliotheksordners liegen und darf nicht dieser Ordner selbst sein.",
+  "titleDelete.refusal.ownership": "Die Ordnerzuordnung konnte nicht bestätigt werden. Dateien wurden erhalten.",
+  "titleDelete.refusal.layout": "Der Ordner oder sein Inhalt kann nicht sicher als einzelner Titel gelöscht werden.",
+  "titleDelete.refusal.unavailable": "Ein Bibliotheksordner ist nicht erreichbar. Zugriff wiederherstellen und Vorschau erneuern.",
+  "titleDelete.refusal.recycle": "Der Titel wurde gelöscht, aber einige Papierkorbeinträge konnten nicht entfernt werden.",
+  "titleDelete.refusal.retry": "Katalogbereinigung fehlgeschlagen. Vor dem erneuten Versuch eine neue Vorschau laden.",
   "settings.downloadClientHttpDownloadDir": "Download-Ordner",
   "settings.downloadClientHttpDownloadDirHelp": "Hier werden fertige Dateien und Teildownloads abgelegt, so wie Scryer den Pfad sieht. Scryer führt die Warteschlange dieses Downloaders im Unterordner .scryer-http.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Gleichzeitige Downloads",

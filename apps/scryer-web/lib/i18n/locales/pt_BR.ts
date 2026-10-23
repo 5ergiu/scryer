@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const pt_BR: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Selecione títulos sem duplicatas.",
+  "titleDelete.refusal.busy": "Uma exclusão já está em andamento.",
+  "titleDelete.refusal.preview": "Atualize a prévia de exclusão e confirme.",
+  "titleDelete.refusal.confirmation": "Digite DELETE para confirmar a exclusão.",
+  "titleDelete.refusal.boundary": "A pasta do título deve estar dentro de uma raiz da biblioteca, não ser a própria raiz.",
+  "titleDelete.refusal.ownership": "Não foi possível verificar a qual título a pasta pertence. Os arquivos foram preservados.",
+  "titleDelete.refusal.layout": "A pasta ou seu conteúdo não podem ser excluídos com segurança como um único título.",
+  "titleDelete.refusal.unavailable": "Uma raiz da biblioteca está indisponível. Restaure o acesso e gere outra prévia.",
+  "titleDelete.refusal.recycle": "O título foi excluído, mas algumas entradas da lixeira não puderam ser removidas.",
+  "titleDelete.refusal.retry": "A limpeza do catálogo falhou. Obtenha uma nova prévia antes de tentar novamente.",
   "settings.downloadClientHttpDownloadDir": "Pasta de downloads",
   "settings.downloadClientHttpDownloadDirHelp": "Onde os arquivos concluídos e suas partes são gravados, como o Scryer vê o caminho. O Scryer mantém a fila deste downloader em uma pasta .scryer-http dentro dela.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Downloads simultâneos",

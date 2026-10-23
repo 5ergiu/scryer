@@ -7,13 +7,14 @@ struct MissingFolderFixture {
     title_id: String,
     root: PathBuf,
     tempdir: tempfile::TempDir,
+    titles: Arc<MockTitleRepo>,
 }
 
 async fn seed(facet: MediaFacet) -> MissingFolderFixture {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let root = tempdir.path().join("library");
     std::fs::create_dir_all(&root).expect("create library root");
-    let (app, admin, _titles) = bootstrap_with_cutoff_projection_state(
+    let (app, admin, titles) = bootstrap_with_cutoff_projection_state(
         Arc::new(StoredSettingsRepo::default()),
         Arc::new(StoredQualityProfileRepo::default()),
         Arc::new(MockMediaFileRepo::default()),
@@ -32,6 +33,7 @@ async fn seed(facet: MediaFacet) -> MissingFolderFixture {
         title_id,
         root,
         tempdir,
+        titles,
     };
     assert_eq!(fixture.folder_path(&fixture.title_id).await, None);
     fixture
@@ -277,4 +279,151 @@ async fn a_folder_outside_the_library_is_never_claimed() {
         .join("elsewhere/Quillmere (2026)/Quillmere (2026).mkv");
     fixture.record_file(&fixture.title_id, &outside).await;
     fixture.assert_refused(&[&outside]).await;
+}
+
+#[tokio::test]
+async fn title_delete_lost_folder_claim_preserves_files_and_catalog() {
+    let fixture = seed(MediaFacet::Movie).await;
+    let file = fixture.root.join("Quillmere (2026)/Quillmere (2026).mkv");
+    fixture.record_file(&fixture.title_id, &file).await;
+    let preview = fixture
+        .app
+        .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+        .await
+        .unwrap();
+    fixture
+        .titles
+        .lose_folder_claim
+        .store(true, Ordering::SeqCst);
+    let error = fixture
+        .delete_with_files(preview.fingerprint)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.validation_reason(),
+        Some(crate::title_delete::FOLDER_CLAIM_LOST)
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"synthetic video");
+    assert!(fixture.title_exists().await);
+    assert_eq!(fixture.folder_path(&fixture.title_id).await, None);
+}
+
+#[tokio::test]
+async fn title_delete_bulk_enforces_aggregate_confirmation() {
+    let fixture = seed(MediaFacet::Series).await;
+    let second = add_title(&fixture.app, &fixture.admin, "Other", MediaFacet::Series).await;
+    for (id, name) in [(&fixture.title_id, "Quillmere"), (&second, "Other")] {
+        let folder = fixture.root.join(name);
+        fixture
+            .app
+            .services
+            .catalog
+            .titles
+            .set_folder_path(id, &folder.to_string_lossy())
+            .await
+            .unwrap();
+        for episode in 1..=26 {
+            fixture
+                .record_file(
+                    id,
+                    &folder.join(format!("Season 01/{name}.S01E{episode:02}.mkv")),
+                )
+                .await;
+        }
+    }
+    let ids = vec![fixture.title_id.clone(), second];
+    let mut items = Vec::new();
+    for id in &ids {
+        let preview = fixture
+            .app
+            .preview_delete_title_files(&fixture.admin, id)
+            .await
+            .unwrap();
+        assert!(!preview.requires_typed_confirmation);
+        items.push(DeleteTitlesJobItem {
+            title_id: id.clone(),
+            preview_fingerprint: Some(preview.fingerprint),
+        });
+    }
+    let error = fixture
+        .app
+        .start_delete_titles_job(
+            &fixture.admin,
+            DeleteTitlesJobRequest {
+                items,
+                delete_files_on_disk: true,
+                typed_confirmation: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.validation_reason(),
+        Some(crate::title_delete::TYPED_CONFIRMATION_REQUIRED)
+    );
+    assert!(fixture.title_exists().await);
+    assert!(
+        fixture
+            .root
+            .join("Other/Season 01/Other.S01E26.mkv")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn title_delete_catalog_failure_retains_media_and_folder_for_fresh_preview_retry() {
+    let mut fixture = seed(MediaFacet::Movie).await;
+    let pending = Arc::new(TrackingPendingReleaseRepo::default());
+    pending
+        .fail_delete_for_title("synthetic cleanup failure")
+        .await;
+    fixture.app = fixture
+        .app
+        .with_test_overrides(|services| services.with_pending_releases(pending.clone()));
+    let folder = fixture.root.join("Quillmere (2026)");
+    let file = folder.join("Quillmere (2026).mkv");
+    fixture.record_file(&fixture.title_id, &file).await;
+    let bystander = fixture.root.join("unrelated.txt");
+    std::fs::write(&bystander, b"preserve").unwrap();
+    let preview = fixture
+        .app
+        .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+        .await
+        .unwrap();
+    let error = fixture
+        .delete_with_files(preview.fingerprint)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.validation_reason(),
+        Some(crate::title_delete::CATALOG_CLEANUP_FAILED)
+    );
+    assert!(!file.exists());
+    assert!(fixture.title_exists().await);
+    assert_eq!(
+        fixture.folder_path(&fixture.title_id).await.as_deref(),
+        Some(folder.to_str().unwrap())
+    );
+    assert_eq!(
+        fixture
+            .app
+            .services
+            .library
+            .media_files
+            .list_media_files_for_title(&fixture.title_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let retry = fixture
+        .app
+        .preview_delete_title_files(&fixture.admin, &fixture.title_id)
+        .await
+        .unwrap();
+    assert_eq!(retry.total_file_count, 0);
+    *pending.delete_error.lock().await = None;
+    fixture.delete_with_files(retry.fingerprint).await.unwrap();
+    assert!(!fixture.title_exists().await);
+    assert_eq!(std::fs::read(bystander).unwrap(), b"preserve");
 }

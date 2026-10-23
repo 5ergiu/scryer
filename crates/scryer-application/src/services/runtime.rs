@@ -1031,6 +1031,7 @@ pub(crate) struct CachedWantedProjection {
 
 #[derive(Clone)]
 pub struct AppRuntimeAcquisitionState {
+    pub(crate) titles_in_deletion: Arc<std::sync::RwLock<HashSet<String>>>,
     pub acquisition_wake: Arc<tokio::sync::Notify>,
     /// Set when failure handling re-opens a scope; the next background pass
     /// walks even if its own walk is not due, so the scope's saved results are
@@ -2578,6 +2579,7 @@ impl AppRuntimeState {
                 title_hydration_scan_yields: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             },
             acquisition: AppRuntimeAcquisitionState {
+                titles_in_deletion: Arc::default(),
                 acquisition_wake: Arc::new(tokio::sync::Notify::new()),
                 scope_reopened_since_walk: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 process_started_at: chrono::Utc::now(),

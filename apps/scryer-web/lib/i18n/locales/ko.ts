@@ -1,6 +1,16 @@
 import type { LocaleDictionary } from "../types";
 
 const ko: LocaleDictionary = {
+  "titleDelete.refusal.selection": "중복 없이 제목을 선택하세요.",
+  "titleDelete.refusal.busy": "삭제가 이미 진행 중입니다.",
+  "titleDelete.refusal.preview": "삭제 미리보기를 새로 고치고 확인하세요.",
+  "titleDelete.refusal.confirmation": "삭제를 확인하려면 DELETE를 입력하세요.",
+  "titleDelete.refusal.boundary": "제목 폴더는 라이브러리 루트 내부에 있어야 하며 루트 자체일 수 없습니다.",
+  "titleDelete.refusal.ownership": "폴더의 소유 관계를 확인하지 못했습니다. 파일은 보존되었습니다.",
+  "titleDelete.refusal.layout": "폴더 또는 내용을 하나의 제목으로 안전하게 삭제할 수 없습니다.",
+  "titleDelete.refusal.unavailable": "라이브러리 루트에 접근할 수 없습니다. 접근을 복원하고 다시 미리보세요.",
+  "titleDelete.refusal.recycle": "제목은 삭제되었지만 일부 휴지통 항목을 영구 삭제하지 못했습니다.",
+  "titleDelete.refusal.retry": "카탈로그 정리에 실패했습니다. 새 미리보기를 받은 후 다시 시도하세요.",
   "settings.downloadClientHttpDownloadDir": "다운로드 폴더",
   "settings.downloadClientHttpDownloadDirHelp": "완료된 파일과 부분 파일이 기록되는 위치입니다(Scryer 기준 경로). 이 다운로더의 대기열은 그 안의 .scryer-http 폴더에 저장됩니다.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "동시 다운로드",

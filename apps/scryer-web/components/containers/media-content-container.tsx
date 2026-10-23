@@ -1,3 +1,4 @@
+import { titleDeleteErrorMessage } from "@/lib/utils/title-delete-error-message";
 import * as React from "react";
 import { useCatalogFilterState } from "@/lib/hooks/use-catalog-filter-state";
 import { createCatalogPageRequestGate } from "@/lib/utils/catalog-page-request";
@@ -4230,7 +4231,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       }
     } catch (error) {
       setGlobalStatus(
-        error instanceof Error ? error.message : t("status.failedToDelete"),
+        titleDeleteErrorMessage(error, t, t("status.failedToDelete")),
         { level: "ERROR" },
       );
     } finally {

@@ -145,6 +145,24 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
         .transpose()
     }
 
+    async fn ended_bindings(&self, ids: &[DownloadId]) -> AppResult<Vec<DownloadId>> {
+        let mut ended = Vec::new();
+        for chunk in ids.chunks(256) {
+            let placeholders = vec!["{}"; chunk.len()].join(", ");
+            let query = format!(
+                "SELECT download_id FROM download_client_bindings WHERE ended_at IS NOT NULL AND download_id IN ({placeholders})"
+            );
+            let args = chunk
+                .iter()
+                .map(|id| SqlArg::Text(id.to_string()))
+                .collect::<Vec<_>>();
+            for row in SqlRuntime::fetch_all(self.datastore.read_exec(), &query, &args).await? {
+                ended.push(download_id_from_column(&row, "download_id")?);
+            }
+        }
+        Ok(ended)
+    }
+
     async fn find_active_binding_by_locator(
         &self,
         locator: &ClientJobLocator,
@@ -238,10 +256,18 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
     /// next. Without the terminal marker written here, a listing that predates
     /// one of those deletes would rebind the item and undo the delete.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()> {
-        let id = id.to_string();
+        self.end_bindings(&[*id]).await
+    }
+
+    async fn end_bindings(&self, ids: &[DownloadId]) -> AppResult<()> {
+        let mut ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        // Acquire per-download locks in a stable order across concurrent batches.
+        ids.sort_unstable();
+        ids.dedup();
         SqlRuntime::run_in_transaction(&self.datastore, "end_download_client_binding", move |tx| {
-            let id = id.clone();
+            let ids = ids.clone();
             Box::pin(async move {
+                for id in ids {
                 super::import_store::lock_retry_download(tx, &id).await?;
                 if SqlRuntime::fetch_optional(SqlExec::Tx(tx),
                     "SELECT id FROM download_identity_states WHERE canonical_download_id = {} AND reason = {} LIMIT 1",
@@ -267,6 +293,7 @@ impl DownloadRegistryRepository for DownloadRegistryStore {
                     &[SqlArg::Timestamp(ended_at), SqlArg::Text(id)],
                 )
                 .await?;
+                }
                 Ok(())
             })
         })
@@ -1532,6 +1559,58 @@ mod tests {
                 .terminal_at
                 .is_some(),
             "every end_binding caller is a terminal event, so the download is finished with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn title_delete_binding_batch_is_atomic_and_reconciles_only_ended_ids() {
+        let store = store().await;
+        let first = DownloadId::parse(FIRST_ID).unwrap();
+        let second = DownloadId::parse(SECOND_ID).unwrap();
+        for (id, job) in [(FIRST_ID, "job-1"), (SECOND_ID, "job-2")] {
+            insert_download(&store, id, "scryer_submission", None).await;
+            insert_binding(&store, id, Some("client-1"), Some(job), None).await;
+        }
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "INSERT INTO download_identity_states (canonical_download_id, reason) VALUES ({}, {})",
+            &[
+                SqlArg::Text(SECOND_ID.into()),
+                SqlArg::Text(scryer_application::DOWNLOAD_PASSWORD_RETRY_REASON.into()),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(store.end_bindings(&[first, second]).await.is_err());
+        assert!(
+            store
+                .ended_bindings(&[first, second])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .load_download(&first)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_at
+                .is_none()
+        );
+        store.end_bindings(&[first]).await.unwrap();
+        assert_eq!(
+            store.ended_bindings(&[first, second]).await.unwrap(),
+            vec![first]
+        );
+        assert!(
+            store
+                .load_binding(&second)
+                .await
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none()
         );
     }
 

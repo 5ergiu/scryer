@@ -1934,6 +1934,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn title_delete_forget_is_serviced_during_snapshot_collection() {
+        let (app, actor) = crate::lib_tests::bootstrap();
+        let (tracker, settled, live) = settled_and_live_siblings();
+        let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut runtime = super::TrackedDownloadRuntimeState::new();
+            runtime.tracker = tracker;
+            let (result_tx, _result_rx) = tokio::sync::mpsc::unbounded_channel();
+            let generation = app.runtime.acquisition.download_registry_generation();
+            let collection = async move {
+                started_tx.send(()).unwrap();
+                finish_rx.await.unwrap()
+            };
+            let result = super::await_snapshot_servicing_commands(
+                &app,
+                &actor,
+                &mut runtime,
+                &result_tx,
+                &mut command_rx,
+                &mut true,
+                &tokio_util::sync::CancellationToken::new(),
+                collection,
+            )
+            .await;
+            assert_eq!(result, Some(()));
+            assert_ne!(
+                generation,
+                app.runtime.acquisition.download_registry_generation()
+            );
+            assert!(runtime.tracker.get_by_download_id(settled).is_none());
+            assert!(runtime.tracker.get_by_download_id(live).is_some());
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            started_rx.await.unwrap();
+            commands
+                .send(
+                    crate::tracked_downloads::TrackedDownloadCommand::ForgetMany {
+                        title_ids: vec!["title-1".into()],
+                        download_ids: vec![settled],
+                    },
+                )
+                .await
+                .unwrap();
+            // The ordered reply proves ForgetMany ran while collection was blocked.
+            let (reply, response) = tokio::sync::oneshot::channel();
+            commands
+                .send(
+                    crate::tracked_downloads::TrackedDownloadCommand::ForgetForTitle {
+                        title_id: "title-1".into(),
+                        download_ids: vec![settled],
+                        reply,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.await.unwrap().unwrap().is_empty());
+            finish_tx.send(()).unwrap();
+            task.await.unwrap();
+        })
+        .await
+        .expect("poller must service commands without completing the client read");
+    }
+
+    #[tokio::test]
+    async fn title_delete_forget_many_preserves_regrab_with_shared_client_id() {
+        let (app, actor) = crate::lib_tests::bootstrap();
+        let (mut tracker, settled, live) = settled_and_live_siblings();
+        let live_before = row_debug(&tracker, live);
+        run_tracked_command(
+            &app,
+            &actor,
+            &mut tracker,
+            crate::tracked_downloads::TrackedDownloadCommand::ForgetMany {
+                title_ids: vec!["title-1".into()],
+                download_ids: vec![settled],
+            },
+        )
+        .await;
+        assert!(tracker.get_by_download_id(settled).is_none());
+        assert_eq!(row_debug(&tracker, live), live_before);
+    }
+
+    #[tokio::test]
     async fn forget_for_title_command_drops_the_deleted_titles_row_and_keeps_the_regrab() {
         use crate::tracked_downloads::TrackedDownloadCommand;
         let (app, actor) = crate::lib_tests::bootstrap();
@@ -2042,9 +2127,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_blocklist_worker_failure_does_not_authorize_terminal_cleanup() {
+    async fn title_delete_late_worker_result_cannot_revive_a_removed_title() {
         let (app, _) = crate::lib_tests::bootstrap();
         let (mut tracker, settled, live) = settled_and_live_siblings();
+        let settled_before = row_debug(&tracker, settled);
+        let mut finished = tracker.get_by_download_id(live).unwrap().clone();
+        finished.state = TrackedDownloadState::Imported;
+        let mut in_flight = std::collections::HashSet::from([SHARED_TORRENT_ID.to_string()]);
+        super::handle_tracked_download_background_work_result(
+            &app,
+            &mut tracker,
+            &mut in_flight,
+            super::TrackedDownloadBackgroundWorkResult {
+                download_id: live,
+                id: SHARED_TORRENT_ID.to_string(),
+                kind: TrackedDownloadBackgroundWorkKind::Import,
+                outcome: Ok(finished),
+                elapsed: std::time::Duration::ZERO,
+            },
+        )
+        .await;
+        assert!(in_flight.is_empty());
+        assert!(tracker.get_by_download_id(live).is_none());
+        assert_eq!(row_debug(&tracker, settled), settled_before);
+    }
+
+    #[tokio::test]
+    async fn manual_blocklist_worker_failure_does_not_authorize_terminal_cleanup() {
+        let (app, actor) = crate::lib_tests::bootstrap();
+        let title = app
+            .add_title(
+                &actor,
+                crate::NewTitle {
+                    name: "Synthetic live download".into(),
+                    facet: scryer_domain::MediaFacet::Movie,
+                    monitored: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (mut tracker, settled, live) = settled_and_live_siblings();
+        tracker.get_mut_by_download_id(live).unwrap().title_id = Some(title.id.clone());
         let settled_before = row_debug(&tracker, settled);
         let tracked = tracker.get_mut_by_download_id(live).unwrap();
         tracked.manual_failure_cleanup = true;
@@ -2073,9 +2197,22 @@ mod tests {
 
     #[tokio::test]
     async fn background_work_result_merges_into_its_own_row_and_leaves_the_sibling_untouched() {
-        let (app, _) = crate::lib_tests::bootstrap();
+        let (app, actor) = crate::lib_tests::bootstrap();
+        let title = app
+            .add_title(
+                &actor,
+                crate::NewTitle {
+                    name: "Synthetic live download".into(),
+                    facet: scryer_domain::MediaFacet::Movie,
+                    monitored: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         for _ in 0..16 {
             let (mut tracker, settled, live) = settled_and_live_siblings();
+            tracker.get_mut_by_download_id(live).unwrap().title_id = Some(title.id.clone());
             let settled_before = row_debug(&tracker, settled);
 
             let mut finished = tracker.get_by_download_id(live).expect("live row").clone();
@@ -2102,7 +2239,7 @@ mod tests {
             let merged = tracker.get_by_download_id(live).expect("live row");
             assert_eq!(merged.state, TrackedDownloadState::ImportPending);
             assert_eq!(merged.status_messages, vec!["worker finished".to_string()]);
-            assert_eq!(merged.title_id.as_deref(), Some("title-2"));
+            assert_eq!(merged.title_id.as_deref(), Some(title.id.as_str()));
             assert_eq!(row_debug(&tracker, settled), settled_before);
         }
     }
