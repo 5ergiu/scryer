@@ -20,6 +20,7 @@ chrono = { workspace = true }
 aws-lc-rs = { workspace = true }
 filetime = "0.2"
 futures-util = "0.3"
+md-5 = "0.11"
 metrics = { workspace = true }
 quick-xml = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "query", "rustls-no-provider", "http2", "gzip", "brotli", "zstd", "deflate", "stream"] }

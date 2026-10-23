@@ -23,6 +23,9 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub use http::HttpDownloadClient;
+pub(crate) use http::{
+    apply_saved_config as apply_saved_http_config, forget_engine as forget_http_engine,
+};
 pub use nzbget::NzbgetDownloadClient;
 pub use router::{
     PrioritizedDownloadClientRouter, describe_download_client_router_metrics,

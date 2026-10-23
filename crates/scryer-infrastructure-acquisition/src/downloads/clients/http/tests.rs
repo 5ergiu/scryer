@@ -224,6 +224,7 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
             complete: false,
             language: None,
             forbidden_answers: 0,
+            skipped_error: None,
         }],
         output_dir,
         // As a crash mid-transfer leaves it.
@@ -240,6 +241,8 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
         forbidden_requests: 0,
         refused_variants: Vec::new(),
         geo_restricted: false,
+        subtitle_required: false,
+        progress_revision: 0,
     }
 }
 
@@ -1588,4 +1591,788 @@ async fn media_that_passes_its_checks_completes() {
             .join("Synthetic.Show.S01E01.mp4")
             .exists()
     );
+}
+
+// ---------------------------------------------------------------------------
+// durable progress
+
+/// A one-shot HTTP server that answers every request with `body` sent as
+/// one HTTP chunk per entry, so the client reads it as that many pieces.
+/// Returns its base URL and the request heads it received.
+async fn chunked_server(chunks: Vec<Vec<u8>>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&heads);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let chunks = chunks.clone();
+            let log = Arc::clone(&log);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).into_owned());
+                let mut answer = format!(
+                    "HTTP/1.1 200 OK\r\nETag: {ETAG}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                )
+                .into_bytes();
+                for chunk in &chunks {
+                    answer.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                    answer.extend_from_slice(chunk);
+                    answer.extend_from_slice(b"\r\n");
+                }
+                answer.extend_from_slice(b"0\r\n\r\n");
+                let _ = stream.write_all(&answer).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{address}"), heads)
+}
+
+#[tokio::test]
+async fn checkpoints_write_progress_files_and_never_the_queue_document() {
+    let chunks: Vec<Vec<u8>> = BODY.chunks(2).map(<[u8]>::to_vec).collect();
+    let chunk_count = chunks.len() as u64;
+    let (base, _) = chunked_server(chunks).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    // A checkpoint after every byte: each piece of the body is one.
+    client
+        .engine()
+        .set_checkpoint_cadence(1, Duration::from_secs(3600));
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+
+    let engine = client.engine();
+    assert!(
+        engine.progress_writes() >= chunk_count,
+        "{} progress writes for {chunk_count} pieces",
+        engine.progress_writes()
+    );
+    // Added, started, file finished, job completed: the document follows the
+    // job's transitions, not its bytes.
+    assert!(
+        engine.document_writes() <= 4,
+        "{} document writes",
+        engine.document_writes()
+    );
+    // The finished job no longer carries fallbacks it will never use.
+    assert!(done.media_fallbacks.is_empty());
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    assert!(store.progress_path(&grab.job_id).exists());
+    // Compact on disk.
+    let raw = std::fs::read(store.path()).unwrap();
+    assert!(!raw.contains(&b'\n'));
+}
+
+#[tokio::test]
+async fn a_progress_file_newer_than_the_document_decides_the_resume_offset() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .and(header("range", "bytes=4-"))
+        .and(header("if-range", ETAG))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("etag", ETAG)
+                .insert_header(
+                    "content-range",
+                    format!("bytes 4-{}/{}", BODY.len() - 1, BODY.len()).as_str(),
+                )
+                .set_body_bytes(&BODY[4..]),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    // The document last recorded nothing of the file; the checkpoint after
+    // it went to the progress file.
+    let mut job = seeded_job(dir.path(), &format!("{}/media/clip.mp4", server.uri()), 0);
+    job.files[0].total_bytes = None;
+    job.files[0].validator = None;
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    tokio::fs::write(job.files[0].part_path(), &BODY[..4])
+        .await
+        .unwrap();
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    store
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+    let mut progressed = job.clone();
+    progressed.progress_revision = 1;
+    progressed.files[0].bytes_done = 4;
+    progressed.files[0].total_bytes = Some(BODY.len() as u64);
+    progressed.files[0].validator = Some(RecordedValidator {
+        etag: Some(ETAG.into()),
+        last_modified: None,
+    });
+    store
+        .save_progress(&job.id, &super::state::HttpJobProgress::of(&progressed))
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.files[0].attempt, 1);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn a_progress_file_older_than_the_document_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = HttpStateStore::for_client(dir.path(), "synthetic-client");
+    let mut job = seeded_job(dir.path(), "https://media.invalid/a.mp4", 4);
+    job.progress_revision = 5;
+    let mut stale = job.clone();
+    stale.progress_revision = 5;
+    stale.files[0].bytes_done = 30;
+    let progress = super::state::HttpJobProgress::of(&stale);
+    let mut loaded = job.clone();
+    assert!(!progress.apply_if_newer(&mut loaded));
+    assert_eq!(loaded, job);
+    store.save_progress(&job.id, &progress).await.unwrap();
+    assert_eq!(store.load_progress(&job.id).await, Some(progress));
+    assert_eq!(store.load_progress("absent-job").await, None);
+}
+
+/// A one-shot HTTP server that sends `BODY` with its full length announced,
+/// stops after `split` bytes and sends the rest only once `gate` opens.
+async fn gated_server(split: usize, gate: Arc<tokio::sync::Notify>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                return;
+            }
+            head.push(byte[0]);
+        }
+        let mut answer = format!(
+            "HTTP/1.1 200 OK\r\nETag: {ETAG}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            BODY.len()
+        )
+        .into_bytes();
+        answer.extend_from_slice(&BODY[..split]);
+        let _ = stream.write_all(&answer).await;
+        let _ = stream.flush().await;
+        gate.notified().await;
+        let _ = stream.write_all(&BODY[split..]).await;
+        let _ = stream.shutdown().await;
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn buffered_bytes_show_live_but_are_recorded_only_after_a_sync() {
+    let split = 17;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(split, Arc::clone(&gate)).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    client
+        .engine()
+        .set_checkpoint_cadence(u64::MAX, Duration::from_secs(3600));
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+
+    // Wait until the first piece has reached the write buffer.
+    let engine = Arc::clone(client.engine());
+    let live = tokio::time::timeout(WAIT_BOUND, async {
+        loop {
+            let listed = engine.job_with_live(&grab.job_id).await.unwrap();
+            if let Some((job, Some(live))) = listed
+                && live.bytes_done == split as u64
+            {
+                return job;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first piece shows as live progress");
+    let job = live;
+    // Not yet synced: nothing is recorded and nothing has left the buffer.
+    assert_eq!(job.files[0].bytes_done, 0);
+    let part = job.files[0].part_path();
+    assert_eq!(
+        std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0),
+        0
+    );
+    // The attempt and its validator may be recorded; its bytes are not.
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    if let Some(progress) = store.load_progress(&grab.job_id).await {
+        let mut recorded = job.clone();
+        recorded.progress_revision = 0;
+        progress.apply_if_newer(&mut recorded);
+        assert_eq!(recorded.files[0].bytes_done, 0);
+    }
+
+    gate.notify_one();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+    assert_eq!(done.files[0].bytes_done, BODY.len() as u64);
+}
+
+// ---------------------------------------------------------------------------
+// optional and required subtitles
+
+async fn subtitle_job(
+    mode: HttpSubtitleMode,
+) -> (tempfile::TempDir, HttpDownloadClient, MockServer, String) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/subs/en.vtt"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let mut source = source(vec![
+        muxed(&format!("{}/media/clip.mp4", server.uri()), 720),
+        subtitle(&format!("{}/subs/en.vtt", server.uri()), "en"),
+    ]);
+    source.selected.subtitle_mode = mode;
+    source.selected.subtitle_languages = vec!["en".into()];
+    let grab = client.submit_download(&request(source)).await.unwrap();
+    (dir, client, server, grab.job_id)
+}
+
+#[tokio::test]
+async fn a_missing_preferred_subtitle_is_skipped_and_the_job_completes() {
+    let (dir, client, _server, id) = subtitle_job(HttpSubtitleMode::SidecarPreferred).await;
+    let done = wait_for_job(&client, &id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert!(done.files[1].skipped_error.is_some());
+    assert!(!done.files[1].complete);
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
+
+    let completed = client.list_completed_downloads().await.unwrap();
+    assert_eq!(completed.len(), 1);
+    assert!(completed[0].subtitle_paths.is_empty());
+    let history = client.list_history().await.unwrap();
+    assert!(!history[0].attention_required);
+    assert_eq!(history[0].attention_reason, None);
+}
+
+#[tokio::test]
+async fn a_missing_required_subtitle_fails_the_job_and_names_the_language() {
+    let (dir, client, _server, id) = subtitle_job(HttpSubtitleMode::SidecarRequired).await;
+    let done = wait_for_job(&client, &id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    let error = done.error.unwrap_or_default();
+    assert!(
+        error.contains("required en subtitle") && error.contains("media file is on disk"),
+        "{error}"
+    );
+    // The media file finished before the subtitle was tried, and stays.
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// deleted and disabled clients
+
+/// Wait until the job's running file has `bytes` in the write buffer.
+async fn wait_for_live_bytes(client: &HttpDownloadClient, id: &str, bytes: u64) {
+    let engine = Arc::clone(client.engine());
+    tokio::time::timeout(WAIT_BOUND, async {
+        loop {
+            if let Some((_, Some(live))) = engine.job_with_live(id).await.unwrap()
+                && live.bytes_done == bytes
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the transfer reached the awaited byte count");
+}
+
+#[tokio::test]
+async fn a_deleted_client_stops_its_engine_and_keeps_its_queue() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(17, Arc::clone(&gate)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let first = client(&config);
+    let grab = first
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+    wait_for_live_bytes(&first, &grab.job_id, 17).await;
+
+    forget_engine(&config.id);
+    assert!(registered_engine(&config.id).is_none());
+    let old = Arc::clone(first.engine());
+    assert!(old.is_shut_down());
+    gate.notify_one();
+    tokio::time::timeout(WAIT_BOUND, old.workers().wait())
+        .await
+        .expect("the forgotten engine's workers stop");
+
+    // The queue stays on disk, the job unfinished, for whatever reads it next.
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    let document = store.load().await.unwrap();
+    let job = document
+        .jobs
+        .iter()
+        .find(|job| job.id == grab.job_id)
+        .expect("the job is still recorded");
+    assert!(!job.state.is_terminal());
+
+    // Created again under the same id, a new engine waits for the old one's
+    // workers and lists the job it left.
+    let again = client(&config);
+    assert!(!Arc::ptr_eq(again.engine(), &old));
+    let listed = again.engine().job(&grab.job_id).await.unwrap();
+    assert!(listed.is_some_and(|job| !job.state.is_terminal()));
+}
+
+#[tokio::test]
+async fn a_disabled_client_finishes_the_current_file_and_starts_nothing_new() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(17, Arc::clone(&gate)).await;
+    let subtitles = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subs/en.vtt"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"WEBVTT\n".as_slice()))
+        .mount(&subtitles)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let mut source = source(vec![
+        muxed(&format!("{base}/media/clip.mp4"), 720),
+        subtitle(&format!("{}/subs/en.vtt", subtitles.uri()), "en"),
+    ]);
+    source.selected.subtitle_mode = HttpSubtitleMode::SidecarPreferred;
+    source.selected.subtitle_languages = vec!["en".into()];
+    let grab = client.submit_download(&request(source)).await.unwrap();
+    wait_for_live_bytes(&client, &grab.job_id, 17).await;
+
+    let mut disabled = config.clone();
+    disabled.is_enabled = false;
+    apply_saved_config(&disabled);
+    gate.notify_one();
+    let parked = wait_for_job(&client, &grab.job_id, |job| {
+        job.state == HttpJobState::Queued && job.files[0].complete
+    })
+    .await;
+    assert!(!parked.files[1].complete);
+    assert!(subtitles.received_requests().await.unwrap().is_empty());
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
+
+    apply_saved_config(&config);
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(subtitles.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_client_changed_to_another_type_stops_its_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    client.engine().ensure_started().await.unwrap();
+    let mut changed = config.clone();
+    changed.client_type = "sabnzbd".into();
+    apply_saved_config(&changed);
+    assert!(registered_engine(&config.id).is_none());
+    assert!(client.engine().is_shut_down());
+}
+
+// ---------------------------------------------------------------------------
+// content coding
+
+async fn gzipped(bytes: &[u8]) -> Vec<u8> {
+    use tokio::io::AsyncWriteExt;
+    let mut encoder = async_compression::tokio::write::GzipEncoder::new(Vec::new());
+    encoder.write_all(bytes).await.unwrap();
+    encoder.shutdown().await.unwrap();
+    encoder.into_inner()
+}
+
+#[tokio::test]
+async fn an_encoded_whole_file_answer_is_stored_as_sent() {
+    let encoded = gzipped(BODY).await;
+    assert_ne!(encoded.as_slice(), BODY);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .and(header("accept-encoding", "identity"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .insert_header("etag", ETAG)
+                .set_body_bytes(encoded.clone()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{}/media/clip.mp4", server.uri()),
+            720,
+        )])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    // The bytes on disk are the bytes the server announced and sent.
+    assert_eq!(done.files[0].total_bytes, Some(encoded.len() as u64));
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), encoded);
+}
+
+// ---------------------------------------------------------------------------
+// a finished file whose completion was not recorded
+
+#[tokio::test]
+async fn a_file_already_in_place_completes_without_a_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    // Renamed into place, then interrupted before the move was recorded.
+    let job = seeded_job(
+        dir.path(),
+        &format!("{}/media/clip.mp4", server.uri()),
+        BODY.len() as u64,
+    );
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    tokio::fs::write(&job.files[0].final_path, BODY)
+        .await
+        .unwrap();
+    HttpStateStore::for_client(dir.path(), &config.id)
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let probe = FixedProbe::new(probed(Some(600), Some(true)));
+    client.engine().set_media_probe(probe.clone());
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert!(done.files[0].complete);
+    assert_eq!(done.files[0].attempt, 1);
+    assert_eq!(probe.probed(), vec![job.files[0].final_path.clone()]);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// expired resource URLs
+
+/// Answers 403 and, in answering, moves the test clock past the expiry.
+struct ExpiringRefusal(Arc<std::sync::atomic::AtomicBool>);
+
+impl wiremock::Respond for ExpiringRefusal {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        ResponseTemplate::new(403)
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_after_the_url_expired_fails_without_retry_or_fallback() {
+    let expires_at = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ExpiringRefusal(Arc::clone(&expired)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/media/fallback.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let clock_flag = Arc::clone(&expired);
+    client.engine().set_clock(Arc::new(move || {
+        if clock_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            expires_at + chrono::Duration::seconds(1)
+        } else {
+            expires_at - chrono::Duration::hours(1)
+        }
+    }));
+    let mut first = muxed(&format!("{}/media/clip.mp4", server.uri()), 1080);
+    first.expires_at = Some(expires_at.to_rfc3339());
+    let mut fallback = muxed(&format!("{}/media/fallback.mp4", server.uri()), 720);
+    fallback.expires_at = Some(expires_at.to_rfc3339());
+    let grab = client
+        .submit_download(&request(source(vec![first, fallback])))
+        .await
+        .unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    assert_eq!(
+        done.error.as_deref(),
+        Some("the resource URL has expired; grab the release again")
+    );
+    assert_eq!(done.forbidden_requests, 0);
+    assert_eq!(done.files[0].forbidden_answers, 0);
+    assert!(done.refused_variants.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// indexer checksums
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
+}
+
+async fn checksum_job(
+    checksum: String,
+) -> (tempfile::TempDir, HttpDownloadClient, MockServer, HttpJob) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let mut media = muxed(&format!("{}/media/clip.mp4", server.uri()), 720);
+    media.validators.checksum = Some(checksum);
+    let grab = client
+        .submit_download(&request(source(vec![media])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    (dir, client, server, done)
+}
+
+#[test]
+fn checksums_are_read_in_their_common_spellings() {
+    use super::transfer::{ChecksumAlgorithm, ExpectedChecksum};
+    let sha256 = sha256_hex(BODY);
+    let parsed = |raw: &str| ExpectedChecksum::parse(raw).map(|expected| expected.algorithm);
+    assert_eq!(
+        parsed(&format!("sha256:{sha256}")),
+        Some(ChecksumAlgorithm::Sha256)
+    );
+    assert_eq!(
+        parsed(&format!("SHA-256:{}", sha256.to_uppercase())),
+        Some(ChecksumAlgorithm::Sha256)
+    );
+    assert_eq!(parsed(&sha256), Some(ChecksumAlgorithm::Sha256));
+    assert_eq!(
+        parsed("md5:0123456789abcdef0123456789abcdef"),
+        Some(ChecksumAlgorithm::Md5)
+    );
+    assert_eq!(
+        parsed("sha1:0123456789abcdef0123456789abcdef01234567"),
+        Some(ChecksumAlgorithm::Sha1)
+    );
+    // Wrong length for the algorithm, unknown algorithm, not hex, bare
+    // digests other than SHA-256.
+    assert_eq!(parsed("md5:0123"), None);
+    assert_eq!(parsed(&format!("crc32:{sha256}")), None);
+    assert_eq!(parsed(&format!("sha256:{}", "zz".repeat(32))), None);
+    assert_eq!(parsed("0123456789abcdef0123456789abcdef"), None);
+}
+
+#[tokio::test]
+async fn a_matching_sha256_checksum_completes() {
+    let (_dir, _client, _server, done) = checksum_job(format!("sha256:{}", sha256_hex(BODY))).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn a_matching_md5_checksum_completes() {
+    use md5::Digest as _;
+    let md5 = hex(&md5::Md5::digest(BODY));
+    let (_dir, _client, _server, done) = checksum_job(format!("md5:{md5}")).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+}
+
+#[tokio::test]
+async fn a_checksum_mismatch_fails_and_leaves_the_partial() {
+    let wrong = sha256_hex(b"synthetic-other-payload");
+    let (_dir, _client, _server, done) = checksum_job(wrong.clone()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    let error = done.error.unwrap_or_default();
+    assert_eq!(
+        error,
+        "the download does not match the indexer's SHA-256 checksum"
+    );
+    assert!(!error.contains(&wrong));
+    let part = done.files[0].part_path();
+    assert_eq!(std::fs::read(&part).unwrap(), BODY);
+    assert!(!done.files[0].final_path.exists());
+}
+
+// ---------------------------------------------------------------------------
+// servers without range support
+
+#[tokio::test]
+async fn a_server_known_not_to_support_ranges_gets_a_fresh_attempt() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let mut job = seeded_job(dir.path(), &format!("{}/media/clip.mp4", server.uri()), 4);
+    job.files[0].resource.range_support = scryer_plugin_sdk::HttpRangeSupport::KnownNo;
+    assert_eq!(resume_range(&job.files[0], 4), RangeRequest::Whole);
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    let first_part = job.files[0].part_path();
+    tokio::fs::write(&first_part, &BODY[..4]).await.unwrap();
+    HttpStateStore::for_client(dir.path(), &config.id)
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.files[0].attempt, 2);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("range")
+                && !request.headers.contains_key("if-range"))
+    );
+    // The earlier partial is left where it was.
+    assert_eq!(std::fs::read(&first_part).unwrap(), &BODY[..4]);
+}
+
+// ---------------------------------------------------------------------------
+// egress client reuse
+
+#[tokio::test]
+async fn the_egress_client_is_rebuilt_only_when_its_proxy_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let http = scryer_outbound_http::generic_reqwest_client;
+    let mut proxy = transport_proxy("http://127.0.0.1:3128");
+
+    let first = HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    let engine = Arc::clone(first.engine());
+    assert_eq!(engine.egress_builds(), 1);
+    for _ in 0..3 {
+        let again = HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+        assert!(Arc::ptr_eq(again.engine(), &engine));
+    }
+    assert_eq!(engine.egress_builds(), 1);
+
+    // An edited proxy gets a new client; the same edit seen again does not.
+    proxy.updated_at += chrono::Duration::seconds(1);
+    HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    assert_eq!(engine.egress_builds(), 2);
+
+    // Dropping the proxy moves to the direct path once.
+    HttpDownloadClient::for_config(&config, None, http()).unwrap();
+    HttpDownloadClient::for_config(&config, None, http()).unwrap();
+    assert_eq!(engine.egress_builds(), 3);
 }

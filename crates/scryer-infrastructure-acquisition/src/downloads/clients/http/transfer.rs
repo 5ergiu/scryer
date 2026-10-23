@@ -18,7 +18,7 @@ use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use scryer_application::AppResult;
 use scryer_plugin_sdk::{PluginHttpResource, PluginHttpVerify};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -30,11 +30,25 @@ const MAX_REDIRECT_HOPS: usize = scryer_outbound_http::DEFAULT_TRUSTED_REDIRECT_
 const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a body may stall between chunks.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bytes buffered in memory before they are handed to the operating system.
+/// The buffer is flushed and synced only at a checkpoint, never per chunk.
+const WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 /// The whole-request ceiling. A large file on a slow link takes a long time;
 /// stalls are caught by the idle timeout instead.
 const WHOLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Bytes written between durable checkpoints.
-const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+/// The longest a transfer goes without a durable checkpoint, however slowly
+/// its bytes arrive.
+pub(crate) const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// When a transfer makes its written bytes durable and records them: after
+/// `bytes` more bytes or `interval` of wall time, whichever comes first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CheckpointCadence {
+    pub bytes: u64,
+    pub interval: Duration,
+}
 /// Transport failures (timeouts, resets, 5xx, 429) tolerated per file.
 const MAX_TRANSIENT_FAILURES: u32 = 5;
 /// Fresh attempts started because a resume could not be trusted.
@@ -78,7 +92,10 @@ impl Egress {
             Self::Direct => scryer_outbound_http::prepare_plugin_http_target_from_url(
                 url.clone(),
                 EGRESS_LABEL,
-                &scryer_outbound_http::PluginEgressPolicy::default(),
+                // Bytes are stored and counted exactly as sent: a body the
+                // server encoded despite `Accept-Encoding: identity` must not
+                // be decoded into something other than the announced length.
+                &scryer_outbound_http::PluginEgressPolicy::default().with_raw_bodies(),
             )
             .await
             .map(|target| target.client().clone())
@@ -568,6 +585,26 @@ async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), Transfe
     judge_media(&outcome, check.expected_duration_seconds, &check.verify)
 }
 
+/// The current time, injectable so tests decide when a URL has expired.
+pub(crate) type Clock = Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
+
+pub(crate) fn system_clock() -> Clock {
+    Arc::new(chrono::Utc::now)
+}
+
+/// Why a file whose signed URL ran out fails: asking again cannot help, and
+/// another variant of the same release was signed the same way.
+const EXPIRED_URL: &str = "the resource URL has expired; grab the release again";
+
+/// The resource states an expiry and it has passed.
+fn has_expired(resource: &PluginHttpResource, now: chrono::DateTime<chrono::Utc>) -> bool {
+    resource
+        .expires_at
+        .as_deref()
+        .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+        .is_some_and(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
+}
+
 /// Everything one file transfer needs from its job and engine.
 pub(crate) struct TransferContext<'a> {
     pub egress: Egress,
@@ -577,6 +614,8 @@ pub(crate) struct TransferContext<'a> {
     pub limiter: Option<&'a BandwidthLimiter>,
     /// The first retry's wait; each further retry doubles it, up to a cap.
     pub backoff_unit: Duration,
+    pub cadence: CheckpointCadence,
+    pub clock: Clock,
     /// Set for the job's media file only; sidecars are not probed.
     pub media_check: Option<MediaCheck<'a>>,
 }
@@ -598,6 +637,19 @@ pub(crate) async fn transfer_file(
     if file.complete {
         return Ok(());
     }
+    if already_in_place(file).await? {
+        // Moved into place before an interruption kept the move from being
+        // recorded: only the final checks are left, and nothing is fetched.
+        if let Some(check) = &context.media_check {
+            verify_media(check, &file.final_path).await?;
+        }
+        file.complete = true;
+        info!(
+            path = %file.final_path.display(),
+            "HTTP download found its finished file already in place"
+        );
+        return record(context, file).await;
+    }
     // Recorded before an interruption: the resource already used up its
     // retries, so it is not asked again.
     if file.forbidden_answers > MAX_FORBIDDEN_RETRIES {
@@ -607,13 +659,8 @@ pub(crate) async fn transfer_file(
             file.forbidden_answers
         )));
     }
-    if let Some(expires_at) = file.resource.expires_at.as_deref()
-        && let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at)
-        && expires_at.with_timezone(&chrono::Utc) <= chrono::Utc::now()
-    {
-        return Err(TransferError::Permanent(
-            "the resource URL has expired; grab the release again".into(),
-        ));
+    if has_expired(&file.resource, (context.clock)()) {
+        return Err(TransferError::Permanent(EXPIRED_URL.into()));
     }
     let resource_url = reqwest::Url::parse(&file.resource.url)
         .map_err(|error| TransferError::Permanent(format!("invalid resource URL: {error}")))?;
@@ -684,6 +731,14 @@ pub(crate) async fn transfer_file(
             ResponseVerdict::Failed(TransferError::Permanent(message)) => {
                 return Err(TransferError::Permanent(message));
             }
+            // A refusal after the URL expired is the expiry, not the
+            // resource: it is neither retried nor counted against the
+            // variant, and no other variant is tried.
+            ResponseVerdict::Failed(TransferError::Rejected(_) | TransferError::Forbidden(_))
+                if has_expired(&file.resource, (context.clock)()) =>
+            {
+                return Err(TransferError::Permanent(EXPIRED_URL.into()));
+            }
             ResponseVerdict::Failed(TransferError::Rejected(message)) => {
                 return Err(TransferError::Rejected(message));
             }
@@ -731,11 +786,39 @@ pub(crate) async fn transfer_file(
     }
 }
 
+/// Every byte is recorded, no partial is left, and the final file holds
+/// exactly the recorded length: the rename happened and only its record was
+/// lost.
+async fn already_in_place(file: &HttpJobFile) -> Result<bool, TransferError> {
+    let Some(total) = file.total_bytes else {
+        return Ok(false);
+    };
+    if total == 0 || file.bytes_done != total {
+        return Ok(false);
+    }
+    if tokio::fs::try_exists(file.part_path())
+        .await
+        .unwrap_or(true)
+    {
+        return Ok(false);
+    }
+    match tokio::fs::metadata(&file.final_path).await {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == total),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TransferError::Permanent(format!(
+            "cannot inspect {}: {error}",
+            file.final_path.display()
+        ))),
+    }
+}
+
 /// The range to ask for: a continuation only when the partial is known to
 /// hold the recorded bytes of a representation with a known length and a
-/// strong validator.
+/// strong validator, and the indexer has not said the server ignores ranges.
 pub(crate) fn resume_range(file: &HttpJobFile, part_len: u64) -> RangeRequest {
-    if file.bytes_done == 0 {
+    if file.bytes_done == 0
+        || file.resource.range_support == scryer_plugin_sdk::HttpRangeSupport::KnownNo
+    {
         return RangeRequest::Whole;
     }
     match (file.total_bytes, file.validator.as_ref()) {
@@ -929,7 +1012,12 @@ fn disk_error(path: &Path, error: &std::io::Error) -> StreamError {
 }
 
 /// Write the body into the attempt's `.part` file from `offset`, recording
-/// progress only after the bytes are flushed to disk.
+/// progress only after the bytes are flushed and synced to disk.
+///
+/// Writes go through a 1 MiB buffer. `live_bytes` counts what reached the
+/// buffer, for the queue's live view; `bytes_done` advances only after a
+/// checkpoint has flushed and synced it, so a crash resumes from bytes that
+/// are known to be on disk.
 async fn stream_body(
     context: &TransferContext<'_>,
     file: &mut HttpJobFile,
@@ -944,20 +1032,22 @@ async fn stream_body(
     }
     // Never truncate: a fresh attempt writes a file name no earlier attempt
     // used, and a continuation writes on from the recorded offset.
-    let mut output = tokio::fs::OpenOptions::new()
+    let mut opened = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&part_path)
         .await
         .map_err(|error| disk_error(&part_path, &error))?;
-    output
+    opened
         .seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|error| disk_error(&part_path, &error))?;
+    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, opened);
 
     let mut written = offset;
     let mut unrecorded = 0u64;
+    let mut last_checkpoint = tokio::time::Instant::now();
     context.live_bytes.store(written, Ordering::Relaxed);
     loop {
         let chunk = tokio::select! {
@@ -998,9 +1088,12 @@ async fn stream_body(
         written += length;
         unrecorded += length;
         context.live_bytes.store(written, Ordering::Relaxed);
-        if unrecorded >= CHECKPOINT_BYTES {
+        if unrecorded >= context.cadence.bytes
+            || last_checkpoint.elapsed() >= context.cadence.interval
+        {
             checkpoint_written(context, file, &mut output, &part_path, written).await?;
             unrecorded = 0;
+            last_checkpoint = tokio::time::Instant::now();
         }
     }
 
@@ -1022,7 +1115,7 @@ async fn stream_body(
 async fn checkpoint_written(
     context: &TransferContext<'_>,
     file: &mut HttpJobFile,
-    output: &mut tokio::fs::File,
+    output: &mut BufWriter<tokio::fs::File>,
     part_path: &Path,
     written: u64,
 ) -> Result<(), StreamError> {
@@ -1031,6 +1124,7 @@ async fn checkpoint_written(
         .await
         .map_err(|error| disk_error(part_path, &error))?;
     output
+        .get_ref()
         .sync_data()
         .await
         .map_err(|error| disk_error(part_path, &error))?;
@@ -1054,6 +1148,31 @@ async fn finish_file(
     let on_disk = existing_len(&part_path).await?;
     let total = file.total_bytes.unwrap_or(file.bytes_done);
     check_final_size(on_disk, total, &file.resource)?;
+    if let Some(expected) = file
+        .resource
+        .validators
+        .checksum
+        .as_deref()
+        .and_then(|raw| {
+            let parsed = ExpectedChecksum::parse(raw);
+            if parsed.is_none() {
+                warn!(
+                    checksum = raw,
+                    "HTTP download checksum is in a form this client does not read; it was not checked"
+                );
+            }
+            parsed
+        })
+    {
+        let actual = hash_file(context, &part_path, expected.algorithm).await?;
+        if actual != expected.digest {
+            // The partial stays where it is, under its partial name.
+            return Err(TransferError::Permanent(format!(
+                "the download does not match the indexer's {} checksum",
+                expected.algorithm.label()
+            )));
+        }
+    }
     // Checked under the partial's name, so a file that fails never appears
     // under its final one.
     if let Some(check) = &context.media_check {
@@ -1080,6 +1199,124 @@ async fn finish_file(
     file.bytes_done = total;
     file.complete = true;
     record(context, file).await
+}
+
+/// A digest algorithm an indexer may state a checksum in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChecksumAlgorithm {
+    Sha256,
+    Sha1,
+    Md5,
+}
+
+impl ChecksumAlgorithm {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SHA-256",
+            Self::Sha1 => "SHA-1",
+            Self::Md5 => "MD5",
+        }
+    }
+
+    fn digest_len(self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Sha1 => 20,
+            Self::Md5 => 16,
+        }
+    }
+}
+
+/// The checksum an indexer stated for a resource.
+///
+/// The SDK leaves the format open, so this reads the common spellings:
+/// `sha256:<hex>`, `sha1:<hex>`, `md5:<hex>` (prefix case-insensitive, with or
+/// without a hyphen such as `sha-256`), and a bare 64-digit hex string as
+/// SHA-256. Anything else is not checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExpectedChecksum {
+    pub algorithm: ChecksumAlgorithm,
+    pub digest: Vec<u8>,
+}
+
+impl ExpectedChecksum {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        let (algorithm, hex) = match raw.split_once(':') {
+            Some((prefix, hex)) => {
+                let algorithm = match prefix.trim().to_ascii_lowercase().replace('-', "").as_str() {
+                    "sha256" => ChecksumAlgorithm::Sha256,
+                    "sha1" => ChecksumAlgorithm::Sha1,
+                    "md5" => ChecksumAlgorithm::Md5,
+                    _ => return None,
+                };
+                (algorithm, hex.trim())
+            }
+            None if raw.len() == 64 => (ChecksumAlgorithm::Sha256, raw),
+            None => return None,
+        };
+        let digest = decode_hex(hex)?;
+        (digest.len() == algorithm.digest_len()).then_some(Self { algorithm, digest })
+    }
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digit = |byte: u8| (byte as char).to_digit(16);
+            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
+        })
+        .collect()
+}
+
+/// Hash a file without holding it in memory.
+async fn hash_file(
+    context: &TransferContext<'_>,
+    path: &Path,
+    algorithm: ChecksumAlgorithm,
+) -> Result<Vec<u8>, TransferError> {
+    use md5::Digest as _;
+    use tokio::io::AsyncReadExt;
+
+    enum Hasher {
+        Lc(aws_lc_rs::digest::Context),
+        Md5(md5::Md5),
+    }
+    let mut hasher = match algorithm {
+        ChecksumAlgorithm::Sha256 => {
+            Hasher::Lc(aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256))
+        }
+        ChecksumAlgorithm::Sha1 => Hasher::Lc(aws_lc_rs::digest::Context::new(
+            &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        )),
+        ChecksumAlgorithm::Md5 => Hasher::Md5(md5::Md5::new()),
+    };
+    let read_error = |error: std::io::Error| {
+        TransferError::Permanent(format!("could not read {}: {error}", path.display()))
+    };
+    let mut input = tokio::fs::File::open(path).await.map_err(read_error)?;
+    let mut buffer = vec![0u8; WRITE_BUFFER_BYTES];
+    loop {
+        if context.cancel.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let read = input.read(&mut buffer).await.map_err(read_error)?;
+        if read == 0 {
+            break;
+        }
+        match &mut hasher {
+            Hasher::Lc(context) => context.update(&buffer[..read]),
+            Hasher::Md5(md5) => md5.update(&buffer[..read]),
+        }
+    }
+    Ok(match hasher {
+        Hasher::Lc(context) => context.finish().as_ref().to_vec(),
+        Hasher::Md5(md5) => md5.finalize().to_vec(),
+    })
 }
 
 /// The finished size must be what the transfer announced and, when the

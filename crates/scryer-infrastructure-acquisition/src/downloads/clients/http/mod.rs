@@ -38,6 +38,7 @@ use scryer_domain::{
     CompletedDownload, DownloadClientConfig, DownloadQueueItem, DownloadQueueState, ProxyConfig,
 };
 use serde_json::Value;
+use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use self::engine::{HttpEngine, HttpEngineLimits, LiveSnapshot};
@@ -139,31 +140,113 @@ fn read_bounded(
 static ENGINES: LazyLock<std::sync::Mutex<HashMap<String, Arc<HttpEngine>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// The workers of engines whose configuration was deleted or stopped being
+/// an HTTP downloader, kept only until they stop, so an engine created
+/// again under the same id waits for them before it reads their queue.
+static RETIRED: LazyLock<std::sync::Mutex<HashMap<String, TaskTracker>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Stop and drop the engine of a configuration that was deleted or is no
+/// longer an HTTP downloader. Its workers checkpoint and stop; its queue
+/// and files stay on disk.
+pub(crate) fn forget_engine(config_id: &str) {
+    let forgotten = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(config_id);
+    let Some(engine) = forgotten else {
+        return;
+    };
+    engine.begin_shutdown();
+    info!(
+        client_id = config_id,
+        "HTTP downloader stopped for a removed configuration"
+    );
+    let mut retired = RETIRED.lock().unwrap_or_else(|p| p.into_inner());
+    retired.retain(|_, workers| !(workers.is_closed() && workers.is_empty()));
+    retired.insert(config_id.to_string(), engine.workers());
+}
+
+/// Bring a running engine in line with a saved configuration: stop it when
+/// the configuration is no longer an HTTP downloader, otherwise apply its
+/// enabled flag. A configuration without an engine has nothing running.
+pub(crate) fn apply_saved_config(config: &DownloadClientConfig) {
+    if !config.client_type.eq_ignore_ascii_case(CLIENT_TYPE) {
+        forget_engine(&config.id);
+        return;
+    }
+    let engine = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&config.id)
+        .cloned();
+    if let Some(engine) = engine {
+        engine.set_enabled(config.is_enabled);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn registered_engine(config_id: &str) -> Option<Arc<HttpEngine>> {
+    ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(config_id)
+        .cloned()
+}
+
 /// The engine for a configuration, created on first use. A changed download
 /// directory replaces the engine: the old one stops its workers (they
 /// checkpoint first) and the new one reads the queue kept in the new
-/// directory. Limits and egress changes apply in place.
-fn engine_for(config_id: &str, settings: &HttpClientSettings, egress: Egress) -> Arc<HttpEngine> {
+/// directory. Limits apply in place; the egress client is rebuilt, outside
+/// the registry lock, only when the proxy it was built from changed, so its
+/// connection pool survives the router's per-call client objects.
+fn engine_for(
+    config_id: &str,
+    settings: &HttpClientSettings,
+    proxy_config: Option<&ProxyConfig>,
+) -> AppResult<Arc<HttpEngine>> {
+    let key = egress_key(proxy_config)?;
+    let current = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(config_id)
+        .filter(|engine| engine.download_dir == settings.download_dir)
+        .cloned();
+    if let Some(engine) = current
+        && engine.has_egress_key(&key)
+    {
+        engine.set_limits(settings.limits);
+        return Ok(engine);
+    }
+    let egress = egress_for(proxy_config)?;
     let mut engines = ENGINES.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(engine) = engines.get(config_id)
         && engine.download_dir == settings.download_dir
     {
-        engine.reconfigure(settings.limits, egress);
-        return Arc::clone(engine);
+        engine.set_limits(settings.limits);
+        engine.set_egress(egress, key);
+        return Ok(Arc::clone(engine));
     }
-    let predecessor = engines.remove(config_id);
-    if let Some(predecessor) = &predecessor {
-        predecessor.begin_shutdown();
-    }
+    let predecessor = match engines.remove(config_id) {
+        Some(predecessor) => {
+            predecessor.begin_shutdown();
+            Some(predecessor.workers())
+        }
+        None => RETIRED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(config_id),
+    };
     let engine = HttpEngine::new(
         config_id.to_string(),
         settings.download_dir.clone(),
         settings.limits,
         egress,
+        key,
         predecessor,
     );
     engines.insert(config_id.to_string(), Arc::clone(&engine));
-    engine
+    Ok(engine)
 }
 
 /// The native HTTP downloader for one configuration.
@@ -181,10 +264,9 @@ impl HttpDownloadClient {
         _http_client: reqwest::Client,
     ) -> AppResult<Self> {
         let settings = HttpClientSettings::from_config_json(&config.config_json)?;
-        let egress = egress_for(proxy_config)?;
-        Ok(Self {
-            engine: engine_for(&config.id, &settings, egress),
-        })
+        let engine = engine_for(&config.id, &settings, proxy_config)?;
+        engine.set_enabled(config.is_enabled);
+        Ok(Self { engine })
     }
 
     #[cfg(test)]
@@ -197,6 +279,24 @@ impl HttpDownloadClient {
     }
 }
 
+/// What an egress client is built from: nothing for the direct path, else
+/// the proxy's revision and the endpoint it egresses through. A restarted
+/// tunnel front changes the endpoint even when the settings did not.
+fn egress_key(proxy_config: Option<&ProxyConfig>) -> AppResult<String> {
+    let Some(proxy) = proxy_config.filter(|proxy| !proxy.is_challenge_solver()) else {
+        return Ok("direct".to_string());
+    };
+    let endpoint =
+        scryer_application::transport_proxy::proxy_egress_url(proxy).map_err(|message| {
+            scryer_application::transport_proxy::record_transport_proxy_failure(proxy, &message);
+            AppError::Validation(message)
+        })?;
+    Ok(format!(
+        "{}|{endpoint}",
+        scryer_application::transport_proxy::transport_proxy_revision(proxy)
+    ))
+}
+
 /// A proxy that carries traffic gets a proxied client; otherwise every hop
 /// is checked and pinned by the direct egress path.
 ///
@@ -207,10 +307,11 @@ fn egress_for(proxy_config: Option<&ProxyConfig>) -> AppResult<Egress> {
     let Some(proxy) = proxy_config.filter(|proxy| !proxy.is_challenge_solver()) else {
         return Ok(Egress::Direct);
     };
-    scryer_application::transport_proxy::transport_proxied_reqwest_client_with_redirect_policy(
+    scryer_application::transport_proxy::transport_proxied_reqwest_client_with_options(
         proxy,
         "",
         reqwest::redirect::Policy::none(),
+        false,
     )
     .map(Egress::Proxied)
     .map_err(|message| {
@@ -363,6 +464,7 @@ impl DownloadClient for HttpDownloadClient {
                     complete: false,
                     language: file.language,
                     forbidden_answers: 0,
+                    skipped_error: None,
                 })
                 .collect(),
             state: HttpJobState::Queued,
@@ -378,6 +480,9 @@ impl DownloadClient for HttpDownloadClient {
             forbidden_requests: 0,
             refused_variants: Vec::new(),
             geo_restricted,
+            subtitle_required: source.selected.subtitle_mode
+                == scryer_plugin_sdk::HttpSubtitleMode::SidecarRequired,
+            progress_revision: 0,
         };
         self.engine.add_job(job).await?;
         if geo_restricted {
@@ -410,12 +515,7 @@ impl DownloadClient for HttpDownloadClient {
         locator: &ClientJobLocator,
         _history_offset: usize,
     ) -> AppResult<DownloadClientObservation> {
-        let found = self
-            .engine
-            .jobs()
-            .await?
-            .into_iter()
-            .find(|(job, _)| job.id == locator.item_id);
+        let found = self.engine.job_with_live(&locator.item_id).await?;
         Ok(match found {
             Some((job, live)) => {
                 DownloadClientObservation::Present(Box::new(self.queue_item(&job, live)))
@@ -427,10 +527,9 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_queue(&self) -> AppResult<Vec<DownloadQueueItem>> {
         Ok(self
             .engine
-            .jobs()
+            .jobs_where(|job| !job.state.is_terminal())
             .await?
             .into_iter()
-            .filter(|(job, _)| !job.state.is_terminal())
             .map(|(job, live)| self.queue_item(&job, live))
             .collect())
     }
@@ -444,11 +543,10 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_history(&self) -> AppResult<Vec<DownloadQueueItem>> {
         let mut jobs: Vec<HttpJob> = self
             .engine
-            .jobs()
+            .jobs_where(|job| job.state.is_terminal())
             .await?
             .into_iter()
             .map(|(job, _)| job)
-            .filter(|job| job.state.is_terminal())
             .collect();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
         Ok(jobs.iter().map(|job| self.queue_item(job, None)).collect())
@@ -457,11 +555,10 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
         let mut jobs: Vec<HttpJob> = self
             .engine
-            .jobs()
+            .jobs_where(|job| job.state == HttpJobState::Completed)
             .await?
             .into_iter()
             .map(|(job, _)| job)
-            .filter(|job| job.state == HttpJobState::Completed)
             .collect();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.completed_at));
         Ok(jobs.iter().filter_map(job_to_completed_download).collect())

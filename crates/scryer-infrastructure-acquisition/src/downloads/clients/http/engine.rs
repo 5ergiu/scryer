@@ -2,16 +2,17 @@
 //! the bounded scheduler, and the workers that transfer each job.
 //!
 //! The queue document on disk is the record. Every state change is written
-//! there before it is reported, workers checkpoint progress only after the
-//! bytes are flushed, and a restart (or a configuration change) reloads the
-//! document and picks up whatever was queued or in flight.
+//! there before it is reported; byte progress goes to the job's own progress
+//! file, written only after the bytes are synced. A restart (or a
+//! configuration change) reloads both and picks up whatever was queued or in
+//! flight.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -24,12 +25,13 @@ use tracing::{info, warn};
 
 use super::selection::media_final_path;
 use super::state::{
-    HttpFileRole, HttpJob, HttpJobFile, HttpJobState, HttpQueueDocument, HttpStateStore,
-    RefusedVariant,
+    HttpFileRole, HttpJob, HttpJobFile, HttpJobProgress, HttpJobState, HttpQueueDocument,
+    HttpStateStore, RefusedVariant,
 };
 use super::transfer::{
-    BandwidthLimiter, Checkpoint, Egress, MediaCheck, MediaProbe, NativeMediaProbe,
-    TransferContext, TransferError, transfer_file,
+    BandwidthLimiter, CHECKPOINT_BYTES, CHECKPOINT_INTERVAL, Checkpoint, CheckpointCadence, Clock,
+    Egress, MediaCheck, MediaProbe, NativeMediaProbe, TransferContext, TransferError, system_clock,
+    transfer_file,
 };
 
 /// Jobs that may wait or run at once. Submissions past this are refused.
@@ -74,13 +76,34 @@ pub(crate) struct HttpEngine {
     store: HttpStateStore,
     limits: std::sync::Mutex<HttpEngineLimits>,
     egress: std::sync::Mutex<Egress>,
+    /// What the egress was built from; an unchanged key keeps the client and
+    /// its connection pool.
+    egress_key: std::sync::Mutex<String>,
+    #[cfg(test)]
+    egress_builds: AtomicU64,
     limiter: Arc<BandwidthLimiter>,
     backoff_unit: std::sync::Mutex<Duration>,
     media_probe: std::sync::Mutex<Arc<dyn MediaProbe>>,
+    checkpoint_cadence: std::sync::Mutex<CheckpointCadence>,
+    clock: std::sync::Mutex<Clock>,
     inner: Mutex<EngineInner>,
-    save_lock: Mutex<()>,
+    /// Document writes requested so far. A write covers every request made
+    /// before its snapshot was taken.
+    persist_requests: AtomicU64,
+    /// Held by the one writer; holds the request count its last write
+    /// covered.
+    save_lock: Mutex<u64>,
+    #[cfg(test)]
+    document_writes: AtomicU64,
+    #[cfg(test)]
+    progress_writes: AtomicU64,
     started: OnceCell<()>,
-    predecessor: std::sync::Mutex<Option<Arc<HttpEngine>>>,
+    /// Whether the client is enabled. A disabled engine starts no transfer,
+    /// and a running one stops after the file it is on.
+    enabled: AtomicBool,
+    /// The workers of the engine this one replaced, which must stop before
+    /// this one reads the queue they write.
+    predecessor: std::sync::Mutex<Option<TaskTracker>>,
     shutdown: CancellationToken,
     tasks: TaskTracker,
     revision: watch::Sender<u64>,
@@ -92,7 +115,8 @@ impl HttpEngine {
         download_dir: PathBuf,
         limits: HttpEngineLimits,
         egress: Egress,
-        predecessor: Option<Arc<HttpEngine>>,
+        egress_key: String,
+        predecessor: Option<TaskTracker>,
     ) -> Arc<Self> {
         let store = HttpStateStore::for_client(&download_dir, &client_id);
         Arc::new(Self {
@@ -104,11 +128,25 @@ impl HttpEngine {
             ))),
             limits: std::sync::Mutex::new(limits),
             egress: std::sync::Mutex::new(egress),
+            egress_key: std::sync::Mutex::new(egress_key),
+            #[cfg(test)]
+            egress_builds: AtomicU64::new(1),
             backoff_unit: std::sync::Mutex::new(DEFAULT_BACKOFF_UNIT),
             media_probe: std::sync::Mutex::new(Arc::new(NativeMediaProbe)),
+            checkpoint_cadence: std::sync::Mutex::new(CheckpointCadence {
+                bytes: CHECKPOINT_BYTES,
+                interval: CHECKPOINT_INTERVAL,
+            }),
+            clock: std::sync::Mutex::new(system_clock()),
             inner: Mutex::new(EngineInner::default()),
-            save_lock: Mutex::new(()),
+            persist_requests: AtomicU64::new(0),
+            save_lock: Mutex::new(0),
+            #[cfg(test)]
+            document_writes: AtomicU64::new(0),
+            #[cfg(test)]
+            progress_writes: AtomicU64::new(0),
             started: OnceCell::new(),
+            enabled: AtomicBool::new(true),
             predecessor: std::sync::Mutex::new(predecessor),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
@@ -116,12 +154,30 @@ impl HttpEngine {
         })
     }
 
-    /// Apply new limits and egress to transfers that start from now on.
-    pub(crate) fn reconfigure(&self, limits: HttpEngineLimits, egress: Egress) {
+    /// Apply new limits to transfers that start from now on.
+    pub(crate) fn set_limits(&self, limits: HttpEngineLimits) {
         *self.limits.lock().unwrap_or_else(|p| p.into_inner()) = limits;
-        *self.egress.lock().unwrap_or_else(|p| p.into_inner()) = egress;
         self.limiter
             .set_rate(bytes_per_second(limits.bandwidth_limit_kbps));
+    }
+
+    /// Whether the egress in use was built from `key`.
+    pub(crate) fn has_egress_key(&self, key: &str) -> bool {
+        *self.egress_key.lock().unwrap_or_else(|p| p.into_inner()) == key
+    }
+
+    /// Replace the egress for transfers that start from now on.
+    pub(crate) fn set_egress(&self, egress: Egress, key: String) {
+        *self.egress.lock().unwrap_or_else(|p| p.into_inner()) = egress;
+        *self.egress_key.lock().unwrap_or_else(|p| p.into_inner()) = key;
+        #[cfg(test)]
+        self.egress_builds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Egress clients built for this engine, including its first.
+    #[cfg(test)]
+    pub(crate) fn egress_builds(&self) -> u64 {
+        self.egress_builds.load(Ordering::Relaxed)
     }
 
     fn limits(&self) -> HttpEngineLimits {
@@ -156,6 +212,45 @@ impl HttpEngine {
         *self.media_probe.lock().unwrap_or_else(|p| p.into_inner()) = probe;
     }
 
+    fn checkpoint_cadence(&self) -> CheckpointCadence {
+        *self
+            .checkpoint_cadence
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Checkpoint after fewer bytes, so tests see several checkpoints in a
+    /// small body.
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_cadence(&self, bytes: u64, interval: Duration) {
+        *self
+            .checkpoint_cadence
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = CheckpointCadence { bytes, interval };
+    }
+
+    fn clock(&self) -> Clock {
+        Arc::clone(&self.clock.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Replace the clock that decides whether a resource URL has expired.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&self, clock: Clock) {
+        *self.clock.lock().unwrap_or_else(|p| p.into_inner()) = clock;
+    }
+
+    /// Queue documents written since the engine started.
+    #[cfg(test)]
+    pub(crate) fn document_writes(&self) -> u64 {
+        self.document_writes.load(Ordering::Relaxed)
+    }
+
+    /// Progress files written since the engine started.
+    #[cfg(test)]
+    pub(crate) fn progress_writes(&self) -> u64 {
+        self.progress_writes.load(Ordering::Relaxed)
+    }
+
     /// Stop scheduling and ask every worker to checkpoint and stop. Their
     /// jobs stay recorded as they were, for the successor to resume.
     pub(crate) fn begin_shutdown(&self) {
@@ -163,8 +258,33 @@ impl HttpEngine {
         self.tasks.close();
     }
 
-    async fn wait_stopped(&self) {
-        self.tasks.wait().await;
+    /// The engine's workers, for a successor to wait on.
+    pub(crate) fn workers(&self) -> TaskTracker {
+        self.tasks.clone()
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// Enable or disable the client. Disabling starts no new transfer and
+    /// lets a running one finish its current file before the job goes back
+    /// to the queue. Enabling schedules the queue again.
+    pub(crate) fn set_enabled(self: &Arc<Self>, enabled: bool) {
+        let was = self.enabled.swap(enabled, Ordering::AcqRel);
+        if enabled
+            && !was
+            && !self.shutdown.is_cancelled()
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let engine = Arc::clone(self);
+            self.tasks.spawn(async move { engine.schedule().await });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shutdown.is_cancelled()
     }
 
     /// A receiver that changes whenever the queue document does.
@@ -189,11 +309,21 @@ impl HttpEngine {
                     .unwrap_or_else(|p| p.into_inner())
                     .take();
                 if let Some(predecessor) = predecessor {
-                    predecessor.wait_stopped().await;
+                    predecessor.wait().await;
                 }
                 let mut document = self.store.load().await?;
                 let mut changed = false;
                 for job in &mut document.jobs {
+                    if job.state.is_terminal() {
+                        continue;
+                    }
+                    // Checkpoints after the document's last write live in
+                    // the job's progress file.
+                    if let Some(progress) = self.store.load_progress(&job.id).await
+                        && progress.apply_if_newer(job)
+                    {
+                        changed = true;
+                    }
                     // Nothing runs before this point, so a job recorded as
                     // downloading was interrupted and goes back to the queue.
                     if job.state == HttpJobState::Downloading {
@@ -212,12 +342,26 @@ impl HttpEngine {
         Ok(())
     }
 
-    /// Write the current document. Serialized so the last write holds the
-    /// newest state.
+    /// Write the current document.
+    ///
+    /// One writer at a time, and a write covers every request made before it
+    /// took its snapshot: callers change the document first and request the
+    /// write after, so a burst of requests waiting behind one write is served
+    /// by the next single write of the newest state.
     async fn persist(&self) -> AppResult<()> {
-        let _guard = self.save_lock.lock().await;
+        let requested = self.persist_requests.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut covered = self.save_lock.lock().await;
+        if *covered >= requested {
+            return Ok(());
+        }
+        let covers = self.persist_requests.load(Ordering::Acquire);
+        // Copy under the lock, serialize and write after releasing it.
         let snapshot = self.inner.lock().await.document.clone();
         self.store.save(&snapshot).await?;
+        drop(snapshot);
+        *covered = covers;
+        #[cfg(test)]
+        self.document_writes.fetch_add(1, Ordering::Relaxed);
         self.revision.send_modify(|revision| *revision += 1);
         Ok(())
     }
@@ -252,20 +396,35 @@ impl HttpEngine {
         Ok(())
     }
 
-    pub(crate) async fn jobs(self: &Arc<Self>) -> AppResult<Vec<(HttpJob, Option<LiveSnapshot>)>> {
+    /// One job and, while it runs, its live progress. Only that job is cloned.
+    pub(crate) async fn job_with_live(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> AppResult<Option<(HttpJob, Option<LiveSnapshot>)>> {
         self.ensure_started().await?;
         let inner = self.inner.lock().await;
         Ok(inner
             .document
             .jobs
             .iter()
-            .map(|job| {
-                let live = inner
-                    .running
-                    .get(&job.id)
-                    .map(|running| LiveSnapshot::of(job, &running.live));
-                (job.clone(), live)
-            })
+            .find(|job| job.id == id)
+            .map(|job| (job.clone(), live_of(&inner, job))))
+    }
+
+    /// The jobs `matches` accepts, with live progress for those running.
+    /// Jobs it rejects are never cloned.
+    pub(crate) async fn jobs_where(
+        self: &Arc<Self>,
+        matches: impl Fn(&HttpJob) -> bool,
+    ) -> AppResult<Vec<(HttpJob, Option<LiveSnapshot>)>> {
+        self.ensure_started().await?;
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .document
+            .jobs
+            .iter()
+            .filter(|job| matches(job))
+            .map(|job| (job.clone(), live_of(&inner, job)))
             .collect())
     }
 
@@ -365,7 +524,7 @@ impl HttpEngine {
     }
 
     async fn schedule_inner(self: &Arc<Self>) {
-        if self.shutdown.is_cancelled() || self.started.get().is_none() {
+        if self.shutdown.is_cancelled() || self.started.get().is_none() || !self.is_enabled() {
             return;
         }
         let limits = self.limits();
@@ -455,6 +614,11 @@ impl HttpEngine {
                             job.error = Some(message);
                         }
                     }
+                    if job.state.is_terminal() {
+                        // Never tried again; only the refusals stay, for the
+                        // record.
+                        job.media_fallbacks = Vec::new();
+                    }
                     job.updated_at = Utc::now();
                     true
                 }
@@ -475,7 +639,7 @@ impl HttpEngine {
         cancel: &CancellationToken,
         live: &Arc<LiveProgress>,
     ) -> Result<(), TransferError> {
-        let file_count = {
+        let (file_count, output_dir) = {
             let inner = self.inner.lock().await;
             let job = inner
                 .document
@@ -483,19 +647,21 @@ impl HttpEngine {
                 .iter()
                 .find(|job| job.id == id)
                 .ok_or(TransferError::Cancelled)?;
-            tokio::fs::create_dir_all(&job.output_dir)
-                .await
-                .map_err(|error| {
-                    TransferError::Permanent(format!(
-                        "could not create {}: {error}",
-                        job.output_dir.display()
-                    ))
-                })?;
-            job.files.len()
+            (job.files.len(), job.output_dir.clone())
         };
+        // A slow or hung filesystem must not hold every other caller of the
+        // engine behind the lock.
+        tokio::fs::create_dir_all(&output_dir)
+            .await
+            .map_err(|error| {
+                TransferError::Permanent(format!(
+                    "could not create {}: {error}",
+                    output_dir.display()
+                ))
+            })?;
         let mut index = 0;
         while index < file_count {
-            let (mut file, expected_duration_seconds, verify) = {
+            let (mut file, expected_duration_seconds, verify, subtitle_required) = {
                 let inner = self.inner.lock().await;
                 let job = inner
                     .document
@@ -507,11 +673,18 @@ impl HttpEngine {
                     job.files[index].clone(),
                     job.expected_duration_seconds,
                     job.verify.clone(),
+                    job.subtitle_required,
                 )
             };
-            if file.complete {
+            if file.complete || file.skipped_error.is_some() {
                 index += 1;
                 continue;
+            }
+            if !self.is_enabled() {
+                // Disabled between files: the finished ones stay finished
+                // and the job waits in the queue for the client to return.
+                self.requeue(id).await;
+                return Err(TransferError::Cancelled);
             }
             live.file_index.store(index as u64, Ordering::Relaxed);
             live.current_file_bytes
@@ -529,6 +702,8 @@ impl HttpEngine {
                 live_bytes: &live.current_file_bytes,
                 limiter: Some(self.limiter.as_ref()),
                 backoff_unit: self.backoff_unit(),
+                cadence: self.checkpoint_cadence(),
+                clock: self.clock(),
                 media_check: (file.role == HttpFileRole::Media).then(|| MediaCheck {
                     probe: probe.as_ref(),
                     expected_duration_seconds,
@@ -545,10 +720,64 @@ impl HttpEngine {
                     self.advance_media_candidate(id, index, &error).await?;
                     live.current_file_bytes.store(0, Ordering::Relaxed);
                 }
+                Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+                Err(error) if file.role == HttpFileRole::Subtitle => {
+                    let language = file.language.as_deref().unwrap_or("unlabelled");
+                    if subtitle_required {
+                        return Err(TransferError::Permanent(format!(
+                            "the required {language} subtitle could not be downloaded: {}; the media file is on disk",
+                            error.message()
+                        )));
+                    }
+                    warn!(
+                        item_id = id,
+                        language,
+                        error = error.message().as_str(),
+                        "HTTP download skipping a subtitle it could not fetch"
+                    );
+                    self.skip_file(id, index, error.message()).await?;
+                    index += 1;
+                }
                 Err(error) => return Err(error),
             }
         }
         Ok(())
+    }
+
+    /// Put a job that stopped early back in the queue, unless a control
+    /// operation already moved it elsewhere.
+    async fn requeue(&self, id: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(job) = inner.document.jobs.iter_mut().find(|job| job.id == id)
+            && job.state == HttpJobState::Downloading
+        {
+            job.state = HttpJobState::Queued;
+            job.updated_at = Utc::now();
+            info!(
+                item_id = id,
+                "HTTP download waiting while its client is disabled"
+            );
+        }
+    }
+
+    /// Record that an optional file was given up on, so it is neither tried
+    /// again nor reported as delivered.
+    async fn skip_file(&self, id: &str, index: usize, reason: String) -> Result<(), TransferError> {
+        {
+            let mut inner = self.inner.lock().await;
+            let job = inner
+                .document
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or(TransferError::Cancelled)?;
+            job.files[index].skipped_error = Some(reason);
+            job.progress_revision = job.progress_revision.saturating_add(1);
+            job.updated_at = Utc::now();
+        }
+        self.persist()
+            .await
+            .map_err(|error| TransferError::Permanent(error.to_string()))
     }
 
     /// Give up on the active media resource and switch the job to its next
@@ -596,6 +825,7 @@ impl HttpEngine {
                         complete: false,
                         language: slot.language.clone(),
                         forbidden_answers: 0,
+                        skipped_error: None,
                     };
                     info!(
                         item_id = id,
@@ -614,22 +844,35 @@ impl HttpEngine {
         outcome
     }
 
-    /// Record one file's durable progress.
+    /// Record one file's durable progress: in the job's progress file while
+    /// the file transfers, in the document once the file is finished.
     async fn record_file(&self, job_id: &str, index: usize, file: &HttpJobFile) -> AppResult<()> {
-        {
+        let progress = {
             let mut inner = self.inner.lock().await;
             let Some(job) = inner.document.jobs.iter_mut().find(|job| job.id == job_id) else {
                 // Removed while it ran; nothing left to record against.
                 return Ok(());
             };
+            let finishes = file.complete && job.files.get(index).is_some_and(|slot| !slot.complete);
             if let Some(slot) = job.files.get_mut(index) {
                 *slot = file.clone();
             }
+            job.progress_revision = job.progress_revision.saturating_add(1);
             job.updated_at = Utc::now();
-        }
-        // A successor loads the document only after every worker here has
+            (!finishes).then(|| HttpJobProgress::of(job))
+        };
+        // A successor loads the queue only after every worker here has
         // stopped, so a final checkpoint during shutdown still belongs here.
-        self.persist().await
+        match progress {
+            Some(progress) => {
+                self.store.save_progress(job_id, &progress).await?;
+                #[cfg(test)]
+                self.progress_writes.fetch_add(1, Ordering::Relaxed);
+                self.revision.send_modify(|revision| *revision += 1);
+                Ok(())
+            }
+            None => self.persist().await,
+        }
     }
 
     /// Record a `403 Forbidden` answer against the file and the job.
@@ -706,6 +949,13 @@ impl LiveSnapshot {
             bytes_per_second,
         }
     }
+}
+
+fn live_of(inner: &EngineInner, job: &HttpJob) -> Option<LiveSnapshot> {
+    inner
+        .running
+        .get(&job.id)
+        .map(|running| LiveSnapshot::of(job, &running.live))
 }
 
 fn find_job_mut<'a>(document: &'a mut HttpQueueDocument, id: &str) -> AppResult<&'a mut HttpJob> {

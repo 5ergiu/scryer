@@ -9,6 +9,13 @@
 //! the previous document), so a crash mid-write leaves the last complete
 //! document in place. A document that does not parse is reported, never
 //! overwritten: the client refuses to start rather than forget its jobs.
+//!
+//! The document changes only when a job does: it is added, removed, changes
+//! state, finishes a file or moves to another media candidate. Byte progress
+//! goes to a small file per job under `progress/` instead, so a transfer's
+//! checkpoints never rewrite the whole queue. A progress file carries the
+//! job's progress revision; on load it replaces the document's file fields
+//! only when it is newer than the revision the document recorded.
 
 use std::path::{Path, PathBuf};
 
@@ -89,9 +96,17 @@ pub(crate) struct HttpJobFile {
     /// retry bound holds across pauses and restarts.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub forbidden_answers: u32,
+    /// Why an optional file was given up on. A skipped file is not tried
+    /// again and does not hold the job back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_error: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
@@ -175,6 +190,15 @@ pub(crate) struct HttpJob {
     /// The indexer declared the release geo-restricted.
     #[serde(default, skip_serializing_if = "is_false")]
     pub geo_restricted: bool,
+    /// The selection required subtitle sidecars, so a subtitle that cannot be
+    /// fetched fails the job instead of being skipped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subtitle_required: bool,
+    /// Bumped on every recorded change to the job's files. The progress file
+    /// written with a higher revision than the document's is the newer record
+    /// of those files.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub progress_revision: u64,
 }
 
 impl HttpJob {
@@ -200,7 +224,12 @@ impl HttpJob {
 
     /// The whole job's size when every file's length is known.
     pub(crate) fn known_total_bytes(&self) -> Option<u64> {
-        self.files.iter().try_fold(0u64, |sum, file| {
+        // A skipped file is never delivered, so it is not part of the size.
+        let mut delivered = self
+            .files
+            .iter()
+            .filter(|file| file.skipped_error.is_none());
+        delivered.try_fold(0u64, |sum, file| {
             let size = file.total_bytes.or_else(|| {
                 file.resource
                     .size_bytes
@@ -256,35 +285,93 @@ pub(crate) struct HttpQueueDocument {
     pub jobs: Vec<HttpJob>,
 }
 
+/// The document as written: borrowed, so a save never copies the jobs.
+#[derive(Serialize)]
+struct HttpQueueDocumentRef<'a> {
+    version: u32,
+    jobs: &'a [HttpJob],
+}
+
+/// One job's byte progress, written at the transfer's checkpoint cadence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HttpJobProgress {
+    /// The job's progress revision when this was written.
+    pub revision: u64,
+    /// One entry per job file, in the job's file order.
+    pub files: Vec<HttpFileProgress>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HttpFileProgress {
+    pub attempt: u32,
+    pub bytes_done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator: Option<RecordedValidator>,
+}
+
+impl HttpJobProgress {
+    pub(crate) fn of(job: &HttpJob) -> Self {
+        Self {
+            revision: job.progress_revision,
+            files: job
+                .files
+                .iter()
+                .map(|file| HttpFileProgress {
+                    attempt: file.attempt,
+                    bytes_done: file.bytes_done,
+                    total_bytes: file.total_bytes,
+                    validator: file.validator.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Apply this progress to `job` when it is newer than what the document
+    /// recorded and still describes the same files. Only the byte-progress
+    /// fields change; whether a file is complete stays the document's word.
+    pub(crate) fn apply_if_newer(&self, job: &mut HttpJob) -> bool {
+        if self.revision <= job.progress_revision || self.files.len() != job.files.len() {
+            return false;
+        }
+        for (file, progress) in job.files.iter_mut().zip(&self.files) {
+            if file.complete {
+                continue;
+            }
+            file.attempt = progress.attempt;
+            file.bytes_done = progress.bytes_done;
+            file.total_bytes = progress.total_bytes;
+            file.validator = progress.validator.clone();
+        }
+        job.progress_revision = self.revision;
+        true
+    }
+}
+
 /// Reads and atomically replaces one client's queue document.
 #[derive(Clone, Debug)]
 pub(crate) struct HttpStateStore {
     path: PathBuf,
+    progress_dir: PathBuf,
 }
+
+/// The directory under the state directory that holds per-job progress.
+const PROGRESS_DIR_NAME: &str = "progress";
 
 impl HttpStateStore {
     pub(crate) fn for_client(download_dir: &Path, client_id: &str) -> Self {
-        let safe_id: String = client_id
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .take(96)
-            .collect();
-        let safe_id = if safe_id.is_empty() {
-            "default".to_string()
-        } else {
-            safe_id
-        };
+        let state_dir = download_dir.join(STATE_DIR_NAME);
         Self {
-            path: download_dir
-                .join(STATE_DIR_NAME)
-                .join(format!("queue-{safe_id}.json")),
+            path: state_dir.join(format!("queue-{}.json", safe_file_stem(client_id))),
+            progress_dir: state_dir.join(PROGRESS_DIR_NAME),
         }
+    }
+
+    /// Where a job's byte progress is kept.
+    pub(crate) fn progress_path(&self, job_id: &str) -> PathBuf {
+        self.progress_dir
+            .join(format!("{}.json", safe_file_stem(job_id)))
     }
 
     #[cfg(test)]
@@ -373,17 +460,21 @@ impl HttpStateStore {
                 parent.display()
             ))
         })?;
-        let mut document = document.clone();
-        document.version = STATE_FORMAT_VERSION;
-        let bytes = serde_json::to_vec_pretty(&document)
-            .map_err(|error| AppError::Repository(error.to_string()))?;
+        let bytes = serde_json::to_vec(&HttpQueueDocumentRef {
+            version: STATE_FORMAT_VERSION,
+            jobs: &document.jobs,
+        })
+        .map_err(|error| AppError::Repository(error.to_string()))?;
         let staging = self.path.with_extension("json.next");
         let write = async {
             let mut file = tokio::fs::File::create(&staging).await?;
             file.write_all(&bytes).await?;
             file.sync_all().await?;
             drop(file);
-            tokio::fs::rename(&staging, &self.path).await
+            tokio::fs::rename(&staging, &self.path).await?;
+            // The rename lives in the directory; without this a crash right
+            // after it could bring the previous document back.
+            sync_directory(parent).await
         };
         write.await.map_err(|error| {
             AppError::Repository(format!(
@@ -393,9 +484,90 @@ impl HttpStateStore {
         })
     }
 
+    /// Replace one job's progress file. Only the data is synced: losing the
+    /// newest progress to a crash only means resuming from an earlier offset
+    /// the partial file still holds.
+    pub(crate) async fn save_progress(
+        &self,
+        job_id: &str,
+        progress: &HttpJobProgress,
+    ) -> AppResult<()> {
+        let path = self.progress_path(job_id);
+        let bytes = serde_json::to_vec(progress)
+            .map_err(|error| AppError::Repository(error.to_string()))?;
+        let staging = path.with_extension("json.next");
+        let write = async {
+            tokio::fs::create_dir_all(&self.progress_dir).await?;
+            let mut file = tokio::fs::File::create(&staging).await?;
+            file.write_all(&bytes).await?;
+            file.sync_data().await?;
+            drop(file);
+            tokio::fs::rename(&staging, &path).await
+        };
+        write.await.map_err(|error| {
+            AppError::Repository(format!(
+                "the HTTP downloader could not record progress at {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    /// A job's progress file, when one was written and can be read. An
+    /// unreadable one is ignored: the document's own offsets still hold.
+    pub(crate) async fn load_progress(&self, job_id: &str) -> Option<HttpJobProgress> {
+        let path = self.progress_path(job_id);
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "HTTP downloader could not read a progress file");
+                return None;
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(progress) => Some(progress),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "HTTP downloader ignored an unreadable progress file");
+                None
+            }
+        }
+    }
+
     fn state_dir(&self) -> AppResult<&Path> {
         self.path.parent().ok_or_else(|| {
             AppError::Repository("the HTTP downloader state path has no parent".into())
         })
     }
+}
+
+/// A file-name stem that cannot leave its directory.
+fn safe_file_stem(raw: &str) -> String {
+    let safe: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    if safe.is_empty() {
+        "default".to_string()
+    } else {
+        safe
+    }
+}
+
+#[cfg(unix)]
+async fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    tokio::fs::File::open(dir).await?.sync_all().await
+}
+
+/// Windows cannot open a directory as a file; its renames are not made
+/// durable this way.
+#[cfg(not(unix))]
+async fn sync_directory(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
