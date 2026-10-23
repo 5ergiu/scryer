@@ -2199,3 +2199,101 @@ async fn a_refusal_after_the_url_expired_fails_without_retry_or_fallback() {
     assert_eq!(done.files[0].forbidden_answers, 0);
     assert!(done.refused_variants.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// indexer checksums
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
+}
+
+async fn checksum_job(
+    checksum: String,
+) -> (tempfile::TempDir, HttpDownloadClient, MockServer, HttpJob) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let mut media = muxed(&format!("{}/media/clip.mp4", server.uri()), 720);
+    media.validators.checksum = Some(checksum);
+    let grab = client
+        .submit_download(&request(source(vec![media])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    (dir, client, server, done)
+}
+
+#[test]
+fn checksums_are_read_in_their_common_spellings() {
+    use super::transfer::{ChecksumAlgorithm, ExpectedChecksum};
+    let sha256 = sha256_hex(BODY);
+    let parsed = |raw: &str| ExpectedChecksum::parse(raw).map(|expected| expected.algorithm);
+    assert_eq!(
+        parsed(&format!("sha256:{sha256}")),
+        Some(ChecksumAlgorithm::Sha256)
+    );
+    assert_eq!(
+        parsed(&format!("SHA-256:{}", sha256.to_uppercase())),
+        Some(ChecksumAlgorithm::Sha256)
+    );
+    assert_eq!(parsed(&sha256), Some(ChecksumAlgorithm::Sha256));
+    assert_eq!(
+        parsed("md5:0123456789abcdef0123456789abcdef"),
+        Some(ChecksumAlgorithm::Md5)
+    );
+    assert_eq!(
+        parsed("sha1:0123456789abcdef0123456789abcdef01234567"),
+        Some(ChecksumAlgorithm::Sha1)
+    );
+    // Wrong length for the algorithm, unknown algorithm, not hex, bare
+    // digests other than SHA-256.
+    assert_eq!(parsed("md5:0123"), None);
+    assert_eq!(parsed(&format!("crc32:{sha256}")), None);
+    assert_eq!(parsed(&format!("sha256:{}", "zz".repeat(32))), None);
+    assert_eq!(parsed("0123456789abcdef0123456789abcdef"), None);
+}
+
+#[tokio::test]
+async fn a_matching_sha256_checksum_completes() {
+    let (_dir, _client, _server, done) = checksum_job(format!("sha256:{}", sha256_hex(BODY))).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn a_matching_md5_checksum_completes() {
+    use md5::Digest as _;
+    let md5 = hex(&md5::Md5::digest(BODY));
+    let (_dir, _client, _server, done) = checksum_job(format!("md5:{md5}")).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+}
+
+#[tokio::test]
+async fn a_checksum_mismatch_fails_and_leaves_the_partial() {
+    let wrong = sha256_hex(b"synthetic-other-payload");
+    let (_dir, _client, _server, done) = checksum_job(wrong.clone()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    let error = done.error.unwrap_or_default();
+    assert_eq!(
+        error,
+        "the download does not match the indexer's SHA-256 checksum"
+    );
+    assert!(!error.contains(&wrong));
+    let part = done.files[0].part_path();
+    assert_eq!(std::fs::read(&part).unwrap(), BODY);
+    assert!(!done.files[0].final_path.exists());
+}

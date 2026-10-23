@@ -1146,6 +1146,31 @@ async fn finish_file(
     let on_disk = existing_len(&part_path).await?;
     let total = file.total_bytes.unwrap_or(file.bytes_done);
     check_final_size(on_disk, total, &file.resource)?;
+    if let Some(expected) = file
+        .resource
+        .validators
+        .checksum
+        .as_deref()
+        .and_then(|raw| {
+            let parsed = ExpectedChecksum::parse(raw);
+            if parsed.is_none() {
+                warn!(
+                    checksum = raw,
+                    "HTTP download checksum is in a form this client does not read; it was not checked"
+                );
+            }
+            parsed
+        })
+    {
+        let actual = hash_file(context, &part_path, expected.algorithm).await?;
+        if actual != expected.digest {
+            // The partial stays where it is, under its partial name.
+            return Err(TransferError::Permanent(format!(
+                "the download does not match the indexer's {} checksum",
+                expected.algorithm.label()
+            )));
+        }
+    }
     // Checked under the partial's name, so a file that fails never appears
     // under its final one.
     if let Some(check) = &context.media_check {
@@ -1172,6 +1197,124 @@ async fn finish_file(
     file.bytes_done = total;
     file.complete = true;
     record(context, file).await
+}
+
+/// A digest algorithm an indexer may state a checksum in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChecksumAlgorithm {
+    Sha256,
+    Sha1,
+    Md5,
+}
+
+impl ChecksumAlgorithm {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SHA-256",
+            Self::Sha1 => "SHA-1",
+            Self::Md5 => "MD5",
+        }
+    }
+
+    fn digest_len(self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Sha1 => 20,
+            Self::Md5 => 16,
+        }
+    }
+}
+
+/// The checksum an indexer stated for a resource.
+///
+/// The SDK leaves the format open, so this reads the common spellings:
+/// `sha256:<hex>`, `sha1:<hex>`, `md5:<hex>` (prefix case-insensitive, with or
+/// without a hyphen such as `sha-256`), and a bare 64-digit hex string as
+/// SHA-256. Anything else is not checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExpectedChecksum {
+    pub algorithm: ChecksumAlgorithm,
+    pub digest: Vec<u8>,
+}
+
+impl ExpectedChecksum {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        let (algorithm, hex) = match raw.split_once(':') {
+            Some((prefix, hex)) => {
+                let algorithm = match prefix.trim().to_ascii_lowercase().replace('-', "").as_str() {
+                    "sha256" => ChecksumAlgorithm::Sha256,
+                    "sha1" => ChecksumAlgorithm::Sha1,
+                    "md5" => ChecksumAlgorithm::Md5,
+                    _ => return None,
+                };
+                (algorithm, hex.trim())
+            }
+            None if raw.len() == 64 => (ChecksumAlgorithm::Sha256, raw),
+            None => return None,
+        };
+        let digest = decode_hex(hex)?;
+        (digest.len() == algorithm.digest_len()).then_some(Self { algorithm, digest })
+    }
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digit = |byte: u8| (byte as char).to_digit(16);
+            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
+        })
+        .collect()
+}
+
+/// Hash a file without holding it in memory.
+async fn hash_file(
+    context: &TransferContext<'_>,
+    path: &Path,
+    algorithm: ChecksumAlgorithm,
+) -> Result<Vec<u8>, TransferError> {
+    use md5::Digest as _;
+    use tokio::io::AsyncReadExt;
+
+    enum Hasher {
+        Lc(aws_lc_rs::digest::Context),
+        Md5(md5::Md5),
+    }
+    let mut hasher = match algorithm {
+        ChecksumAlgorithm::Sha256 => {
+            Hasher::Lc(aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256))
+        }
+        ChecksumAlgorithm::Sha1 => Hasher::Lc(aws_lc_rs::digest::Context::new(
+            &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        )),
+        ChecksumAlgorithm::Md5 => Hasher::Md5(md5::Md5::new()),
+    };
+    let read_error = |error: std::io::Error| {
+        TransferError::Permanent(format!("could not read {}: {error}", path.display()))
+    };
+    let mut input = tokio::fs::File::open(path).await.map_err(read_error)?;
+    let mut buffer = vec![0u8; WRITE_BUFFER_BYTES];
+    loop {
+        if context.cancel.is_cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let read = input.read(&mut buffer).await.map_err(read_error)?;
+        if read == 0 {
+            break;
+        }
+        match &mut hasher {
+            Hasher::Lc(context) => context.update(&buffer[..read]),
+            Hasher::Md5(md5) => md5.update(&buffer[..read]),
+        }
+    }
+    Ok(match hasher {
+        Hasher::Lc(context) => context.finish().as_ref().to_vec(),
+        Hasher::Md5(md5) => md5.finalize().to_vec(),
+    })
 }
 
 /// The finished size must be what the transfer announced and, when the
