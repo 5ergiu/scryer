@@ -325,20 +325,35 @@ impl HttpEngine {
         Ok(())
     }
 
-    pub(crate) async fn jobs(self: &Arc<Self>) -> AppResult<Vec<(HttpJob, Option<LiveSnapshot>)>> {
+    /// One job and, while it runs, its live progress. Only that job is cloned.
+    pub(crate) async fn job_with_live(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> AppResult<Option<(HttpJob, Option<LiveSnapshot>)>> {
         self.ensure_started().await?;
         let inner = self.inner.lock().await;
         Ok(inner
             .document
             .jobs
             .iter()
-            .map(|job| {
-                let live = inner
-                    .running
-                    .get(&job.id)
-                    .map(|running| LiveSnapshot::of(job, &running.live));
-                (job.clone(), live)
-            })
+            .find(|job| job.id == id)
+            .map(|job| (job.clone(), live_of(&inner, job))))
+    }
+
+    /// The jobs `matches` accepts, with live progress for those running.
+    /// Jobs it rejects are never cloned.
+    pub(crate) async fn jobs_where(
+        self: &Arc<Self>,
+        matches: impl Fn(&HttpJob) -> bool,
+    ) -> AppResult<Vec<(HttpJob, Option<LiveSnapshot>)>> {
+        self.ensure_started().await?;
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .document
+            .jobs
+            .iter()
+            .filter(|job| matches(job))
+            .map(|job| (job.clone(), live_of(&inner, job)))
             .collect())
     }
 
@@ -838,6 +853,13 @@ impl LiveSnapshot {
             bytes_per_second,
         }
     }
+}
+
+fn live_of(inner: &EngineInner, job: &HttpJob) -> Option<LiveSnapshot> {
+    inner
+        .running
+        .get(&job.id)
+        .map(|running| LiveSnapshot::of(job, &running.live))
 }
 
 fn find_job_mut<'a>(document: &'a mut HttpQueueDocument, id: &str) -> AppResult<&'a mut HttpJob> {

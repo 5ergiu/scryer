@@ -414,12 +414,7 @@ impl DownloadClient for HttpDownloadClient {
         locator: &ClientJobLocator,
         _history_offset: usize,
     ) -> AppResult<DownloadClientObservation> {
-        let found = self
-            .engine
-            .jobs()
-            .await?
-            .into_iter()
-            .find(|(job, _)| job.id == locator.item_id);
+        let found = self.engine.job_with_live(&locator.item_id).await?;
         Ok(match found {
             Some((job, live)) => {
                 DownloadClientObservation::Present(Box::new(self.queue_item(&job, live)))
@@ -431,10 +426,9 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_queue(&self) -> AppResult<Vec<DownloadQueueItem>> {
         Ok(self
             .engine
-            .jobs()
+            .jobs_where(|job| !job.state.is_terminal())
             .await?
             .into_iter()
-            .filter(|(job, _)| !job.state.is_terminal())
             .map(|(job, live)| self.queue_item(&job, live))
             .collect())
     }
@@ -448,11 +442,10 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_history(&self) -> AppResult<Vec<DownloadQueueItem>> {
         let mut jobs: Vec<HttpJob> = self
             .engine
-            .jobs()
+            .jobs_where(|job| job.state.is_terminal())
             .await?
             .into_iter()
             .map(|(job, _)| job)
-            .filter(|job| job.state.is_terminal())
             .collect();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
         Ok(jobs.iter().map(|job| self.queue_item(job, None)).collect())
@@ -461,11 +454,10 @@ impl DownloadClient for HttpDownloadClient {
     async fn list_completed_downloads(&self) -> AppResult<Vec<CompletedDownload>> {
         let mut jobs: Vec<HttpJob> = self
             .engine
-            .jobs()
+            .jobs_where(|job| job.state == HttpJobState::Completed)
             .await?
             .into_iter()
             .map(|(job, _)| job)
-            .filter(|job| job.state == HttpJobState::Completed)
             .collect();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.completed_at));
         Ok(jobs.iter().filter_map(job_to_completed_download).collect())

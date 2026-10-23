@@ -1822,21 +1822,18 @@ async fn buffered_bytes_show_live_but_are_recorded_only_after_a_sync() {
     let engine = Arc::clone(client.engine());
     let live = tokio::time::timeout(WAIT_BOUND, async {
         loop {
-            let listed = engine.jobs().await.unwrap();
-            if let Some((_, Some(live))) = listed.iter().find(|(job, _)| job.id == grab.job_id)
+            let listed = engine.job_with_live(&grab.job_id).await.unwrap();
+            if let Some((job, Some(live))) = listed
                 && live.bytes_done == split as u64
             {
-                return listed;
+                return job;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("the first piece shows as live progress");
-    let (job, _) = live
-        .into_iter()
-        .find(|(job, _)| job.id == grab.job_id)
-        .unwrap();
+    let job = live;
     // Not yet synced: nothing is recorded and nothing has left the buffer.
     assert_eq!(job.files[0].bytes_done, 0);
     let part = job.files[0].part_path();
