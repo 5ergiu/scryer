@@ -3139,7 +3139,9 @@ pub(crate) fn map_app_error(error: AppError) -> Response {
             )
                 .into_response()
         }
-        AppError::ImportEvidenceUnavailable(message) | AppError::Repository(message) => {
+        AppError::ImportEvidenceUnavailable(message)
+        | AppError::Repository(message)
+        | AppError::RepositoryFailed { message, .. } => {
             let error_id = Id::new().0;
             tracing::error!(
                 error_id = %error_id,

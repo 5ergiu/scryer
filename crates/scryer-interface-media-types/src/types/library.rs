@@ -1161,6 +1161,14 @@ pub struct DeleteTitleInput {
 pub struct DeleteTitlePayload {
     /// Deleted title identity.
     pub id: async_graphql::ID,
+    /// Recycle entries purged during this deletion.
+    pub recycle_purged: i32,
+    /// Recycle entries preserved after revalidation.
+    pub recycle_preserved: i32,
+    /// Recycle entries held by another operation.
+    pub recycle_busy: i32,
+    /// Recycle cleanup failures; catalog deletion still succeeded.
+    pub recycle_failed: i32,
 }
 
 #[derive(InputObject)]

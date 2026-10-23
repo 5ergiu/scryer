@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const zh_CN: LocaleDictionary = {
+  "titleDelete.refusal.selection": "请选择不重复的标题。",
+  "titleDelete.refusal.busy": "删除操作已在进行中。",
+  "titleDelete.refusal.downloadRetry": "使用密码重试的下载正在等待状态核对。请等待完成，或从 Scryer 的「活动 > 导入」视图中移除该下载，然后重试删除标题。",
+  "titleDelete.refusal.preview": "请刷新删除预览并确认。",
+  "titleDelete.refusal.confirmation": "输入 DELETE 以确认删除。",
+  "titleDelete.refusal.boundary": "标题文件夹必须位于媒体库根目录内，不能是根目录本身。",
+  "titleDelete.refusal.ownership": "无法验证文件夹的归属。文件已保留。",
+  "titleDelete.refusal.layout": "无法将此文件夹或其内容作为单个标题安全删除。",
+  "titleDelete.refusal.unavailable": "媒体库根目录不可用。请恢复访问后重新预览。",
+  "titleDelete.refusal.outsideRoots": "文件路径不在任何已配置的媒体库根目录内。请修正媒体库根目录或标题文件夹后重新预览。",
+  "queue.attention.downloadPasswordRetry": "下载密码重试正在等待核对。如果客户端已不再有该任务，请移除此下载。",
+  "titleDelete.refusal.recycle": "标题已删除，但部分回收站条目无法清除。",
+  "titleDelete.refusal.retry": "目录清理失败。请获取新的预览后再重试。",
   "settings.downloadClientHttpDownloadDir": "下载文件夹",
   "settings.downloadClientHttpDownloadDirHelp": "完成的文件及其部分文件的写入位置（Scryer 看到的路径）。此下载器的队列保存在其中的 .scryer-http 文件夹里。",
   "settings.downloadClientHttpMaxConcurrentDownloads": "同时下载数",

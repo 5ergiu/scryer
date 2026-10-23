@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const ru: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Выберите названия без повторов.",
+  "titleDelete.refusal.busy": "Удаление уже выполняется.",
+  "titleDelete.refusal.downloadRetry": "Повторная загрузка с паролем ожидает проверки состояния. Дождитесь её завершения или удалите загрузку в Scryer в разделе «Активность > Импорт», затем повторите удаление названия.",
+  "titleDelete.refusal.preview": "Обновите и подтвердите предварительный просмотр удаления.",
+  "titleDelete.refusal.confirmation": "Введите DELETE для подтверждения удаления.",
+  "titleDelete.refusal.boundary": "Папка названия должна находиться внутри корня библиотеки, а не быть самим корнем.",
+  "titleDelete.refusal.ownership": "Не удалось проверить принадлежность папки. Файлы сохранены.",
+  "titleDelete.refusal.layout": "Папку или её содержимое нельзя безопасно удалить как одно название.",
+  "titleDelete.refusal.unavailable": "Корень библиотеки недоступен. Восстановите доступ и обновите предварительный просмотр.",
+  "titleDelete.refusal.outsideRoots": "Путь к файлу находится вне всех настроенных корней библиотеки. Исправьте корни библиотеки или папку тайтла и обновите предварительный просмотр.",
+  "queue.attention.downloadPasswordRetry": "Повторная попытка ввода пароля для загрузки ожидает сверки. Удалите эту загрузку, если в клиенте больше нет задания.",
+  "titleDelete.refusal.recycle": "Название удалено, но некоторые записи корзины не удалось очистить.",
+  "titleDelete.refusal.retry": "Очистка каталога не удалась. Получите новый предварительный просмотр перед повтором.",
   "settings.downloadClientHttpDownloadDir": "Папка загрузок",
   "settings.downloadClientHttpDownloadDirHelp": "Куда записываются готовые файлы и их части (путь, как его видит Scryer). Очередь этого загрузчика хранится во вложенной папке .scryer-http.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Одновременные загрузки",

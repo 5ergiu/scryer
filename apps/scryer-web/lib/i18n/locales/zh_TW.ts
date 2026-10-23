@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const zh_TW: LocaleDictionary = {
+  "titleDelete.refusal.selection": "請選取不重複的作品。",
+  "titleDelete.refusal.busy": "刪除作業已在進行中。",
+  "titleDelete.refusal.downloadRetry": "使用密碼重試的下載正在等待狀態確認。請等待完成，或從 Scryer 的「活動 > 匯入」畫面移除該下載，然後再試一次刪除作品。",
+  "titleDelete.refusal.preview": "請重新整理刪除預覽並確認。",
+  "titleDelete.refusal.confirmation": "輸入 DELETE 以確認刪除。",
+  "titleDelete.refusal.boundary": "作品資料夾必須位於媒體庫根目錄內，不能是根目錄本身。",
+  "titleDelete.refusal.ownership": "無法確認資料夾的歸屬。檔案已保留。",
+  "titleDelete.refusal.layout": "無法將此資料夾或其內容視為單一作品安全刪除。",
+  "titleDelete.refusal.unavailable": "媒體庫根目錄無法使用。請恢復存取後重新預覽。",
+  "titleDelete.refusal.outsideRoots": "檔案路徑不在任何已設定的媒體庫根目錄內。請修正媒體庫根目錄或標題資料夾後重新預覽。",
+  "queue.attention.downloadPasswordRetry": "下載密碼重試正在等待核對。如果用戶端已不再有該工作，請移除此下載。",
+  "titleDelete.refusal.recycle": "作品已刪除，但部分資源回收筒項目無法清除。",
+  "titleDelete.refusal.retry": "目錄清理失敗。請取得新的預覽後再試一次。",
   "settings.downloadClientHttpDownloadDir": "下載資料夾",
   "settings.downloadClientHttpDownloadDirHelp": "完成的檔案及其部分檔案的寫入位置（Scryer 看到的路徑）。此下載器的佇列儲存在其中的 .scryer-http 資料夾內。",
   "settings.downloadClientHttpMaxConcurrentDownloads": "同時下載數",

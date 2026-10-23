@@ -603,21 +603,12 @@ pub const RENAME_APPLY_ENTRY: GuardedEntry = GuardedEntry {
     constant: "RENAME_APPLY_ENTRY",
 };
 
-/// Single-title deletion.
+/// Shared per-title execution for explicit single and bulk deletion.
 pub const TITLE_DELETE_ENTRY: GuardedEntry = GuardedEntry {
     action: GuardedAction::TitleDelete,
     module: "catalog/workflow/delete.rs",
-    function: "delete_title",
-    constant: "TITLE_DELETE_ENTRY",
-};
-
-/// The bulk deletion job's per-title work, which does not route through
-/// [`TITLE_DELETE_ENTRY`].
-pub const TITLE_DELETE_JOB_ENTRY: GuardedEntry = GuardedEntry {
-    action: GuardedAction::TitleDelete,
-    module: "catalog/workflow/delete.rs",
     function: "delete_title_job_item",
-    constant: "TITLE_DELETE_JOB_ENTRY",
+    constant: "TITLE_DELETE_ENTRY",
 };
 
 /// Media-file deletion, including the per-item work of the bulk deletion job.
@@ -827,7 +818,6 @@ pub const GUARDED_ENTRIES: &[&GuardedEntry] = &[
     &MANUAL_IMPORT_ENTRY,
     &RENAME_APPLY_ENTRY,
     &TITLE_DELETE_ENTRY,
-    &TITLE_DELETE_JOB_ENTRY,
     &MEDIA_FILE_DELETE_ENTRY,
     &MEDIA_FILE_PRIMARY_ENTRY,
     &LIBRARY_ROOTS_UPDATE_ENTRY,
@@ -999,6 +989,12 @@ impl crate::AppUseCase {
         entry: &'static GuardedEntry,
         title_id: &str,
     ) -> AppResult<tokio::sync::OwnedRwLockReadGuard<()>> {
+        if matches!(entry.action, GuardedAction::Import) && self.title_is_being_deleted(title_id) {
+            return Err(AppError::validation_refused(
+                crate::title_delete::IN_PROGRESS,
+                "title deletion is in progress; import was preserved",
+            ));
+        }
         let guard = self
             .runtime
             .library

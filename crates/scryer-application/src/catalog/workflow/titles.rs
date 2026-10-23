@@ -1664,8 +1664,72 @@ impl AppUseCase {
         title_id: &str,
         actor: DomainEventActor,
     ) -> AppResult<()> {
-        let (download_submissions, submitted_download_ids) =
-            self.title_submissions_to_retire(title_id).await;
+        self.purge_title_dependent_records_with_retirement(title_id, actor, false)
+            .await
+    }
+
+    pub(crate) async fn purge_explicit_title_dependent_records(
+        &self,
+        title_id: &str,
+        actor: DomainEventActor,
+    ) -> AppResult<()> {
+        self.purge_title_dependent_records_with_retirement(title_id, actor, true)
+            .await
+    }
+
+    /// Called under the exclusive title-delete guard before any destructive work.
+    pub(crate) async fn preflight_title_download_retirement(
+        &self,
+        title_id: &str,
+    ) -> AppResult<()> {
+        let (_, ids) = self.explicit_title_submissions_to_retire(title_id).await?;
+        if self
+            .services
+            .workflow
+            .download_registry
+            .bindings_have_password_retry(&ids)
+            .await?
+        {
+            return Err(AppError::validation_refused(
+                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
+                "A download password retry is awaiting reconciliation. Let it settle, or remove the download from the Imports view in Scryer's Activity page, then retry title deletion.",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn explicit_title_submissions_to_retire(
+        &self,
+        title_id: &str,
+    ) -> AppResult<(
+        Vec<crate::DownloadSubmission>,
+        Vec<scryer_domain::download_identity::DownloadId>,
+    )> {
+        let submissions = &self.services.workflow.download_submissions;
+        let download_submissions = submissions.list_for_title(title_id).await?;
+        let unbound = submissions.list_active_unbound_for_title(title_id).await?;
+        let submitted_download_ids = download_submissions
+            .iter()
+            .chain(&unbound)
+            .map(|submission| submission.download_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        Ok((download_submissions, submitted_download_ids))
+    }
+
+    async fn purge_title_dependent_records_with_retirement(
+        &self,
+        title_id: &str,
+        actor: DomainEventActor,
+        explicit: bool,
+    ) -> AppResult<()> {
+        let (download_submissions, submitted_download_ids) = if explicit {
+            self.explicit_title_submissions_to_retire(title_id).await?
+        } else {
+            self.title_submissions_to_retire(title_id).await
+        };
 
         let mut seen_downloads = HashSet::new();
         for submission in download_submissions {
@@ -1697,7 +1761,8 @@ impl AppUseCase {
                 .services
                 .workflow
                 .download_queue_commands
-                .queue_delete_command(
+                .queue_delete_command_for_download(
+                    Some(&submission.download_id),
                     identity.client_id.as_deref(),
                     &identity.client_type,
                     &identity.item_id,
@@ -1722,8 +1787,13 @@ impl AppUseCase {
             }
         }
 
-        self.retire_title_downloads(title_id, submitted_download_ids)
-            .await;
+        if explicit {
+            self.retire_deleted_title_downloads(title_id, submitted_download_ids)
+                .await?;
+        } else {
+            self.retire_title_downloads(title_id, submitted_download_ids)
+                .await;
+        }
 
         self.purge_title_records_after_downloads(title_id).await
     }
@@ -1997,6 +2067,37 @@ impl AppUseCase {
         self.retire_title_downloads(source_title_id, unmoved).await;
     }
 
+    /// Local retirement must succeed before removing the catalog row. Client
+    /// commands and tracker notifications remain independent of this boundary.
+    async fn retire_deleted_title_downloads(
+        &self,
+        title_id: &str,
+        download_ids: Vec<scryer_domain::download_identity::DownloadId>,
+    ) -> AppResult<()> {
+        self.services
+            .workflow
+            .download_registry
+            .end_bindings(&download_ids)
+            .await?;
+        self.runtime
+            .acquisition
+            .invalidate_download_registry_observations();
+        self.services
+            .workflow
+            .download_submissions
+            .abandon_title_download_cleanup(&download_ids)
+            .await?;
+        self.services
+            .workflow
+            .download_submissions
+            .delete_identity_tracked_states_for_downloads(&download_ids)
+            .await?;
+        if let Some(handle) = self.runtime.acquisition.tracked_download_handle.as_ref() {
+            handle.forget_many(vec![title_id.to_owned()], download_ids);
+        }
+        Ok(())
+    }
+
     /// Forget a deleted title's downloads, the way Sonarr drops a series'
     /// history when the series is deleted.
     ///
@@ -2029,12 +2130,7 @@ impl AppUseCase {
                 .end_binding(download_id)
                 .await
             {
-                warn!(
-                    title_id = %title_id,
-                    download_id = %download_id,
-                    error = %err,
-                    "failed to end download binding while deleting title"
-                );
+                warn!(title_id, %download_id, error = %err, "failed to end download binding while retiring merged title");
             }
         }
         for download_id in &download_ids {
@@ -2068,15 +2164,13 @@ impl AppUseCase {
                 .await
             {
                 Ok(removed) => debug!(
-                    title_id = %title_id,
+                    title_id,
                     removed = removed.len(),
-                    "stopped tracking downloads of deleted title"
+                    "stopped tracking downloads of merged title"
                 ),
-                Err(err) => warn!(
-                    title_id = %title_id,
-                    error = %err,
-                    "failed to stop tracking downloads while deleting title"
-                ),
+                Err(err) => {
+                    warn!(title_id, error = %err, "failed to stop tracking downloads while retiring merged title")
+                }
             }
         }
     }

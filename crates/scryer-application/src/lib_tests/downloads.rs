@@ -6,7 +6,7 @@ type DownloadBindingTimes = HashMap<
 >;
 
 #[derive(Default)]
-pub(super) struct RecordingDownloadRegistry {
+pub(crate) struct RecordingDownloadRegistry {
     rows: Arc<Mutex<HashMap<ClientJobLocator, scryer_domain::download_identity::DownloadId>>>,
     binding_times: Arc<Mutex<DownloadBindingTimes>>,
     ended: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
@@ -15,6 +15,9 @@ pub(super) struct RecordingDownloadRegistry {
     failing_bindings: Arc<Mutex<HashSet<ClientJobLocator>>>,
     failing_ends: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
     strict_conflicts: bool,
+    pub(crate) ended_binding_reads: std::sync::atomic::AtomicUsize,
+    pub(crate) fail_ended_binding_reads: std::sync::atomic::AtomicBool,
+    pub(super) password_retry_ids: Mutex<HashSet<scryer_domain::download_identity::DownloadId>>,
     /// Registry transactions the resolver actually entered.
     pub(super) resolutions: Arc<std::sync::atomic::AtomicUsize>,
     /// Batched freshness writes, one entry per `touch_observations` call.
@@ -70,6 +73,16 @@ impl RecordingDownloadRegistry {
         download_id: &scryer_domain::download_identity::DownloadId,
     ) -> bool {
         self.ended.lock().await.contains(download_id)
+    }
+
+    /// End a binding the way explicit queue removal does: the durable
+    /// password-retry fence does not hold it.
+    pub(super) async fn end_binding_ignoring_password_retry(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) {
+        self.password_retry_ids.lock().await.remove(download_id);
+        self.ended.lock().await.insert(*download_id);
     }
 
     async fn fail_binding_lookup(&self, locator: ClientJobLocator) {
@@ -218,10 +231,46 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         }))
     }
 
+    async fn ended_bindings(
+        &self,
+        ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<Vec<scryer_domain::download_identity::DownloadId>> {
+        self.ended_binding_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .fail_ended_binding_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository(
+                "synthetic retirement lookup failure".into(),
+            ));
+        }
+        let ended = self.ended.lock().await;
+        Ok(ids
+            .iter()
+            .filter(|id| ended.contains(id))
+            .copied()
+            .collect())
+    }
+
+    async fn bindings_have_password_retry(
+        &self,
+        ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<bool> {
+        let retries = self.password_retry_ids.lock().await;
+        Ok(ids.iter().any(|id| retries.contains(id)))
+    }
+
     async fn end_binding(
         &self,
         id: &scryer_domain::download_identity::DownloadId,
     ) -> AppResult<()> {
+        if self.password_retry_ids.lock().await.contains(id) {
+            return Err(AppError::validation_refused(
+                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
+                "Synthetic password retry fence preserves the binding.",
+            ));
+        }
         if self.failing_ends.lock().await.contains(id) {
             return Err(AppError::Repository(
                 "injected binding end failure".to_string(),
@@ -12504,8 +12553,11 @@ async fn queue_delete_ends_bound_download_when_client_is_unavailable() {
     let canonical_download_id = scryer_domain::download_identity::DownloadId::new();
     let locator = ClientJobLocator::new(Some("client-bound"), "nzbget", "bound-job");
     registry.bind(locator, canonical_download_id).await;
-    let app =
-        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_download_submissions(Arc::new(TrackingDownloadSubmissionRepo::default()))
+    });
 
     let command = app
         .delete_download_queue_item(&user, Some("client-bound"), "NZBGet", "bound-job", false)
@@ -12807,6 +12859,63 @@ async fn queue_delete_registry_miss_or_error_uses_legacy_command_and_still_execu
     let deleted = download_client.deleted_items.lock().await.clone();
     assert!(deleted.contains(&("miss-job".to_string(), false)));
     assert!(deleted.contains(&("error-job".to_string(), false)));
+}
+
+#[tokio::test]
+async fn delayed_canonical_delete_command_preserves_reused_client_item() {
+    let client = Arc::new(StubDownloadClient::default());
+    let commands = Arc::new(TrackingDownloadQueueCommandRepo::default());
+    let command_id = commands
+        .seed_pending(Some("client-reused"), "nzbget", "reused-job", false)
+        .await;
+    let old = scryer_domain::download_identity::DownloadId::new();
+    let new = scryer_domain::download_identity::DownloadId::new();
+    commands
+        .queued
+        .lock()
+        .await
+        .iter_mut()
+        .find(|row| row.id == command_id)
+        .unwrap()
+        .canonical_download_id = Some(old);
+    let (base_app, _) = bootstrap_with_delete_queue(client.clone(), commands.clone());
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    registry
+        .bind_at(
+            ClientJobLocator::new(Some("client-reused"), "nzbget", "reused-job"),
+            new,
+            chrono::Utc::now(),
+            None,
+        )
+        .await;
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let token = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(start_background_download_delete_poller(
+        app,
+        token.child_token(),
+    ));
+    crate::test_wait::wait_until("superseded delete command completes", || async {
+        commands
+            .get(&command_id)
+            .await
+            .is_some_and(|row| row.status == scryer_domain::DownloadQueueDeleteStatus::Completed)
+    })
+    .await;
+    token.cancel();
+    crate::test_wait::within_deadline("delete poller stops", task)
+        .await
+        .unwrap();
+    assert!(client.deleted_items.lock().await.is_empty());
+    assert!(
+        registry
+            .load_binding(&new)
+            .await
+            .unwrap()
+            .unwrap()
+            .ended_at
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -18419,9 +18528,14 @@ async fn deleting_a_download_client_clears_its_status_row() {
     let config =
         create_enabled_download_client_config(&app, &user, "Fixture Retired", "nzbget").await;
 
+    let generation = app.runtime.acquisition.download_registry_generation();
     app.delete_download_client_config(&user, &config.id)
         .await
         .expect("delete download client config");
+    assert!(
+        app.runtime.acquisition.download_registry_generation() > generation,
+        "retired client bindings must invalidate tracker reconciliation"
+    );
 
     assert_eq!(
         status.cleared.lock().expect("cleared mutex").as_slice(),

@@ -742,6 +742,10 @@ pub fn to_gql_error(err: AppError) -> Error {
             repository_gql_error(error.to_string())
         }
         AppError::Repository(message) => repository_gql_error(message),
+        AppError::RepositoryFailed { message, reason } => repository_gql_error(message)
+            .extend_with(|_, extensions| {
+                extensions.set("reason", reason);
+            }),
     }
 }
 
@@ -775,7 +779,10 @@ pub enum LoginErrorClassification {
 pub fn classify_login_error(err: &AppError) -> LoginErrorClassification {
     if login_progression_error(err) {
         LoginErrorClassification::Progression
-    } else if matches!(err, AppError::Repository(_)) {
+    } else if matches!(
+        err,
+        AppError::Repository(_) | AppError::RepositoryFailed { .. }
+    ) {
         LoginErrorClassification::InfrastructureFailure
     } else {
         LoginErrorClassification::MaskedPrimaryFailure
@@ -835,7 +842,7 @@ fn app_error_kind(err: &AppError) -> &'static str {
         AppError::ImportSourceChanged { .. } => "ImportSourceChanged",
         AppError::DiscoveryPresentationSuperseded { .. } => "DiscoveryPresentationSuperseded",
         AppError::PluginFailed { .. } => "PluginFailed",
-        AppError::Repository(_) => "Repository",
+        AppError::Repository(_) | AppError::RepositoryFailed { .. } => "Repository",
     }
 }
 
@@ -844,8 +851,11 @@ pub fn to_login_gql_error(method: &'static str, err: AppError) -> Error {
     match classify_login_error(&err) {
         LoginErrorClassification::Progression => to_gql_error(err),
         LoginErrorClassification::InfrastructureFailure => {
-            let AppError::Repository(message) = err else {
-                return to_gql_error(err);
+            let message = match err {
+                AppError::Repository(message) | AppError::RepositoryFailed { message, .. } => {
+                    message
+                }
+                other => return to_gql_error(other),
             };
             repository_gql_error(message)
         }
@@ -1523,6 +1533,22 @@ mod tests {
         );
         assert!(!error.message.contains("metadata gateway"));
         assert!(!error.message.contains("<html>"));
+    }
+
+    #[test]
+    fn repository_reason_preserves_internal_error_masking() {
+        let reason = scryer_application::title_delete::CATALOG_CLEANUP_FAILED;
+        let error = to_gql_error(AppError::RepositoryFailed {
+            message: "database connection failed at private path".into(),
+            reason,
+        });
+        assert_eq!(error.message, INTERNAL_SERVER_ERROR_MESSAGE);
+        assert_eq!(graphql_error_code(&error), Some(INTERNAL_ERROR_CODE));
+        assert_eq!(
+            graphql_error_extension_string(&error, "reason"),
+            Some(reason)
+        );
+        assert!(graphql_error_extension_string(&error, "errorId").is_some());
     }
 
     #[test]

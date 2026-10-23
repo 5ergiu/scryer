@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const it: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Seleziona titoli senza duplicati.",
+  "titleDelete.refusal.busy": "È già in corso un’eliminazione.",
+  "titleDelete.refusal.downloadRetry": "Un nuovo tentativo di download con password è in attesa di riconciliazione. Attendi il completamento oppure rimuovi il download dalla vista delle importazioni in Attività di Scryer, quindi riprova a eliminare il titolo.",
+  "titleDelete.refusal.preview": "Aggiorna e conferma l’anteprima di eliminazione.",
+  "titleDelete.refusal.confirmation": "Digita DELETE per confermare l’eliminazione.",
+  "titleDelete.refusal.boundary": "La cartella del titolo deve trovarsi all’interno di una radice della libreria, non essere la radice stessa.",
+  "titleDelete.refusal.ownership": "Impossibile verificare a quale titolo appartiene la cartella. I file sono stati conservati.",
+  "titleDelete.refusal.layout": "La cartella o il suo contenuto non possono essere eliminati in sicurezza come un solo titolo.",
+  "titleDelete.refusal.unavailable": "Una radice della libreria non è disponibile. Ripristina l’accesso e aggiorna l’anteprima.",
+  "titleDelete.refusal.outsideRoots": "Il percorso del file è esterno a tutte le radici della libreria configurate. Correggi le radici della libreria o la cartella del titolo e aggiorna l’anteprima.",
+  "queue.attention.downloadPasswordRetry": "Un nuovo tentativo con password del download è in attesa di riconciliazione. Rimuovi questo download se il client non ha più il processo.",
+  "titleDelete.refusal.recycle": "Il titolo è stato eliminato, ma alcune voci del cestino non sono state rimosse.",
+  "titleDelete.refusal.retry": "Pulizia del catalogo non riuscita. Ottieni una nuova anteprima prima di riprovare.",
   "settings.downloadClientHttpDownloadDir": "Cartella di download",
   "settings.downloadClientHttpDownloadDirHelp": "Dove vengono scritti i file completati e le loro parti, come Scryer vede il percorso. Scryer conserva la coda di questo downloader in una cartella .scryer-http al suo interno.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Download simultanei",

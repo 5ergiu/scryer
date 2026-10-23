@@ -5,12 +5,14 @@ mod authorization;
 mod catalog;
 pub mod challenge_solver;
 mod contracts;
+pub mod delete_refusal;
 mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
 pub mod public_url;
 pub mod rate_limit_proxy_policy;
+pub mod title_delete;
 
 /// Completed-history rows the poller considers each cycle.
 ///
@@ -1036,6 +1038,14 @@ pub enum AppError {
 
     #[error("repository: {0}")]
     Repository(String),
+
+    /// A repository fault with a stable workflow reason. The diagnostic remains
+    /// internal; API adapters mask it just like `Repository` while exposing the reason.
+    #[error("repository: {message}")]
+    RepositoryFailed {
+        message: String,
+        reason: &'static str,
+    },
 }
 
 impl AppError {
@@ -1057,6 +1067,14 @@ impl AppError {
         match self {
             Self::ValidationRefused { reason, .. } => Some(reason),
             _ => None,
+        }
+    }
+
+    /// The stable condition named by a validation or repository failure.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::RepositoryFailed { reason, .. } => Some(reason),
+            _ => self.validation_reason(),
         }
     }
 

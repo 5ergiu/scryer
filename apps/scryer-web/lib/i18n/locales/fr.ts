@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const fr: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Sélectionnez des titres sans doublons.",
+  "titleDelete.refusal.busy": "Une suppression est déjà en cours.",
+  "titleDelete.refusal.downloadRetry": "Une nouvelle tentative de téléchargement avec mot de passe attend une synchronisation. Attendez sa fin ou retirez le téléchargement de la vue des importations sous Activité dans Scryer, puis réessayez de supprimer le titre.",
+  "titleDelete.refusal.preview": "Actualisez et confirmez l’aperçu de suppression.",
+  "titleDelete.refusal.confirmation": "Saisissez DELETE pour confirmer la suppression.",
+  "titleDelete.refusal.boundary": "Le dossier du titre doit être dans une racine de bibliothèque, sans être la racine elle-même.",
+  "titleDelete.refusal.ownership": "L’appartenance du dossier n’a pas pu être vérifiée. Les fichiers ont été conservés.",
+  "titleDelete.refusal.layout": "Le dossier ou son contenu ne peut pas être supprimé sans risque comme un seul titre.",
+  "titleDelete.refusal.unavailable": "Une racine de bibliothèque est indisponible. Rétablissez l’accès et actualisez l’aperçu.",
+  "titleDelete.refusal.outsideRoots": "Le chemin du fichier est en dehors de toutes les racines de bibliothèque configurées. Corrigez les racines de bibliothèque ou le dossier du titre et actualisez l’aperçu.",
+  "queue.attention.downloadPasswordRetry": "Une nouvelle tentative de mot de passe du téléchargement attend sa réconciliation. Supprimez ce téléchargement si le client n’a plus la tâche.",
+  "titleDelete.refusal.recycle": "Le titre a été supprimé, mais certaines entrées de la corbeille n’ont pas pu être purgées.",
+  "titleDelete.refusal.retry": "Le nettoyage du catalogue a échoué. Obtenez un nouvel aperçu avant de réessayer.",
   "settings.downloadClientHttpDownloadDir": "Dossier de téléchargement",
   "settings.downloadClientHttpDownloadDirHelp": "Emplacement des fichiers terminés et de leurs parties, tel que Scryer le voit. Scryer y conserve la file de ce téléchargeur dans un dossier .scryer-http.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Téléchargements simultanés",

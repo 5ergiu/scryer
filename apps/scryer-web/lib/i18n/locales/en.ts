@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "titleDelete.refusal.selection": "Select titles without duplicates.",
+  "titleDelete.refusal.busy": "A deletion is already running.",
+  "titleDelete.refusal.downloadRetry": "A download password retry is awaiting reconciliation. Let it settle, or remove the download from Scryer's Activity > Import view, then retry title deletion.",
+  "titleDelete.refusal.preview": "Refresh the deletion preview and confirm it.",
+  "titleDelete.refusal.confirmation": "Type DELETE to confirm deletion.",
+  "titleDelete.refusal.boundary": "The title folder must be inside a library root, not the root itself.",
+  "titleDelete.refusal.ownership": "Folder ownership could not be verified. Files were preserved.",
+  "titleDelete.refusal.layout": "The folder or its contents are not safe to delete as one title.",
+  "titleDelete.refusal.unavailable": "A library root is unavailable. Restore access and preview again.",
+  "titleDelete.refusal.outsideRoots": "The file path is outside every configured library root. Fix the library roots or the title folder and preview again.",
+  "queue.attention.downloadPasswordRetry": "A download password retry is awaiting reconciliation. Remove this download if the client no longer has the job.",
+  "titleDelete.refusal.recycle": "The title was deleted, but some recycle entries could not be purged.",
+  "titleDelete.refusal.retry": "Catalog cleanup failed. Get a fresh preview before retrying.",
   "settings.downloadClientHttpDownloadDir": "Download folder",
   "settings.downloadClientHttpDownloadDirHelp": "Where finished files and their partials are written, as seen by Scryer. Scryer keeps this downloader's queue in a .scryer-http folder inside it.",
   "settings.downloadClientHttpMaxConcurrentDownloads": "Concurrent downloads",
