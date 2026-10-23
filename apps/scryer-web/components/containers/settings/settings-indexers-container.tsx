@@ -19,6 +19,7 @@ import { useIndexersSubscription } from "@/lib/hooks/use-indexers-subscription";
 import type { IndexerSettingsTab } from "@/components/root/types";
 import type {
   ConfigFieldDef,
+  LoginChallengeStatus,
   ProxyRecord,
   IndexerRecord,
   ProviderTypeInfo,
@@ -45,6 +46,7 @@ import {
 import {
   indexerProviderTypesQuery,
   pluginConfigFieldsQuery,
+  pluginLoginChallengeQuery,
   proxyConfigsQuery,
   indexersInitQuery,
   indexersQuery,
@@ -75,6 +77,7 @@ import {
   type DynamicConfigFields,
   type DynamicConfigFieldsStatus,
 } from "@/lib/utils/dynamic-config-fields";
+import { loginChallengeErrorMessage } from "@/lib/utils/login-challenge-error-message";
 import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
 import {
   buildIndexerSavePayload,
@@ -530,6 +533,141 @@ export function SettingsIndexersContainer({
         : providerTypes,
     [dynamicConfigFields, providerTypes, staticSelectedProvider],
   );
+
+  // The sign-in image a provider's login asks the operator to read. It is
+  // fetched for the draft (the server restores stored secrets for an indexer
+  // being edited) when the editor opens, when the address, selection, proxy
+  // or indexer changes, after a failed save, and on request. It is never
+  // stored; the server carries the sign-in it started to the save.
+  const [loginChallenge, setLoginChallenge] = useState<LoginChallengeStatus>({
+    state: "idle",
+  });
+  const [loginChallengeNonce, setLoginChallengeNonce] = useState(0);
+  const loginChallengeEpochRef = useRef(createRequestEpoch());
+  const indexerDraftRef = useRef(indexerDraft);
+  const effectiveSelectedProvider = isEditorOpen
+    ? (effectiveProviderTypes.find(
+        (pt) => pt.providerType === normalizedDraftProviderType,
+      ) ?? null)
+    : null;
+  const effectiveSelectedProviderRef = useRef(effectiveSelectedProvider);
+  // The fetch reads the draft as it stands when it fires, without re-running
+  // for every keystroke in a field the image does not depend on.
+  useEffect(() => {
+    indexerDraftRef.current = indexerDraft;
+    effectiveSelectedProviderRef.current = effectiveSelectedProvider;
+  });
+  const loginChallengeAnswerKey =
+    effectiveSelectedProvider?.configFields.find(
+      (field) => field.role === "LOGIN_CHALLENGE_ANSWER",
+    )?.key ?? null;
+  const connectionUrlKey =
+    effectiveSelectedProvider?.configFields.find(
+      (field) => field.role === "CONNECTION_URL",
+    )?.key ?? null;
+  const loginChallengeSignature =
+    loginChallengeAnswerKey === null
+      ? null
+      : JSON.stringify([
+          normalizedDraftProviderType,
+          editingIndexerId,
+          indexerDraft.proxyConfigId,
+          loginChallengeAnswerKey,
+          dynamicTriggersSignature,
+          connectionUrlKey
+            ? (indexerDraft.configValues[connectionUrlKey] ?? "").trim()
+            : "",
+          loginChallengeNonce,
+        ]);
+
+  useEffect(() => {
+    const epoch = loginChallengeEpochRef.current.next();
+    if (loginChallengeSignature === null) {
+      setLoginChallenge({ state: "idle" });
+      return;
+    }
+    setLoginChallenge({ state: "loading" });
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const draft = indexerDraftRef.current;
+          const provider = effectiveSelectedProviderRef.current;
+          const fields = provider?.configFields ?? [];
+          const answerKeys = new Set(
+            fields
+              .filter((field) => field.role === "LOGIN_CHALLENGE_ANSWER")
+              .map((field) => field.key),
+          );
+          const configValues = Object.fromEntries(
+            Object.entries(
+              omitHiddenConfigValues(
+                normalizeIndexerConfigValues(fields, draft.configValues),
+                dynamicConfigFieldsRef.current,
+              ),
+            ).filter(([key]) => !answerKeys.has(key)),
+          );
+          const values =
+            serializeConfigValues(
+              fields.filter((field) => !answerKeys.has(field.key)),
+              configValues,
+              draft.storedSecretKeys,
+            ) ?? [];
+          const { data, error } = await client
+            .query(
+              pluginLoginChallengeQuery,
+              {
+                providerType: normalizedDraftProviderType,
+                values,
+                indexerId: editingIndexerId ?? undefined,
+                proxyConfigId: draft.proxyConfigId,
+              },
+              { requestPolicy: "network-only" },
+            )
+            .toPromise();
+          if (!loginChallengeEpochRef.current.isCurrent(epoch)) {
+            return;
+          }
+          if (error) throw error;
+          const challenge = data?.pluginConfigFields?.loginChallenge as
+            | { contentType: string; imageData: string }
+            | null
+            | undefined;
+          setLoginChallenge(
+            challenge
+              ? {
+                  state: "ready",
+                  contentType: challenge.contentType,
+                  imageData: challenge.imageData,
+                }
+              : { state: "none" },
+          );
+        } catch (error) {
+          if (!loginChallengeEpochRef.current.isCurrent(epoch)) {
+            return;
+          }
+          setLoginChallenge({
+            state: "error",
+            message: loginChallengeErrorMessage(
+              error,
+              t,
+              t("status.failedToLoad"),
+            ),
+          });
+        }
+      })();
+    }, DYNAMIC_CONFIG_FIELDS_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [
+    client,
+    editingIndexerId,
+    loginChallengeSignature,
+    normalizedDraftProviderType,
+    t,
+  ]);
+
+  const refreshLoginChallenge = useCallback(() => {
+    setLoginChallengeNonce((nonce) => nonce + 1);
+  }, []);
 
   const refreshIndexers = useCallback(async () => {
     try {
@@ -1011,6 +1149,13 @@ export function SettingsIndexersContainer({
         userFacingGraphQlErrorMessage(error, t("status.failedToUpdate")),
         { level: "ERROR" },
       );
+      // A sign-in image answers once: a refused save needs a fresh one.
+      if (
+        loginChallenge.state === "ready" ||
+        loginChallenge.state === "error"
+      ) {
+        refreshLoginChallenge();
+      }
     } finally {
       setMutatingIndexerId(null);
     }
@@ -1599,6 +1744,8 @@ export function SettingsIndexersContainer({
         syncIndexer={syncIndexer}
         providerTypes={effectiveProviderTypes}
         dynamicConfigFieldsStatus={dynamicConfigFieldsStatus}
+        loginChallenge={loginChallenge}
+        refreshLoginChallenge={refreshLoginChallenge}
         testIndexerConnection={testIndexerConnection}
         isTestingConnection={isTestingConnection}
         isEditorOpen={isEditorOpen}

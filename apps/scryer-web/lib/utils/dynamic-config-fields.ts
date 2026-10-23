@@ -84,7 +84,11 @@ export function reconcileDynamicConfigValues(
     }
   }
   for (const field of next?.fields ?? []) {
-    if (field.key in result || field.valueSource === "HOST_BINDING") {
+    if (
+      field.key in result ||
+      field.valueSource === "HOST_BINDING" ||
+      field.fieldType === "INFO"
+    ) {
       continue;
     }
     result[field.key] =

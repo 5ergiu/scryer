@@ -355,7 +355,7 @@ pub(crate) fn validate_dynamic_config_fields(
             return Err(invalid(format!("field '{key}' asks for a host binding")));
         }
         if field.role.is_some() {
-            return Err(invalid(format!("field '{key}' claims a connection role")));
+            return Err(invalid(format!("field '{key}' claims a field role")));
         }
         let is_select = matches!(
             field.field_type,
@@ -363,6 +363,18 @@ pub(crate) fn validate_dynamic_config_fields(
         );
         if is_select && field.options.is_empty() {
             return Err(invalid(format!("select field '{key}' has no options")));
+        }
+        // Guidance text is not a setting: nothing may make it take a value.
+        if field.field_type == ConfigFieldType::Info
+            && (field.required
+                || field.required_when.is_some()
+                || !field.options.is_empty()
+                || field
+                    .default_value
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()))
+        {
+            return Err(invalid(format!("info field '{key}' asks for a value")));
         }
         if let Some(default_value) = field.default_value.as_deref().map(str::trim)
             && !default_value.is_empty()
@@ -575,6 +587,41 @@ mod tests {
     }
 
     #[test]
+    fn info_fields_are_accepted_only_without_a_value() {
+        let guidance = ConfigFieldDef {
+            help_text: Some("Read this first.".into()),
+            ..field("info_activity", ConfigFieldType::Info)
+        };
+        let answer = validate(vec![guidance.clone()], &[]).unwrap();
+        assert_eq!(answer.fields[0].field_type, ConfigFieldType::Info);
+
+        for valued in [
+            ConfigFieldDef {
+                required: true,
+                ..guidance.clone()
+            },
+            ConfigFieldDef {
+                default_value: Some("text".into()),
+                ..guidance.clone()
+            },
+            ConfigFieldDef {
+                required_when: Some(FieldCondition {
+                    key: "definition".into(),
+                    op: ConditionOp::NonEmpty,
+                    values: vec![],
+                }),
+                ..guidance.clone()
+            },
+            ConfigFieldDef {
+                options: select("x", &["a"]).options,
+                ..guidance.clone()
+            },
+        ] {
+            assert!(rejection(validate(vec![valued], &[])).contains("asks for a value"));
+        }
+    }
+
+    #[test]
     fn answers_that_would_reshape_the_form_unsafely_are_refused() {
         assert!(
             rejection(validate(
@@ -625,7 +672,7 @@ mod tests {
                 }],
                 &[]
             ))
-            .contains("connection role")
+            .contains("field role")
         );
         assert!(rejection(validate(vec![select("sort", &[])], &[])).contains("no options"));
         assert!(

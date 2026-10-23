@@ -10,6 +10,7 @@ mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
+pub mod login_challenge_refusal;
 pub mod public_url;
 pub mod rate_limit_proxy_policy;
 pub mod title_delete;
@@ -616,16 +617,17 @@ pub use ports::{
     ImportFileTransferProgressSender, ImportRepository, ImportRetryClaim, ImportRetryClaimOutcome,
     ImportRetryFinishOutcome, IndexerAccountingContext, IndexerArtifactResolver,
     IndexerCapsSnapshotRefresher, IndexerClient, IndexerConfigRepository, IndexerDispatchGate,
-    IndexerGrabClient, IndexerGrabSelection, IndexerManagementClient, IndexerPluginProvider,
-    IndexerSearchCandidateWrite, IndexerSearchLearningContext, IndexerSearchLearningKey,
-    IndexerSearchLearningRecord, IndexerSearchLearningRepository, IndexerSearchRunWrite,
-    IndexerStatsTracker, IndexerSystemBackoff, JellyfinServerUser, JobRunRepository,
-    LibraryProbeRepository, LibraryRepository, LibraryScanUnmatchedItemRepository,
-    LifecycleActionRunRepository, LifecycleClaimRepository, LocationOperationProgress,
-    LocationOperationRepository, LocationOwnershipClaim, LocationOwnershipOutcome,
-    LogicalBackupExporter, MaintenanceActionJobReceiptClaim, MaintenanceActionJobReceiptTransition,
-    MaintenanceActionStepCandidateKey, MaintenanceActionStepClaim, MaintenanceActionStepRepository,
-    MaintenanceCandidateQuery, MaintenanceCandidateRepository, MaintenanceEvaluationRepository,
+    IndexerGrabClient, IndexerGrabSelection, IndexerLoginChallenge, IndexerManagementClient,
+    IndexerPluginProvider, IndexerSearchCandidateWrite, IndexerSearchLearningContext,
+    IndexerSearchLearningKey, IndexerSearchLearningRecord, IndexerSearchLearningRepository,
+    IndexerSearchRunWrite, IndexerStatsTracker, IndexerSystemBackoff, JellyfinServerUser,
+    JobRunRepository, LibraryProbeRepository, LibraryRepository,
+    LibraryScanUnmatchedItemRepository, LifecycleActionRunRepository, LifecycleClaimRepository,
+    LocationOperationProgress, LocationOperationRepository, LocationOwnershipClaim,
+    LocationOwnershipOutcome, LogicalBackupExporter, MaintenanceActionJobReceiptClaim,
+    MaintenanceActionJobReceiptTransition, MaintenanceActionStepCandidateKey,
+    MaintenanceActionStepClaim, MaintenanceActionStepRepository, MaintenanceCandidateQuery,
+    MaintenanceCandidateRepository, MaintenanceEvaluationRepository,
     MaintenanceEvaluationRunRepository, MaintenanceExclusionRepository,
     MaintenanceRuleSetRepository, MaintenanceSearchJobRunCreation,
     MaintenanceSequenceCompletionRepository, MediaAnalyzer, MediaFileHashCandidate,

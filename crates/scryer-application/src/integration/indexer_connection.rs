@@ -6,6 +6,18 @@ pub(crate) struct ConnectionValidation {
     persisted_config: Option<IndexerConfig>,
 }
 
+/// A draft indexer configuration made ready to run under the probe's
+/// synthetic id.
+struct PreparedIndexerProbe {
+    provider: Arc<dyn IndexerPluginProvider>,
+    fields: Vec<scryer_domain::ConfigFieldDef>,
+    persisted_config: Option<IndexerConfig>,
+    validated_base_url: Option<url::Url>,
+    accounting: Option<crate::IndexerAccountingContext>,
+    proxy_config: Option<scryer_domain::ProxyConfig>,
+    temp_config: IndexerConfig,
+}
+
 impl AppUseCase {
     /// Test an indexer connection by performing a minimal search through the plugin system.
     /// This validates: plugin availability, HTTP connectivity, API key, response parsing.
@@ -71,175 +83,23 @@ impl AppUseCase {
         indexer_id: Option<&str>,
         proxy_config_id_override: Option<Option<&str>>,
     ) -> AppResult<ConnectionValidation> {
-        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
-            .await?;
-
-        self.ensure_provider_plugin_not_blocked(provider_type)
-            .await?;
-
-        // Fails early for an unknown provider, before any stored config is read.
-        self.indexer_config_fields_for_provider_type(provider_type)?;
-        let persisted_config = if let Some(indexer_id) = indexer_id {
-            self.services
-                .integrations
-                .indexer_configs
-                .get_by_id(indexer_id)
-                .await?
-        } else {
-            None
-        };
-        let same_provider_persisted_json = persisted_config
-            .as_ref()
-            .filter(|config| {
-                config
-                    .provider_type
-                    .trim()
-                    .eq_ignore_ascii_case(provider_type.trim())
-            })
-            .and_then(|config| config.config_json.as_deref());
-        let fields = self
-            .effective_indexer_config_fields(
+        let PreparedIndexerProbe {
+            provider,
+            fields,
+            persisted_config,
+            validated_base_url,
+            accounting,
+            proxy_config,
+            temp_config,
+        } = self
+            .prepare_indexer_probe(
+                actor,
                 provider_type,
-                &[config_json, same_provider_persisted_json],
+                config_json,
+                indexer_id,
+                proxy_config_id_override,
             )
             .await?;
-        let persisted_config_json = persisted_config
-            .as_ref()
-            .filter(|config| {
-                persisted_indexer_config_can_restore_secrets(
-                    &fields,
-                    provider_type,
-                    config.provider_type.as_str(),
-                    config_json,
-                    config.config_json.as_deref(),
-                )
-            })
-            .and_then(|config| config.config_json.as_deref());
-        let normalized_config_json = crate::app_usecase_integration::normalize_indexer_config_json(
-            &fields,
-            config_json,
-            persisted_config_json,
-        )?;
-        let provider = self
-            .services
-            .integrations
-            .plugin_provider
-            .available()
-            .ok_or_else(|| AppError::Repository("indexer provider not available".into()))?;
-        provider.validate_config_for_provider(provider_type, &normalized_config_json)?;
-        let base_url = crate::app_usecase_integration::derive_indexer_base_url_from_config_fields(
-            &fields,
-            Some(&normalized_config_json),
-        )?;
-        // An empty base URL means the provider declares no connection-URL
-        // field (its endpoint is fixed by the plugin's allowed hosts), so
-        // there is no operator URL to validate or preflight.
-        let validated_base_url = if base_url.is_empty() {
-            None
-        } else {
-            Some(validate_test_flight_url(&base_url)?)
-        };
-        let accounting = persisted_config
-            .as_ref()
-            .and_then(crate::IndexerAccountingContext::for_config);
-
-        let now = Utc::now();
-
-        // Build a temporary IndexerConfig to get a client from the provider.
-        // Reject obviously invalid API keys (e.g. masked placeholders from
-        // Sonarr/Radarr import that were stored before the masking fix).
-        let parsed_config: serde_json::Value = serde_json::from_str(&normalized_config_json)
-            .map_err(|error| AppError::Validation(error.to_string()))?;
-        for field in fields
-            .iter()
-            .filter(|field| field.field_type == scryer_domain::ConfigFieldType::Password)
-        {
-            if let Some(trimmed) = parsed_config
-                .get(&field.key)
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                && trimmed.chars().all(|c| c == '*')
-                && !trimmed.is_empty()
-            {
-                return Err(AppError::Validation(
-                    "API key appears to be a masked placeholder — enter the real key".into(),
-                ));
-            }
-        }
-
-        let proxy_config_id = match proxy_config_id_override {
-            Some(Some(id)) => Some(id.to_string()),
-            Some(None) => None,
-            None => persisted_config
-                .as_ref()
-                .and_then(|config| config.proxy_config_id.clone()),
-        };
-        let proxy_config = if let Some(proxy_config_id) = proxy_config_id.as_deref() {
-            let proxy_config = self
-                .services
-                .integrations
-                .proxy_configs
-                .get_by_id(proxy_config_id)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Validation("Proxy configuration was not found.".to_string())
-                })?;
-            if !proxy_config.is_enabled {
-                return Err(AppError::Validation(
-                    "Proxy is disabled for this indexer.".to_string(),
-                ));
-            }
-            // Prowlarr owns challenge handling for the indexers it fronts, so
-            // a challenge solver can never sit in front of it. Transport and
-            // tunnel proxies only carry bytes and remain allowed.
-            if proxy_config.is_challenge_solver()
-                && (provider_type.trim().eq_ignore_ascii_case("prowlarr")
-                    || persisted_config
-                        .as_ref()
-                        .is_some_and(IndexerConfig::is_prowlarr_nab_proxy))
-            {
-                return Err(AppError::Validation(
-                    "Prowlarr indexers cannot use challenge solvers; Prowlarr owns challenge handling."
-                        .to_string(),
-                ));
-            }
-            Some(proxy_config)
-        } else {
-            None
-        };
-
-        // The probe deliberately runs under a synthetic id: it must exercise the
-        // submitted configuration, not whatever is stored. Nothing may persist
-        // against that id — `indexer_error_history_is_persistable` is what the
-        // capture paths ask before writing error history, so a failed probe
-        // reports its own error instead of a foreign-key failure behind it.
-        let temp_config = IndexerConfig {
-            id: crate::CONNECTION_TEST_INDEXER_ID.to_string(),
-            name: "Test Connection".to_string(),
-            provider_type: provider_type.to_string(),
-            base_url,
-            api_key_encrypted: None,
-            rate_limit_seconds: None,
-            rate_limit_burst: None,
-            max_queries_per_minute: None,
-            is_enabled: true,
-            enable_interactive_search: true,
-            enable_auto_search: true,
-            disabled_until: None,
-            proxy_config_id,
-            download_client_id: None,
-            seeding_profile_id: None,
-            managed_parent_config_id: None,
-            managed_child_key: None,
-            managed_metadata_json: None,
-            caps_snapshot_json: None,
-            last_health_status: None,
-            last_error_message: None,
-            last_error_at: None,
-            config_json: Some(normalized_config_json),
-            created_at: now,
-            updated_at: now,
-        };
 
         if let Some(validated_base_url) = validated_base_url.as_ref()
             && !temp_config.is_direct_nab()
@@ -360,6 +220,249 @@ impl AppUseCase {
         Ok(ConnectionValidation {
             caps_snapshot_json: caps_snapshot,
             persisted_config: matching_config,
+        })
+    }
+
+    /// The image challenge the indexer's sign-in asks for under the operator's
+    /// draft settings, fetched before they are saved. The draft is prepared
+    /// exactly as a connection test prepares it: stored secrets are restored
+    /// for an existing indexer and the proxy the draft names is used. `None`
+    /// when the provider declares no field for the answer, or its sign-in
+    /// asks for nothing right now. The image is returned once and never
+    /// stored.
+    pub async fn indexer_login_challenge(
+        &self,
+        actor: &User,
+        provider_type: &str,
+        config_json: Option<&str>,
+        indexer_id: Option<&str>,
+        proxy_config_id_override: Option<Option<&str>>,
+    ) -> AppResult<Option<crate::IndexerLoginChallenge>> {
+        let prepared = self
+            .prepare_indexer_probe(
+                actor,
+                provider_type,
+                config_json,
+                indexer_id,
+                proxy_config_id_override,
+            )
+            .await?;
+        if !prepared
+            .fields
+            .iter()
+            .any(|field| field.role == Some(scryer_domain::ConfigFieldRole::LoginChallengeAnswer))
+        {
+            return Ok(None);
+        }
+        let management = prepared
+            .provider
+            .management_capabilities_for_provider(provider_type);
+        if management.supports_validate_config || management.supports_managed_children_sync {
+            return Ok(None);
+        }
+        let Some(client) = prepared.provider.client_for_provider_with_accounting(
+            &prepared.temp_config,
+            prepared.proxy_config.as_ref(),
+            prepared.accounting.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        client
+            .login_challenge()
+            .await
+            .map_err(map_indexer_connection_test_error)
+    }
+
+    /// The submitted draft as a connection probe runs it: the provider is
+    /// usable, the config is normalized against the effective fields with
+    /// stored secrets restored, and the proxy it names is resolved.
+    async fn prepare_indexer_probe(
+        &self,
+        actor: &User,
+        provider_type: &str,
+        config_json: Option<&str>,
+        indexer_id: Option<&str>,
+        proxy_config_id_override: Option<Option<&str>>,
+    ) -> AppResult<PreparedIndexerProbe> {
+        self.require_app_permission(actor, scryer_domain::AppPermission::ManageSystemSettings)
+            .await?;
+
+        self.ensure_provider_plugin_not_blocked(provider_type)
+            .await?;
+
+        // Fails early for an unknown provider, before any stored config is read.
+        self.indexer_config_fields_for_provider_type(provider_type)?;
+        let persisted_config = if let Some(indexer_id) = indexer_id {
+            self.services
+                .integrations
+                .indexer_configs
+                .get_by_id(indexer_id)
+                .await?
+        } else {
+            None
+        };
+        let same_provider_persisted_json = persisted_config
+            .as_ref()
+            .filter(|config| {
+                config
+                    .provider_type
+                    .trim()
+                    .eq_ignore_ascii_case(provider_type.trim())
+            })
+            .and_then(|config| config.config_json.as_deref());
+        let fields = self
+            .effective_indexer_config_fields(
+                provider_type,
+                &[config_json, same_provider_persisted_json],
+            )
+            .await?;
+        let persisted_config_json = persisted_config
+            .as_ref()
+            .filter(|config| {
+                persisted_indexer_config_can_restore_secrets(
+                    &fields,
+                    provider_type,
+                    config.provider_type.as_str(),
+                    config_json,
+                    config.config_json.as_deref(),
+                )
+            })
+            .and_then(|config| config.config_json.as_deref());
+        let normalized_config_json = crate::app_usecase_integration::normalize_indexer_config_json(
+            &fields,
+            config_json,
+            persisted_config_json,
+        )?;
+        let provider = self
+            .services
+            .integrations
+            .plugin_provider
+            .available()
+            .cloned()
+            .ok_or_else(|| AppError::Repository("indexer provider not available".into()))?;
+        provider.validate_config_for_provider(provider_type, &normalized_config_json)?;
+        let base_url = crate::app_usecase_integration::derive_indexer_base_url_from_config_fields(
+            &fields,
+            Some(&normalized_config_json),
+        )?;
+        // An empty base URL means the provider declares no connection-URL
+        // field (its endpoint is fixed by the plugin's allowed hosts), so
+        // there is no operator URL to validate or preflight.
+        let validated_base_url = if base_url.is_empty() {
+            None
+        } else {
+            Some(validate_test_flight_url(&base_url)?)
+        };
+        let accounting = persisted_config
+            .as_ref()
+            .and_then(crate::IndexerAccountingContext::for_config);
+
+        let now = Utc::now();
+
+        // Build a temporary IndexerConfig to get a client from the provider.
+        // Reject obviously invalid API keys (e.g. masked placeholders from
+        // Sonarr/Radarr import that were stored before the masking fix).
+        let parsed_config: serde_json::Value = serde_json::from_str(&normalized_config_json)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        for field in fields
+            .iter()
+            .filter(|field| field.field_type == scryer_domain::ConfigFieldType::Password)
+        {
+            if let Some(trimmed) = parsed_config
+                .get(&field.key)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                && trimmed.chars().all(|c| c == '*')
+                && !trimmed.is_empty()
+            {
+                return Err(AppError::Validation(
+                    "API key appears to be a masked placeholder — enter the real key".into(),
+                ));
+            }
+        }
+
+        let proxy_config_id = match proxy_config_id_override {
+            Some(Some(id)) => Some(id.to_string()),
+            Some(None) => None,
+            None => persisted_config
+                .as_ref()
+                .and_then(|config| config.proxy_config_id.clone()),
+        };
+        let proxy_config = if let Some(proxy_config_id) = proxy_config_id.as_deref() {
+            let proxy_config = self
+                .services
+                .integrations
+                .proxy_configs
+                .get_by_id(proxy_config_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Validation("Proxy configuration was not found.".to_string())
+                })?;
+            if !proxy_config.is_enabled {
+                return Err(AppError::Validation(
+                    "Proxy is disabled for this indexer.".to_string(),
+                ));
+            }
+            // Prowlarr owns challenge handling for the indexers it fronts, so
+            // a challenge solver can never sit in front of it. Transport and
+            // tunnel proxies only carry bytes and remain allowed.
+            if proxy_config.is_challenge_solver()
+                && (provider_type.trim().eq_ignore_ascii_case("prowlarr")
+                    || persisted_config
+                        .as_ref()
+                        .is_some_and(IndexerConfig::is_prowlarr_nab_proxy))
+            {
+                return Err(AppError::Validation(
+                    "Prowlarr indexers cannot use challenge solvers; Prowlarr owns challenge handling."
+                        .to_string(),
+                ));
+            }
+            Some(proxy_config)
+        } else {
+            None
+        };
+
+        // The probe deliberately runs under a synthetic id: it must exercise the
+        // submitted configuration, not whatever is stored. Nothing may persist
+        // against that id — `indexer_error_history_is_persistable` is what the
+        // capture paths ask before writing error history, so a failed probe
+        // reports its own error instead of a foreign-key failure behind it.
+        let temp_config = IndexerConfig {
+            id: crate::CONNECTION_TEST_INDEXER_ID.to_string(),
+            name: "Test Connection".to_string(),
+            provider_type: provider_type.to_string(),
+            base_url,
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            max_queries_per_minute: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            disabled_until: None,
+            proxy_config_id,
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: Some(normalized_config_json),
+            created_at: now,
+            updated_at: now,
+        };
+
+        Ok(PreparedIndexerProbe {
+            provider,
+            fields,
+            persisted_config,
+            validated_base_url,
+            accounting,
+            proxy_config,
+            temp_config,
         })
     }
 
@@ -505,6 +608,7 @@ fn map_indexer_connection_test_error(error: AppError) -> AppError {
         // Kinds that already carry a user-facing message and their own GraphQL
         // code. Re-wrapping them would only bury what they say.
         AppError::Validation(_)
+        | AppError::ValidationRefused { .. }
         | AppError::Unauthorized(_)
         | AppError::NotFound(_)
         | AppError::Canceled(_)
@@ -1174,6 +1278,8 @@ mod tests {
         probe_result: bool,
         dynamic_fields: Option<crate::PluginDynamicConfigFields>,
         dynamic_calls: Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+        /// `Err` names the refusal reason the challenge fails with.
+        login_challenge: Option<Result<crate::IndexerLoginChallenge, &'static str>>,
     }
 
     impl RecordingIndexerClient {
@@ -1190,7 +1296,16 @@ mod tests {
                 probe_result: false,
                 dynamic_fields: None,
                 dynamic_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                login_challenge: None,
             }
+        }
+
+        fn with_login_challenge(
+            mut self,
+            challenge: Result<crate::IndexerLoginChallenge, &'static str>,
+        ) -> Self {
+            self.login_challenge = Some(challenge);
+            self
         }
 
         fn with_dynamic_fields(mut self, fields: crate::PluginDynamicConfigFields) -> Self {
@@ -1224,6 +1339,17 @@ mod tests {
         ) -> AppResult<Option<crate::PluginDynamicConfigFields>> {
             self.dynamic_calls.lock().unwrap().push(values.clone());
             Ok(self.dynamic_fields.clone())
+        }
+
+        async fn login_challenge(&self) -> AppResult<Option<crate::IndexerLoginChallenge>> {
+            match &self.login_challenge {
+                None => Ok(None),
+                Some(Ok(challenge)) => Ok(Some(challenge.clone())),
+                Some(Err(reason)) => Err(AppError::validation_refused(
+                    reason,
+                    "synthetic challenge refusal",
+                )),
+            }
         }
 
         async fn search(
@@ -3424,6 +3550,176 @@ mod tests {
             "testing an unsaved credential must not clear health of the stored credential"
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    fn challenge_answer_field() -> scryer_domain::ConfigFieldDef {
+        scryer_domain::ConfigFieldDef {
+            required: false,
+            ..string_field(
+                "captcha_answer",
+                "Challenge Answer",
+                Some(scryer_domain::ConfigFieldRole::LoginChallengeAnswer),
+            )
+        }
+    }
+
+    fn saved_challenge_indexer() -> IndexerConfig {
+        IndexerConfig {
+            id: "cfg-1".to_string(),
+            name: "Synthetic Tracker".to_string(),
+            provider_type: "synthetic-engine".to_string(),
+            base_url: "https://tracker.example".to_string(),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            max_queries_per_minute: None,
+            disabled_until: None,
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: None,
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: None,
+            managed_child_key: None,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: Some(
+                r#"{"base_url":"https://tracker.example","password":"stored-secret"}"#.to_string(),
+            ),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// The challenge is fetched with the draft settings, under the probe's
+    /// synthetic id, with the stored secret the draft left blank restored, and
+    /// nothing about it is saved.
+    #[tokio::test]
+    async fn login_challenge_runs_the_draft_with_restored_secrets_and_saves_nothing() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        indexer_repo
+            .created
+            .lock()
+            .await
+            .push(saved_challenge_indexer());
+        let challenge = crate::IndexerLoginChallenge {
+            answer_field_key: "captcha_answer".to_string(),
+            content_type: "image/png".to_string(),
+            image_base64: "iVBORw==".to_string(),
+        };
+        let client = Arc::new(
+            RecordingIndexerClient::new(false).with_login_challenge(Ok(challenge.clone())),
+        );
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "synthetic-engine",
+            vec![
+                string_field(
+                    "base_url",
+                    "Base URL",
+                    Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+                ),
+                password_field("password", "Password"),
+                challenge_answer_field(),
+            ],
+            searchable_capabilities(),
+            client.clone(),
+        ));
+        let app = test_app(
+            indexer_repo.clone(),
+            Some(provider.clone()),
+            Arc::new(NullSettingsRepository),
+        );
+
+        let shown = app
+            .indexer_login_challenge(
+                &test_admin(),
+                "synthetic-engine",
+                Some(r#"{"base_url":"https://tracker.example","captcha_answer":""}"#),
+                Some("cfg-1"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown, Some(challenge));
+
+        let seen = provider.seen_configs.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, crate::CONNECTION_TEST_INDEXER_ID);
+        let config: serde_json::Value =
+            serde_json::from_str(seen[0].config_json.as_deref().unwrap()).unwrap();
+        assert_eq!(config["password"], "stored-secret");
+        assert_eq!(config["base_url"], "https://tracker.example");
+        assert!(client.calls.lock().unwrap().is_empty(), "no search runs");
+        assert!(indexer_repo.cleared_ids().await.is_empty());
+        assert_eq!(
+            indexer_repo.created.lock().await.clone()[0].config_json,
+            saved_challenge_indexer().config_json,
+            "the stored settings are untouched"
+        );
+    }
+
+    /// A provider with no answer field is never asked, and a refusal keeps the
+    /// reason it was raised with.
+    #[tokio::test]
+    async fn login_challenge_skips_providers_without_an_answer_field_and_keeps_refusal_reasons() {
+        let fields = vec![string_field(
+            "base_url",
+            "Base URL",
+            Some(scryer_domain::ConfigFieldRole::ConnectionUrl),
+        )];
+        let client = Arc::new(RecordingIndexerClient::new(false).with_login_challenge(Ok(
+            crate::IndexerLoginChallenge {
+                answer_field_key: "captcha_answer".to_string(),
+                content_type: "image/png".to_string(),
+                image_base64: "iVBORw==".to_string(),
+            },
+        )));
+        let provider = Arc::new(RecordingPluginProvider::new(
+            "synthetic-engine",
+            fields.clone(),
+            searchable_capabilities(),
+            client,
+        ));
+        let app = test_app(
+            Arc::new(RecordingIndexerConfigRepo::new()),
+            Some(provider.clone()),
+            Arc::new(NullSettingsRepository),
+        );
+        let draft = Some(r#"{"base_url":"https://tracker.example"}"#);
+        assert_eq!(
+            app.indexer_login_challenge(&test_admin(), "synthetic-engine", draft, None, None)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(provider.seen_configs.lock().unwrap().is_empty());
+
+        let refusing =
+            Arc::new(RecordingPluginProvider::new(
+                "synthetic-engine",
+                [fields, vec![challenge_answer_field()]].concat(),
+                searchable_capabilities(),
+                Arc::new(RecordingIndexerClient::new(false).with_login_challenge(Err(
+                    crate::login_challenge_refusal::IMAGE_TYPE_UNSUPPORTED,
+                ))),
+            ));
+        let app = test_app(
+            Arc::new(RecordingIndexerConfigRepo::new()),
+            Some(refusing),
+            Arc::new(NullSettingsRepository),
+        );
+        let error = app
+            .indexer_login_challenge(&test_admin(), "synthetic-engine", draft, None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.validation_reason(),
+            Some(crate::login_challenge_refusal::IMAGE_TYPE_UNSUPPORTED)
+        );
     }
 
     #[tokio::test]
