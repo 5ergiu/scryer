@@ -1927,3 +1927,124 @@ async fn a_missing_required_subtitle_fails_the_job_and_names_the_language() {
             .exists()
     );
 }
+
+// ---------------------------------------------------------------------------
+// deleted and disabled clients
+
+/// Wait until the job's running file has `bytes` in the write buffer.
+async fn wait_for_live_bytes(client: &HttpDownloadClient, id: &str, bytes: u64) {
+    let engine = Arc::clone(client.engine());
+    tokio::time::timeout(WAIT_BOUND, async {
+        loop {
+            if let Some((_, Some(live))) = engine.job_with_live(id).await.unwrap()
+                && live.bytes_done == bytes
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the transfer reached the awaited byte count");
+}
+
+#[tokio::test]
+async fn a_deleted_client_stops_its_engine_and_keeps_its_queue() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(17, Arc::clone(&gate)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let first = client(&config);
+    let grab = first
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+    wait_for_live_bytes(&first, &grab.job_id, 17).await;
+
+    forget_engine(&config.id);
+    assert!(registered_engine(&config.id).is_none());
+    let old = Arc::clone(first.engine());
+    assert!(old.is_shut_down());
+    gate.notify_one();
+    tokio::time::timeout(WAIT_BOUND, old.workers().wait())
+        .await
+        .expect("the forgotten engine's workers stop");
+
+    // The queue stays on disk, the job unfinished, for whatever reads it next.
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    let document = store.load().await.unwrap();
+    let job = document
+        .jobs
+        .iter()
+        .find(|job| job.id == grab.job_id)
+        .expect("the job is still recorded");
+    assert!(!job.state.is_terminal());
+
+    // Created again under the same id, a new engine waits for the old one's
+    // workers and lists the job it left.
+    let again = client(&config);
+    assert!(!Arc::ptr_eq(again.engine(), &old));
+    let listed = again.engine().job(&grab.job_id).await.unwrap();
+    assert!(listed.is_some_and(|job| !job.state.is_terminal()));
+}
+
+#[tokio::test]
+async fn a_disabled_client_finishes_the_current_file_and_starts_nothing_new() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(17, Arc::clone(&gate)).await;
+    let subtitles = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subs/en.vtt"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"WEBVTT\n".as_slice()))
+        .mount(&subtitles)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let mut source = source(vec![
+        muxed(&format!("{base}/media/clip.mp4"), 720),
+        subtitle(&format!("{}/subs/en.vtt", subtitles.uri()), "en"),
+    ]);
+    source.selected.subtitle_mode = HttpSubtitleMode::SidecarPreferred;
+    source.selected.subtitle_languages = vec!["en".into()];
+    let grab = client.submit_download(&request(source)).await.unwrap();
+    wait_for_live_bytes(&client, &grab.job_id, 17).await;
+
+    let mut disabled = config.clone();
+    disabled.is_enabled = false;
+    apply_saved_config(&disabled);
+    gate.notify_one();
+    let parked = wait_for_job(&client, &grab.job_id, |job| {
+        job.state == HttpJobState::Queued && job.files[0].complete
+    })
+    .await;
+    assert!(!parked.files[1].complete);
+    assert!(subtitles.received_requests().await.unwrap().is_empty());
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
+
+    apply_saved_config(&config);
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(subtitles.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_client_changed_to_another_type_stops_its_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    client.engine().ensure_started().await.unwrap();
+    let mut changed = config.clone();
+    changed.client_type = "sabnzbd".into();
+    apply_saved_config(&changed);
+    assert!(registered_engine(&config.id).is_none());
+    assert!(client.engine().is_shut_down());
+}

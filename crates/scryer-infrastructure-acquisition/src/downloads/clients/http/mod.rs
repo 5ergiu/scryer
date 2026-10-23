@@ -38,6 +38,7 @@ use scryer_domain::{
     CompletedDownload, DownloadClientConfig, DownloadQueueItem, DownloadQueueState, ProxyConfig,
 };
 use serde_json::Value;
+use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use self::engine::{HttpEngine, HttpEngineLimits, LiveSnapshot};
@@ -139,6 +140,60 @@ fn read_bounded(
 static ENGINES: LazyLock<std::sync::Mutex<HashMap<String, Arc<HttpEngine>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// The workers of engines whose configuration was deleted or stopped being
+/// an HTTP downloader, kept only until they stop, so an engine created
+/// again under the same id waits for them before it reads their queue.
+static RETIRED: LazyLock<std::sync::Mutex<HashMap<String, TaskTracker>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Stop and drop the engine of a configuration that was deleted or is no
+/// longer an HTTP downloader. Its workers checkpoint and stop; its queue
+/// and files stay on disk.
+pub(crate) fn forget_engine(config_id: &str) {
+    let forgotten = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(config_id);
+    let Some(engine) = forgotten else {
+        return;
+    };
+    engine.begin_shutdown();
+    info!(
+        client_id = config_id,
+        "HTTP downloader stopped for a removed configuration"
+    );
+    let mut retired = RETIRED.lock().unwrap_or_else(|p| p.into_inner());
+    retired.retain(|_, workers| !(workers.is_closed() && workers.is_empty()));
+    retired.insert(config_id.to_string(), engine.workers());
+}
+
+/// Bring a running engine in line with a saved configuration: stop it when
+/// the configuration is no longer an HTTP downloader, otherwise apply its
+/// enabled flag. A configuration without an engine has nothing running.
+pub(crate) fn apply_saved_config(config: &DownloadClientConfig) {
+    if !config.client_type.eq_ignore_ascii_case(CLIENT_TYPE) {
+        forget_engine(&config.id);
+        return;
+    }
+    let engine = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&config.id)
+        .cloned();
+    if let Some(engine) = engine {
+        engine.set_enabled(config.is_enabled);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn registered_engine(config_id: &str) -> Option<Arc<HttpEngine>> {
+    ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(config_id)
+        .cloned()
+}
+
 /// The engine for a configuration, created on first use. A changed download
 /// directory replaces the engine: the old one stops its workers (they
 /// checkpoint first) and the new one reads the queue kept in the new
@@ -151,10 +206,16 @@ fn engine_for(config_id: &str, settings: &HttpClientSettings, egress: Egress) ->
         engine.reconfigure(settings.limits, egress);
         return Arc::clone(engine);
     }
-    let predecessor = engines.remove(config_id);
-    if let Some(predecessor) = &predecessor {
-        predecessor.begin_shutdown();
-    }
+    let predecessor = match engines.remove(config_id) {
+        Some(predecessor) => {
+            predecessor.begin_shutdown();
+            Some(predecessor.workers())
+        }
+        None => RETIRED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(config_id),
+    };
     let engine = HttpEngine::new(
         config_id.to_string(),
         settings.download_dir.clone(),
@@ -182,9 +243,9 @@ impl HttpDownloadClient {
     ) -> AppResult<Self> {
         let settings = HttpClientSettings::from_config_json(&config.config_json)?;
         let egress = egress_for(proxy_config)?;
-        Ok(Self {
-            engine: engine_for(&config.id, &settings, egress),
-        })
+        let engine = engine_for(&config.id, &settings, egress);
+        engine.set_enabled(config.is_enabled);
+        Ok(Self { engine })
     }
 
     #[cfg(test)]

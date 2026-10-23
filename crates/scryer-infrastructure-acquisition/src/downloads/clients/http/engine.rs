@@ -12,7 +12,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -91,7 +91,12 @@ pub(crate) struct HttpEngine {
     #[cfg(test)]
     progress_writes: AtomicU64,
     started: OnceCell<()>,
-    predecessor: std::sync::Mutex<Option<Arc<HttpEngine>>>,
+    /// Whether the client is enabled. A disabled engine starts no transfer,
+    /// and a running one stops after the file it is on.
+    enabled: AtomicBool,
+    /// The workers of the engine this one replaced, which must stop before
+    /// this one reads the queue they write.
+    predecessor: std::sync::Mutex<Option<TaskTracker>>,
     shutdown: CancellationToken,
     tasks: TaskTracker,
     revision: watch::Sender<u64>,
@@ -103,7 +108,7 @@ impl HttpEngine {
         download_dir: PathBuf,
         limits: HttpEngineLimits,
         egress: Egress,
-        predecessor: Option<Arc<HttpEngine>>,
+        predecessor: Option<TaskTracker>,
     ) -> Arc<Self> {
         let store = HttpStateStore::for_client(&download_dir, &client_id);
         Arc::new(Self {
@@ -129,6 +134,7 @@ impl HttpEngine {
             #[cfg(test)]
             progress_writes: AtomicU64::new(0),
             started: OnceCell::new(),
+            enabled: AtomicBool::new(true),
             predecessor: std::sync::Mutex::new(predecessor),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
@@ -212,8 +218,33 @@ impl HttpEngine {
         self.tasks.close();
     }
 
-    async fn wait_stopped(&self) {
-        self.tasks.wait().await;
+    /// The engine's workers, for a successor to wait on.
+    pub(crate) fn workers(&self) -> TaskTracker {
+        self.tasks.clone()
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// Enable or disable the client. Disabling starts no new transfer and
+    /// lets a running one finish its current file before the job goes back
+    /// to the queue. Enabling schedules the queue again.
+    pub(crate) fn set_enabled(self: &Arc<Self>, enabled: bool) {
+        let was = self.enabled.swap(enabled, Ordering::AcqRel);
+        if enabled
+            && !was
+            && !self.shutdown.is_cancelled()
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let engine = Arc::clone(self);
+            self.tasks.spawn(async move { engine.schedule().await });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shutdown.is_cancelled()
     }
 
     /// A receiver that changes whenever the queue document does.
@@ -238,7 +269,7 @@ impl HttpEngine {
                     .unwrap_or_else(|p| p.into_inner())
                     .take();
                 if let Some(predecessor) = predecessor {
-                    predecessor.wait_stopped().await;
+                    predecessor.wait().await;
                 }
                 let mut document = self.store.load().await?;
                 let mut changed = false;
@@ -453,7 +484,7 @@ impl HttpEngine {
     }
 
     async fn schedule_inner(self: &Arc<Self>) {
-        if self.shutdown.is_cancelled() || self.started.get().is_none() {
+        if self.shutdown.is_cancelled() || self.started.get().is_none() || !self.is_enabled() {
             return;
         }
         let limits = self.limits();
@@ -609,6 +640,12 @@ impl HttpEngine {
                 index += 1;
                 continue;
             }
+            if !self.is_enabled() {
+                // Disabled between files: the finished ones stay finished
+                // and the job waits in the queue for the client to return.
+                self.requeue(id).await;
+                return Err(TransferError::Cancelled);
+            }
             live.file_index.store(index as u64, Ordering::Relaxed);
             live.current_file_bytes
                 .store(file.bytes_done, Ordering::Relaxed);
@@ -664,6 +701,22 @@ impl HttpEngine {
             }
         }
         Ok(())
+    }
+
+    /// Put a job that stopped early back in the queue, unless a control
+    /// operation already moved it elsewhere.
+    async fn requeue(&self, id: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(job) = inner.document.jobs.iter_mut().find(|job| job.id == id)
+            && job.state == HttpJobState::Downloading
+        {
+            job.state = HttpJobState::Queued;
+            job.updated_at = Utc::now();
+            info!(
+                item_id = id,
+                "HTTP download waiting while its client is disabled"
+            );
+        }
     }
 
     /// Record that an optional file was given up on, so it is neither tried
