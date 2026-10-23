@@ -1022,9 +1022,9 @@ pub(crate) async fn run_claimed_download_cleanup(
                 let host_payload_in_flight = !payload_removed
                     && checkpoint.as_ref().is_some_and(|checkpoint| checkpoint.get("completed").is_some());
                 let payload_removed = if host_payload_in_flight {
-                    match remove_host_payload_before_entry_cleanup(
+                    match remove_host_payload(
                         app, Some(&record.download_id), &record.client_id, &record.client_type,
-                        &record.item_id, Some(&record), None,
+                        &record.item_id, Some(&record), None, None,
                     ).await {
                         Ok(Some(report)) => {
                             if let Some(marker) = report.filesystem_checkpoint.as_deref()

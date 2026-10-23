@@ -445,9 +445,11 @@ fn cleanup_record_for(tracked: &TrackedDownload) -> crate::DownloadCleanupRecord
     }
 }
 
+// NZBGet's host deletion runs before its entry is removed, so an entry retry
+// must replay the stored plan and never delete content recreated since.
 #[tokio::test]
 async fn durable_payload_checkpoint_does_not_delete_recreated_content() {
-    for client_type in ["nzbget", "sabnzbd"] {
+    for client_type in ["nzbget"] {
         let client = Arc::new(StubDownloadClient::default());
         let (app, user, repository) = bootstrap_with_torrent_clients(client.clone());
         let config =
@@ -826,8 +828,28 @@ async fn host_cleanup_preserves_unowned_files_inside_an_authorized_root() {
             None,
         )
         .await;
+        assert_eq!(std::fs::read(&file).unwrap(), b"media", "{client_type}");
+        if client_type == "sabnzbd" {
+            // SABnzbd is asked to delete its files under "remove files"; the
+            // host backup deletion still refuses a file it cannot attribute.
+            assert_eq!(outcome, TerminalDownloadCleanupOutcome::Removed);
+            assert_eq!(
+                outcome.payload,
+                Some(crate::import::import::HostPayloadDisposition::Unverified)
+            );
+            assert_eq!(
+                client.deleted_requests.lock().await.clone(),
+                vec![(
+                    Some(config.id.clone()),
+                    None,
+                    "owned-job".to_string(),
+                    true,
+                    true
+                )]
+            );
+            continue;
+        }
         assert_eq!(outcome, TerminalDownloadCleanupOutcome::RetryableFailure);
-        assert_eq!(std::fs::read(&file).unwrap(), b"media");
         assert!(client.deleted_requests.lock().await.is_empty());
         let other = payload.parent().unwrap().join("Unrelated job");
         std::fs::create_dir(&other).unwrap();
@@ -2612,6 +2634,55 @@ async fn a_client_reported_usenet_failure_is_removed_with_its_payload() {
             "{client_type}"
         );
     }
+}
+
+// The client is asked first, so a failed entry removal leaves the payload for
+// the retry: the retry asks the client again with its files, and the host
+// backup deletion runs once the entry is gone.
+#[tokio::test]
+async fn a_failed_client_removal_retries_with_data_before_the_host_backup() {
+    let (app, user, client, repository, config, tracked) =
+        client_failure_fixture("sabnzbd", true).await;
+    let (root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+    let unrelated = root.path().join("Unrelated.Fixture.1080p-GRP");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("keep.mkv"), b"other media").unwrap();
+    let mut record = cleanup_record_for(&tracked);
+    client.set_delete_error(Some("entry delete failed")).await;
+    let first = crate::import::import::run_claimed_download_cleanup(&app, record.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(first.2, TerminalDownloadCleanupOutcome::RetryableFailure);
+    assert!(payload.join("movie.mkv").exists());
+
+    record.payload_checkpoint =
+        Some(repository.cleanup_checkpoints.lock().await[&record.download_id].clone());
+    record.attempts = 2;
+    client.set_delete_error(None).await;
+    let retry = crate::import::import::run_claimed_download_cleanup(&app, record, None)
+        .await
+        .unwrap();
+    assert_eq!(retry.2, TerminalDownloadCleanupOutcome::Removed);
+    assert!(!payload.exists());
+    assert_eq!(
+        std::fs::read(unrelated.join("keep.mkv")).unwrap(),
+        b"other media"
+    );
+    // The stub records only the request that succeeded.
+    assert_eq!(
+        client.deleted_requests.lock().await.clone(),
+        vec![(
+            Some(config.id.clone()),
+            None,
+            "client-failed-job".to_string(),
+            true,
+            true
+        )]
+    );
+    assert_eq!(
+        last_finished_cleanup(&repository.finished_cleanup.lock().await),
+        Some(("payload_and_entry_removed".to_string(), true))
+    );
 }
 
 #[tokio::test]
@@ -6015,10 +6086,7 @@ async fn sab_cleanup_renamed_directory_summary_removes_only_empty_folder() {
         );
         let deleted = client.deleted_requests.lock().await;
         assert_eq!(deleted.len(), 1);
-        assert_eq!(
-            deleted[0].4, !keep_file,
-            "SAB must not delete files that the host retained"
-        );
+        assert!(deleted[0].4, "SAB follows the remove-files preference");
     }
 }
 
@@ -6042,7 +6110,7 @@ async fn sab_cleanup_storage_leaf_prunes_empty_job_parent_and_preserves_siblings
         assert_eq!(result.2.outcome, TerminalDownloadCleanupOutcome::Removed);
         assert_eq!(payload.exists(), keep_sibling);
         assert!(root.path().join("imported.mkv").exists());
-        assert_eq!(client.deleted_requests.lock().await[0].4, !keep_sibling);
+        assert!(client.deleted_requests.lock().await[0].4);
     }
 }
 
@@ -6097,11 +6165,7 @@ async fn sab_cleanup_existing_import_evidence_prunes_nested_empty_folders() {
         } else {
             assert_eq!(std::fs::read(&destination).unwrap(), b"media", "{scenario}");
         }
-        assert_eq!(
-            client.deleted_requests.lock().await[0].4,
-            !retained,
-            "{scenario}"
-        );
+        assert!(client.deleted_requests.lock().await[0].4, "{scenario}");
     }
 }
 

@@ -775,14 +775,13 @@ async fn reconcile_terminal_download_cleanup(
         _ => false,
     };
 
-    // The host deletion always runs first. For a client that cannot delete
-    // its own data it is the only deletion; for one that can, it is the
-    // backup, and the client is then asked to delete its files as well.
-    let client_removal = if remove_data {
-        client_data_removal(app, client_id, client_type).await
-    } else {
-        ClientDataRemoval::None
-    };
+    // Under that one "remove files" decision, a client that can delete its
+    // own files is always asked to, and the host deletion follows as the
+    // backup for whatever it left. A client that cannot (NZBGet, entry-only
+    // torrent plugins) gets the host deletion before its entry is removed
+    // instead: NZBGet's history removal deletes DestDir on its own.
+    let client_deletes_payload =
+        remove_data && client_deletes_its_payload(app, client_id, client_type).await;
     let mut payload_disposition = None;
     // A retained, unreadable or unavailable NZBGet state is not a host
     // payload failure. It retries without spending the give-up budget below,
@@ -837,8 +836,8 @@ async fn reconcile_terminal_download_cleanup(
     let mut stored_checkpoint = record
         .and_then(|record| record.payload_checkpoint.as_deref())
         .and_then(|checkpoint| serde_json::from_str::<serde_json::Value>(checkpoint).ok());
-    let payload_cleanup_checkpoint = if remove_data {
-        match remove_host_payload_before_entry_cleanup(
+    let mut payload_cleanup_checkpoint = if remove_data && !client_deletes_payload {
+        match remove_host_payload(
             app,
             canonical_download_id,
             client_id,
@@ -848,6 +847,7 @@ async fn reconcile_terminal_download_cleanup(
             nzbget_payload
                 .as_ref()
                 .map(|payload| payload.download.clone()),
+            None,
         )
         .await
         {
@@ -855,23 +855,6 @@ async fn reconcile_terminal_download_cleanup(
                 payload_disposition = Some(report.disposition);
                 stored_checkpoint = Some(report.stored_checkpoint);
                 report.filesystem_checkpoint
-            }
-            // The client reports no payload location for this job (a failed
-            // job never reaches its completed folder). Its own deletion
-            // covers the files.
-            Ok(None) if client_removal != ClientDataRemoval::None => None,
-            // A client that deletes its own files does not wait on the host.
-            Err(error) if client_removal == ClientDataRemoval::Native => {
-                tracing::debug!(
-                    client_id,
-                    client_type,
-                    download_client_item_id,
-                    state = state.as_str(),
-                    error = %error,
-                    "host payload deletion did not complete; the client deletes its own files"
-                );
-                payload_disposition = Some(HostPayloadDisposition::Unverified);
-                None
             }
             other => {
                 let error = other.err().unwrap_or_else(|| {
@@ -972,49 +955,63 @@ async fn reconcile_terminal_download_cleanup(
             ..TerminalDownloadCleanup::bare(TerminalDownloadCleanupOutcome::RetryableFailure)
         };
     }
-    let payload_already_removed = record
-        .and_then(|record| record.payload_checkpoint.as_deref())
-        .and_then(|checkpoint| serde_json::from_str::<serde_json::Value>(checkpoint).ok())
-        .is_some_and(|checkpoint| {
-            checkpoint
-                .get("payload_removed")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        });
-    let client_deletes_payload = match client_removal {
-        ClientDataRemoval::None => false,
-        ClientDataRemoval::Native => true,
-        // Never on a retry after the host deletion settled (the directory
-        // may have been recreated since), and never over files the host
-        // kept because it could not verify them.
-        ClientDataRemoval::AfterHostVerifies => {
-            !payload_already_removed
-                && matches!(payload_disposition, None | Some(HostPayloadDisposition::Removed))
+    // Where the host backup deletion will look once the client has deleted
+    // the job, resolved while the client still lists it. A failed job never
+    // reaches the client's completed folder and has no location; the
+    // client's own deletion is then the only one.
+    let follow_up_payload = if client_deletes_payload {
+        match stored_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.get("completed").cloned())
+            .and_then(|completed| {
+                serde_json::from_value::<scryer_domain::CompletedDownload>(completed).ok()
+            }) {
+            Some(completed) => Some(completed),
+            None => match app
+                .services
+                .integrations
+                .download_client
+                .get_cleanup_payload_for_source(client_id, client_type, download_client_item_id)
+                .await
+            {
+                Ok(payload) => payload.map(|payload| payload.download),
+                Err(error) => {
+                    tracing::warn!(
+                        client_id,
+                        client_type,
+                        download_client_item_id,
+                        state = state.as_str(),
+                        error = %error,
+                        "payload location unavailable; the client's own deletion has no host backup"
+                    );
+                    None
+                }
+            },
         }
+    } else {
+        None
     };
-    // Whether absence may later be credited to the client's own deletion:
-    // the host deletion did not settle the payload itself.
-    let native_intent = client_deletes_payload
-        && !matches!(
-            payload_disposition,
-            Some(HostPayloadDisposition::Removed | HostPayloadDisposition::PartiallyRetained)
-        );
     let mut intent_record: Option<crate::DownloadCleanupRecord> = None;
-    if (!remove_data || native_intent)
+    if (!remove_data || client_deletes_payload)
         && let Some(record) = record
     {
         // Persist the operation and identity only after policy and seeding
         // eligibility pass, so authoritative absence can recover a lost
         // response for either the client's own data deletion or an
         // entry-only removal.
-        let intent = serde_json::json!({
-            "native_remove_requested": native_intent,
+        let mut intent = serde_json::json!({
+            "native_remove_requested": client_deletes_payload,
             "entry_only_remove_requested": !remove_data,
             "download_id": record.download_id.to_string(),
             "client_id": record.client_id,
             "client_type": record.client_type,
             "item_id": record.item_id,
         });
+        // Lets a later attempt that finds the entry gone still run the host
+        // backup deletion.
+        if let Some(completed) = follow_up_payload.as_ref() {
+            intent["completed"] = serde_json::json!(completed);
+        }
         let checkpoint = intent.to_string();
         if let Err(error) = app
             .services
@@ -1091,7 +1088,7 @@ async fn reconcile_terminal_download_cleanup(
             // process): a later authoritative absence may credit it as a
             // completed native deletion. A crash before this point leaves
             // no marker, and absence then settles as payload-unverified.
-            if native_intent
+            if client_deletes_payload
                 && client_payload == ClientPayloadDeletion::Requested
                 && let Some(record) = record
             {
@@ -1150,6 +1147,46 @@ async fn reconcile_terminal_download_cleanup(
             }
         }
     };
+
+    // The host backup deletion, for whatever the client left (all of it when
+    // the client refused). The entry is already gone, so a failure here
+    // settles with the payload unverified rather than retrying.
+    if client_deletes_payload
+        && outcome == TerminalDownloadCleanupOutcome::Removed
+        && let Some(completed) = follow_up_payload
+    {
+        match remove_host_payload(
+            app,
+            canonical_download_id,
+            client_id,
+            client_type,
+            download_client_item_id,
+            record,
+            None,
+            Some(completed),
+        )
+        .await
+        {
+            Ok(Some(report)) => {
+                payload_disposition = Some(report.disposition);
+                stored_checkpoint = Some(report.stored_checkpoint);
+                payload_cleanup_checkpoint = report.filesystem_checkpoint;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    client_id,
+                    client_type,
+                    download_client_item_id,
+                    state = state.as_str(),
+                    client_payload = client_payload.as_str(),
+                    error = %error,
+                    "host backup payload deletion did not complete after the client entry was removed"
+                );
+                payload_disposition = Some(HostPayloadDisposition::Unverified);
+            }
+        }
+    }
 
     // Kept beside the settlement so a client's refusal to delete its files
     // stays distinguishable from a host deletion that went unverified.
@@ -1215,33 +1252,15 @@ const CLIENT_PAYLOAD_DELETION_REFUSED: &str = "CLEANUP_CLIENT_PAYLOAD_DELETION_R
 /// ([`ClientPayloadDeletion`]).
 const CLIENT_PAYLOAD_KEY: &str = "client_payload";
 
-/// Whether, and when, terminal cleanup asks a client to delete a job's files
-/// itself. It never decides whether the host deletion runs: that always does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClientDataRemoval {
-    /// The client cannot delete data on request. NZBGet's failed-state
-    /// history removal is guarded separately by `verify_nzbget_entry_cleanup`.
-    None,
-    /// The client deletes its own files (Weaver, plugins with
-    /// `remove_with_data`), whatever the host deletion found.
-    Native,
-    /// SABnzbd: `del_completed_files` can reach files the host deletion kept,
-    /// so it is asked only once the host verified the payload gone, or when
-    /// the job has no completed location for the host to inspect.
-    AfterHostVerifies,
-}
-
-async fn client_data_removal(
-    app: &AppUseCase,
-    client_id: &str,
-    client_type: &str,
-) -> ClientDataRemoval {
+/// Whether the client deletes a job's files when asked to remove its entry
+/// with data (Weaver, SABnzbd, plugins with `remove_with_data`). NZBGet does
+/// not: its failed-state history removal is guarded separately by
+/// `verify_nzbget_entry_cleanup`.
+async fn client_deletes_its_payload(app: &AppUseCase, client_id: &str, client_type: &str) -> bool {
     match client_type.trim() {
-        "weaver" => ClientDataRemoval::Native,
-        "sabnzbd" => ClientDataRemoval::AfterHostVerifies,
-        "nzbget" => ClientDataRemoval::None,
-        _ if plugin_has_native_data_removal(app, client_id).await => ClientDataRemoval::Native,
-        _ => ClientDataRemoval::None,
+        "weaver" | "sabnzbd" => true,
+        "nzbget" => false,
+        _ => plugin_has_native_data_removal(app, client_id).await,
     }
 }
 
@@ -1835,8 +1854,9 @@ async fn verify_nzbget_entry_cleanup(payload: &crate::DownloadCleanupPayload) ->
 
 /// Host-side payload deletion. It runs whenever a payload is removed: the only
 /// deletion for clients that cannot delete their own data (NZBGet, entry-only
-/// torrent plugins) and the backup for those that can. `None` when the client
-/// reports no payload location for the job. Deletion is inventory-and-verify,
+/// torrent plugins), run before their entry is removed, and the backup for
+/// those that can, run after the client was asked to delete its files.
+/// `None` when no payload location is known for the job. Deletion is inventory-and-verify,
 /// never a recursive wipe:
 ///
 /// 1. The job directory must be provably this job's (named for the release
@@ -1853,7 +1873,7 @@ async fn verify_nzbget_entry_cleanup(payload: &crate::DownloadCleanupPayload) ->
 /// and, when a mapped root contains the payload, for the root-availability and
 /// symlink-ancestor checks; they are no longer required to exist. Library and
 /// recycle roots are refused outright.
-async fn remove_host_payload_before_entry_cleanup(
+async fn remove_host_payload(
     app: &AppUseCase,
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
     client_id: &str,
@@ -1861,6 +1881,7 @@ async fn remove_host_payload_before_entry_cleanup(
     download_client_item_id: &str,
     record: Option<&crate::DownloadCleanupRecord>,
     revalidated_nzbget_download: Option<scryer_domain::CompletedDownload>,
+    known_completed: Option<scryer_domain::CompletedDownload>,
 ) -> AppResult<Option<HostPayloadCleanupReport>> {
     let client_id = client_id.trim();
     if client_id.is_empty() {
@@ -1924,7 +1945,7 @@ async fn remove_host_payload_before_entry_cleanup(
             serde_json::from_value::<scryer_domain::CompletedDownload>(completed).ok()
         }) {
         completed
-    } else if let Some(completed) = current_nzbget_download {
+    } else if let Some(completed) = current_nzbget_download.or(known_completed) {
         completed
     } else {
         match app
