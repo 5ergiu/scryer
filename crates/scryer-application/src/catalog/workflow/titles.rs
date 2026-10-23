@@ -2107,7 +2107,7 @@ impl AppUseCase {
         if let Err(err) = submissions
             .finish_download_cleanup(
                 download_id,
-                "cleanup_abandoned",
+                crate::import::import::CleanupSettlement::CleanupAbandoned.as_str(),
                 true,
                 0,
                 0,

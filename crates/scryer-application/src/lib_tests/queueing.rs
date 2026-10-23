@@ -5921,7 +5921,6 @@ async fn a_failed_grab_walks_the_saved_search_results_without_querying_an_indexe
             client_item_id,
             release_title: release(suffix),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         }

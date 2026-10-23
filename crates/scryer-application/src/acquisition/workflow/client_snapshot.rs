@@ -112,7 +112,6 @@ pub(crate) struct DownloadFailureContext {
     pub client_item_id: String,
     pub release_title: String,
     pub reason: String,
-    pub remove_from_client_if_configured: bool,
     pub skip_reacquire: bool,
     /// The blocklist entry's reason. `None` records the failure as one the
     /// download client reported; a failure Scryer's own import gate raised
@@ -1020,7 +1019,6 @@ async fn check_grabbed_for_failures(app: &AppUseCase, dl_snapshot: &DownloadClie
                     client_item_id: failed_item.download_client_item_id.clone(),
                     release_title: release_title.clone(),
                     reason: failed_item.reason.clone(),
-                    remove_from_client_if_configured: true,
                     blocklist_reason: None,
                     skip_reacquire: false,
                 },
@@ -1484,41 +1482,9 @@ async fn handle_download_failure_for_download(
         return outcome;
     }
 
-    // NZBGet must retain history until terminal cleanup has inspected its payload.
-    // The tracked-state update below schedules that existing durable cleanup path.
-    if context.remove_from_client_if_configured
-        && !context.client_type.eq_ignore_ascii_case("nzbget")
-        && let Some(title) = attribution.title.as_ref()
-        && app
-            .should_remove_failed_download(
-                Some(title.library_id.as_str()),
-                &title.facet,
-                &context.client_id,
-            )
-            .await
-        && let Err(error) = app
-            .services
-            .integrations
-            .download_client
-            // History cleanup for a download the client itself failed: the
-            // entry goes, what the client kept is left to the client.
-            .delete_queue_item_for_client_id(
-                &context.client_id,
-                &context.client_item_id,
-                true,
-                false,
-            )
-            .await
-    {
-        warn!(
-            title_id = resolved_title_id.as_deref().unwrap_or(""),
-            client_id = context.client_id.as_str(),
-            download_client_item_id = context.client_item_id.as_str(),
-            error = %error,
-            "failed to delete failed download from client history"
-        );
-    }
-
+    // The client entry stays until terminal cleanup removes it, with its
+    // payload, under the "Remove failed" policy. The tracked-state update
+    // below schedules that durable cleanup.
     let _ = app
         .services
         .workflow
