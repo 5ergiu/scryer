@@ -1023,26 +1023,31 @@ fn decode_search_result(
     }
 }
 
-/// Component plugins deliberately keep unexpected trap details out of their
-/// public error. An upstream's explicit API-key rejection is safe, actionable
-/// information, though, and the guest currently carries it only in that debug
-/// detail. Promote the category without relaying the untrusted detail itself.
+/// A credential the indexer rejected is a stable reason the client translates
+/// (`PLUGIN_INVALID_API_KEY` and friends), so a plugin that names the code
+/// needs nothing more. Plugins built before the shared codes said only the
+/// generic sentence and named the rejected key in their debug text; promote
+/// those to the same reason without relaying the untrusted detail itself.
 fn indexer_search_plugin_error(error: PluginError, context: &str) -> AppError {
-    // Built first so the debug detail is logged on every path.
-    let failed = AppError::plugin_failed(&error, context);
-    let is_api_key_rejection = error.public_message == "indexer component failed"
+    if is_legacy_api_key_rejection(&error) {
+        let promoted = PluginError {
+            code: PluginErrorCode::from("invalid_api_key"),
+            ..error
+        };
+        return AppError::plugin_failed(&promoted, context);
+    }
+    AppError::plugin_failed(&error, context)
+}
+
+fn is_legacy_api_key_rejection(error: &PluginError) -> bool {
+    error.public_message == "indexer component failed"
         && error.debug_message.as_deref().is_some_and(|message| {
             let normalized = message.to_ascii_lowercase();
             (normalized.contains("api key") || normalized.contains("apikey"))
                 && (normalized.contains("invalid")
                     || normalized.contains("rejected")
                     || normalized.contains("error"))
-        });
-    if is_api_key_rejection {
-        return AppError::Validation("The indexer rejected the API key.".to_string());
-    }
-
-    failed
+        })
 }
 
 fn host_incomplete_reason(reason: PluginIncompleteReason) -> HostIncompleteReason {
@@ -3330,17 +3335,18 @@ mod tests {
         .err()
         .expect("an API-key rejection must fail the search");
 
-        assert_eq!(
-            error.to_string(),
-            "validation: The indexer rejected the API key."
-        );
-        assert!(!error.to_string().contains("secret"));
+        let failure = error
+            .plugin_failure()
+            .expect("a legacy API-key rejection is promoted to the shared reason");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_API_KEY");
+        assert_eq!(failure.detail, None);
+        assert!(!format!("{error:?}").contains("secret"));
     }
 
     #[test]
     fn a_plugin_code_the_sdk_never_named_reaches_the_client_as_its_own_reason() {
         // What a guest writes for a code newer than any host or SDK release.
-        let bytes = br#"{"err":{"code":"invalid_username_password","public_message":"Login refused: wrong username or password","debug_message":"form answered 200 with key=example-secret"}}"#;
+        let bytes = br#"{"err":{"code":"geo_blocked","public_message":"The site refuses requests from this region","debug_message":"form answered 451 with key=example-secret"}}"#;
         let result = serde_json::from_slice::<PluginResult<PluginSearchResponse>>(bytes)
             .expect("an unknown code decodes unchanged");
 
@@ -3349,12 +3355,76 @@ mod tests {
             .expect("a plugin error must fail the search");
 
         let failure = error.plugin_failure().expect("a typed plugin failure");
-        assert_eq!(failure.reason.as_str(), "PLUGIN_INVALID_USERNAME_PASSWORD");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_GEO_BLOCKED");
         assert_eq!(
             failure.detail.as_deref(),
-            Some("Login refused: wrong username or password")
+            Some("The site refuses requests from this region")
         );
         assert!(!format!("{error:?}").contains("example-secret"));
+    }
+
+    fn coded_search_error(code: &str, public_message: &str, debug_message: &str) -> AppError {
+        decode_search_result(
+            PluginResult::Err(PluginError {
+                code: PluginErrorCode::from(code),
+                public_message: public_message.to_string(),
+                debug_message: Some(debug_message.to_string()),
+                retry_after_seconds: None,
+                details: None,
+            }),
+            true,
+            "indexer search",
+        )
+        .err()
+        .expect("a plugin error must fail the search")
+    }
+
+    #[test]
+    fn a_rejected_credential_code_reaches_the_client_as_its_translated_reason() {
+        for code in [
+            "invalid_api_key",
+            "invalid_passkey",
+            "invalid_cookie",
+            "invalid_username_password",
+        ] {
+            // The plugin's sentence does not matter: the code alone decides.
+            let error = coded_search_error(
+                code,
+                "the plugin could not complete the request",
+                "upstream answered 401 for key=example-secret",
+            );
+            let failure = error
+                .plugin_failure()
+                .unwrap_or_else(|| panic!("{code} stays a typed plugin failure"));
+            assert_eq!(
+                failure.reason.as_str(),
+                format!("PLUGIN_{}", code.to_ascii_uppercase()),
+                "{code}"
+            );
+            assert_eq!(failure.detail, None, "{code}");
+            assert!(!format!("{error:?}").contains("example-secret"), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_code_that_names_no_credential_stays_a_plugin_failure() {
+        for code in ["captcha_required", "quota_exceeded", "tls_error"] {
+            let error = coded_search_error(
+                code,
+                "the plugin could not complete the request",
+                "api key error: rejected",
+            );
+            let failure = error
+                .plugin_failure()
+                .unwrap_or_else(|| panic!("{code} stays a typed plugin failure"));
+            assert_eq!(
+                failure.reason.as_str(),
+                format!("PLUGIN_{}", code.to_ascii_uppercase()),
+                "{code}"
+            );
+            // The PDK's generic sentence adds nothing beside the reason.
+            assert_eq!(failure.detail, None, "{code}");
+        }
     }
 
     #[test]

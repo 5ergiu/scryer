@@ -29,6 +29,20 @@ export const PLUGIN_FAILURE_KEYS: Readonly<Record<string, string>> = {
   PLUGIN_TIMED_OUT: "plugins.failure.timedOut",
   PLUGIN_RESOURCE_LIMIT: "plugins.failure.resourceLimit",
   PLUGIN_INVALID_USERNAME_PASSWORD: "plugins.failure.invalidUsernamePassword",
+  PLUGIN_INVALID_API_KEY: "plugins.failure.invalidApiKey",
+  PLUGIN_INVALID_PASSKEY: "plugins.failure.invalidPasskey",
+  PLUGIN_INVALID_COOKIE: "plugins.failure.invalidCookie",
+  PLUGIN_CAPTCHA_REQUIRED: "plugins.failure.captchaRequired",
+  PLUGIN_TWO_FACTOR_REQUIRED: "plugins.failure.twoFactorRequired",
+  PLUGIN_ACCOUNT_BANNED: "plugins.failure.accountBanned",
+  PLUGIN_ACCOUNT_DISABLED: "plugins.failure.accountDisabled",
+  PLUGIN_ENDPOINT_NOT_FOUND: "plugins.failure.endpointNotFound",
+  PLUGIN_TLS_ERROR: "plugins.failure.tlsError",
+  PLUGIN_INVALID_RESPONSE: "plugins.failure.invalidResponse",
+  PLUGIN_QUOTA_EXCEEDED: "plugins.failure.quotaExceeded",
+  PLUGIN_ITEM_NOT_FOUND: "plugins.failure.itemNotFound",
+  PLUGIN_DOWNLOAD_REJECTED: "plugins.failure.downloadRejected",
+  PLUGIN_PATH_NOT_WRITABLE: "plugins.failure.pathNotWritable",
 };
 
 const PLUGIN_REASON_PREFIX = "PLUGIN_";
