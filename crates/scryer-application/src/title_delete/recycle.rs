@@ -40,7 +40,8 @@ impl AppUseCase {
         // Enumerate at this title's purge boundary: entries created during an
         // earlier batch item must remain visible. Config construction dedupes bins.
         for (_, config) in self.recycle_bin_configs_for_recycling(roots).await {
-            if config.validation_error.is_some() {
+            if let Some(error) = config.validation_error.as_ref() {
+                tracing::warn!(%error, title_id = %title.id, "cannot verify title recycle cleanup for invalid bin");
                 outcome.failed += 1;
                 continue;
             }

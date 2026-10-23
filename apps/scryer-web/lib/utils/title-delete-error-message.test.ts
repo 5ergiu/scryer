@@ -15,3 +15,17 @@ test("unknown deletion reasons retain the server explanation", () => {
   } }] };
   assert.equal(titleDeleteErrorMessage(error, t, "failed"), "new condition");
 });
+
+test("catalog cleanup failures retain their translated recovery instruction as internal errors", () => {
+  const error = { graphQLErrors: [{ message: "Internal server error", extensions: {
+    code: "INTERNAL_ERROR", reason: "TITLE_DELETE_CATALOG_CLEANUP_FAILED",
+  } }] };
+  assert.equal(titleDeleteErrorMessage(error, t, "failed"), en["titleDelete.refusal.retry"]);
+});
+
+test("a title folder outside every library root asks for root or folder correction", () => {
+  const error = { graphQLErrors: [{ message: "unrelated wording", extensions: {
+    code: "VALIDATION_ERROR", reason: "TITLE_DELETE_FOLDER_OUTSIDE_ROOTS",
+  } }] };
+  assert.equal(titleDeleteErrorMessage(error, t, "failed"), en["titleDelete.refusal.outsideRoots"]);
+});

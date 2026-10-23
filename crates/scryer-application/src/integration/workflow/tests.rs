@@ -1015,6 +1015,34 @@ mod tests {
     }
 
     #[test]
+    fn password_retry_hold_stays_visible_without_native_queue_item() {
+        let client_item = item("retry-job", DownloadQueueState::Failed);
+        let mut held = tracked_in_state(&client_item, TrackedDownloadState::ImportBlocked);
+        held.client_id = client_item.client_id.clone();
+        held.client_type = client_item.client_type.clone();
+        held.status = TrackedDownloadStatus::Warning;
+        held.status_messages = vec!["Password retry is awaiting confirmation from the download client; sources are preserved.".into()];
+        let metadata = tracked_download_queue_snapshot(&held);
+        let mut projected = synthetic_tracked_snapshot_queue_item(&metadata, None)
+            .expect("held retry remains visible when no native queue row exists");
+        apply_tracked_download_queue_metadata(&mut projected, &metadata);
+        assert_eq!(
+            projected.download_client_item_id,
+            client_item.download_client_item_id
+        );
+        assert_eq!(projected.client_id, held.client_id);
+        assert_eq!(projected.client_type, held.client_type);
+        assert_eq!(
+            projected.tracked_state,
+            Some(TrackedDownloadState::ImportBlocked)
+        );
+        assert!(
+            !projected.download_client_item_id.is_empty(),
+            "queue removal retains the exact native locator"
+        );
+    }
+
+    #[test]
     fn imported_seeding_tracked_rows_stay_visible_in_the_download_queue() {
         // Regression rail: a tracked state that the queue projection filters
         // out is a download that has silently vanished from the operator's
@@ -1930,6 +1958,61 @@ mod tests {
             &work_tx,
             command,
         )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn title_delete_reconciliation_is_idle_without_changes_and_retries_read_errors() {
+        crate::test_wait::within_deadline("binding reconciliation", async {
+            use crate::DownloadRegistryRepository;
+            use std::sync::atomic::Ordering;
+            let (base, _) = crate::lib_tests::bootstrap();
+            let registry =
+                std::sync::Arc::new(crate::lib_tests::RecordingDownloadRegistry::default());
+            let app = base
+                .with_test_overrides(|services| services.with_download_registry(registry.clone()));
+            let (tracker, old, live) = settled_and_live_siblings();
+            let mut runtime = super::TrackedDownloadRuntimeState::new();
+            runtime.tracker = tracker;
+            // Validation in progress must not evict rows or completed work.
+            app.runtime
+                .acquisition
+                .titles_in_deletion
+                .write()
+                .unwrap()
+                .insert("title-1".into());
+            super::reconcile_retired_tracked_downloads(&app, &mut runtime).await;
+            assert!(runtime.tracker.get_by_download_id(old).is_some());
+            super::reconcile_retired_tracked_downloads(&app, &mut runtime).await;
+            assert_eq!(registry.ended_binding_reads.load(Ordering::SeqCst), 1);
+            registry.end_binding(&old).await.unwrap();
+            app.runtime
+                .acquisition
+                .invalidate_download_registry_observations();
+            registry
+                .fail_ended_binding_reads
+                .store(true, Ordering::SeqCst);
+            super::reconcile_retired_tracked_downloads(&app, &mut runtime).await;
+            assert!(runtime.tracker.get_by_download_id(old).is_some());
+            assert!(runtime.tracker.get_by_download_id(live).is_some());
+            registry
+                .fail_ended_binding_reads
+                .store(false, Ordering::SeqCst);
+            super::reconcile_retired_tracked_downloads(&app, &mut runtime).await;
+            assert!(runtime.tracker.get_by_download_id(old).is_none());
+            assert!(runtime.tracker.get_by_download_id(live).is_some());
+            assert_eq!(registry.ended_binding_reads.load(Ordering::SeqCst), 3);
+            // An arriving row is checked even after this generation settled.
+            let late = runtime.tracker.insert_for_tests(reconcile_row(
+                Some("title-3"),
+                TrackedDownloadState::ImportPending,
+            ));
+            registry.end_binding(&late).await.unwrap();
+            super::reconcile_retired_tracked_downloads(&app, &mut runtime).await;
+            assert!(runtime.tracker.get_by_download_id(late).is_none());
+            assert!(runtime.tracker.get_by_download_id(live).is_some());
+            assert_eq!(registry.ended_binding_reads.load(Ordering::SeqCst), 4);
+        })
         .await;
     }
 

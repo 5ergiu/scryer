@@ -114,6 +114,8 @@ struct TrackedDownloadRuntimeState {
         HashMap<DownloadQueueProjectionSource, HashMap<String, DownloadQueueItem>>,
     tracked_work_in_flight: HashSet<String>,
     deferred_work_results: Vec<TrackedDownloadBackgroundWorkResult>,
+    reconciled_registry_generation: Option<u64>,
+    reconciled_tracker_ids: HashSet<scryer_domain::download_identity::DownloadId>,
     tracked_work_drain: TrackedDownloadWorkDrain,
     /// Identity resolutions for the completed-history rows this poller keeps
     /// re-reading. Held across ticks and retired by registry changes.
@@ -132,8 +134,52 @@ impl TrackedDownloadRuntimeState {
             previous_items_by_projection: HashMap::new(),
             tracked_work_in_flight: HashSet::new(),
             deferred_work_results: Vec::new(),
+            reconciled_registry_generation: None,
+            reconciled_tracker_ids: HashSet::new(),
             tracked_work_drain: TrackedDownloadWorkDrain::empty(),
             completed_download_resolutions: Default::default(),
+        }
+    }
+}
+
+async fn reconcile_retired_tracked_downloads(
+    app: &AppUseCase,
+    runtime: &mut TrackedDownloadRuntimeState,
+) {
+    let generation = app.runtime.acquisition.download_registry_generation();
+    let mut current_ids = runtime
+        .tracker
+        .get_all()
+        .iter()
+        .map(|row| row.download_id)
+        .collect::<HashSet<_>>();
+    if runtime.reconciled_registry_generation == Some(generation)
+        && current_ids == runtime.reconciled_tracker_ids
+    {
+        return;
+    }
+    // Forget notifications are lossy; durable bindings remain authoritative.
+    // Newly observed IDs also need a check, even at an unchanged generation.
+    let ids = current_ids.iter().copied().collect::<Vec<_>>();
+    match app
+        .services
+        .workflow
+        .download_registry
+        .ended_bindings(&ids)
+        .await
+    {
+        Ok(ended) => {
+            for id in ended {
+                runtime.tracker.stop_tracking_download(id);
+                current_ids.remove(&id);
+            }
+            runtime.reconciled_registry_generation = Some(generation);
+            runtime.reconciled_tracker_ids = current_ids;
+        }
+        Err(error) => {
+            // Preserve observations and completed work. Dispatch still checks
+            // each worker's durable ownership, and the next tick retries this read.
+            tracing::warn!(%error, "cannot reconcile retired downloads; retrying next refresh");
         }
     }
 }
@@ -1075,46 +1121,7 @@ async fn process_tracked_download_snapshot(
         }
     }
 
-    // Forget notifications are deliberately lossy. The durable binding is
-    // authoritative even if the bounded command channel was full or closed.
-    let ids = runtime
-        .tracker
-        .get_all()
-        .iter()
-        .map(|tracked| tracked.download_id)
-        .collect::<Vec<_>>();
-    match app
-        .services
-        .workflow
-        .download_registry
-        .ended_bindings(&ids)
-        .await
-    {
-        Ok(ended) => {
-            for id in ended {
-                runtime.tracker.stop_tracking_download(id);
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "cannot reconcile retired downloads; skipping import dispatch");
-            return;
-        }
-    }
-    let deleting = runtime
-        .tracker
-        .get_all()
-        .iter()
-        .filter(|tracked| {
-            tracked
-                .title_id
-                .as_deref()
-                .is_some_and(|id| app.title_is_being_deleted(id))
-        })
-        .map(|tracked| tracked.download_id)
-        .collect::<Vec<_>>();
-    for id in deleting {
-        runtime.tracker.stop_tracking_download(id);
-    }
+    reconcile_retired_tracked_downloads(app, runtime).await;
 
     // Phase 1 served most rows from the observation memo, so the binding
     // freshness writes those rows came due for are written here as one
@@ -1860,7 +1867,6 @@ pub async fn start_download_queue_poller_with_options(
                 // and it makes the tick self-sufficient rather than a
                 // best-effort sighting that history occasionally repairs.
                 let client_refresh_started_at = Instant::now();
-                let generation = app.runtime.acquisition.download_registry_generation();
                 let collection = app.collect_download_snapshot_items_excluding_client_types(
                     true, true, false, &excluded_client_type_refs,
                 );
@@ -1868,11 +1874,9 @@ pub async fn start_download_queue_poller_with_options(
                     &app, &actor, &mut runtime, &tracked_work_result_tx,
                     &mut command_rx, &mut commands_open, &token, collection,
                 ).await else { return; };
-                // A binding retired during collection must not be revived by
-                // a client response that began before the retirement.
-                if generation != app.runtime.acquisition.download_registry_generation() {
-                    continue;
-                }
+                // Process healthy client results even when unrelated grabs or
+                // completions changed the registry during collection. Canonical
+                // binding reconciliation excludes retired entries individually.
                 let (snapshot, collection_error) = match collected {
                     Ok(snapshot) => (snapshot, None),
                     Err(error) => {

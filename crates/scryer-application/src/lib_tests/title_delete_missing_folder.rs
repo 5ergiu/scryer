@@ -371,6 +371,120 @@ async fn title_delete_bulk_enforces_aggregate_confirmation() {
 }
 
 #[tokio::test]
+async fn title_delete_bulk_sees_owner_created_during_earlier_item() {
+    crate::test_wait::within_deadline("late owner blocks the later batch item", async {
+        let fixture = seed(MediaFacet::Movie).await;
+        let later = add_title(
+            &fixture.app,
+            &fixture.admin,
+            "Later Feature",
+            MediaFacet::Movie,
+        )
+        .await;
+        let first_file = fixture.root.join("Quillmere/feature.mkv");
+        let later_folder = fixture.root.join("Later Feature");
+        let later_file = later_folder.join("feature.mkv");
+        fixture.record_file(&fixture.title_id, &first_file).await;
+        fixture.record_file(&later, &later_file).await;
+        fixture
+            .titles
+            .set_folder_path(&later, &later_folder.to_string_lossy())
+            .await
+            .unwrap();
+        let ids = vec![fixture.title_id.clone(), later.clone()];
+        let preview = fixture
+            .app
+            .preview_delete_titles_files(&fixture.admin, &ids)
+            .await
+            .unwrap();
+        let jobs = Arc::new(RecordingJobRunRepo::default());
+        let app = fixture
+            .app
+            .with_test_overrides(|services| services.with_job_runs(jobs.clone()));
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        fixture
+            .titles
+            .set_delete_operation_log(operations.clone())
+            .await;
+        let barrier = operations.lock().await;
+        let accepted = app
+            .start_delete_titles_job(
+                &fixture.admin,
+                DeleteTitlesJobRequest {
+                    items: preview
+                        .items
+                        .into_iter()
+                        .map(|item| DeleteTitlesJobItem {
+                            title_id: item.title_id,
+                            preview_fingerprint: Some(item.preview.unwrap().fingerprint),
+                        })
+                        .collect(),
+                    delete_files_on_disk: true,
+                    typed_confirmation: None,
+                },
+            )
+            .await
+            .unwrap();
+        crate::test_wait::wait_until("first batch item reaches catalog deletion", || async {
+            fixture
+                .titles
+                .delete_started
+                .lock()
+                .await
+                .contains(&fixture.title_id)
+        })
+        .await;
+        let owner = add_title(&app, &fixture.admin, "Late Folder Owner", MediaFacet::Movie).await;
+        fixture
+            .titles
+            .set_folder_path(&owner, &later_folder.to_string_lossy())
+            .await
+            .unwrap();
+        drop(barrier);
+        let run = crate::test_wait::wait_for("specific late-owner batch completes", || async {
+            jobs.runs
+                .lock()
+                .await
+                .iter()
+                .find(|run| run.id == accepted.job_run.id && run.status.is_terminal())
+                .cloned()
+        })
+        .await;
+        let summary: serde_json::Value =
+            serde_json::from_str(run.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            summary["succeededTitleIds"],
+            serde_json::json!([fixture.title_id])
+        );
+        assert_eq!(summary["failures"][0]["titleId"], later);
+        assert_eq!(
+            summary["failures"][0]["reason"],
+            crate::title_delete::FOLDER_OVERLAPS_TITLE
+        );
+        assert_eq!(std::fs::read(&later_file).unwrap(), b"synthetic video");
+        assert!(
+            app.services
+                .catalog
+                .titles
+                .get_by_id(&later)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            app.services
+                .catalog
+                .titles
+                .get_by_id(&owner)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn title_delete_catalog_failure_retains_media_and_folder_for_fresh_preview_retry() {
     let mut fixture = seed(MediaFacet::Movie).await;
     let pending = Arc::new(TrackingPendingReleaseRepo::default());
@@ -394,8 +508,9 @@ async fn title_delete_catalog_failure_retains_media_and_folder_for_fresh_preview
         .delete_with_files(preview.fingerprint)
         .await
         .unwrap_err();
+    assert!(matches!(error, AppError::RepositoryFailed { .. }));
     assert_eq!(
-        error.validation_reason(),
+        error.reason(),
         Some(crate::title_delete::CATALOG_CLEANUP_FAILED)
     );
     assert!(!file.exists());
@@ -426,4 +541,85 @@ async fn title_delete_catalog_failure_retains_media_and_folder_for_fresh_preview
     fixture.delete_with_files(retry.fingerprint).await.unwrap();
     assert!(!fixture.title_exists().await);
     assert_eq!(std::fs::read(bystander).unwrap(), b"preserve");
+}
+
+#[tokio::test]
+async fn title_delete_bulk_read_failure_is_not_catalog_cleanup_failure() {
+    crate::test_wait::within_deadline("bulk delete classifies failure by step", async {
+        let fixture = seed(MediaFacet::Movie).await;
+        let later = add_title(
+            &fixture.app,
+            &fixture.admin,
+            "Unreadable Later Title",
+            MediaFacet::Movie,
+        )
+        .await;
+        let jobs = Arc::new(RecordingJobRunRepo::default());
+        let app = fixture
+            .app
+            .with_test_overrides(|services| services.with_job_runs(jobs.clone()));
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        fixture
+            .titles
+            .set_delete_operation_log(operations.clone())
+            .await;
+        let barrier = operations.lock().await;
+        let accepted = app
+            .start_delete_titles_job(
+                &fixture.admin,
+                DeleteTitlesJobRequest {
+                    items: [&fixture.title_id, &later]
+                        .into_iter()
+                        .map(|id| DeleteTitlesJobItem {
+                            title_id: id.clone(),
+                            preview_fingerprint: None,
+                        })
+                        .collect(),
+                    delete_files_on_disk: false,
+                    typed_confirmation: None,
+                },
+            )
+            .await
+            .unwrap();
+        crate::test_wait::wait_until("first item reaches catalog delete", || async {
+            fixture
+                .titles
+                .delete_started
+                .lock()
+                .await
+                .contains(&fixture.title_id)
+        })
+        .await;
+        fixture.titles.fail_get_by_id.store(true, Ordering::SeqCst);
+        drop(barrier);
+        let run = crate::test_wait::wait_for("specific read-failure batch completes", || async {
+            jobs.runs
+                .lock()
+                .await
+                .iter()
+                .find(|run| run.id == accepted.job_run.id && run.status.is_terminal())
+                .cloned()
+        })
+        .await;
+        let summary: serde_json::Value =
+            serde_json::from_str(run.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            summary["succeededTitleIds"],
+            serde_json::json!([fixture.title_id])
+        );
+        assert_eq!(summary["failures"][0]["titleId"], later);
+        assert!(summary["failures"][0]["reason"].is_null());
+        fixture.titles.fail_get_by_id.store(false, Ordering::SeqCst);
+        assert!(
+            app.services
+                .catalog
+                .titles
+                .get_by_id(&later)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(!app.title_is_being_deleted(&later));
+    })
+    .await;
 }

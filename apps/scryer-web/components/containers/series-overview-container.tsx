@@ -80,6 +80,7 @@ import type {
   TitleCreditRecord,
 } from "@/lib/types/titles";
 import { useDeletePreview } from "@/lib/hooks/use-delete-preview";
+import { deleteErrorMessage } from "@/lib/utils/delete-error-message";
 import { normalizeJobRun } from "@/lib/utils/job-runs";
 import {
   deletedMediaFileIds,
@@ -1698,7 +1699,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
       setEpisodeFilesToDelete(null);
       setEpisodeFilesDeleteTypedConfirmation("");
     } catch (error: unknown) {
-      setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.apiError")), { level: "ERROR" });
+      setGlobalStatus(deleteErrorMessage(error, t, t("status.apiError")), { level: "ERROR" });
     } finally {
       setEpisodeFilesDeleteLoading(false);
     }

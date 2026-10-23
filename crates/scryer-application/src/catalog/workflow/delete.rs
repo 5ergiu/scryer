@@ -1,6 +1,7 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TitleLogicalDeleteOptions {
     pub(crate) purge_recycle_bin_entries: bool,
+    pub(crate) explicit_download_retirement: bool,
     pub(crate) append_title_deleted_event: bool,
     /// Media file paths the title tracked before its files were deleted from
     /// disk; reported on the title-deleted event. Empty for catalog-only
@@ -226,7 +227,7 @@ impl AppUseCase {
         preview_fingerprint: &str,
         authorization: &crate::PolicyDeleteAuthorization,
     ) -> AppResult<()> {
-        let _delete_guard = self.acquire_title_delete_guard(id).await?;
+        let delete_guard = self.acquire_title_delete_guard(id).await?;
         let title = self
             .services
             .catalog
@@ -251,9 +252,15 @@ impl AppUseCase {
             )
             .await?;
 
+        delete_guard.activate();
         let deleted_paths = self.tracked_media_file_paths(id).await;
-        self.execute_delete_title_files_by_policy(id, preview_fingerprint, authorization)
-            .await?;
+        self.execute_delete_title_files_by_policy(
+            id,
+            preview_fingerprint,
+            authorization,
+            &delete_guard,
+        )
+        .await?;
         let deleted_paths = paths_no_longer_on_disk(deleted_paths).await;
 
         self.delete_title_logical_cleanup(
@@ -261,6 +268,7 @@ impl AppUseCase {
             actor,
             TitleLogicalDeleteOptions {
                 purge_recycle_bin_entries: true,
+                explicit_download_retirement: false,
                 append_title_deleted_event: true,
                 deleted_paths,
             },
@@ -357,7 +365,8 @@ impl AppUseCase {
             .map(|item| item.title_id.clone())
             .collect::<Vec<_>>();
         if request.delete_files_on_disk
-            && request.typed_confirmation.as_deref().map(str::trim) != Some("DELETE")
+            && request.typed_confirmation.as_deref().map(str::trim)
+                != Some(crate::library::user_delete::DELETE_TYPED_CONFIRMATION_VALUE)
         {
             let preview = self
                 .preview_delete_titles_files(actor, &accepted_title_ids)
@@ -365,7 +374,10 @@ impl AppUseCase {
             if preview.preview.requires_typed_confirmation {
                 return Err(AppError::validation_refused(
                     deletion_reason::TYPED_CONFIRMATION_REQUIRED,
-                    "typed confirmation is required; enter DELETE",
+                    format!(
+                        "typed confirmation is required; enter {}",
+                        crate::library::user_delete::DELETE_TYPED_CONFIRMATION_VALUE,
+                    ),
                 ));
             }
         }
@@ -487,7 +499,7 @@ impl AppUseCase {
                 }
                 Err(error) => failures.push(TitleDeletionFailure {
                     title_id: item.title_id,
-                    reason: error.validation_reason().map(str::to_owned),
+                    reason: error.reason().map(str::to_owned),
                     error: error.to_string(),
                 }),
             }
@@ -556,7 +568,7 @@ impl AppUseCase {
         delete_files_on_disk: bool,
         typed_confirmation: Option<&str>,
     ) -> AppResult<crate::title_delete::RecyclePurgeOutcome> {
-        let _delete_guard = self.acquire_title_delete_guard(&item.title_id).await?;
+        let delete_guard = self.acquire_title_delete_guard(&item.title_id).await?;
         let _location_guard = self
             .acquire_location_title_mutation(
                 &crate::location::ownership_guard::TITLE_DELETE_ENTRY,
@@ -580,6 +592,9 @@ impl AppUseCase {
         )
         .await?;
 
+        self.preflight_title_download_retirement(&item.title_id)
+            .await?;
+        delete_guard.activate();
         let mut deleted_paths = Vec::new();
         if delete_files_on_disk {
             let preview_fingerprint = item
@@ -598,6 +613,7 @@ impl AppUseCase {
                 &item.title_id,
                 preview_fingerprint,
                 typed_confirmation,
+                &delete_guard,
             )
             .await?;
             deleted_paths = paths_no_longer_on_disk(deleted_paths).await;
@@ -611,13 +627,21 @@ impl AppUseCase {
             actor,
             TitleLogicalDeleteOptions {
                 purge_recycle_bin_entries: false,
+                explicit_download_retirement: true,
                 append_title_deleted_event: true,
                 deleted_paths,
             },
         )
         .await
-        .map_err(|error| {
-            AppError::validation_refused(deletion_reason::CATALOG_CLEANUP_FAILED, error.to_string())
+        .map_err(|error| match error {
+            AppError::Repository(message) => AppError::RepositoryFailed {
+                message,
+                reason: deletion_reason::CATALOG_CLEANUP_FAILED,
+            },
+            other => crate::delete_refusal::classify_validation(
+                other,
+                deletion_reason::CATALOG_CLEANUP_FAILED,
+            ),
         })?;
         Ok(outcome)
     }
@@ -639,10 +663,6 @@ impl AppUseCase {
                 )
             })?;
         let active = self.runtime.acquisition.titles_in_deletion.clone();
-        active
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_owned());
         Ok(crate::title_delete::TitleDeletionGuard {
             _lock: lock,
             title_id: id.to_owned(),
@@ -765,12 +785,17 @@ impl AppUseCase {
         options: TitleLogicalDeleteOptions,
     ) -> AppResult<()> {
         let actor = actor.into();
-        self.purge_title_logical_dependents(
-            title,
-            options.purge_recycle_bin_entries,
-            actor.clone(),
-        )
-        .await?;
+        if options.explicit_download_retirement {
+            self.purge_explicit_title_dependent_records(&title.id, actor.clone())
+                .await?;
+        } else {
+            self.purge_title_logical_dependents(
+                title,
+                options.purge_recycle_bin_entries,
+                actor.clone(),
+            )
+            .await?;
+        }
         self.delete_title_row(
             title,
             actor,
@@ -2210,4 +2235,33 @@ async fn paths_no_longer_on_disk(paths: Vec<String>) -> Vec<String> {
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod title_delete_guard_tests {
+    #[tokio::test]
+    async fn title_delete_guard_does_not_block_imports_until_activated() {
+        crate::test_wait::within_deadline("title deletion exclusion", async {
+            let (app, _) = crate::lib_tests::bootstrap();
+            let guard = app
+                .acquire_title_delete_guard("synthetic-title")
+                .await
+                .unwrap();
+            assert!(!app.title_is_being_deleted("synthetic-title"));
+            let error = app
+                .acquire_title_delete_guard("synthetic-title")
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.validation_reason(),
+                Some(crate::title_delete::IN_PROGRESS)
+            );
+            guard.activate();
+            assert!(app.title_is_being_deleted("synthetic-title"));
+            drop(guard);
+            assert!(!app.title_is_being_deleted("synthetic-title"));
+        })
+        .await;
+    }
 }

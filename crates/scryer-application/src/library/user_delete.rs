@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 const DELETE_PREVIEW_SAMPLE_PATH_LIMIT: usize = 5;
 const LARGE_DELETE_MEDIA_THRESHOLD: usize = 50;
-const DELETE_TYPED_CONFIRMATION_VALUE: &str = "DELETE";
+pub(crate) const DELETE_TYPED_CONFIRMATION_VALUE: &str = "DELETE";
 const DELETE_TYPED_CONFIRMATION_PROMPT: &str = "Type DELETE to confirm this large delete.";
 const BULK_DELETE_PREVIEW_CONCURRENCY: usize = 4;
 
@@ -621,7 +621,11 @@ impl AppUseCase {
         title_id: &str,
         preview_fingerprint: &str,
         typed_confirmation: Option<&str>,
+        deletion_guard: &crate::title_delete::TitleDeletionGuard,
     ) -> AppResult<()> {
+        // Permission and retirement preflight have passed. Stop new import
+        // admissions before capturing the file set; Drop clears this on refusal.
+        deletion_guard.activate();
         let context = self
             .resolve_title_delete_context(title_id, MissingTitleFolder::Derive)
             .await?;
@@ -662,7 +666,9 @@ impl AppUseCase {
         title_id: &str,
         preview_fingerprint: &str,
         authorization: &PolicyDeleteAuthorization,
+        deletion_guard: &crate::title_delete::TitleDeletionGuard,
     ) -> AppResult<()> {
+        deletion_guard.activate();
         let context = self
             .resolve_title_delete_context(title_id, MissingTitleFolder::Refuse)
             .await?;
@@ -680,12 +686,14 @@ impl AppUseCase {
                     .map_err(title_delete_boundary_error)?;
             }
         }
-        self.execute_delete_context(
-            context,
-            preview_fingerprint,
-            DeleteConfirmationAuthority::Policy(authorization),
-        )
-        .await
+        let manifest = self
+            .validate_delete_context(
+                context,
+                preview_fingerprint,
+                DeleteConfirmationAuthority::Policy(authorization),
+            )
+            .await?;
+        apply_delete_manifest(&manifest).await
     }
 
     /// Capture the existing per-file ownership manifest and replacement proofs
@@ -1002,9 +1010,20 @@ impl AppUseCase {
         authority: DeleteConfirmationAuthority<'_>,
     ) -> AppResult<UserDeleteManifest> {
         let manifest = self.build_delete_manifest(context.clone()).await?;
+        let (stale_reason, typed_reason) = if matches!(context, UserDeleteContext::Title(_)) {
+            (
+                crate::title_delete::PREVIEW_STALE,
+                crate::title_delete::TYPED_CONFIRMATION_REQUIRED,
+            )
+        } else {
+            (
+                crate::delete_refusal::PREVIEW_STALE,
+                crate::delete_refusal::TYPED_CONFIRMATION_REQUIRED,
+            )
+        };
         if manifest.fingerprint != preview_fingerprint {
             return Err(AppError::validation_refused(
-                crate::title_delete::PREVIEW_STALE,
+                stale_reason,
                 "delete preview is stale; refresh the delete dialog and confirm again",
             ));
         }
@@ -1016,7 +1035,7 @@ impl AppUseCase {
                         != DELETE_TYPED_CONFIRMATION_VALUE
                     {
                         return Err(AppError::validation_refused(
-                            crate::title_delete::TYPED_CONFIRMATION_REQUIRED,
+                            typed_reason,
                             format!(
                                 "typed confirmation is required; enter {DELETE_TYPED_CONFIRMATION_VALUE}"
                             ),
@@ -1640,10 +1659,21 @@ fn ensure_delete_context_roots_available(context: &UserDeleteContext) -> AppResu
                 normalize_root_folders(context.root_folders.clone(), context.facet.clone())?;
             let path = normalize_absolute_path(&stored_path_to_path_buf(folder_path))?;
             crate::fs_safety::resolve_available_root_for_path(&path, &roots).map_err(|error| {
-                AppError::validation_refused(
-                    crate::title_delete::ROOT_UNAVAILABLE,
-                    error.to_string(),
-                )
+                match error {
+                    // Title deletion has its own code for a folder outside the roots.
+                    AppError::ValidationRefused { message, reason }
+                        if reason == crate::delete_refusal::PATH_OUTSIDE_ROOTS =>
+                    {
+                        AppError::validation_refused(
+                            crate::title_delete::FOLDER_OUTSIDE_ROOTS,
+                            message,
+                        )
+                    }
+                    error => crate::delete_refusal::classify_validation(
+                        error,
+                        crate::title_delete::ROOT_UNAVAILABLE,
+                    ),
+                }
             })?;
             Ok(())
         }
@@ -1657,9 +1687,9 @@ fn ensure_delete_context_roots_available(context: &UserDeleteContext) -> AppResu
                 let path = normalize_absolute_path(&stored_path_to_path_buf(raw_path))?;
                 crate::fs_safety::resolve_available_root_for_path(&path, &roots).map_err(
                     |error| {
-                        AppError::validation_refused(
-                            crate::title_delete::ROOT_UNAVAILABLE,
-                            error.to_string(),
+                        crate::delete_refusal::classify_validation(
+                            error,
+                            crate::delete_refusal::ROOT_UNAVAILABLE,
                         )
                     },
                 )?;
@@ -1671,9 +1701,9 @@ fn ensure_delete_context_roots_available(context: &UserDeleteContext) -> AppResu
                 normalize_root_folders(context.root_folders.clone(), context.facet.clone())?;
             let path = normalize_absolute_path(&stored_path_to_path_buf(&context.file_path))?;
             crate::fs_safety::resolve_available_root_for_path(&path, &roots).map_err(|error| {
-                AppError::validation_refused(
-                    crate::title_delete::ROOT_UNAVAILABLE,
-                    error.to_string(),
+                crate::delete_refusal::classify_validation(
+                    error,
+                    crate::delete_refusal::ROOT_UNAVAILABLE,
                 )
             })?;
             Ok(())
@@ -2121,7 +2151,7 @@ pub(crate) fn ensure_aggregate_delete_confirmation(
 ) -> AppResult<()> {
     if preview.fingerprint != preview_fingerprint {
         return Err(AppError::validation_refused(
-            crate::title_delete::PREVIEW_STALE,
+            crate::delete_refusal::PREVIEW_STALE,
             "delete preview is stale; refresh the delete dialog and confirm again",
         ));
     }
@@ -2130,7 +2160,7 @@ pub(crate) fn ensure_aggregate_delete_confirmation(
         && typed_confirmation.unwrap_or_default().trim() != DELETE_TYPED_CONFIRMATION_VALUE
     {
         return Err(AppError::validation_refused(
-            crate::title_delete::TYPED_CONFIRMATION_REQUIRED,
+            crate::delete_refusal::TYPED_CONFIRMATION_REQUIRED,
             format!("typed confirmation is required; enter {DELETE_TYPED_CONFIRMATION_VALUE}"),
         ));
     }
@@ -2499,7 +2529,7 @@ mod tests {
         let empty_result = ensure_delete_context_roots_available(&context);
         assert!(
             empty_result.unwrap_err().validation_reason()
-                == Some(crate::title_delete::ROOT_UNAVAILABLE),
+                == Some(crate::delete_refusal::ROOT_UNAVAILABLE),
             "empty roots should not prove that a disk-delete target's root is mounted"
         );
 
@@ -2616,7 +2646,7 @@ mod tests {
             ensure_aggregate_delete_confirmation(&preview, "stale", None)
                 .unwrap_err()
                 .validation_reason(),
-            Some(crate::title_delete::PREVIEW_STALE)
+            Some(crate::delete_refusal::PREVIEW_STALE)
         );
 
         preview.requires_typed_confirmation = true;
@@ -2625,7 +2655,7 @@ mod tests {
             ensure_aggregate_delete_confirmation(&preview, &fingerprint, None)
                 .unwrap_err()
                 .validation_reason(),
-            Some(crate::title_delete::TYPED_CONFIRMATION_REQUIRED)
+            Some(crate::delete_refusal::TYPED_CONFIRMATION_REQUIRED)
         );
         ensure_aggregate_delete_confirmation(
             &preview,

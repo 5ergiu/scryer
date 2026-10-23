@@ -1664,6 +1664,47 @@ impl AppUseCase {
         title_id: &str,
         actor: DomainEventActor,
     ) -> AppResult<()> {
+        self.purge_title_dependent_records_with_retirement(title_id, actor, false)
+            .await
+    }
+
+    pub(crate) async fn purge_explicit_title_dependent_records(
+        &self,
+        title_id: &str,
+        actor: DomainEventActor,
+    ) -> AppResult<()> {
+        self.purge_title_dependent_records_with_retirement(title_id, actor, true)
+            .await
+    }
+
+    /// Called under the exclusive title-delete guard before any destructive work.
+    pub(crate) async fn preflight_title_download_retirement(
+        &self,
+        title_id: &str,
+    ) -> AppResult<()> {
+        let (_, ids) = self.explicit_title_submissions_to_retire(title_id).await?;
+        if self
+            .services
+            .workflow
+            .download_registry
+            .bindings_have_password_retry(&ids)
+            .await?
+        {
+            return Err(AppError::validation_refused(
+                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
+                "A download password retry is awaiting reconciliation. Let it settle, or remove the download from the Imports view in Scryer's Activity page, then retry title deletion.",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn explicit_title_submissions_to_retire(
+        &self,
+        title_id: &str,
+    ) -> AppResult<(
+        Vec<crate::DownloadSubmission>,
+        Vec<scryer_domain::download_identity::DownloadId>,
+    )> {
         let submissions = &self.services.workflow.download_submissions;
         let download_submissions = submissions.list_for_title(title_id).await?;
         let unbound = submissions.list_active_unbound_for_title(title_id).await?;
@@ -1674,6 +1715,21 @@ impl AppUseCase {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
+
+        Ok((download_submissions, submitted_download_ids))
+    }
+
+    async fn purge_title_dependent_records_with_retirement(
+        &self,
+        title_id: &str,
+        actor: DomainEventActor,
+        explicit: bool,
+    ) -> AppResult<()> {
+        let (download_submissions, submitted_download_ids) = if explicit {
+            self.explicit_title_submissions_to_retire(title_id).await?
+        } else {
+            self.title_submissions_to_retire(title_id).await
+        };
 
         let mut seen_downloads = HashSet::new();
         for submission in download_submissions {
@@ -1731,8 +1787,13 @@ impl AppUseCase {
             }
         }
 
-        self.retire_deleted_title_downloads(title_id, submitted_download_ids)
-            .await?;
+        if explicit {
+            self.retire_deleted_title_downloads(title_id, submitted_download_ids)
+                .await?;
+        } else {
+            self.retire_title_downloads(title_id, submitted_download_ids)
+                .await;
+        }
 
         self.purge_title_records_after_downloads(title_id).await
     }

@@ -219,6 +219,12 @@ impl DownloadQueueReadModel {
 pub(crate) struct DownloadQueueReadModelCache {
     pub(crate) current: Arc<tokio::sync::RwLock<Option<Arc<DownloadQueueReadModel>>>>,
     pub(crate) build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set when the last build found no durable password-retry recovery rows.
+    /// A new fence is only written by a retry claim, which invalidates this
+    /// cache, so native-revision-only rebuilds skip the submission query until
+    /// then. A non-empty result is never reused: the poller can retire those
+    /// rows (terminal download, ended binding) without invalidating.
+    pub(crate) password_retry_recovery_known_empty: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct PendingDownloadQueueSnapshot {

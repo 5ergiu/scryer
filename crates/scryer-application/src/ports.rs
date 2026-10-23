@@ -5552,6 +5552,12 @@ pub trait DownloadRegistryRepository: Send + Sync {
     /// End an active binding; ending an already-ended or absent binding is a no-op.
     async fn end_binding(&self, id: &DownloadId) -> AppResult<()>;
 
+    /// Check durable retry fences before title deletion performs filesystem work.
+    /// Implementations without password retry support have no such fences.
+    async fn bindings_have_password_retry(&self, _ids: &[DownloadId]) -> AppResult<bool> {
+        Ok(false)
+    }
+
     /// Retire one title's bindings together in stores supporting transactions.
     async fn end_bindings(&self, ids: &[DownloadId]) -> AppResult<()> {
         for id in ids {
@@ -6181,6 +6187,12 @@ pub trait DownloadSubmissionRepository: Send + Sync {
     ) -> AppResult<Vec<DownloadSubmission>>;
 
     async fn list_for_title(&self, title_id: &str) -> AppResult<Vec<DownloadSubmission>>;
+
+    /// On-demand recovery rows for durable password retries with an active,
+    /// matching client binding, including jobs absent from the native queue.
+    async fn list_password_retry_recovery_submissions(&self) -> AppResult<Vec<DownloadSubmission>> {
+        Ok(Vec::new())
+    }
 
     /// Configured client ids that still hold at least one live (non-ended)
     /// client binding — that is, a download this instance is still tracking on

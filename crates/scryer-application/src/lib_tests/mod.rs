@@ -23,6 +23,7 @@ mod custom_job_shutdown;
 mod diacritic_release_matching;
 mod discovery_sync;
 mod downloads;
+pub(crate) use downloads::RecordingDownloadRegistry;
 mod episode_file_delete;
 mod episode_metadata_refresh;
 mod folder_match;

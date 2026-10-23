@@ -2001,6 +2001,31 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn list_password_retry_recovery_submissions(&self) -> AppResult<Vec<DownloadSubmission>> {
+        let sql = download_submission_select_sql(
+            &self.datastore,
+            "WHERE password_retry_state IS NOT NULL
+             AND EXISTS (SELECT 1 FROM download_identity_states st
+                 WHERE st.canonical_download_id = download_submissions.id AND st.reason = {})
+             AND EXISTS (SELECT 1 FROM downloads d
+                 WHERE d.id = download_submissions.id AND d.terminal_at IS NULL)
+             AND EXISTS (SELECT 1 FROM download_client_bindings b
+                 WHERE b.download_id = download_submissions.id AND b.ended_at IS NULL
+                 AND b.client_config_id = download_submissions.download_client_id
+                 AND b.client_type_snapshot = download_submissions.download_client_type
+                 AND b.native_item_id = download_submissions.download_client_item_id
+                 AND b.native_item_id IS NOT NULL)",
+        );
+        fetch_download_submissions(
+            self.datastore.read_exec(),
+            &sql,
+            &[SqlArg::Text(
+                scryer_application::DOWNLOAD_PASSWORD_RETRY_REASON.into(),
+            )],
+        )
+        .await
+    }
+
     async fn list_client_ids_with_live_downloads(&self) -> AppResult<Vec<String>> {
         let rows = SqlRuntime::fetch_all(
             self.datastore.read_exec(),
@@ -2321,6 +2346,10 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         let id = *download_id;
         SqlRuntime::run_in_transaction(&self.datastore, "delete_canonical_submission", move |tx| {
             Box::pin(async move {
+                // Explicit queue removal cancels local ownership even when a
+                // password retry remains fenced. Unlike automatic retirement,
+                // this operator action must recover an abandoned retry; the
+                // terminal binding prevents late observations from reviving it.
                 end_binding_tx(tx, &id).await?;
                 let args = [SqlArg::Text(id.to_string())];
                 SqlRuntime::execute(
@@ -3949,6 +3978,168 @@ mod seed_goal_tests {
             .await
             .expect("tracked-state projection should load");
         assert_eq!(states, vec![(identity(), "new".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn password_retry_recovery_lists_only_owned_active_bindings() {
+        let store = store().await;
+        let active = DownloadId::new();
+        let ended = DownloadId::new();
+        let unrelated = DownloadId::new();
+        let mismatched = DownloadId::new();
+        for (id, job, fenced) in [
+            (active, "active", true),
+            (ended, "ended", true),
+            (unrelated, "unrelated", false),
+            (mismatched, "mismatched", true),
+        ] {
+            store
+                .record_submission_with_identity(
+                    submission(id, job, "retry-title"),
+                    submission_identity(id),
+                    None,
+                )
+                .await
+                .unwrap();
+            if fenced {
+                SqlRuntime::execute(
+                    store.datastore.read_exec(),
+                    "UPDATE download_submissions SET password_retry_state = {} WHERE id = {}",
+                    &[SqlArg::Text("{}".into()), SqlArg::Text(id.to_string())],
+                )
+                .await
+                .unwrap();
+                store
+                    .record_identity_tracked_state_for_download(
+                        Some(&id),
+                        &submission_identity(id),
+                        None,
+                        "failed",
+                        Some(scryer_application::DOWNLOAD_PASSWORD_RETRY_REASON),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "UPDATE download_client_bindings SET ended_at = {} WHERE download_id = {}",
+            &[
+                SqlArg::Timestamp(Utc::now()),
+                SqlArg::Text(ended.to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "UPDATE download_client_bindings SET native_item_id = {} WHERE download_id = {}",
+            &[
+                SqlArg::Text("foreign-item".into()),
+                SqlArg::Text(mismatched.to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+        let rows = store
+            .list_password_retry_recovery_submissions()
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.download_id).collect::<Vec<_>>(),
+            vec![active]
+        );
+        assert_eq!(rows[0].download_client_item_id, "active");
+        store.delete_by_download_id(&active).await.unwrap();
+        assert!(
+            store
+                .list_password_retry_recovery_submissions()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_queue_removal_retires_password_retry_fenced_download() {
+        let store = store().await;
+        let id = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(id, "job-1", "retry-title"),
+                submission_identity(id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .record_identity_tracked_state_for_download(
+                Some(&id),
+                &submission_identity(id),
+                None,
+                "failed",
+                Some(scryer_application::DOWNLOAD_PASSWORD_RETRY_REASON),
+                None,
+            )
+            .await
+            .unwrap();
+        // Give the row the durable fence a real retry claim leaves behind.
+        SqlRuntime::execute(
+            store.datastore.read_exec(),
+            "UPDATE download_submissions SET password_retry_state = {} WHERE id = {}",
+            &[
+                SqlArg::Text(
+                    serde_json::json!({
+                        "previous_reason": scryer_application::DOWNLOAD_PASSWORD_REQUIRED_REASON,
+                        "claimed_at": "2026-01-01T00:00:00Z",
+                        "confirmed": false,
+                    })
+                    .to_string(),
+                ),
+                SqlArg::Text(id.to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+        store.delete_by_download_id(&id).await.unwrap();
+        assert!(
+            store
+                .list_for_title("retry-title")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_active_unbound_for_title("retry-title")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let terminal = SqlRuntime::fetch_optional(
+            store.datastore.read_exec(),
+            "SELECT id FROM downloads WHERE id = {} AND terminal_at IS NOT NULL",
+            &[SqlArg::Text(id.to_string())],
+        )
+        .await
+        .unwrap();
+        assert!(
+            terminal.is_some(),
+            "late observations must not revive the removed retry"
+        );
+        // The old identity record is retained, but cannot fence any title once
+        // its submission is gone and cannot resurrect its terminal binding.
+        let retained = SqlRuntime::fetch_optional(store.datastore.read_exec(),
+            "SELECT id FROM download_identity_states WHERE canonical_download_id = {} AND reason = {}",
+            &[SqlArg::Text(id.to_string()), SqlArg::Text(scryer_application::DOWNLOAD_PASSWORD_RETRY_REASON.into())]).await.unwrap();
+        assert!(retained.is_some());
     }
 
     #[tokio::test]

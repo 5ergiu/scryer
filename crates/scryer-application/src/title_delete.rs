@@ -10,6 +10,17 @@ pub(crate) struct TitleDeletionGuard {
     pub(crate) active: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
+impl TitleDeletionGuard {
+    /// Block new imports after permission and any retirement preflight, before
+    /// capturing and validating the file manifest.
+    pub(crate) fn activate(&self) {
+        self.active
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.title_id.clone());
+    }
+}
+
 impl Drop for TitleDeletionGuard {
     fn drop(&mut self) {
         self.active
@@ -71,6 +82,9 @@ pub const RECYCLE_ENTRY_BUSY: &str = "TITLE_DELETE_RECYCLE_ENTRY_BUSY";
 /// Catalog cleanup did not complete.
 pub const CATALOG_CLEANUP_FAILED: &str = "TITLE_DELETE_CATALOG_CLEANUP_FAILED";
 
+/// A durable password retry must settle before deleting its title.
+pub const DOWNLOAD_RETRY_IN_PROGRESS: &str = "TITLE_DELETE_DOWNLOAD_RETRY_IN_PROGRESS";
+
 /// All title deletion reasons.
 pub const ALL: &[&str] = &[
     EMPTY_REQUEST,
@@ -93,6 +107,7 @@ pub const ALL: &[&str] = &[
     RECYCLE_PURGE_INCOMPLETE,
     RECYCLE_ENTRY_BUSY,
     CATALOG_CLEANUP_FAILED,
+    DOWNLOAD_RETRY_IN_PROGRESS,
 ];
 
 #[cfg(test)]

@@ -40,6 +40,33 @@ async fn delete_command_download_id(
         .then_some(binding.download_id)
 }
 
+async fn delete_command_client_item(
+    app: &AppUseCase,
+    command: &crate::DownloadQueueCommandRecord,
+    is_history: bool,
+) -> crate::AppResult<()> {
+    let download_client = &app.services.integrations.download_client;
+    if let Some(client_id) = command.client_id.as_deref() {
+        download_client
+            .delete_queue_item_for_client_id(
+                client_id,
+                &command.download_client_item_id,
+                is_history,
+                false,
+            )
+            .await
+    } else {
+        download_client
+            .delete_queue_item_for_client(
+                &command.client_type,
+                &command.download_client_item_id,
+                is_history,
+                false,
+            )
+            .await
+    }
+}
+
 pub async fn start_background_download_delete_poller(
     app: AppUseCase,
     token: tokio_util::sync::CancellationToken,
@@ -162,38 +189,39 @@ async fn execute_delete_command(
         }
     };
 
-    let result = if let Some(client_id) = command.client_id.as_deref() {
-        app.services
-            .integrations
-            .download_client
-            .delete_queue_item_for_client_id(
-                client_id,
-                &command.download_client_item_id,
-                command.is_history,
-                false,
-            )
+    // A password-retry recovery row is shown even when the job is absent from
+    // the native snapshot, so the row's queue/history placement is unknown:
+    // the job may still be active (restart before the first poll, accepted but
+    // unconfirmed retry) or already in history. Remove it from both.
+    let password_retry_fenced = match canonical_download_id.as_ref() {
+        Some(download_id) => app
+            .services
+            .workflow
+            .download_registry
+            .bindings_have_password_retry(std::slice::from_ref(download_id))
             .await
-    } else {
-        app.services
-            .integrations
-            .download_client
-            .delete_queue_item_for_client(
-                &command.client_type,
-                &command.download_client_item_id,
-                command.is_history,
-                false,
-            )
-            .await
+            .unwrap_or_else(|error| {
+                worker.warn_error("check_delete_command_password_retry", &error);
+                false
+            }),
+        None => false,
     };
-
-    if let Err(error) = result {
-        tracing::warn!(
-            client_id = ?command.client_id,
-            client_type = %command.client_type,
-            download_client_item_id = %command.download_client_item_id,
-            error = %error,
-            "download client delete failed; completing local queue deletion"
-        );
+    let delete_kinds: &[bool] = if password_retry_fenced {
+        &[false, true]
+    } else {
+        std::slice::from_ref(&command.is_history)
+    };
+    for &is_history in delete_kinds {
+        if let Err(error) = delete_command_client_item(app, command, is_history).await {
+            tracing::warn!(
+                client_id = ?command.client_id,
+                client_type = %command.client_type,
+                download_client_item_id = %command.download_client_item_id,
+                is_history,
+                error = %error,
+                "download client delete failed; completing local queue deletion"
+            );
+        }
     }
 
     let actor = command
@@ -243,6 +271,9 @@ async fn execute_delete_command(
             app.runtime
                 .acquisition
                 .invalidate_download_registry_observations();
+            // A durable retry recovery row may exist only in the Activity
+            // read model, so removing it need not change the native snapshot.
+            app.invalidate_download_queue_read_model().await;
             // The same settle the terminal transition performs: without
             // it a search for this scope inside the cache window still
             // sees the deleted submission and refuses the new grab as a

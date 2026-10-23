@@ -736,6 +736,92 @@ async fn title_delete_bulk_reports_recycle_warning_without_losing_successful_id(
 }
 
 #[tokio::test]
+async fn title_delete_bulk_purges_recycle_entry_created_during_earlier_item() {
+    crate::test_wait::within_deadline("late recycle entry is purged by its batch item", async {
+        let fixture = TitleDeleteFixture::new().await;
+        let titles = Arc::new(MockTitleRepo::default());
+        titles.create(fixture.deleted.clone()).await.unwrap();
+        titles.create(fixture.kept.clone()).await.unwrap();
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        titles.set_delete_operation_log(operations.clone()).await;
+        let barrier = operations.lock().await;
+        let jobs = Arc::new(RecordingJobRunRepo::default());
+        let mut app = fixture
+            .with_bin_setting(None)
+            .with_test_overrides(|services| services.with_job_runs(jobs.clone()));
+        app.services.catalog.titles = titles.clone();
+        let accepted = app
+            .start_delete_titles_job(
+                &fixture.user,
+                DeleteTitlesJobRequest {
+                    items: [&fixture.deleted.id, &fixture.kept.id]
+                        .into_iter()
+                        .map(|id| DeleteTitlesJobItem {
+                            title_id: id.clone(),
+                            preview_fingerprint: None,
+                        })
+                        .collect(),
+                    delete_files_on_disk: false,
+                    typed_confirmation: None,
+                },
+            )
+            .await
+            .unwrap();
+        crate::test_wait::wait_until(
+            "first recycle batch item reaches catalog deletion",
+            || async {
+                titles
+                    .delete_started
+                    .lock()
+                    .await
+                    .contains(&fixture.deleted.id)
+            },
+        )
+        .await;
+        let root = fixture.fixture.root_a();
+        let config = crate::recycle_bin::RecycleBinConfig {
+            enabled: true,
+            base_path: root.join(".scryer-recycle"),
+            retention_days: 7,
+            cleanup_enabled: true,
+            validation_error: None,
+            source_roots: vec![root.clone()],
+        };
+        let source = root.join("late-recycled-feature.mkv");
+        std::fs::write(&source, b"late recycle bytes").unwrap();
+        let mut manifest = removal_manifest(&source);
+        manifest.title_id = Some(fixture.kept.id.clone());
+        let recycled = crate::recycle_bin::recycle_file(&config, &source, manifest)
+            .await
+            .unwrap()
+            .unwrap();
+        let unrelated = config.base_path.join("unrelated.txt");
+        std::fs::write(&unrelated, b"keep unrelated bytes").unwrap();
+        drop(barrier);
+        let run = crate::test_wait::wait_for("specific late-recycle batch completes", || async {
+            jobs.runs
+                .lock()
+                .await
+                .iter()
+                .find(|run| run.id == accepted.job_run.id && run.status.is_terminal())
+                .cloned()
+        })
+        .await;
+        let summary: serde_json::Value =
+            serde_json::from_str(run.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(run.status, JobRunStatus::Completed);
+        assert_eq!(
+            summary["succeededTitleIds"],
+            serde_json::json!([fixture.deleted.id, fixture.kept.id])
+        );
+        assert_eq!(summary["recycleOutcomes"][&fixture.kept.id]["purged"], 1);
+        assert!(!recycled.recycled_path.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep unrelated bytes");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn title_delete_reports_busy_recycle_entry_and_still_deletes_catalog_title() {
     let fixture = TitleDeleteFixture::new().await;
     let bin = fixture.fixture.root_a().join(".scryer-recycle");

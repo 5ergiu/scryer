@@ -3653,6 +3653,22 @@ type DeleteTitlePayload {
 	Deleted title identity.
 	"""
 	id: ID!
+	"""
+	Recycle entries purged during this deletion.
+	"""
+	recyclePurged: Int!
+	"""
+	Recycle entries preserved after revalidation.
+	"""
+	recyclePreserved: Int!
+	"""
+	Recycle entries held by another operation.
+	"""
+	recycleBusy: Int!
+	"""
+	Recycle cleanup failures; catalog deletion still succeeded.
+	"""
+	recycleFailed: Int!
 }
 
 """

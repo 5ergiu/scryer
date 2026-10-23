@@ -36,6 +36,8 @@ pub(crate) struct MockTitleRepo {
     /// compensating transaction can be exercised at the exact commit that fails.
     pub(super) folder_path_write_error: Arc<Mutex<Option<(String, String)>>>,
     pub(super) delete_operation_log: OptionalDeleteOperationLog,
+    /// Explicit per-title arrival signal, recorded before any injected delete barrier.
+    pub(super) delete_started: Mutex<HashSet<String>>,
     pub(super) pending_import_items: Option<Arc<Mutex<Vec<LibraryScanUnmatchedItem>>>>,
     pub(super) external_id_batch_lookup_calls: AtomicUsize,
     /// How many times a caller asked for the whole catalog to match against.
@@ -1397,6 +1399,7 @@ impl TitleRepository for MockTitleRepo {
     }
 
     async fn delete(&self, id: &str) -> AppResult<()> {
+        self.delete_started.lock().await.insert(id.to_owned());
         if let Some(operation_log) = self.delete_operation_log.lock().await.clone() {
             operation_log
                 .lock()

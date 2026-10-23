@@ -6,7 +6,7 @@ type DownloadBindingTimes = HashMap<
 >;
 
 #[derive(Default)]
-pub(super) struct RecordingDownloadRegistry {
+pub(crate) struct RecordingDownloadRegistry {
     rows: Arc<Mutex<HashMap<ClientJobLocator, scryer_domain::download_identity::DownloadId>>>,
     binding_times: Arc<Mutex<DownloadBindingTimes>>,
     ended: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
@@ -15,6 +15,9 @@ pub(super) struct RecordingDownloadRegistry {
     failing_bindings: Arc<Mutex<HashSet<ClientJobLocator>>>,
     failing_ends: Arc<Mutex<HashSet<scryer_domain::download_identity::DownloadId>>>,
     strict_conflicts: bool,
+    pub(crate) ended_binding_reads: std::sync::atomic::AtomicUsize,
+    pub(crate) fail_ended_binding_reads: std::sync::atomic::AtomicBool,
+    pub(super) password_retry_ids: Mutex<HashSet<scryer_domain::download_identity::DownloadId>>,
     /// Registry transactions the resolver actually entered.
     pub(super) resolutions: Arc<std::sync::atomic::AtomicUsize>,
     /// Batched freshness writes, one entry per `touch_observations` call.
@@ -70,6 +73,16 @@ impl RecordingDownloadRegistry {
         download_id: &scryer_domain::download_identity::DownloadId,
     ) -> bool {
         self.ended.lock().await.contains(download_id)
+    }
+
+    /// End a binding the way explicit queue removal does: the durable
+    /// password-retry fence does not hold it.
+    pub(super) async fn end_binding_ignoring_password_retry(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) {
+        self.password_retry_ids.lock().await.remove(download_id);
+        self.ended.lock().await.insert(*download_id);
     }
 
     async fn fail_binding_lookup(&self, locator: ClientJobLocator) {
@@ -218,10 +231,46 @@ impl DownloadRegistryRepository for RecordingDownloadRegistry {
         }))
     }
 
+    async fn ended_bindings(
+        &self,
+        ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<Vec<scryer_domain::download_identity::DownloadId>> {
+        self.ended_binding_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .fail_ended_binding_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Repository(
+                "synthetic retirement lookup failure".into(),
+            ));
+        }
+        let ended = self.ended.lock().await;
+        Ok(ids
+            .iter()
+            .filter(|id| ended.contains(id))
+            .copied()
+            .collect())
+    }
+
+    async fn bindings_have_password_retry(
+        &self,
+        ids: &[scryer_domain::download_identity::DownloadId],
+    ) -> AppResult<bool> {
+        let retries = self.password_retry_ids.lock().await;
+        Ok(ids.iter().any(|id| retries.contains(id)))
+    }
+
     async fn end_binding(
         &self,
         id: &scryer_domain::download_identity::DownloadId,
     ) -> AppResult<()> {
+        if self.password_retry_ids.lock().await.contains(id) {
+            return Err(AppError::validation_refused(
+                crate::title_delete::DOWNLOAD_RETRY_IN_PROGRESS,
+                "Synthetic password retry fence preserves the binding.",
+            ));
+        }
         if self.failing_ends.lock().await.contains(id) {
             return Err(AppError::Repository(
                 "injected binding end failure".to_string(),
@@ -18411,9 +18460,14 @@ async fn deleting_a_download_client_clears_its_status_row() {
     let config =
         create_enabled_download_client_config(&app, &user, "Fixture Retired", "nzbget").await;
 
+    let generation = app.runtime.acquisition.download_registry_generation();
     app.delete_download_client_config(&user, &config.id)
         .await
         .expect("delete download client config");
+    assert!(
+        app.runtime.acquisition.download_registry_generation() > generation,
+        "retired client bindings must invalidate tracker reconciliation"
+    );
 
     assert_eq!(
         status.cleared.lock().expect("cleared mutex").as_slice(),
