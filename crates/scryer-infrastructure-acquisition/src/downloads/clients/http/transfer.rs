@@ -616,6 +616,19 @@ pub(crate) async fn transfer_file(
     if file.complete {
         return Ok(());
     }
+    if already_in_place(file).await? {
+        // Moved into place before an interruption kept the move from being
+        // recorded: only the final checks are left, and nothing is fetched.
+        if let Some(check) = &context.media_check {
+            verify_media(check, &file.final_path).await?;
+        }
+        file.complete = true;
+        info!(
+            path = %file.final_path.display(),
+            "HTTP download found its finished file already in place"
+        );
+        return record(context, file).await;
+    }
     // Recorded before an interruption: the resource already used up its
     // retries, so it is not asked again.
     if file.forbidden_answers > MAX_FORBIDDEN_RETRIES {
@@ -746,6 +759,32 @@ pub(crate) async fn transfer_file(
                 .await?;
             }
         }
+    }
+}
+
+/// Every byte is recorded, no partial is left, and the final file holds
+/// exactly the recorded length: the rename happened and only its record was
+/// lost.
+async fn already_in_place(file: &HttpJobFile) -> Result<bool, TransferError> {
+    let Some(total) = file.total_bytes else {
+        return Ok(false);
+    };
+    if total == 0 || file.bytes_done != total {
+        return Ok(false);
+    }
+    if tokio::fs::try_exists(file.part_path())
+        .await
+        .unwrap_or(true)
+    {
+        return Ok(false);
+    }
+    match tokio::fs::metadata(&file.final_path).await {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == total),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(TransferError::Permanent(format!(
+            "cannot inspect {}: {error}",
+            file.final_path.display()
+        ))),
     }
 }
 

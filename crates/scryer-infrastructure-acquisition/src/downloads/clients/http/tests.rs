@@ -2093,3 +2093,46 @@ async fn an_encoded_whole_file_answer_is_stored_as_sent() {
     assert_eq!(done.files[0].total_bytes, Some(encoded.len() as u64));
     assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), encoded);
 }
+
+// ---------------------------------------------------------------------------
+// a finished file whose completion was not recorded
+
+#[tokio::test]
+async fn a_file_already_in_place_completes_without_a_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    // Renamed into place, then interrupted before the move was recorded.
+    let job = seeded_job(
+        dir.path(),
+        &format!("{}/media/clip.mp4", server.uri()),
+        BODY.len() as u64,
+    );
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    tokio::fs::write(&job.files[0].final_path, BODY)
+        .await
+        .unwrap();
+    HttpStateStore::for_client(dir.path(), &config.id)
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let probe = FixedProbe::new(probed(Some(600), Some(true)));
+    client.engine().set_media_probe(probe.clone());
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert!(done.files[0].complete);
+    assert_eq!(done.files[0].attempt, 1);
+    assert_eq!(probe.probed(), vec![job.files[0].final_path.clone()]);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
