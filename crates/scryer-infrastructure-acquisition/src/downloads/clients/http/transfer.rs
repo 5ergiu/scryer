@@ -18,7 +18,7 @@ use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use scryer_application::AppResult;
 use scryer_plugin_sdk::{PluginHttpResource, PluginHttpVerify};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -30,6 +30,9 @@ const MAX_REDIRECT_HOPS: usize = scryer_outbound_http::DEFAULT_TRUSTED_REDIRECT_
 const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a body may stall between chunks.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bytes buffered in memory before they are handed to the operating system.
+/// The buffer is flushed and synced only at a checkpoint, never per chunk.
+const WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 /// The whole-request ceiling. A large file on a slow link takes a long time;
 /// stalls are caught by the idle timeout instead.
 const WHOLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -941,7 +944,12 @@ fn disk_error(path: &Path, error: &std::io::Error) -> StreamError {
 }
 
 /// Write the body into the attempt's `.part` file from `offset`, recording
-/// progress only after the bytes are flushed to disk.
+/// progress only after the bytes are flushed and synced to disk.
+///
+/// Writes go through a 1 MiB buffer. `live_bytes` counts what reached the
+/// buffer, for the queue's live view; `bytes_done` advances only after a
+/// checkpoint has flushed and synced it, so a crash resumes from bytes that
+/// are known to be on disk.
 async fn stream_body(
     context: &TransferContext<'_>,
     file: &mut HttpJobFile,
@@ -956,17 +964,18 @@ async fn stream_body(
     }
     // Never truncate: a fresh attempt writes a file name no earlier attempt
     // used, and a continuation writes on from the recorded offset.
-    let mut output = tokio::fs::OpenOptions::new()
+    let mut opened = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&part_path)
         .await
         .map_err(|error| disk_error(&part_path, &error))?;
-    output
+    opened
         .seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|error| disk_error(&part_path, &error))?;
+    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, opened);
 
     let mut written = offset;
     let mut unrecorded = 0u64;
@@ -1038,7 +1047,7 @@ async fn stream_body(
 async fn checkpoint_written(
     context: &TransferContext<'_>,
     file: &mut HttpJobFile,
-    output: &mut tokio::fs::File,
+    output: &mut BufWriter<tokio::fs::File>,
     part_path: &Path,
     written: u64,
 ) -> Result<(), StreamError> {
@@ -1047,6 +1056,7 @@ async fn checkpoint_written(
         .await
         .map_err(|error| disk_error(part_path, &error))?;
     output
+        .get_ref()
         .sync_data()
         .await
         .map_err(|error| disk_error(part_path, &error))?;

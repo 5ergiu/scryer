@@ -1762,3 +1762,98 @@ async fn a_progress_file_older_than_the_document_is_ignored() {
     assert_eq!(store.load_progress(&job.id).await, Some(progress));
     assert_eq!(store.load_progress("absent-job").await, None);
 }
+
+/// A one-shot HTTP server that sends `BODY` with its full length announced,
+/// stops after `split` bytes and sends the rest only once `gate` opens.
+async fn gated_server(split: usize, gate: Arc<tokio::sync::Notify>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                return;
+            }
+            head.push(byte[0]);
+        }
+        let mut answer = format!(
+            "HTTP/1.1 200 OK\r\nETag: {ETAG}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            BODY.len()
+        )
+        .into_bytes();
+        answer.extend_from_slice(&BODY[..split]);
+        let _ = stream.write_all(&answer).await;
+        let _ = stream.flush().await;
+        gate.notified().await;
+        let _ = stream.write_all(&BODY[split..]).await;
+        let _ = stream.shutdown().await;
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn buffered_bytes_show_live_but_are_recorded_only_after_a_sync() {
+    let split = 17;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let base = gated_server(split, Arc::clone(&gate)).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    client
+        .engine()
+        .set_checkpoint_cadence(u64::MAX, Duration::from_secs(3600));
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{base}/media/clip.mp4"),
+            720,
+        )])))
+        .await
+        .unwrap();
+
+    // Wait until the first piece has reached the write buffer.
+    let engine = Arc::clone(client.engine());
+    let live = tokio::time::timeout(WAIT_BOUND, async {
+        loop {
+            let listed = engine.jobs().await.unwrap();
+            if let Some((_, Some(live))) = listed.iter().find(|(job, _)| job.id == grab.job_id)
+                && live.bytes_done == split as u64
+            {
+                return listed;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first piece shows as live progress");
+    let (job, _) = live
+        .into_iter()
+        .find(|(job, _)| job.id == grab.job_id)
+        .unwrap();
+    // Not yet synced: nothing is recorded and nothing has left the buffer.
+    assert_eq!(job.files[0].bytes_done, 0);
+    let part = job.files[0].part_path();
+    assert_eq!(
+        std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0),
+        0
+    );
+    // The attempt and its validator may be recorded; its bytes are not.
+    let store = HttpStateStore::for_client(dir.path(), &config.id);
+    if let Some(progress) = store.load_progress(&grab.job_id).await {
+        let mut recorded = job.clone();
+        recorded.progress_revision = 0;
+        progress.apply_if_newer(&mut recorded);
+        assert_eq!(recorded.files[0].bytes_done, 0);
+    }
+
+    gate.notify_one();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
+    assert_eq!(done.files[0].bytes_done, BODY.len() as u64);
+}
