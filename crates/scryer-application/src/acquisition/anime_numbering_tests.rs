@@ -897,9 +897,10 @@ fn a_reading_with_no_catalog_episode_is_discarded() {
 fn a_wanted_tvdb_episode_translates_back_into_community_numbering() {
     let bridge = bridge();
 
-    let coordinates =
-        community_coordinates_for_tvdb_episode(&bridge, 1, 56).expect("community coordinates");
-    assert_eq!(coordinates.season, 4);
+    let coordinates = community_coordinates_for_tvdb_episode(&bridge, 1, 56, None)
+        .expect("community coordinates");
+    assert_eq!(coordinates.entry_index, 4);
+    assert_eq!(coordinates.season, Some(4));
     assert_eq!(coordinates.episode, 20);
     assert_eq!(
         coordinates.season_title.as_deref(),
@@ -907,13 +908,13 @@ fn a_wanted_tvdb_episode_translates_back_into_community_numbering() {
     );
 
     assert_eq!(
-        community_coordinates_for_tvdb_episode(&bridge, 1, 1)
+        community_coordinates_for_tvdb_episode(&bridge, 1, 1, None)
             .expect("first cour")
             .season,
-        1
+        Some(1)
     );
-    assert!(community_coordinates_for_tvdb_episode(&bridge, 2, 1).is_none());
-    assert!(community_coordinates_for_tvdb_episode(&bridge, 1, 99).is_none());
+    assert!(community_coordinates_for_tvdb_episode(&bridge, 2, 1, None).is_none());
+    assert!(community_coordinates_for_tvdb_episode(&bridge, 1, 99, None).is_none());
 }
 
 // ── fuzzy title anchoring ─────────────────────────────────────────────────
