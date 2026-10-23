@@ -585,6 +585,26 @@ async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), Transfe
     judge_media(&outcome, check.expected_duration_seconds, &check.verify)
 }
 
+/// The current time, injectable so tests decide when a URL has expired.
+pub(crate) type Clock = Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
+
+pub(crate) fn system_clock() -> Clock {
+    Arc::new(chrono::Utc::now)
+}
+
+/// Why a file whose signed URL ran out fails: asking again cannot help, and
+/// another variant of the same release was signed the same way.
+const EXPIRED_URL: &str = "the resource URL has expired; grab the release again";
+
+/// The resource states an expiry and it has passed.
+fn has_expired(resource: &PluginHttpResource, now: chrono::DateTime<chrono::Utc>) -> bool {
+    resource
+        .expires_at
+        .as_deref()
+        .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+        .is_some_and(|expires_at| expires_at.with_timezone(&chrono::Utc) <= now)
+}
+
 /// Everything one file transfer needs from its job and engine.
 pub(crate) struct TransferContext<'a> {
     pub egress: Egress,
@@ -595,6 +615,7 @@ pub(crate) struct TransferContext<'a> {
     /// The first retry's wait; each further retry doubles it, up to a cap.
     pub backoff_unit: Duration,
     pub cadence: CheckpointCadence,
+    pub clock: Clock,
     /// Set for the job's media file only; sidecars are not probed.
     pub media_check: Option<MediaCheck<'a>>,
 }
@@ -638,13 +659,8 @@ pub(crate) async fn transfer_file(
             file.forbidden_answers
         )));
     }
-    if let Some(expires_at) = file.resource.expires_at.as_deref()
-        && let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at)
-        && expires_at.with_timezone(&chrono::Utc) <= chrono::Utc::now()
-    {
-        return Err(TransferError::Permanent(
-            "the resource URL has expired; grab the release again".into(),
-        ));
+    if has_expired(&file.resource, (context.clock)()) {
+        return Err(TransferError::Permanent(EXPIRED_URL.into()));
     }
     let resource_url = reqwest::Url::parse(&file.resource.url)
         .map_err(|error| TransferError::Permanent(format!("invalid resource URL: {error}")))?;
@@ -714,6 +730,14 @@ pub(crate) async fn transfer_file(
             }
             ResponseVerdict::Failed(TransferError::Permanent(message)) => {
                 return Err(TransferError::Permanent(message));
+            }
+            // A refusal after the URL expired is the expiry, not the
+            // resource: it is neither retried nor counted against the
+            // variant, and no other variant is tried.
+            ResponseVerdict::Failed(TransferError::Rejected(_) | TransferError::Forbidden(_))
+                if has_expired(&file.resource, (context.clock)()) =>
+            {
+                return Err(TransferError::Permanent(EXPIRED_URL.into()));
             }
             ResponseVerdict::Failed(TransferError::Rejected(message)) => {
                 return Err(TransferError::Rejected(message));

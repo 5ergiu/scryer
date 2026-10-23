@@ -29,8 +29,9 @@ use super::state::{
     HttpStateStore, RefusedVariant,
 };
 use super::transfer::{
-    BandwidthLimiter, CHECKPOINT_BYTES, CHECKPOINT_INTERVAL, Checkpoint, CheckpointCadence, Egress,
-    MediaCheck, MediaProbe, NativeMediaProbe, TransferContext, TransferError, transfer_file,
+    BandwidthLimiter, CHECKPOINT_BYTES, CHECKPOINT_INTERVAL, Checkpoint, CheckpointCadence, Clock,
+    Egress, MediaCheck, MediaProbe, NativeMediaProbe, TransferContext, TransferError, system_clock,
+    transfer_file,
 };
 
 /// Jobs that may wait or run at once. Submissions past this are refused.
@@ -79,6 +80,7 @@ pub(crate) struct HttpEngine {
     backoff_unit: std::sync::Mutex<Duration>,
     media_probe: std::sync::Mutex<Arc<dyn MediaProbe>>,
     checkpoint_cadence: std::sync::Mutex<CheckpointCadence>,
+    clock: std::sync::Mutex<Clock>,
     inner: Mutex<EngineInner>,
     /// Document writes requested so far. A write covers every request made
     /// before its snapshot was taken.
@@ -126,6 +128,7 @@ impl HttpEngine {
                 bytes: CHECKPOINT_BYTES,
                 interval: CHECKPOINT_INTERVAL,
             }),
+            clock: std::sync::Mutex::new(system_clock()),
             inner: Mutex::new(EngineInner::default()),
             persist_requests: AtomicU64::new(0),
             save_lock: Mutex::new(0),
@@ -197,6 +200,16 @@ impl HttpEngine {
             .checkpoint_cadence
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = CheckpointCadence { bytes, interval };
+    }
+
+    fn clock(&self) -> Clock {
+        Arc::clone(&self.clock.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Replace the clock that decides whether a resource URL has expired.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&self, clock: Clock) {
+        *self.clock.lock().unwrap_or_else(|p| p.into_inner()) = clock;
     }
 
     /// Queue documents written since the engine started.
@@ -663,6 +676,7 @@ impl HttpEngine {
                 limiter: Some(self.limiter.as_ref()),
                 backoff_unit: self.backoff_unit(),
                 cadence: self.checkpoint_cadence(),
+                clock: self.clock(),
                 media_check: (file.role == HttpFileRole::Media).then(|| MediaCheck {
                     probe: probe.as_ref(),
                     expected_duration_seconds,

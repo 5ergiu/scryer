@@ -2136,3 +2136,66 @@ async fn a_file_already_in_place_completes_without_a_request() {
     assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// expired resource URLs
+
+/// Answers 403 and, in answering, moves the test clock past the expiry.
+struct ExpiringRefusal(Arc<std::sync::atomic::AtomicBool>);
+
+impl wiremock::Respond for ExpiringRefusal {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        ResponseTemplate::new(403)
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_after_the_url_expired_fails_without_retry_or_fallback() {
+    let expires_at = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ExpiringRefusal(Arc::clone(&expired)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/media/fallback.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let clock_flag = Arc::clone(&expired);
+    client.engine().set_clock(Arc::new(move || {
+        if clock_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            expires_at + chrono::Duration::seconds(1)
+        } else {
+            expires_at - chrono::Duration::hours(1)
+        }
+    }));
+    let mut first = muxed(&format!("{}/media/clip.mp4", server.uri()), 1080);
+    first.expires_at = Some(expires_at.to_rfc3339());
+    let mut fallback = muxed(&format!("{}/media/fallback.mp4", server.uri()), 720);
+    fallback.expires_at = Some(expires_at.to_rfc3339());
+    let grab = client
+        .submit_download(&request(source(vec![first, fallback])))
+        .await
+        .unwrap();
+
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    assert_eq!(
+        done.error.as_deref(),
+        Some("the resource URL has expired; grab the release again")
+    );
+    assert_eq!(done.forbidden_requests, 0);
+    assert_eq!(done.files[0].forbidden_answers, 0);
+    assert!(done.refused_variants.is_empty());
+}
