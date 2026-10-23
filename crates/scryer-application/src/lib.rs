@@ -93,7 +93,7 @@ mod null_repositories;
 mod oauth;
 pub mod persisted_records;
 pub mod plugin_failure;
-pub use plugin_failure::{PluginFailure, PluginFailureReason};
+pub use plugin_failure::{PluginFailure, PluginFailureReason, plugin_codes};
 mod plugins;
 mod polling_worker;
 mod ports;

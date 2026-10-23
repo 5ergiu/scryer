@@ -11,7 +11,7 @@ use scryer_application::{
     AppError, AppResult, ClientJobLocator, DownloadClient, DownloadClientAddRequest,
     DownloadClientFeedbackScope, DownloadClientMarkImportedRequest, DownloadClientObservation,
     DownloadClientStatus, DownloadGrabResult, DownloadSourceKind, ResolvedDownloadArtifact,
-    StagedNzbRef,
+    StagedNzbRef, plugin_codes,
 };
 use scryer_domain::{
     CompletedDownload, DownloadQueueItem, DownloadQueueState, DownloadSeedingSnapshot,
@@ -293,7 +293,7 @@ fn plugin_missing_observation(complete_listing: bool) -> DownloadClientObservati
 fn decode_command_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
     match result {
         PluginResult::Ok(value) => Ok(value),
-        PluginResult::Err(error) => Err(plugin_error_as_repository(error, context)),
+        PluginResult::Err(error) => Err(plugin_error_as_failure(error, context)),
     }
 }
 
@@ -369,21 +369,37 @@ fn plugin_error_message(error: &PluginError, context: &str) -> String {
     )
 }
 
-fn plugin_error_as_repository(error: PluginError, context: &str) -> AppError {
-    AppError::Repository(plugin_error_message(&error, context))
+/// A failed client command other than add or the connection test keeps the
+/// reason the plugin named, so a client can say why in its own language.
+fn plugin_error_as_failure(error: PluginError, context: &str) -> AppError {
+    AppError::plugin_failed(&error, context)
 }
+
+/// Open codes that stand for what the well-known transient codes said before
+/// codes were open: an unreachable or misbehaving client (`tls_error`,
+/// `invalid_response`) or a spent allowance (`quota_exceeded`). They stay
+/// retryable, so another client in the routing order is tried.
+const RETRYABLE_ADD_CODES: &[&str] = &[
+    plugin_codes::TLS_ERROR,
+    plugin_codes::INVALID_RESPONSE,
+    plugin_codes::QUOTA_EXCEEDED,
+];
 
 fn map_download_add_plugin_error(error: PluginError, context: &str) -> AppError {
     let message = plugin_error_message(&error, context);
-    match error.code {
+    // A well-known code sent as its open string is that code.
+    match &PluginErrorCode::from(error.code.as_str()) {
         PluginErrorCode::RateLimited
         | PluginErrorCode::UpstreamUnavailable
         | PluginErrorCode::Temporary => AppError::DownloadSubmitUnavailable(message),
+        PluginErrorCode::Other(code) if RETRYABLE_ADD_CODES.contains(&code.as_str()) => {
+            AppError::DownloadSubmitUnavailable(message)
+        }
         PluginErrorCode::InvalidConfig
         | PluginErrorCode::AuthFailed
         | PluginErrorCode::Unsupported
         | PluginErrorCode::Permanent
-        // A code this host does not know is not retried.
+        // Any other code, known or not, is a refusal and is not retried.
         | PluginErrorCode::Other(_) => AppError::DownloadSubmitRejected(message),
     }
 }
@@ -2286,6 +2302,94 @@ mod tests {
                 if message.contains("download_rejected")
                     && message.contains("the client refused the job")
         ));
+    }
+
+    #[test]
+    fn command_add_open_transport_codes_stay_retryable() {
+        for code in ["tls_error", "invalid_response", "quota_exceeded"] {
+            let error = decode_download_add_result::<()>(
+                PluginResult::Err(PluginError {
+                    details: None,
+                    code: PluginErrorCode::from(code),
+                    public_message: "the client could not be used right now".to_string(),
+                    debug_message: None,
+                    retry_after_seconds: None,
+                }),
+                "download add",
+            )
+            .expect_err("an open transport code should fail the submission");
+
+            assert!(error.is_retryable_download_submit_failure(), "{code}");
+        }
+    }
+
+    #[test]
+    fn command_add_refusal_codes_are_rejected_not_retried() {
+        for code in [
+            "endpoint_not_found",
+            "invalid_api_key",
+            "path_not_writable",
+            "item_not_found",
+            "account_banned",
+        ] {
+            let error = decode_download_add_result::<()>(
+                PluginResult::Err(PluginError {
+                    details: None,
+                    code: PluginErrorCode::from(code),
+                    public_message: "the client refused the job".to_string(),
+                    debug_message: None,
+                    retry_after_seconds: None,
+                }),
+                "download add",
+            )
+            .expect_err("a refusal code should fail the submission");
+
+            assert!(!error.is_retryable_download_submit_failure(), "{code}");
+            assert!(
+                matches!(error, AppError::DownloadSubmitRejected(_)),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_add_well_known_code_sent_as_a_string_keeps_its_retry_class() {
+        let error = decode_download_add_result::<()>(
+            PluginResult::Err(PluginError {
+                details: None,
+                code: PluginErrorCode::Other("temporary".into()),
+                public_message: "client is temporarily unavailable".to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+            }),
+            "download add",
+        )
+        .expect_err("a transient plugin error should fail the submission");
+
+        assert!(error.is_retryable_download_submit_failure());
+    }
+
+    #[test]
+    fn a_failed_client_command_names_the_plugin_reason() {
+        let error = decode_command_result::<()>(
+            PluginResult::Err(PluginError {
+                details: None,
+                code: PluginErrorCode::from("item_not_found"),
+                public_message: "the client no longer has this download".to_string(),
+                debug_message: Some("secret detail".to_string()),
+                retry_after_seconds: None,
+            }),
+            "download control",
+        )
+        .expect_err("a failed command should fail");
+
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_ITEM_NOT_FOUND");
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("the client no longer has this download")
+        );
+        assert!(!error.to_string().contains("secret detail"));
     }
 
     #[test]

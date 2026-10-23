@@ -32,6 +32,78 @@ const REASON_MAX_CHARS: usize = 64;
 
 const REASON_PREFIX: &str = "PLUGIN_";
 
+/// The open error codes the plugin kit shares, as their wire strings.
+///
+/// A plugin may send any code; these are the ones the host acts on beyond the
+/// seven well-known `PluginErrorCode` variants. Each is API once a released
+/// plugin sends it: never rename, reuse or repurpose one. Compare a received
+/// code with `code.as_str() == plugin_codes::X`, or use the constant as a match
+/// pattern on `code.as_str()`.
+pub mod plugin_codes {
+    /// The service rejected the configured username or password.
+    pub const INVALID_USERNAME_PASSWORD: &str = "invalid_username_password";
+    /// The service rejected the configured API key.
+    pub const INVALID_API_KEY: &str = "invalid_api_key";
+    /// The service rejected the configured passkey.
+    pub const INVALID_PASSKEY: &str = "invalid_passkey";
+    /// A configured cookie was rejected or has expired.
+    pub const INVALID_COOKIE: &str = "invalid_cookie";
+    /// The service demands a CAPTCHA before it will answer.
+    pub const CAPTCHA_REQUIRED: &str = "captcha_required";
+    /// The service demands a second authentication factor.
+    pub const TWO_FACTOR_REQUIRED: &str = "two_factor_required";
+    /// The service says the account is banned.
+    pub const ACCOUNT_BANNED: &str = "account_banned";
+    /// The service says the account is disabled, suspended or not activated.
+    pub const ACCOUNT_DISABLED: &str = "account_disabled";
+    /// The configured URL answers, but not with the expected API.
+    pub const ENDPOINT_NOT_FOUND: &str = "endpoint_not_found";
+    /// A secure (TLS) connection to the service could not be established.
+    pub const TLS_ERROR: &str = "tls_error";
+    /// The service answered with something the plugin cannot parse.
+    pub const INVALID_RESPONSE: &str = "invalid_response";
+    /// A daily or monthly allowance is used up; distinct from rate limiting.
+    pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
+    /// The referenced download, torrent or list no longer exists.
+    pub const ITEM_NOT_FOUND: &str = "item_not_found";
+    /// The download client refused to add the item.
+    pub const DOWNLOAD_REJECTED: &str = "download_rejected";
+    /// The download client cannot write to the configured or requested path.
+    pub const PATH_NOT_WRITABLE: &str = "path_not_writable";
+
+    /// Every shared open code above, in declaration order.
+    pub const ALL: &[&str] = &[
+        INVALID_USERNAME_PASSWORD,
+        INVALID_API_KEY,
+        INVALID_PASSKEY,
+        INVALID_COOKIE,
+        CAPTCHA_REQUIRED,
+        TWO_FACTOR_REQUIRED,
+        ACCOUNT_BANNED,
+        ACCOUNT_DISABLED,
+        ENDPOINT_NOT_FOUND,
+        TLS_ERROR,
+        INVALID_RESPONSE,
+        QUOTA_EXCEEDED,
+        ITEM_NOT_FOUND,
+        DOWNLOAD_REJECTED,
+        PATH_NOT_WRITABLE,
+    ];
+
+    /// The codes that say the service refused the configured credentials or
+    /// the account behind them.
+    pub const CREDENTIAL_OR_ACCOUNT_REFUSALS: &[&str] = &[
+        INVALID_USERNAME_PASSWORD,
+        INVALID_API_KEY,
+        INVALID_PASSKEY,
+        INVALID_COOKIE,
+        CAPTCHA_REQUIRED,
+        TWO_FACTOR_REQUIRED,
+        ACCOUNT_BANNED,
+        ACCOUNT_DISABLED,
+    ];
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PluginFailureReason {
     /// The plugin found its configuration unusable.
@@ -339,6 +411,24 @@ mod tests {
             "indexer indexer_test component: plugin error invalid_username_password: \
              Login refused: check the username and password"
         );
+    }
+
+    #[test]
+    fn the_shared_plugin_codes_are_distinct_snake_case_and_unknown_to_the_sdk() {
+        let distinct = plugin_codes::ALL.iter().collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), plugin_codes::ALL.len());
+        for code in plugin_codes::ALL {
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{code}"
+            );
+            assert!(!PluginErrorCode::from(*code).is_known(), "{code}");
+            let reason = PluginFailureReason::from_code(&PluginErrorCode::from(*code));
+            assert_eq!(reason.as_str(), format!("PLUGIN_{}", code.to_uppercase()));
+        }
+        for code in plugin_codes::CREDENTIAL_OR_ACCOUNT_REFUSALS {
+            assert!(plugin_codes::ALL.contains(code), "{code}");
+        }
     }
 
     #[test]

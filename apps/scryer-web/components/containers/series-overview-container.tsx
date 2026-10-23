@@ -35,6 +35,7 @@ import type { Release } from "@/lib/types";
 import type { CatalogDiscoveryItem } from "@/lib/types/discovery";
 import type { TitleRatings } from "@/components/views/title-ratings-strip";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
+import { pluginErrorMessage } from "@/lib/utils/plugin-error-message";
 import {
   runIterativeReleaseSearch,
   titleReleaseSearchInput,
@@ -1983,7 +1984,7 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         setGlobalStatus(t("status.queuedLatest", { name: title.name }), { level: "SUCCESS" });
         await refreshTitleDetail();
       } catch (error: unknown) {
-        setGlobalStatus(userFacingGraphQlErrorMessage(error, t("status.queueFailed")), { level: "ERROR" });
+        setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [
