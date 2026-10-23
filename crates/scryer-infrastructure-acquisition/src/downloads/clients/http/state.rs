@@ -96,6 +96,10 @@ pub(crate) struct HttpJobFile {
     /// retry bound holds across pauses and restarts.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub forbidden_answers: u32,
+    /// Why an optional file was given up on. A skipped file is not tried
+    /// again and does not hold the job back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_error: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -186,6 +190,10 @@ pub(crate) struct HttpJob {
     /// The indexer declared the release geo-restricted.
     #[serde(default, skip_serializing_if = "is_false")]
     pub geo_restricted: bool,
+    /// The selection required subtitle sidecars, so a subtitle that cannot be
+    /// fetched fails the job instead of being skipped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subtitle_required: bool,
     /// Bumped on every recorded change to the job's files. The progress file
     /// written with a higher revision than the document's is the newer record
     /// of those files.
@@ -216,7 +224,12 @@ impl HttpJob {
 
     /// The whole job's size when every file's length is known.
     pub(crate) fn known_total_bytes(&self) -> Option<u64> {
-        self.files.iter().try_fold(0u64, |sum, file| {
+        // A skipped file is never delivered, so it is not part of the size.
+        let mut delivered = self
+            .files
+            .iter()
+            .filter(|file| file.skipped_error.is_none());
+        delivered.try_fold(0u64, |sum, file| {
             let size = file.total_bytes.or_else(|| {
                 file.resource
                     .size_bytes

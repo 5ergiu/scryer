@@ -573,7 +573,7 @@ impl HttpEngine {
         };
         let mut index = 0;
         while index < file_count {
-            let (mut file, expected_duration_seconds, verify) = {
+            let (mut file, expected_duration_seconds, verify, subtitle_required) = {
                 let inner = self.inner.lock().await;
                 let job = inner
                     .document
@@ -585,9 +585,10 @@ impl HttpEngine {
                     job.files[index].clone(),
                     job.expected_duration_seconds,
                     job.verify.clone(),
+                    job.subtitle_required,
                 )
             };
-            if file.complete {
+            if file.complete || file.skipped_error.is_some() {
                 index += 1;
                 continue;
             }
@@ -624,10 +625,48 @@ impl HttpEngine {
                     self.advance_media_candidate(id, index, &error).await?;
                     live.current_file_bytes.store(0, Ordering::Relaxed);
                 }
+                Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+                Err(error) if file.role == HttpFileRole::Subtitle => {
+                    let language = file.language.as_deref().unwrap_or("unlabelled");
+                    if subtitle_required {
+                        return Err(TransferError::Permanent(format!(
+                            "the required {language} subtitle could not be downloaded: {}; the media file is on disk",
+                            error.message()
+                        )));
+                    }
+                    warn!(
+                        item_id = id,
+                        language,
+                        error = error.message().as_str(),
+                        "HTTP download skipping a subtitle it could not fetch"
+                    );
+                    self.skip_file(id, index, error.message()).await?;
+                    index += 1;
+                }
                 Err(error) => return Err(error),
             }
         }
         Ok(())
+    }
+
+    /// Record that an optional file was given up on, so it is neither tried
+    /// again nor reported as delivered.
+    async fn skip_file(&self, id: &str, index: usize, reason: String) -> Result<(), TransferError> {
+        {
+            let mut inner = self.inner.lock().await;
+            let job = inner
+                .document
+                .jobs
+                .iter_mut()
+                .find(|job| job.id == id)
+                .ok_or(TransferError::Cancelled)?;
+            job.files[index].skipped_error = Some(reason);
+            job.progress_revision = job.progress_revision.saturating_add(1);
+            job.updated_at = Utc::now();
+        }
+        self.persist()
+            .await
+            .map_err(|error| TransferError::Permanent(error.to_string()))
     }
 
     /// Give up on the active media resource and switch the job to its next
@@ -675,6 +714,7 @@ impl HttpEngine {
                         complete: false,
                         language: slot.language.clone(),
                         forbidden_answers: 0,
+                        skipped_error: None,
                     };
                     info!(
                         item_id = id,

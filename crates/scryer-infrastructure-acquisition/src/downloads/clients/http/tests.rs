@@ -224,6 +224,7 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
             complete: false,
             language: None,
             forbidden_answers: 0,
+            skipped_error: None,
         }],
         output_dir,
         // As a crash mid-transfer leaves it.
@@ -240,6 +241,7 @@ fn seeded_job(download_dir: &Path, url: &str, bytes_done: u64) -> HttpJob {
         forbidden_requests: 0,
         refused_variants: Vec::new(),
         geo_restricted: false,
+        subtitle_required: false,
         progress_revision: 0,
     }
 }
@@ -1856,4 +1858,75 @@ async fn buffered_bytes_show_live_but_are_recorded_only_after_a_sync() {
     assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
     assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), BODY);
     assert_eq!(done.files[0].bytes_done, BODY.len() as u64);
+}
+
+// ---------------------------------------------------------------------------
+// optional and required subtitles
+
+async fn subtitle_job(
+    mode: HttpSubtitleMode,
+) -> (tempfile::TempDir, HttpDownloadClient, MockServer, String) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/subs/en.vtt"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = eager_client(&config);
+    let mut source = source(vec![
+        muxed(&format!("{}/media/clip.mp4", server.uri()), 720),
+        subtitle(&format!("{}/subs/en.vtt", server.uri()), "en"),
+    ]);
+    source.selected.subtitle_mode = mode;
+    source.selected.subtitle_languages = vec!["en".into()];
+    let grab = client.submit_download(&request(source)).await.unwrap();
+    (dir, client, server, grab.job_id)
+}
+
+#[tokio::test]
+async fn a_missing_preferred_subtitle_is_skipped_and_the_job_completes() {
+    let (dir, client, _server, id) = subtitle_job(HttpSubtitleMode::SidecarPreferred).await;
+    let done = wait_for_job(&client, &id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert!(done.files[1].skipped_error.is_some());
+    assert!(!done.files[1].complete);
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
+
+    let completed = client.list_completed_downloads().await.unwrap();
+    assert_eq!(completed.len(), 1);
+    assert!(completed[0].subtitle_paths.is_empty());
+    let history = client.list_history().await.unwrap();
+    assert!(!history[0].attention_required);
+    assert_eq!(history[0].attention_reason, None);
+}
+
+#[tokio::test]
+async fn a_missing_required_subtitle_fails_the_job_and_names_the_language() {
+    let (dir, client, _server, id) = subtitle_job(HttpSubtitleMode::SidecarRequired).await;
+    let done = wait_for_job(&client, &id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Failed);
+    let error = done.error.unwrap_or_default();
+    assert!(
+        error.contains("required en subtitle") && error.contains("media file is on disk"),
+        "{error}"
+    );
+    // The media file finished before the subtitle was tried, and stays.
+    assert!(
+        dir.path()
+            .join("Synthetic.Show.S01E01")
+            .join("Synthetic.Show.S01E01.mp4")
+            .exists()
+    );
 }

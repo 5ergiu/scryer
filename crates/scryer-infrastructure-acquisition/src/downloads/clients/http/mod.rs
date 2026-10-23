@@ -363,6 +363,7 @@ impl DownloadClient for HttpDownloadClient {
                     complete: false,
                     language: file.language,
                     forbidden_answers: 0,
+                    skipped_error: None,
                 })
                 .collect(),
             state: HttpJobState::Queued,
@@ -378,6 +379,8 @@ impl DownloadClient for HttpDownloadClient {
             forbidden_requests: 0,
             refused_variants: Vec::new(),
             geo_restricted,
+            subtitle_required: source.selected.subtitle_mode
+                == scryer_plugin_sdk::HttpSubtitleMode::SidecarRequired,
             progress_revision: 0,
         };
         self.engine.add_job(job).await?;
