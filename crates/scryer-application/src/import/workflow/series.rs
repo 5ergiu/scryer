@@ -131,7 +131,7 @@ async fn import_series_download(
         completed.completed_at.map(|completed_at| completed_at.date_naive()),
     )
     .await?;
-    // `video_files` came from `find_video_files(dir, true)`: samples are already
+    // `video_files` came from `discover_video_files(dir, true)`: samples are already
     // excluded, so this is the count Sonarr's `OtherVideoFiles` rule wants.
     let video_file_count = video_files.len();
     // One release, one blocklist row — accumulated across the members and
@@ -1399,6 +1399,7 @@ async fn import_single_episode_file(
     // filename, and only identity parsing ever reads it.
     let parse_video = source_video.parse_path();
     let parse_video = parse_video.as_ref();
+    let content_qualified = source_video.content_qualified;
     let source_video = source_video.path();
     // Sonarr's `OtherVideoFiles`: with more than one (non-sample) video in the
     // download, each file must identify itself.
@@ -1788,7 +1789,7 @@ async fn import_single_episode_file(
         specials_folder_template,
         title_folder_path,
         source_video,
-        None,
+        content_qualified,
         &parsed,
         &target_episodes,
         &target_episodes,

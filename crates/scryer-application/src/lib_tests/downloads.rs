@@ -7195,9 +7195,70 @@ async fn manual_import_lands_content_qualified_extensionless_movie() {
 
 #[cfg(feature = "runtime-media-analysis")]
 #[tokio::test]
-async fn automatic_import_still_ignores_an_extensionless_video() {
-    // Content qualification belongs to the manual executor alone: an automatic
-    // import keeps treating an extensionless file as no video at all.
+async fn automatic_import_lands_content_qualified_extensionless_episode() {
+    // Field 2026-10-22: a client delivered a lone Matroska member with no
+    // extension and the automatic import ended "no video files found". The
+    // completed-download discovery content-probes the extensionless file as
+    // manual import does, and the destination takes the probed container's
+    // extension.
+    let FailClosedPackFixture {
+        app,
+        user,
+        title,
+        episode,
+        library_dir: _library_dir,
+        ..
+    } = fail_closed_pack_fixture().await;
+    let source_dir = tempfile::tempdir().expect("source tempdir");
+    write_extensionless_video(source_dir.path(), "h264_aac.mkv");
+    let mut completed = series_pack_completed_download(
+        "automatic-extensionless-episode",
+        &title.id,
+        "Fail.Closed.Pack.S01E01.1080p.WEB-DL",
+        source_dir.path(),
+    );
+    // The client reports the job's release name; the member itself is
+    // obfuscated and carries no extension.
+    completed.release_name = Some("Fail.Closed.Pack.S01E01.1080p.WEB-DL".to_string());
+    // Discovery probes the real file; only the import gate's full analysis
+    // stands in for an episode-length source.
+    let _probe = probe_agrees_with_the_name(1920, 1080);
+
+    let result = crate::import::import::import_completed_download(&app, &user, &completed)
+        .await
+        .expect("automatic import should run");
+
+    assert_eq!(
+        result.decision,
+        scryer_domain::ImportDecision::Imported,
+        "{result:?}"
+    );
+    let media_files = app
+        .services
+        .library
+        .media_files
+        .list_media_files_for_title(&title.id)
+        .await
+        .expect("list media files");
+    assert_eq!(media_files.len(), 1, "{media_files:?}");
+    assert_eq!(
+        media_files[0].episode_id.as_deref(),
+        Some(episode.id.as_str())
+    );
+    let destination = crate::stored_paths::stored_path_to_path_buf(&media_files[0].file_path);
+    assert_eq!(
+        destination.extension().and_then(|ext| ext.to_str()),
+        Some("mkv"),
+        "{media_files:?}"
+    );
+    assert!(destination.is_file(), "{destination:?}");
+}
+
+#[cfg(feature = "runtime-media-analysis")]
+#[tokio::test]
+async fn automatic_import_still_ignores_an_extensionless_non_video() {
+    // Only content the probe identifies as video qualifies: an extensionless
+    // file of anything else keeps the no-video path.
     let FailClosedPackFixture {
         app,
         user,
@@ -7206,9 +7267,16 @@ async fn automatic_import_still_ignores_an_extensionless_video() {
         ..
     } = fail_closed_pack_fixture().await;
     let source_dir = tempfile::tempdir().expect("source tempdir");
-    write_extensionless_video(source_dir.path(), "h264_aac.mkv");
+    let payload = source_dir.path().join("dXRUKoYEAJ58jradJdxMKKxgczVTvt");
+    std::fs::write(&payload, b"not a media container").expect("write payload");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&payload)
+        .expect("open payload")
+        .set_len(PACK_VIDEO_SIZE_BYTES)
+        .expect("size payload above the content-probe floor");
     let completed = series_pack_completed_download(
-        "automatic-extensionless-episode",
+        "automatic-extensionless-non-video",
         &title.id,
         "Fail.Closed.Pack.S01E01.1080p.WEB-DL",
         source_dir.path(),
