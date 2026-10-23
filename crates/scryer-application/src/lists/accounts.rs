@@ -10,7 +10,7 @@ use scryer_domain::{
 };
 use scryer_plugin_sdk::{
     LIST_CREDENTIAL_TYPE_API_KEY, ListAccountFlow, ListCredential, ListMemberKeyUse,
-    ListPluginAccountResponse, ListProviderAuth, PluginDescriptor, PluginErrorCode, PluginResult,
+    ListPluginAccountResponse, ListProviderAuth, PluginDescriptor, PluginResult,
 };
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::Mutex;
@@ -1449,10 +1449,8 @@ impl AppUseCase {
             // may verify on the next attempt.
             Ok(PluginResult::Err(error))
                 if matches!(
-                    error.code,
-                    PluginErrorCode::RateLimited
-                        | PluginErrorCode::UpstreamUnavailable
-                        | PluginErrorCode::Temporary
+                    error.code.as_str(),
+                    "rate_limited" | "quota_exceeded" | "upstream_unavailable" | "temporary"
                 ) =>
             {
                 Err(AppError::temporary_unavailable(
@@ -1467,7 +1465,7 @@ impl AppUseCase {
             // yet, so the member is asked for the right key rather than to reconnect.
             Ok(PluginResult::Err(error))
                 if account.is_none()
-                    && error.code == PluginErrorCode::AuthFailed
+                    && matches!(error.code.as_str(), "auth_failed" | "invalid_api_key")
                     && token.token_type.as_deref() == Some(LIST_CREDENTIAL_TYPE_API_KEY) =>
             {
                 Err(key_rejected())
