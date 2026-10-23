@@ -10,6 +10,8 @@ pub mod lists;
 pub mod title_naming;
 pub mod title_normalization;
 pub use lists::*;
+mod season_numbering;
+pub use season_numbering::season_ordinal_from_title;
 mod title_sort;
 pub mod title_spelling;
 pub use title_sort::{
@@ -1200,6 +1202,64 @@ impl AnimeNumberingBridge {
         })
     }
 
+    /// The season number release groups give a community entry, or `None`
+    /// when nothing about the entry settles it.
+    ///
+    /// An entry's [`AnimeCommunitySeason::index`] is its position in air
+    /// order, and positions drift away from season numbers as soon as a
+    /// season is split into parts or the dataset carries an entry that starts
+    /// no season. So for an anime community bridge the number is derived, in
+    /// this order:
+    ///
+    /// 1. the season ordinal the entry's own names state
+    ///    ([`AnimeCommunitySeason::title_season_ordinal`]);
+    /// 2. else, when the entry's first range starts at episode 1 of a TVDB
+    ///    season, that TVDB season;
+    /// 3. else, when that TVDB season holds more than one entry (one long
+    ///    TVDB season carrying several cours), the entry's 1-based position
+    ///    among the entries of that TVDB season;
+    /// 4. else `None`.
+    ///
+    /// A bridge built from a TVDB alternate or DVD order numbers its entries
+    /// by that order's own seasons, so its index is the season number.
+    pub fn community_season_number(&self, entry: &AnimeCommunitySeason) -> Option<i32> {
+        if self.source.is_tvdb_alternate_order() {
+            return (entry.index > 0).then_some(entry.index);
+        }
+        if let Some(ordinal) = entry.title_season_ordinal() {
+            return Some(ordinal);
+        }
+        let anchor = entry.first_range()?;
+        if anchor.tvdb_season <= 0 {
+            return None;
+        }
+        if anchor.tvdb_episode_start == 1 && anchor.community_episode_start == 1 {
+            return Some(anchor.tvdb_season);
+        }
+        let mut same_tvdb_season = self
+            .seasons
+            .iter()
+            .filter(|season| {
+                season
+                    .first_range()
+                    .is_some_and(|range| range.tvdb_season == anchor.tvdb_season)
+            })
+            .collect::<Vec<_>>();
+        if same_tvdb_season.len() < 2 {
+            return None;
+        }
+        same_tvdb_season.sort_by_key(|season| {
+            (
+                season.first_range().map(|range| range.tvdb_episode_start),
+                season.index,
+            )
+        });
+        let position = same_tvdb_season
+            .iter()
+            .position(|season| *season == entry)?;
+        i32::try_from(position + 1).ok()
+    }
+
     /// Every cour name the bridge carries, as tagged aliases of the title the
     /// bridge belongs to.
     ///
@@ -1268,6 +1328,34 @@ pub struct AnimeCommunitySeasonRange {
 }
 
 impl AnimeCommunitySeason {
+    /// The season ordinal this entry's names state, when they agree on one.
+    ///
+    /// Each name is read with [`season_ordinal_from_title`]; a name stating
+    /// none says nothing, and names stating different seasons settle nothing.
+    pub fn title_season_ordinal(&self) -> Option<i32> {
+        let mut agreed = None;
+        for ordinal in self
+            .titles
+            .iter()
+            .filter_map(|title| season_ordinal_from_title(title))
+        {
+            match agreed {
+                None => agreed = Some(ordinal),
+                Some(previous) if previous == ordinal => {}
+                Some(_) => return None,
+            }
+        }
+        agreed
+    }
+
+    /// The range holding the entry's lowest community episode: where the
+    /// entry starts.
+    pub fn first_range(&self) -> Option<&AnimeCommunitySeasonRange> {
+        self.ranges
+            .iter()
+            .min_by_key(|range| range.community_episode_start)
+    }
+
     /// Whether a release that names this community season may also carry
     /// `season` as its season token without contradicting that name.
     ///

@@ -1848,7 +1848,13 @@ fn apply_resolved_catalog_coordinates(
 /// community season's own preferred title.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CommunityCoordinates {
-    pub(crate) season: i32,
+    /// The bridge entry covering the episode ([`AnimeCommunitySeason::index`]).
+    /// A position in the bridge, not a season number.
+    pub(crate) entry_index: i32,
+    /// The season number release groups post the entry under, or `None` when
+    /// nothing settles it or the pair it makes is a different real episode of
+    /// the title. See [`AnimeNumberingBridge::community_season_number`].
+    pub(crate) season: Option<i32>,
     pub(crate) episode: i32,
     pub(crate) season_title: Option<String>,
     /// The community season's own AniDB entry, when the bridge knows it.
@@ -1857,15 +1863,32 @@ pub(crate) struct CommunityCoordinates {
 
 /// Translate a wanted TVDB episode into the community numbering release groups
 /// use. `None` when no community season covers it.
+///
+/// `catalog_episodes` is the title's catalog, when the caller has it. A
+/// community (season, episode) that names a different real episode of the
+/// title is dropped from the coordinates: asking for it, or admitting results
+/// labelled with it, would fetch that other episode. The real episodes are the
+/// catalog's together with every TVDB episode the bridge's own ranges span, so
+/// a caller without the catalog still has the bridge as the oracle. Only an
+/// anime community bridge is checked: a TVDB alternate or DVD order the
+/// operator pinned is how the releases are numbered, and that order overlaps
+/// the official one by construction.
 pub(crate) fn community_coordinates_for_tvdb_episode(
     bridge: &AnimeNumberingBridge,
     tvdb_season: i32,
     tvdb_episode: i32,
+    catalog_episodes: Option<&[Episode]>,
 ) -> Option<CommunityCoordinates> {
     let (season, community_episode) =
         bridge.community_season_for_tvdb_episode(tvdb_season, tvdb_episode)?;
+    let community_season = bridge.community_season_number(season).filter(|&number| {
+        bridge.source.is_tvdb_alternate_order()
+            || (number, community_episode) == (tvdb_season, tvdb_episode)
+            || !names_a_real_episode(bridge, catalog_episodes, number, community_episode)
+    });
     Some(CommunityCoordinates {
-        season: season.index,
+        entry_index: season.index,
+        season: community_season,
         episode: community_episode,
         season_title: season
             .titles
@@ -1874,6 +1897,36 @@ pub(crate) fn community_coordinates_for_tvdb_episode(
             .filter(|title| !title.is_empty()),
         anidb_id: season.anidb_id.filter(|id| *id > 0),
     })
+}
+
+/// Whether `(season, episode)` is a real episode of the title: one the catalog
+/// carries, or one inside a TVDB span of the bridge's ranges.
+fn names_a_real_episode(
+    bridge: &AnimeNumberingBridge,
+    catalog_episodes: Option<&[Episode]>,
+    season: i32,
+    episode: i32,
+) -> bool {
+    let in_catalog = catalog_episodes.is_some_and(|episodes| {
+        episodes.iter().any(|candidate| {
+            parse_catalog_number(candidate.season_number.as_deref()) == Some(season)
+                && parse_catalog_number(candidate.episode_number.as_deref()) == Some(episode)
+        })
+    });
+    in_catalog
+        || bridge
+            .seasons
+            .iter()
+            .flat_map(|entry| &entry.ranges)
+            .any(|range| {
+                range.tvdb_season == season
+                    && episode >= range.tvdb_episode_start
+                    && range.tvdb_episode_end.is_none_or(|end| episode <= end)
+            })
+}
+
+fn parse_catalog_number(value: Option<&str>) -> Option<i32> {
+    value.and_then(|value| value.trim().parse::<i32>().ok())
 }
 
 #[cfg(test)]
