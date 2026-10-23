@@ -568,7 +568,7 @@ impl HttpEngine {
         cancel: &CancellationToken,
         live: &Arc<LiveProgress>,
     ) -> Result<(), TransferError> {
-        let file_count = {
+        let (file_count, output_dir) = {
             let inner = self.inner.lock().await;
             let job = inner
                 .document
@@ -576,16 +576,18 @@ impl HttpEngine {
                 .iter()
                 .find(|job| job.id == id)
                 .ok_or(TransferError::Cancelled)?;
-            tokio::fs::create_dir_all(&job.output_dir)
-                .await
-                .map_err(|error| {
-                    TransferError::Permanent(format!(
-                        "could not create {}: {error}",
-                        job.output_dir.display()
-                    ))
-                })?;
-            job.files.len()
+            (job.files.len(), job.output_dir.clone())
         };
+        // A slow or hung filesystem must not hold every other caller of the
+        // engine behind the lock.
+        tokio::fs::create_dir_all(&output_dir)
+            .await
+            .map_err(|error| {
+                TransferError::Permanent(format!(
+                    "could not create {}: {error}",
+                    output_dir.display()
+                ))
+            })?;
         let mut index = 0;
         while index < file_count {
             let (mut file, expected_duration_seconds, verify, subtitle_required) = {
