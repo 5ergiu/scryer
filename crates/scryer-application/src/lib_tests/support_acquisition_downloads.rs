@@ -1432,6 +1432,17 @@ impl DownloadSubmissionRepository for TrackingDownloadSubmissionRepo {
         Ok(())
     }
 
+    async fn delete_by_download_id(
+        &self,
+        download_id: &scryer_domain::download_identity::DownloadId,
+    ) -> AppResult<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|entry| entry.download_id != *download_id);
+        Ok(())
+    }
+
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()> {
         let key = download_source_identity_key(identity);
         self.store.lock().await.retain(|entry| {

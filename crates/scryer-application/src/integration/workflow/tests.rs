@@ -2134,7 +2134,7 @@ mod tests {
         let mut finished = tracker.get_by_download_id(live).unwrap().clone();
         finished.state = TrackedDownloadState::Imported;
         let mut in_flight = std::collections::HashSet::from([SHARED_TORRENT_ID.to_string()]);
-        super::handle_tracked_download_background_work_result(
+        let deferred = super::handle_tracked_download_background_work_result(
             &app,
             &mut tracker,
             &mut in_flight,
@@ -2147,9 +2147,116 @@ mod tests {
             },
         )
         .await;
+        assert!(deferred.is_none());
         assert!(in_flight.is_empty());
         assert!(tracker.get_by_download_id(live).is_none());
         assert_eq!(row_debug(&tracker, settled), settled_before);
+    }
+
+    #[tokio::test]
+    async fn title_delete_worker_result_waits_for_ownership_read_recovery() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let (mut app, actor) = crate::lib_tests::bootstrap();
+            let titles = std::sync::Arc::new(crate::lib_tests::MockTitleRepo::default());
+            let title = app
+                .add_title(
+                    &actor,
+                    crate::NewTitle {
+                        name: "Synthetic completed download".into(),
+                        facet: scryer_domain::MediaFacet::Movie,
+                        monitored: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            crate::TitleRepository::create(titles.as_ref(), title.clone())
+                .await
+                .unwrap();
+            app.services.catalog.titles = titles.clone();
+            assert!(
+                app.services
+                    .catalog
+                    .titles
+                    .get_by_id(&title.id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let mut runtime = super::TrackedDownloadRuntimeState::new();
+            let mut tracked = reconcile_row(Some(&title.id), TrackedDownloadState::Importing);
+            tracked.status_messages = vec!["worker in progress".into()];
+            let download_id = runtime.tracker.insert_for_tests(tracked);
+            let mut finished = runtime
+                .tracker
+                .get_by_download_id(download_id)
+                .unwrap()
+                .clone();
+            finished.state = TrackedDownloadState::Imported;
+            finished.status_messages = vec!["finished once".into()];
+            let client_item_id = finished.client_item.download_client_item_id.clone();
+            runtime
+                .tracked_work_in_flight
+                .insert(SHARED_TORRENT_ID.into());
+            titles
+                .fail_get_by_id
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let deferred = super::handle_tracked_download_background_work_result(
+                &app,
+                &mut runtime.tracker,
+                &mut runtime.tracked_work_in_flight,
+                super::TrackedDownloadBackgroundWorkResult {
+                    download_id,
+                    id: SHARED_TORRENT_ID.into(),
+                    kind: TrackedDownloadBackgroundWorkKind::Import,
+                    outcome: Ok(finished),
+                    elapsed: std::time::Duration::ZERO,
+                },
+            )
+            .await
+            .expect("failed ownership read retains the finished result");
+            runtime.deferred_work_results.push(deferred);
+            super::retry_deferred_tracked_download_work_results(&app, &mut runtime).await;
+            assert_eq!(runtime.deferred_work_results.len(), 1);
+            assert!(runtime.tracked_work_in_flight.contains(SHARED_TORRENT_ID));
+            assert_eq!(
+                runtime
+                    .tracker
+                    .get_by_download_id(download_id)
+                    .unwrap()
+                    .state,
+                TrackedDownloadState::Importing
+            );
+
+            titles
+                .fail_get_by_id
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            super::retry_deferred_tracked_download_work_results(&app, &mut runtime).await;
+            assert!(runtime.deferred_work_results.is_empty());
+            assert!(runtime.tracked_work_in_flight.is_empty());
+            // Successful terminal cleanup removes the tracker row, but the
+            // completed result must still publish its Imported projection.
+            assert!(runtime.tracker.get_by_download_id(download_id).is_none());
+            let settled =
+                crate::test_wait::wait_for("recovered result publishes completed item", || async {
+                    app.runtime
+                        .acquisition
+                        .download_queue_snapshot
+                        .snapshot()
+                        .await
+                        .items
+                        .iter()
+                        .find(|item| {
+                            item.download_client_item_id == client_item_id
+                                && item.tracked_state == Some(TrackedDownloadState::Imported)
+                        })
+                        .cloned()
+                })
+                .await;
+            assert_eq!(settled.tracked_state, Some(TrackedDownloadState::Imported));
+        })
+        .await
+        .expect("ownership recovery should settle the existing result");
     }
 
     #[tokio::test]
@@ -2174,7 +2281,7 @@ mod tests {
         tracked.manual_failure_cleanup = true;
         tracked.state = TrackedDownloadState::FailedPending;
         let mut in_flight = std::collections::HashSet::from([SHARED_TORRENT_ID.to_string()]);
-        super::handle_tracked_download_background_work_result(
+        let deferred = super::handle_tracked_download_background_work_result(
             &app,
             &mut tracker,
             &mut in_flight,
@@ -2187,6 +2294,7 @@ mod tests {
             },
         )
         .await;
+        assert!(deferred.is_none());
         assert!(in_flight.is_empty());
         assert_eq!(
             tracker.get_by_download_id(live).unwrap().state,
@@ -2221,7 +2329,7 @@ mod tests {
             finished.status_messages = vec!["worker finished".to_string()];
 
             let mut in_flight = std::collections::HashSet::from([SHARED_TORRENT_ID.to_string()]);
-            super::handle_tracked_download_background_work_result(
+            let deferred = super::handle_tracked_download_background_work_result(
                 &app,
                 &mut tracker,
                 &mut in_flight,
@@ -2234,7 +2342,7 @@ mod tests {
                 },
             )
             .await;
-
+            assert!(deferred.is_none());
             assert!(in_flight.is_empty());
             let merged = tracker.get_by_download_id(live).expect("live row");
             assert_eq!(merged.state, TrackedDownloadState::ImportPending);

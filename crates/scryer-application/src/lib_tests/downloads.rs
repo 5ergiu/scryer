@@ -12436,8 +12436,11 @@ async fn queue_delete_ends_bound_download_when_client_is_unavailable() {
     let canonical_download_id = scryer_domain::download_identity::DownloadId::new();
     let locator = ClientJobLocator::new(Some("client-bound"), "nzbget", "bound-job");
     registry.bind(locator, canonical_download_id).await;
-    let app =
-        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let app = base_app.with_test_overrides(|services| {
+        services
+            .with_download_registry(registry.clone())
+            .with_download_submissions(Arc::new(TrackingDownloadSubmissionRepo::default()))
+    });
 
     let command = app
         .delete_download_queue_item(&user, Some("client-bound"), "NZBGet", "bound-job", false)
@@ -12739,6 +12742,63 @@ async fn queue_delete_registry_miss_or_error_uses_legacy_command_and_still_execu
     let deleted = download_client.deleted_items.lock().await.clone();
     assert!(deleted.contains(&("miss-job".to_string(), false)));
     assert!(deleted.contains(&("error-job".to_string(), false)));
+}
+
+#[tokio::test]
+async fn delayed_canonical_delete_command_preserves_reused_client_item() {
+    let client = Arc::new(StubDownloadClient::default());
+    let commands = Arc::new(TrackingDownloadQueueCommandRepo::default());
+    let command_id = commands
+        .seed_pending(Some("client-reused"), "nzbget", "reused-job", false)
+        .await;
+    let old = scryer_domain::download_identity::DownloadId::new();
+    let new = scryer_domain::download_identity::DownloadId::new();
+    commands
+        .queued
+        .lock()
+        .await
+        .iter_mut()
+        .find(|row| row.id == command_id)
+        .unwrap()
+        .canonical_download_id = Some(old);
+    let (base_app, _) = bootstrap_with_delete_queue(client.clone(), commands.clone());
+    let registry = Arc::new(RecordingDownloadRegistry::default());
+    registry
+        .bind_at(
+            ClientJobLocator::new(Some("client-reused"), "nzbget", "reused-job"),
+            new,
+            chrono::Utc::now(),
+            None,
+        )
+        .await;
+    let app =
+        base_app.with_test_overrides(|services| services.with_download_registry(registry.clone()));
+    let token = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(start_background_download_delete_poller(
+        app,
+        token.child_token(),
+    ));
+    crate::test_wait::wait_until("superseded delete command completes", || async {
+        commands
+            .get(&command_id)
+            .await
+            .is_some_and(|row| row.status == scryer_domain::DownloadQueueDeleteStatus::Completed)
+    })
+    .await;
+    token.cancel();
+    crate::test_wait::within_deadline("delete poller stops", task)
+        .await
+        .unwrap();
+    assert!(client.deleted_items.lock().await.is_empty());
+    assert!(
+        registry
+            .load_binding(&new)
+            .await
+            .unwrap()
+            .unwrap()
+            .ended_at
+            .is_none()
+    );
 }
 
 #[tokio::test]

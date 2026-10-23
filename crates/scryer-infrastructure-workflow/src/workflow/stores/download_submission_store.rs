@@ -2317,6 +2317,30 @@ impl DownloadSubmissionRepository for DownloadSubmissionStore {
         .await
     }
 
+    async fn delete_by_download_id(&self, download_id: &DownloadId) -> AppResult<()> {
+        let id = *download_id;
+        SqlRuntime::run_in_transaction(&self.datastore, "delete_canonical_submission", move |tx| {
+            Box::pin(async move {
+                end_binding_tx(tx, &id).await?;
+                let args = [SqlArg::Text(id.to_string())];
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "DELETE FROM download_submission_episode_links WHERE download_id = {}",
+                    &args,
+                )
+                .await?;
+                SqlRuntime::execute(
+                    SqlExec::Tx(tx),
+                    "DELETE FROM download_submissions WHERE id = {}",
+                    &args,
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()> {
         let identity = identity.clone();
         SqlRuntime::run_in_transaction(
@@ -3925,6 +3949,52 @@ mod seed_goal_tests {
             .await
             .expect("tracked-state projection should load");
         assert_eq!(states, vec![(identity(), "new".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn delayed_canonical_delete_preserves_reused_locator() {
+        let store = store().await;
+        let old = DownloadId::new();
+        let new = DownloadId::new();
+        store
+            .record_submission_with_identity(
+                submission(old, "job-1", "old-title"),
+                submission_identity(old),
+                None,
+            )
+            .await
+            .unwrap();
+        store.delete_by_download_id(&old).await.unwrap();
+        store
+            .record_submission_with_identity(
+                submission(new, "job-1", "new-title"),
+                submission_identity(new),
+                None,
+            )
+            .await
+            .unwrap();
+        // A command completing after reuse must never follow the old locator.
+        store.delete_by_download_id(&old).await.unwrap();
+        assert_eq!(
+            active_binding_download_id(store.datastore.read_exec(), &identity())
+                .await
+                .unwrap(),
+            Some(new)
+        );
+        assert!(
+            store
+                .find_by_canonical_download_id(&new)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .find_by_canonical_download_id(&old)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

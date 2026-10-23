@@ -6262,6 +6262,13 @@ pub trait DownloadSubmissionRepository: Send + Sync {
         ))
     }
 
+    /// Remove only this canonical submission; never follow a reused client locator.
+    async fn delete_by_download_id(&self, _download_id: &DownloadId) -> AppResult<()> {
+        Err(AppError::Repository(
+            "canonical submission deletion is unsupported".into(),
+        ))
+    }
+
     async fn delete_by_client_item_id(&self, identity: &ClientJobLocator) -> AppResult<()>;
 
     async fn update_tracked_state(

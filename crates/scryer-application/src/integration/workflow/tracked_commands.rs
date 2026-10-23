@@ -113,6 +113,7 @@ struct TrackedDownloadRuntimeState {
     previous_items_by_projection:
         HashMap<DownloadQueueProjectionSource, HashMap<String, DownloadQueueItem>>,
     tracked_work_in_flight: HashSet<String>,
+    deferred_work_results: Vec<TrackedDownloadBackgroundWorkResult>,
     tracked_work_drain: TrackedDownloadWorkDrain,
     /// Identity resolutions for the completed-history rows this poller keeps
     /// re-reading. Held across ticks and retired by registry changes.
@@ -130,6 +131,7 @@ impl TrackedDownloadRuntimeState {
             tracker: crate::tracked_downloads::TrackedDownloadService::new(),
             previous_items_by_projection: HashMap::new(),
             tracked_work_in_flight: HashSet::new(),
+            deferred_work_results: Vec::new(),
             tracked_work_drain: TrackedDownloadWorkDrain::empty(),
             completed_download_resolutions: Default::default(),
         }
@@ -1800,13 +1802,15 @@ pub async fn start_download_queue_poller_with_options(
                 if let Some(event) = maybe_result {
                     match event {
                         TrackedDownloadBackgroundWorkEvent::Finished(result) => {
-                            handle_tracked_download_background_work_result(
+                            if let Some(result) = handle_tracked_download_background_work_result(
                                 &app,
                                 &mut runtime.tracker,
                                 &mut runtime.tracked_work_in_flight,
                                 result,
                             )
-                            .await;
+                            .await {
+                                runtime.deferred_work_results.push(result);
+                            }
                             let mut dispatched = false;
                             while try_dispatch_next_tracked_download_background_work(
                                 &app,
@@ -1826,6 +1830,7 @@ pub async fn start_download_queue_poller_with_options(
                 }
             }
             _ = interval.tick() => {
+                retry_deferred_tracked_download_work_results(&app, &mut runtime).await;
                 crate::import_workflow::schedule_import_retry_recovery(&app);
                 let active_bridged_client_types = bridged_client_types.snapshot();
                 remove_ended_bridge_projections(
@@ -3410,31 +3415,51 @@ fn dispatch_tracked_download_background_work(
         }
     });
 }
+async fn retry_deferred_tracked_download_work_results(
+    app: &AppUseCase,
+    runtime: &mut TrackedDownloadRuntimeState,
+) {
+    // Retain the finished work while ownership reads are unavailable. Keeping
+    // its in-flight reservation prevents another worker from repeating it.
+    for result in std::mem::take(&mut runtime.deferred_work_results) {
+        if let Some(result) = handle_tracked_download_background_work_result(
+            app,
+            &mut runtime.tracker,
+            &mut runtime.tracked_work_in_flight,
+            result,
+        )
+        .await
+        {
+            runtime.deferred_work_results.push(result);
+        }
+    }
+}
+
 async fn handle_tracked_download_background_work_result(
     app: &AppUseCase,
     tracker: &mut crate::tracked_downloads::TrackedDownloadService,
     tracked_work_in_flight: &mut HashSet<String>,
     result: TrackedDownloadBackgroundWorkResult,
-) {
-    tracked_work_in_flight.remove(&result.id);
-
+) -> Option<TrackedDownloadBackgroundWorkResult> {
     if let Some(tracked) = tracker.get_by_download_id(result.download_id) {
         match tracked_work_is_retired(app, tracked).await {
             Ok(true) => {
+                tracked_work_in_flight.remove(&result.id);
                 tracker.stop_tracking_download(result.download_id);
                 crate::tracked_downloads::publish_runtime_tracked_download_snapshot_cache(
                     app, tracker,
                 )
                 .await;
-                return;
+                return None;
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot verify ownership of completed background work");
-                return;
+                return Some(result);
             }
             Ok(false) => {}
         }
     }
+    tracked_work_in_flight.remove(&result.id);
     let Some(tracked) = tracker.get_mut_by_download_id(result.download_id) else {
         tracing::debug!(
             id = %result.id,
@@ -3442,7 +3467,7 @@ async fn handle_tracked_download_background_work_result(
             elapsed_ms = result.elapsed.as_millis() as u64,
             "tracked background work finished after tracker entry disappeared"
         );
-        return;
+        return None;
     };
 
     let state = match result.outcome {
@@ -3505,6 +3530,7 @@ async fn handle_tracked_download_background_work_result(
     }
 
     publish_runtime_tracked_download_and_activity_item(app, tracker, Some(activity_item)).await;
+    None
 }
 /// Why a terminal settle is running.
 ///

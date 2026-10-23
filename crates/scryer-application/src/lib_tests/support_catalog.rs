@@ -19,7 +19,7 @@ pub(super) type PausedDownloadRequest = (Option<String>, String);
 pub(super) type PausedDownloadRequests = Arc<Mutex<Vec<PausedDownloadRequest>>>;
 
 #[derive(Default)]
-pub(super) struct MockTitleRepo {
+pub(crate) struct MockTitleRepo {
     pub(super) store: Arc<Mutex<Vec<Title>>>,
     pub(super) fail_monitoring_for: Mutex<HashSet<String>>,
     /// The title tag registry, in definition order. Mirrors the store's
@@ -27,6 +27,7 @@ pub(super) struct MockTitleRepo {
     /// every bag carrying the old label, and a delete that strips it.
     pub(super) title_tag_definitions: Arc<Mutex<Vec<scryer_domain::TitleTagDefinition>>>,
     pub(super) fail_tag_reads: AtomicBool,
+    pub(crate) fail_get_by_id: AtomicBool,
     pub(super) lose_folder_claim: AtomicBool,
     pub(super) smg_identity_backfill_attempts: Arc<Mutex<HashMap<String, i64>>>,
     pub(super) metadata_hydration_due: Mutex<HashSet<String>>,
@@ -886,6 +887,9 @@ impl TitleRepository for MockTitleRepo {
     }
 
     async fn get_by_id(&self, id: &str) -> AppResult<Option<Title>> {
+        if self.fail_get_by_id.load(Ordering::SeqCst) {
+            return Err(AppError::Repository("synthetic title read failure".into()));
+        }
         let list = self.store.lock().await;
         Ok(list.iter().find(|title| title.id == id).cloned())
     }

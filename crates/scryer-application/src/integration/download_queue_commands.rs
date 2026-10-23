@@ -121,6 +121,28 @@ async fn execute_delete_command(
         &command.download_client_item_id,
     );
     let canonical_download_id = delete_command_download_id(app, command, &source_identity).await;
+    if let Some(download_id) = canonical_download_id.as_ref() {
+        match delete_locator_was_rebound(app, &source_identity, download_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                // A delayed command no longer owns this native client item.
+                if let Err(error) = app
+                    .services
+                    .workflow
+                    .download_queue_commands
+                    .mark_delete_command_completed(&command.id)
+                    .await
+                {
+                    worker.warn_error("complete_superseded_delete_command", &error);
+                }
+                return;
+            }
+            Err(error) => {
+                worker.warn_error("check_delete_command_binding", &error);
+                return;
+            }
+        }
+    }
     // Read the owning title before the row goes: once the submission is
     // deleted there is nothing left to key the guard caches on, and they
     // hold this download as in flight for up to 30s.
@@ -210,13 +232,12 @@ async fn execute_delete_command(
             worker.warn_error("finalize_scryer_download_ignored", &error);
         }
     }
-    let local_delete_succeeded = match app
-        .services
-        .workflow
-        .download_submissions
-        .delete_by_client_item_id(&source_identity)
-        .await
-    {
+    let submissions = &app.services.workflow.download_submissions;
+    let local_delete = match canonical_download_id.as_ref() {
+        Some(id) => submissions.delete_by_download_id(id).await,
+        None => submissions.delete_by_client_item_id(&source_identity).await,
+    };
+    let local_delete_succeeded = match local_delete {
         Ok(()) => {
             // The delete ends this item's binding inside the store.
             app.runtime
@@ -239,26 +260,39 @@ async fn execute_delete_command(
             false
         }
     };
-    if let Some(handle) = app.runtime.acquisition.tracked_download_handle.as_ref()
-        && let Err(error) = handle
+    if let Some(handle) = app.runtime.acquisition.tracked_download_handle.as_ref() {
+        if let Some(id) = canonical_download_id {
+            handle.forget_many(Vec::new(), vec![id]);
+        } else if let Err(error) = handle
             .forget(crate::tracked_downloads::tracked_download_id(
                 command.client_id.as_deref(),
                 &command.client_type,
                 &command.download_client_item_id,
             ))
             .await
-    {
-        worker.warn_error("forget_tracked_download", &error);
+        {
+            worker.warn_error("forget_tracked_download", &error);
+        }
     }
-    app.runtime
-        .acquisition
-        .download_queue_snapshot
-        .stage_remove(
-            command.client_id.as_deref(),
-            &command.client_type,
-            &command.download_client_item_id,
-        )
-        .await;
+    // A new binding may have appeared while the remote request was in flight.
+    let remove_snapshot = match canonical_download_id.as_ref() {
+        Some(id) => matches!(
+            delete_locator_was_rebound(app, &source_identity, id).await,
+            Ok(false)
+        ),
+        None => true,
+    };
+    if remove_snapshot {
+        app.runtime
+            .acquisition
+            .download_queue_snapshot
+            .stage_remove(
+                command.client_id.as_deref(),
+                &command.client_type,
+                &command.download_client_item_id,
+            )
+            .await;
+    }
     if !local_delete_succeeded {
         return;
     }
@@ -286,4 +320,19 @@ async fn execute_delete_command(
             Err(error) => worker.warn_error("end_delete_command_download_binding", &error),
         }
     }
+}
+
+/// A native client locator can be reused after its original binding ends.
+async fn delete_locator_was_rebound(
+    app: &AppUseCase,
+    locator: &crate::ClientJobLocator,
+    download_id: &scryer_domain::download_identity::DownloadId,
+) -> crate::AppResult<bool> {
+    Ok(app
+        .services
+        .workflow
+        .download_registry
+        .find_active_binding_by_locator(locator)
+        .await?
+        .is_some_and(|binding| binding.download_id != *download_id))
 }

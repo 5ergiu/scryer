@@ -106,6 +106,7 @@ pub(crate) use support_bootstrap_fixtures::bootstrap;
 #[cfg(unix)]
 pub(crate) use support_bootstrap_fixtures::bootstrap_application_upgrade;
 use support_bootstrap_fixtures::*;
+pub(crate) use support_catalog::MockTitleRepo;
 use support_catalog::*;
 use support_events_requests::*;
 pub(crate) use support_imports::MockMediaFileRepo;
