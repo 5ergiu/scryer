@@ -15,12 +15,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use async_trait::async_trait;
 use scryer_domain::{ListSourceOrigin, ListSubscription};
 use scryer_plugin_sdk::{
-    ListCredential, ListPluginFetchRequest, ListPluginItem, PluginError, PluginResult,
+    ListCredential, ListPluginFetchRequest, ListPluginItem, PluginError, PluginErrorCode,
+    PluginResult,
 };
 
 use super::gateway::{ListChartItem, chart_items_to_plugin_items};
 use super::plugin::ListPluginProvider;
-use crate::AppError;
+use crate::{AppError, plugin_codes};
 
 /// A provider paging past this many pages is treated as a runaway cursor.
 pub(crate) const MAX_FETCH_PAGES: usize = 100;
@@ -142,26 +143,29 @@ impl ListFailure {
     pub fn from_plugin_error(error: &PluginError, provider: &str) -> Self {
         // Codes are compared by their wire string, so a well-known code sent
         // as an open string still matches and an unknown code fails plainly.
-        let class = match error.code.as_str() {
-            "auth_failed"
-            | "invalid_username_password"
-            | "invalid_api_key"
-            | "invalid_passkey"
-            | "invalid_cookie"
-            | "captcha_required"
-            | "two_factor_required"
-            | "account_banned"
-            | "account_disabled" => ListFailureClass::Unauthorized,
-            "rate_limited" | "quota_exceeded" => ListFailureClass::RateLimited {
+        let code = error.code.as_str();
+        let class = if error.code == PluginErrorCode::AuthFailed
+            || plugin_codes::CREDENTIAL_OR_ACCOUNT_REFUSALS.contains(&code)
+        {
+            ListFailureClass::Unauthorized
+        } else if error.code == PluginErrorCode::RateLimited || code == plugin_codes::QUOTA_EXCEEDED
+        {
+            ListFailureClass::RateLimited {
                 retry_after_seconds: error
                     .retry_after_seconds
                     .and_then(|seconds| u64::try_from(seconds).ok()),
-            },
-            "upstream_unavailable" | "temporary" => ListFailureClass::Unavailable,
-            "item_not_found" => ListFailureClass::NotFound,
+            }
+        } else if error.code == PluginErrorCode::UpstreamUnavailable
+            || error.code == PluginErrorCode::Temporary
+        {
+            ListFailureClass::Unavailable
+        } else if code == plugin_codes::ITEM_NOT_FOUND
             // Plugins built before `item_not_found` say so only in prose.
-            "permanent" if is_not_found(error) => ListFailureClass::NotFound,
-            _ => ListFailureClass::Failed,
+            || (error.code == PluginErrorCode::Permanent && is_not_found(error))
+        {
+            ListFailureClass::NotFound
+        } else {
+            ListFailureClass::Failed
         };
         Self::new(class, provider)
     }
@@ -547,7 +551,7 @@ async fn fetch_media_partitions(
 mod tests {
     use std::collections::BTreeMap;
 
-    use scryer_plugin_sdk::{ListPluginFetchResponse, PluginErrorCode, PluginResult};
+    use scryer_plugin_sdk::{ListPluginFetchResponse, PluginResult};
 
     use super::*;
     use crate::lists::test_support::{
