@@ -126,6 +126,9 @@ async fn import_series_download(
         source_root,
         video_files,
         expected_episode_ids.as_ref(),
+        // A pack member's numbering is corroborated by when the download
+        // finished, the pack-wide stand-in for a single file's mtime.
+        completed.completed_at.map(|completed_at| completed_at.date_naive()),
     )
     .await?;
     // `video_files` came from `find_video_files(dir, true)`: samples are already
