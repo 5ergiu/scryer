@@ -955,42 +955,41 @@ async fn reconcile_terminal_download_cleanup(
             ..TerminalDownloadCleanup::bare(TerminalDownloadCleanupOutcome::RetryableFailure)
         };
     }
-    // Where the host backup deletion will look once the client has deleted
-    // the job, resolved while the client still lists it. A failed job never
-    // reaches the client's completed folder and has no location; the
+    // The host backup deletion is planned while the client still lists the
+    // job: its location and an inventory of what is on disk now. A failed job
+    // never reaches the client's completed folder and has no location; the
     // client's own deletion is then the only one.
-    let follow_up_payload = if client_deletes_payload {
-        match stored_checkpoint
-            .as_ref()
-            .and_then(|checkpoint| checkpoint.get("completed").cloned())
-            .and_then(|completed| {
-                serde_json::from_value::<scryer_domain::CompletedDownload>(completed).ok()
-            }) {
-            Some(completed) => Some(completed),
-            None => match app
-                .services
-                .integrations
-                .download_client
-                .get_cleanup_payload_for_source(client_id, client_type, download_client_item_id)
-                .await
-            {
-                Ok(payload) => payload.map(|payload| payload.download),
-                Err(error) => {
-                    tracing::warn!(
-                        client_id,
-                        client_type,
-                        download_client_item_id,
-                        state = state.as_str(),
-                        error = %error,
-                        "payload location unavailable; the client's own deletion has no host backup"
-                    );
-                    None
-                }
-            },
+    let backup_plan = if client_deletes_payload {
+        match plan_host_payload_backup(
+            app,
+            canonical_download_id,
+            client_id,
+            client_type,
+            download_client_item_id,
+            record,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!(
+                    client_id,
+                    client_type,
+                    download_client_item_id,
+                    state = state.as_str(),
+                    error = %error,
+                    "host backup deletion cannot be planned; the client's own deletion has no backup"
+                );
+                payload_disposition = Some(HostPayloadDisposition::Unverified);
+                None
+            }
         }
     } else {
         None
     };
+    if let Some(plan) = backup_plan.as_ref() {
+        stored_checkpoint = Some(plan.clone());
+    }
     let mut intent_record: Option<crate::DownloadCleanupRecord> = None;
     if (!remove_data || client_deletes_payload)
         && let Some(record) = record
@@ -999,19 +998,18 @@ async fn reconcile_terminal_download_cleanup(
         // eligibility pass, so authoritative absence can recover a lost
         // response for either the client's own data deletion or an
         // entry-only removal.
-        let mut intent = serde_json::json!({
-            "native_remove_requested": client_deletes_payload,
-            "entry_only_remove_requested": !remove_data,
-            "download_id": record.download_id.to_string(),
-            "client_id": record.client_id,
-            "client_type": record.client_type,
-            "item_id": record.item_id,
-        });
-        // Lets a later attempt that finds the entry gone still run the host
-        // backup deletion.
-        if let Some(completed) = follow_up_payload.as_ref() {
-            intent["completed"] = serde_json::json!(completed);
-        }
+        // Written over the backup plan, so a later attempt that finds the
+        // entry gone still runs the host backup from it.
+        let mut intent = backup_plan
+            .clone()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        intent["native_remove_requested"] = serde_json::json!(client_deletes_payload);
+        intent["entry_only_remove_requested"] = serde_json::json!(!remove_data);
+        intent["download_id"] = serde_json::json!(record.download_id.to_string());
+        intent["client_id"] = serde_json::json!(record.client_id);
+        intent["client_type"] = serde_json::json!(record.client_type);
+        intent["item_id"] = serde_json::json!(record.item_id);
         let checkpoint = intent.to_string();
         if let Err(error) = app
             .services
@@ -1153,7 +1151,7 @@ async fn reconcile_terminal_download_cleanup(
     // settles with the payload unverified rather than retrying.
     if client_deletes_payload
         && outcome == TerminalDownloadCleanupOutcome::Removed
-        && let Some(completed) = follow_up_payload
+        && backup_plan.is_some()
     {
         match remove_host_payload(
             app,
@@ -1163,7 +1161,7 @@ async fn reconcile_terminal_download_cleanup(
             download_client_item_id,
             record,
             None,
-            Some(completed),
+            stored_checkpoint.clone(),
         )
         .await
         {
@@ -1873,6 +1871,10 @@ async fn verify_nzbget_entry_cleanup(payload: &crate::DownloadCleanupPayload) ->
 /// and, when a mapped root contains the payload, for the root-availability and
 /// symlink-ancestor checks; they are no longer required to exist. Library and
 /// recycle roots are refused outright.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "host payload deletion carries client identity, the cleanup row, NZBGet's revalidated state, and a stored plan"
+)]
 async fn remove_host_payload(
     app: &AppUseCase,
     canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
@@ -1881,8 +1883,82 @@ async fn remove_host_payload(
     download_client_item_id: &str,
     record: Option<&crate::DownloadCleanupRecord>,
     revalidated_nzbget_download: Option<scryer_domain::CompletedDownload>,
-    known_completed: Option<scryer_domain::CompletedDownload>,
+    planned: Option<serde_json::Value>,
 ) -> AppResult<Option<HostPayloadCleanupReport>> {
+    match run_host_payload_cleanup(
+        app,
+        canonical_download_id,
+        client_id,
+        client_type,
+        download_client_item_id,
+        record,
+        revalidated_nzbget_download,
+        planned,
+        false,
+    )
+    .await?
+    {
+        Some(HostPayloadStep::Settled(report)) => Ok(Some(report)),
+        Some(HostPayloadStep::Planned(_)) => Err(AppError::Repository(
+            "host payload deletion stopped at its plan".into(),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Plans the host backup deletion for a client about to delete the job
+/// itself: resolves the payload location while the client still lists the
+/// job and inventories it on the cleanup row, deleting nothing. The backup
+/// then removes only what still matches that inventory, never content that
+/// reappeared after the client's deletion. `None` when the client reports no
+/// location for the job.
+async fn plan_host_payload_backup(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    client_id: &str,
+    client_type: &str,
+    download_client_item_id: &str,
+    record: Option<&crate::DownloadCleanupRecord>,
+) -> AppResult<Option<serde_json::Value>> {
+    Ok(run_host_payload_cleanup(
+        app,
+        canonical_download_id,
+        client_id,
+        client_type,
+        download_client_item_id,
+        record,
+        None,
+        None,
+        true,
+    )
+    .await?
+    .map(|step| match step {
+        HostPayloadStep::Planned(plan) => plan,
+        HostPayloadStep::Settled(report) => report.stored_checkpoint,
+    }))
+}
+
+enum HostPayloadStep {
+    /// The deletion plan, stored on the cleanup row; nothing was deleted.
+    Planned(serde_json::Value),
+    Settled(HostPayloadCleanupReport),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "host payload deletion carries client identity, the cleanup row, NZBGet's revalidated state, a stored plan, and the plan-only mode"
+)]
+async fn run_host_payload_cleanup(
+    app: &AppUseCase,
+    canonical_download_id: Option<&scryer_domain::download_identity::DownloadId>,
+    client_id: &str,
+    client_type: &str,
+    download_client_item_id: &str,
+    record: Option<&crate::DownloadCleanupRecord>,
+    revalidated_nzbget_download: Option<scryer_domain::CompletedDownload>,
+    planned: Option<serde_json::Value>,
+    plan_only: bool,
+) -> AppResult<Option<HostPayloadStep>> {
     let client_id = client_id.trim();
     if client_id.is_empty() {
         return Err(AppError::Validation(
@@ -1907,11 +1983,16 @@ async fn remove_host_payload(
         (false, _) => None,
     };
 
-    let saved = record
-        .and_then(|record| record.payload_checkpoint.as_deref())
-        .map(serde_json::from_str::<serde_json::Value>)
-        .transpose()
-        .map_err(|error| AppError::Repository(format!("invalid payload checkpoint: {error}")))?;
+    let saved = match planned {
+        Some(planned) => Some(planned),
+        None => record
+            .and_then(|record| record.payload_checkpoint.as_deref())
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(|error| {
+                AppError::Repository(format!("invalid payload checkpoint: {error}"))
+            })?,
+    };
     if let Some(saved) = saved.as_ref()
         && saved
             .get("payload_removed")
@@ -1924,7 +2005,7 @@ async fn remove_host_payload(
             download_client_item_id,
             "payload deletion already checkpointed; retrying entry operation only"
         );
-        return Ok(Some(HostPayloadCleanupReport {
+        return Ok(Some(HostPayloadStep::Settled(HostPayloadCleanupReport {
             disposition: saved
                 .get("disposition")
                 .cloned()
@@ -1935,7 +2016,7 @@ async fn remove_host_payload(
                 .and_then(serde_json::Value::as_str)
                 .map(std::path::PathBuf::from),
             stored_checkpoint: saved.clone(),
-        }));
+        })));
     }
 
     let mut completed = if let Some(completed) = saved
@@ -1945,7 +2026,7 @@ async fn remove_host_payload(
             serde_json::from_value::<scryer_domain::CompletedDownload>(completed).ok()
         }) {
         completed
-    } else if let Some(completed) = current_nzbget_download.or(known_completed) {
+    } else if let Some(completed) = current_nzbget_download {
         completed
     } else {
         match app
@@ -2212,11 +2293,14 @@ async fn remove_host_payload(
                     "file payload changed since import; retaining source and client entry".into(),
                 ));
             }
-            persist_plan(serde_json::json!({
+            let plan = persist_plan(serde_json::json!({
                 "completed": authoritative_completed, "payload_removed": false,
                 "target": target,
             }))
             .await?;
+            if plan_only {
+                return Ok(Some(HostPayloadStep::Planned(plan)));
+            }
             crate::fs_safety::remove_file_safely_if_exists(&target).await?;
             HostPayloadDisposition::Removed
         }
@@ -2272,6 +2356,9 @@ async fn remove_host_payload(
                     .and_then(|value| serde_json::from_value::<PayloadInventory>(value).ok())
                     .filter(|inventory| std::path::Path::new(&inventory.target) == target.as_path())
                 {
+                    Some(_) if plan_only => {
+                        return Ok(saved.map(HostPayloadStep::Planned));
+                    }
                     Some(inventory) => inventory,
                     None => {
                         let walk_target = target.clone();
@@ -2284,11 +2371,14 @@ async fn remove_host_payload(
                                 "payload inventory task panicked: {error}"
                             ))
                         })??;
-                        persist_plan(serde_json::json!({
+                        let plan = persist_plan(serde_json::json!({
                             "completed": authoritative_completed, "payload_removed": false,
                             "target": target, "inventory": inventory,
                         }))
                         .await?;
+                        if plan_only {
+                            return Ok(Some(HostPayloadStep::Planned(plan)));
+                        }
                         inventory
                     }
                 };
@@ -2325,12 +2415,15 @@ async fn remove_host_payload(
                 // folder, or a client-renamed duplicate). Remove only the files
                 // Scryer itself imported from it, verified by size, and leave
                 // everything else alone; remove directories only when empty.
-                persist_plan(serde_json::json!({
+                let plan = persist_plan(serde_json::json!({
                     "completed": authoritative_completed, "payload_removed": false,
                     "target": target,
                     "imported_sources": imported_here.iter().map(|(source, _)| source).collect::<Vec<_>>(),
                 }))
                 .await?;
+                if plan_only {
+                    return Ok(Some(HostPayloadStep::Planned(plan)));
+                }
                 let canonical_target = canonical_payload_directory(&target)?;
                 let mut removed = 0usize;
                 for (source, size) in imported_here {
@@ -2410,6 +2503,16 @@ async fn remove_host_payload(
             )));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if plan_only {
+                // Nothing to inventory; the backup still confirms absence
+                // and prunes empty job parents.
+                let plan = persist_plan(serde_json::json!({
+                    "completed": authoritative_completed, "payload_removed": false,
+                    "target": target,
+                }))
+                .await?;
+                return Ok(Some(HostPayloadStep::Planned(plan)));
+            }
             HostPayloadDisposition::Removed
         }
         Err(error) => {
@@ -2450,11 +2553,11 @@ async fn remove_host_payload(
         "filesystem_checkpoint": checkpoint,
     }))
     .await?;
-    Ok(Some(HostPayloadCleanupReport {
+    Ok(Some(HostPayloadStep::Settled(HostPayloadCleanupReport {
         disposition,
         filesystem_checkpoint: checkpoint,
         stored_checkpoint,
-    }))
+    })))
 }
 
 fn remove_empty_sab_job_parents(

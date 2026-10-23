@@ -2685,6 +2685,64 @@ async fn a_failed_client_removal_retries_with_data_before_the_host_backup() {
     );
 }
 
+// A retry that finds the entry gone runs the host backup from the location
+// stored before the client call. Content recreated in that folder since the
+// client deleted it is not this job's payload and must stay.
+#[tokio::test]
+async fn host_backup_after_entry_absence_keeps_recreated_content() {
+    for client_type in ["sabnzbd", "weaver"] {
+        let (app, user, client, repository, _config, tracked) =
+            client_failure_fixture(client_type, true).await;
+        let (_root, payload) = host_payload_fixture(&app, &user, &client, &tracked).await;
+        let mut record = cleanup_record_for(&tracked);
+        client.set_delete_error(Some("entry delete failed")).await;
+        let first = crate::import::import::run_claimed_download_cleanup(&app, record.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.2,
+            TerminalDownloadCleanupOutcome::RetryableFailure,
+            "{client_type}"
+        );
+        let checkpoint = repository.cleanup_checkpoints.lock().await[&record.download_id].clone();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap()["completed"]
+                .is_object(),
+            "{client_type}"
+        );
+
+        // The client deleted the job after all, then the folder came back
+        // with other content.
+        client.history_items.lock().await.clear();
+        std::fs::remove_dir_all(&payload).unwrap();
+        std::fs::create_dir(&payload).unwrap();
+        std::fs::write(payload.join("new.mkv"), b"recreated content").unwrap();
+        record.payload_checkpoint = Some(checkpoint);
+        record.attempts = 2;
+        client.set_delete_error(None).await;
+        let retry = crate::import::import::run_claimed_download_cleanup(&app, record, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.2,
+            TerminalDownloadCleanupOutcome::AlreadyGone,
+            "{client_type}"
+        );
+        assert_eq!(
+            std::fs::read(payload.join("new.mkv")).unwrap(),
+            b"recreated content",
+            "{client_type}"
+        );
+        // The retained new file is no removed payload: absence credits the
+        // client's own deletion instead.
+        assert_eq!(
+            last_finished_cleanup(&repository.finished_cleanup.lock().await),
+            Some(("native_removal_recovered".to_string(), true)),
+            "{client_type}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_client_reported_usenet_failure_is_untouched_with_remove_failed_off() {
     for client_type in ["sabnzbd", "weaver"] {

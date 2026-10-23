@@ -1033,7 +1033,9 @@ pub(crate) async fn run_claimed_download_cleanup(
                                 tracing::warn!(download_id = %record.download_id, error = %error,
                                     "failed to clear payload cleanup checkpoint after entry absence");
                             }
-                            true
+                            // Retained files (content that changed since the
+                            // inventory) do not count as a removed payload.
+                            report.disposition == HostPayloadDisposition::Removed
                         }
                         // Unreachable while the checkpoint names the payload;
                         // settled below as unverified all the same.
