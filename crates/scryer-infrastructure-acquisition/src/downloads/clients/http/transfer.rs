@@ -814,9 +814,11 @@ async fn already_in_place(file: &HttpJobFile) -> Result<bool, TransferError> {
 
 /// The range to ask for: a continuation only when the partial is known to
 /// hold the recorded bytes of a representation with a known length and a
-/// strong validator.
+/// strong validator, and the indexer has not said the server ignores ranges.
 pub(crate) fn resume_range(file: &HttpJobFile, part_len: u64) -> RangeRequest {
-    if file.bytes_done == 0 {
+    if file.bytes_done == 0
+        || file.resource.range_support == scryer_plugin_sdk::HttpRangeSupport::KnownNo
+    {
         return RangeRequest::Whole;
     }
     match (file.total_bytes, file.validator.as_ref()) {

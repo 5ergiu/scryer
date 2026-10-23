@@ -2297,3 +2297,51 @@ async fn a_checksum_mismatch_fails_and_leaves_the_partial() {
     assert_eq!(std::fs::read(&part).unwrap(), BODY);
     assert!(!done.files[0].final_path.exists());
 }
+
+// ---------------------------------------------------------------------------
+// servers without range support
+
+#[tokio::test]
+async fn a_server_known_not_to_support_ranges_gets_a_fresh_attempt() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let mut job = seeded_job(dir.path(), &format!("{}/media/clip.mp4", server.uri()), 4);
+    job.files[0].resource.range_support = scryer_plugin_sdk::HttpRangeSupport::KnownNo;
+    assert_eq!(resume_range(&job.files[0], 4), RangeRequest::Whole);
+    tokio::fs::create_dir_all(&job.output_dir).await.unwrap();
+    let first_part = job.files[0].part_path();
+    tokio::fs::write(&first_part, &BODY[..4]).await.unwrap();
+    HttpStateStore::for_client(dir.path(), &config.id)
+        .save(&HttpQueueDocument {
+            version: 1,
+            jobs: vec![job.clone()],
+        })
+        .await
+        .unwrap();
+
+    let client = client(&config);
+    let done = wait_for_job(&client, &job.id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    assert_eq!(done.files[0].attempt, 2);
+    assert_eq!(std::fs::read(&job.files[0].final_path).unwrap(), BODY);
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("range")
+                && !request.headers.contains_key("if-range"))
+    );
+    // The earlier partial is left where it was.
+    assert_eq!(std::fs::read(&first_part).unwrap(), &BODY[..4]);
+}
