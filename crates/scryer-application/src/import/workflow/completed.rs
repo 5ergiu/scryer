@@ -429,8 +429,6 @@ pub(crate) enum ClientPayloadDeletion {
     NotRequested,
     /// The client was asked to delete its files with the entry.
     Requested,
-    /// The client refused to delete its files; only the entry was removed.
-    Refused,
 }
 
 impl ClientPayloadDeletion {
@@ -438,7 +436,6 @@ impl ClientPayloadDeletion {
         match self {
             Self::NotRequested => "not_requested",
             Self::Requested => "requested",
-            Self::Refused => "refused",
         }
     }
 }

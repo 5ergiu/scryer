@@ -2192,9 +2192,6 @@ pub(super) struct StubDownloadClient {
     pub(super) deleted_items: Arc<Mutex<Vec<(String, bool)>>>,
     pub(super) deleted_requests: DeletedDownloadRequests,
     pub(super) delete_error: Arc<Mutex<Option<String>>>,
-    /// Refuse every delete that asks for the data (as Weaver does for an API
-    /// key without admin scope) while entry-only deletes still succeed.
-    pub(super) payload_delete_refusal: Arc<Mutex<Option<String>>>,
     pub(super) queue_error: Arc<Mutex<Option<String>>>,
     pub(super) recent_activity_error: Arc<Mutex<Option<String>>>,
     pub(super) snapshot_authoritative_client_ids: Arc<Mutex<HashSet<String>>>,
@@ -2326,9 +2323,6 @@ impl StubDownloadClient {
             is_history,
             remove_data,
         ));
-        if remove_data && let Some(refusal) = self.payload_delete_refusal.lock().await.clone() {
-            return Err(AppError::Unauthorized(refusal));
-        }
         self.deleted_items
             .lock()
             .await

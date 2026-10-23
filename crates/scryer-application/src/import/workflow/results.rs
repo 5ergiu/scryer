@@ -1030,12 +1030,12 @@ async fn reconcile_terminal_download_cleanup(
     }
     let record = intent_record.as_ref().or(record);
 
-    let mut client_payload = if client_deletes_payload {
+    let client_payload = if client_deletes_payload {
         ClientPayloadDeletion::Requested
     } else {
         ClientPayloadDeletion::NotRequested
     };
-    let mut delete_result = delete_terminal_download_entry(
+    let delete_result = delete_terminal_download_entry(
         app,
         client_id,
         client_type,
@@ -1044,30 +1044,6 @@ async fn reconcile_terminal_download_cleanup(
         client_deletes_payload,
     )
     .await;
-    if client_deletes_payload && let Err(AppError::Unauthorized(error)) = &delete_result {
-        // The client kept the entry and refused only the files (a Weaver API
-        // key without admin scope). The host deletion above already ran, so
-        // remove the entry alone.
-        tracing::warn!(
-            client_id,
-            client_type,
-            download_client_item_id,
-            state = state.as_str(),
-            reason = CLIENT_PAYLOAD_DELETION_REFUSED,
-            error = %error,
-            "download client refused to delete its files; removing the entry only"
-        );
-        client_payload = ClientPayloadDeletion::Refused;
-        delete_result = delete_terminal_download_entry(
-            app,
-            client_id,
-            client_type,
-            download_client_item_id,
-            is_history,
-            false,
-        )
-        .await;
-    }
 
     let outcome = match delete_result {
         Ok(()) => {
@@ -1087,7 +1063,6 @@ async fn reconcile_terminal_download_cleanup(
             // completed native deletion. A crash before this point leaves
             // no marker, and absence then settles as payload-unverified.
             if client_deletes_payload
-                && client_payload == ClientPayloadDeletion::Requested
                 && let Some(record) = record
             {
                 let mut checkpoint = record
@@ -1146,8 +1121,8 @@ async fn reconcile_terminal_download_cleanup(
         }
     };
 
-    // The host backup deletion, for whatever the client left (all of it when
-    // the client refused). The entry is already gone, so a failure here
+    // The host backup deletion, for whatever the client left. The entry is
+    // already gone, so a failure here
     // settles with the payload unverified rather than retrying.
     if client_deletes_payload
         && outcome == TerminalDownloadCleanupOutcome::Removed
@@ -1186,8 +1161,8 @@ async fn reconcile_terminal_download_cleanup(
         }
     }
 
-    // Kept beside the settlement so a client's refusal to delete its files
-    // stays distinguishable from a host deletion that went unverified.
+    // Kept beside the settlement so a deletion the client performed stays
+    // distinguishable from one the host verified.
     if remove_data
         && outcome == TerminalDownloadCleanupOutcome::Removed
         && let Some(record) = record
@@ -1241,13 +1216,8 @@ async fn reconcile_terminal_download_cleanup(
     }
 }
 
-/// Logged when a client that deletes its own files refused to for this
-/// entry, and Scryer removed the entry alone.
-const CLIENT_PAYLOAD_DELETION_REFUSED: &str = "CLEANUP_CLIENT_PAYLOAD_DELETION_REFUSED";
-
 /// Payload checkpoint field recording, once the entry is removed, whether the
-/// client was asked to delete the files and whether it refused
-/// ([`ClientPayloadDeletion`]).
+/// client was asked to delete the files ([`ClientPayloadDeletion`]).
 const CLIENT_PAYLOAD_KEY: &str = "client_payload";
 
 /// Whether the client deletes a job's files when asked to remove its entry
