@@ -268,10 +268,11 @@ fn egress_for(proxy_config: Option<&ProxyConfig>) -> AppResult<Egress> {
     let Some(proxy) = proxy_config.filter(|proxy| !proxy.is_challenge_solver()) else {
         return Ok(Egress::Direct);
     };
-    scryer_application::transport_proxy::transport_proxied_reqwest_client_with_redirect_policy(
+    scryer_application::transport_proxy::transport_proxied_reqwest_client_with_options(
         proxy,
         "",
         reqwest::redirect::Policy::none(),
+        false,
     )
     .map(Egress::Proxied)
     .map_err(|message| {

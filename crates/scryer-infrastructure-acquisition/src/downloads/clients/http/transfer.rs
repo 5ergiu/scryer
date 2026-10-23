@@ -92,7 +92,10 @@ impl Egress {
             Self::Direct => scryer_outbound_http::prepare_plugin_http_target_from_url(
                 url.clone(),
                 EGRESS_LABEL,
-                &scryer_outbound_http::PluginEgressPolicy::default(),
+                // Bytes are stored and counted exactly as sent: a body the
+                // server encoded despite `Accept-Encoding: identity` must not
+                // be decoded into something other than the announced length.
+                &scryer_outbound_http::PluginEgressPolicy::default().with_raw_bodies(),
             )
             .await
             .map(|target| target.client().clone())

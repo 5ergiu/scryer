@@ -2048,3 +2048,48 @@ async fn a_client_changed_to_another_type_stops_its_engine() {
     assert!(registered_engine(&config.id).is_none());
     assert!(client.engine().is_shut_down());
 }
+
+// ---------------------------------------------------------------------------
+// content coding
+
+async fn gzipped(bytes: &[u8]) -> Vec<u8> {
+    use tokio::io::AsyncWriteExt;
+    let mut encoder = async_compression::tokio::write::GzipEncoder::new(Vec::new());
+    encoder.write_all(bytes).await.unwrap();
+    encoder.shutdown().await.unwrap();
+    encoder.into_inner()
+}
+
+#[tokio::test]
+async fn an_encoded_whole_file_answer_is_stored_as_sent() {
+    let encoded = gzipped(BODY).await;
+    assert_ne!(encoded.as_slice(), BODY);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .and(header("accept-encoding", "identity"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .insert_header("etag", ETAG)
+                .set_body_bytes(encoded.clone()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let grab = client
+        .submit_download(&request(source(vec![muxed(
+            &format!("{}/media/clip.mp4", server.uri()),
+            720,
+        )])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    // The bytes on disk are the bytes the server announced and sent.
+    assert_eq!(done.files[0].total_bytes, Some(encoded.len() as u64));
+    assert_eq!(std::fs::read(&done.files[0].final_path).unwrap(), encoded);
+}
