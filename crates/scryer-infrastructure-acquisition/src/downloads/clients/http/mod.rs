@@ -197,14 +197,35 @@ pub(crate) fn registered_engine(config_id: &str) -> Option<Arc<HttpEngine>> {
 /// The engine for a configuration, created on first use. A changed download
 /// directory replaces the engine: the old one stops its workers (they
 /// checkpoint first) and the new one reads the queue kept in the new
-/// directory. Limits and egress changes apply in place.
-fn engine_for(config_id: &str, settings: &HttpClientSettings, egress: Egress) -> Arc<HttpEngine> {
+/// directory. Limits apply in place; the egress client is rebuilt, outside
+/// the registry lock, only when the proxy it was built from changed, so its
+/// connection pool survives the router's per-call client objects.
+fn engine_for(
+    config_id: &str,
+    settings: &HttpClientSettings,
+    proxy_config: Option<&ProxyConfig>,
+) -> AppResult<Arc<HttpEngine>> {
+    let key = egress_key(proxy_config)?;
+    let current = ENGINES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(config_id)
+        .filter(|engine| engine.download_dir == settings.download_dir)
+        .cloned();
+    if let Some(engine) = current
+        && engine.has_egress_key(&key)
+    {
+        engine.set_limits(settings.limits);
+        return Ok(engine);
+    }
+    let egress = egress_for(proxy_config)?;
     let mut engines = ENGINES.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(engine) = engines.get(config_id)
         && engine.download_dir == settings.download_dir
     {
-        engine.reconfigure(settings.limits, egress);
-        return Arc::clone(engine);
+        engine.set_limits(settings.limits);
+        engine.set_egress(egress, key);
+        return Ok(Arc::clone(engine));
     }
     let predecessor = match engines.remove(config_id) {
         Some(predecessor) => {
@@ -221,10 +242,11 @@ fn engine_for(config_id: &str, settings: &HttpClientSettings, egress: Egress) ->
         settings.download_dir.clone(),
         settings.limits,
         egress,
+        key,
         predecessor,
     );
     engines.insert(config_id.to_string(), Arc::clone(&engine));
-    engine
+    Ok(engine)
 }
 
 /// The native HTTP downloader for one configuration.
@@ -242,8 +264,7 @@ impl HttpDownloadClient {
         _http_client: reqwest::Client,
     ) -> AppResult<Self> {
         let settings = HttpClientSettings::from_config_json(&config.config_json)?;
-        let egress = egress_for(proxy_config)?;
-        let engine = engine_for(&config.id, &settings, egress);
+        let engine = engine_for(&config.id, &settings, proxy_config)?;
         engine.set_enabled(config.is_enabled);
         Ok(Self { engine })
     }
@@ -256,6 +277,24 @@ impl HttpDownloadClient {
     fn queue_item(&self, job: &HttpJob, live: Option<LiveSnapshot>) -> DownloadQueueItem {
         job_to_queue_item(job, live)
     }
+}
+
+/// What an egress client is built from: nothing for the direct path, else
+/// the proxy's revision and the endpoint it egresses through. A restarted
+/// tunnel front changes the endpoint even when the settings did not.
+fn egress_key(proxy_config: Option<&ProxyConfig>) -> AppResult<String> {
+    let Some(proxy) = proxy_config.filter(|proxy| !proxy.is_challenge_solver()) else {
+        return Ok("direct".to_string());
+    };
+    let endpoint =
+        scryer_application::transport_proxy::proxy_egress_url(proxy).map_err(|message| {
+            scryer_application::transport_proxy::record_transport_proxy_failure(proxy, &message);
+            AppError::Validation(message)
+        })?;
+    Ok(format!(
+        "{}|{endpoint}",
+        scryer_application::transport_proxy::transport_proxy_revision(proxy)
+    ))
 }
 
 /// A proxy that carries traffic gets a proxied client; otherwise every hop

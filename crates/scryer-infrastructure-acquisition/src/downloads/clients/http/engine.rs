@@ -76,6 +76,11 @@ pub(crate) struct HttpEngine {
     store: HttpStateStore,
     limits: std::sync::Mutex<HttpEngineLimits>,
     egress: std::sync::Mutex<Egress>,
+    /// What the egress was built from; an unchanged key keeps the client and
+    /// its connection pool.
+    egress_key: std::sync::Mutex<String>,
+    #[cfg(test)]
+    egress_builds: AtomicU64,
     limiter: Arc<BandwidthLimiter>,
     backoff_unit: std::sync::Mutex<Duration>,
     media_probe: std::sync::Mutex<Arc<dyn MediaProbe>>,
@@ -110,6 +115,7 @@ impl HttpEngine {
         download_dir: PathBuf,
         limits: HttpEngineLimits,
         egress: Egress,
+        egress_key: String,
         predecessor: Option<TaskTracker>,
     ) -> Arc<Self> {
         let store = HttpStateStore::for_client(&download_dir, &client_id);
@@ -122,6 +128,9 @@ impl HttpEngine {
             ))),
             limits: std::sync::Mutex::new(limits),
             egress: std::sync::Mutex::new(egress),
+            egress_key: std::sync::Mutex::new(egress_key),
+            #[cfg(test)]
+            egress_builds: AtomicU64::new(1),
             backoff_unit: std::sync::Mutex::new(DEFAULT_BACKOFF_UNIT),
             media_probe: std::sync::Mutex::new(Arc::new(NativeMediaProbe)),
             checkpoint_cadence: std::sync::Mutex::new(CheckpointCadence {
@@ -145,12 +154,30 @@ impl HttpEngine {
         })
     }
 
-    /// Apply new limits and egress to transfers that start from now on.
-    pub(crate) fn reconfigure(&self, limits: HttpEngineLimits, egress: Egress) {
+    /// Apply new limits to transfers that start from now on.
+    pub(crate) fn set_limits(&self, limits: HttpEngineLimits) {
         *self.limits.lock().unwrap_or_else(|p| p.into_inner()) = limits;
-        *self.egress.lock().unwrap_or_else(|p| p.into_inner()) = egress;
         self.limiter
             .set_rate(bytes_per_second(limits.bandwidth_limit_kbps));
+    }
+
+    /// Whether the egress in use was built from `key`.
+    pub(crate) fn has_egress_key(&self, key: &str) -> bool {
+        *self.egress_key.lock().unwrap_or_else(|p| p.into_inner()) == key
+    }
+
+    /// Replace the egress for transfers that start from now on.
+    pub(crate) fn set_egress(&self, egress: Egress, key: String) {
+        *self.egress.lock().unwrap_or_else(|p| p.into_inner()) = egress;
+        *self.egress_key.lock().unwrap_or_else(|p| p.into_inner()) = key;
+        #[cfg(test)]
+        self.egress_builds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Egress clients built for this engine, including its first.
+    #[cfg(test)]
+    pub(crate) fn egress_builds(&self) -> u64 {
+        self.egress_builds.load(Ordering::Relaxed)
     }
 
     fn limits(&self) -> HttpEngineLimits {

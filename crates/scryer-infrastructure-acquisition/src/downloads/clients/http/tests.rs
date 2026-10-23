@@ -2345,3 +2345,34 @@ async fn a_server_known_not_to_support_ranges_gets_a_fresh_attempt() {
     // The earlier partial is left where it was.
     assert_eq!(std::fs::read(&first_part).unwrap(), &BODY[..4]);
 }
+
+// ---------------------------------------------------------------------------
+// egress client reuse
+
+#[tokio::test]
+async fn the_egress_client_is_rebuilt_only_when_its_proxy_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let http = scryer_outbound_http::generic_reqwest_client;
+    let mut proxy = transport_proxy("http://127.0.0.1:3128");
+
+    let first = HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    let engine = Arc::clone(first.engine());
+    assert_eq!(engine.egress_builds(), 1);
+    for _ in 0..3 {
+        let again = HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+        assert!(Arc::ptr_eq(again.engine(), &engine));
+    }
+    assert_eq!(engine.egress_builds(), 1);
+
+    // An edited proxy gets a new client; the same edit seen again does not.
+    proxy.updated_at += chrono::Duration::seconds(1);
+    HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    HttpDownloadClient::for_config(&config, Some(&proxy), http()).unwrap();
+    assert_eq!(engine.egress_builds(), 2);
+
+    // Dropping the proxy moves to the direct path once.
+    HttpDownloadClient::for_config(&config, None, http()).unwrap();
+    HttpDownloadClient::for_config(&config, None, http()).unwrap();
+    assert_eq!(engine.egress_builds(), 3);
+}
