@@ -235,3 +235,22 @@ test("a refreshed loaded title is merged in place or dropped by the filters", ()
     ["title-1"],
   );
 });
+
+test("a new title is left out while filters only the server can apply are active", () => {
+  const current = [loadedTitle];
+  const serverFiltered = buildActiveCatalogListFilters("MOVIE", "", [], true);
+
+  assert.equal(
+    applyRefreshedCatalogTitle(current, listRefreshTitle, serverFiltered, true),
+    current,
+  );
+
+  // A title already listed is still refreshed in place.
+  const renamed = { ...loadedTitle, name: "Placeholder Renamed" };
+  assert.deepEqual(
+    applyRefreshedCatalogTitle(current, renamed, serverFiltered, true).map(
+      (title) => title.name,
+    ),
+    ["Placeholder Renamed"],
+  );
+});

@@ -95,6 +95,7 @@ import {
 import {
   EMPTY_TITLE_QUICK_FILTERS,
   buildTitleCatalogQueryVariables,
+  titleCatalogFilterInput,
   titleCatalogProjectionForTable,
   loadTitleCatalogSelection,
   titleCatalogQueryKey,
@@ -1133,6 +1134,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     facet: activeFacet,
     query: "",
     libraryIds: [],
+    serverFiltered: false,
   });
   const catalogTitleRequestSeqRef = React.useRef(0);
   const catalogBootstrapRequestSeqRef = React.useRef(0);
@@ -1972,6 +1974,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         activeFacet,
         query,
         libraryIds,
+        titleCatalogFilterInput(effectiveTitleQuickFilters, advancedFilters) !== null,
       );
       const requestSeq = ++catalogTitleRequestSeqRef.current;
       catalogPageRequestGate.reset();
@@ -2780,6 +2783,11 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       applyRefreshedTitleRecord(titleId, title, requestEpoch, {
         insertIfMissing: added,
       });
+      // Only the server knows whether a new title passes the active quick or
+      // advanced filters, so the list is reloaded rather than guessed at.
+      if (added && title && activeCatalogListFiltersRef.current.serverFiltered) {
+        void reloadTitles(undefined, undefined, { mode: "background" });
+      }
     },
   });
 
