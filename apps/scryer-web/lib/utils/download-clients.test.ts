@@ -5,6 +5,7 @@ import {
   buildDownloadClientBaseUrl,
   buildDownloadClientConfigValues,
   buildDownloadClientTypeOptions,
+  downloadClientConnectionTestBlocker,
   isFileBackedDownloadClientConfigField,
   isHostlessDownloadClientType,
   normalizeDownloadClientDraft,
@@ -221,6 +222,20 @@ test("the connection test dials what a save would store", () => {
     buildDownloadClientBaseUrl(draft({ host: "https://qbit.example.com", port: "", urlBase: "" })),
     "https://qbit.example.com",
   );
+});
+
+test("the connection test runs for a hostless client and still needs an address otherwise", () => {
+  assert.equal(downloadClientConnectionTestBlocker(draft({ clientType: "http", host: "", port: "" })), null);
+  assert.equal(downloadClientConnectionTestBlocker(draft({ clientType: "HTTP", host: "", port: "" })), null);
+  assert.equal(
+    downloadClientConnectionTestBlocker(draft({ clientType: "http", name: "  ", host: "" })),
+    "settings.downloadClientValidation",
+  );
+  assert.equal(
+    downloadClientConnectionTestBlocker(draft({ clientType: "nzbget", host: "" })),
+    "settings.downloadClientValidation",
+  );
+  assert.equal(downloadClientConnectionTestBlocker(draft({ clientType: "nzbget" })), null);
 });
 
 test("the built-in HTTP downloader is offered with its own settings and no address", () => {
