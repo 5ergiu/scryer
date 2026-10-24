@@ -17283,3 +17283,116 @@ async fn scheduled_rss_ingests_each_poll_before_the_next_is_fetched() {
         "a match from the first poll must survive to title processing: {report:?}"
     );
 }
+
+/// Answers every RSS poll with the same fixed feed.
+struct FixedFeedRssIndexerClient {
+    results: Vec<IndexerSearchResult>,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for FixedFeedRssIndexerClient {
+    async fn search(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: self.results.clone(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+/// A cycle past its budget stops taking up titles, and the next cycle
+/// processes the ones it left even though no poll offers their releases
+/// again.
+#[tokio::test]
+async fn an_rss_cycle_past_its_budget_leaves_the_remaining_titles_to_the_next_cycle() {
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let indexer_client = Arc::new(FixedFeedRssIndexerClient {
+        results: vec![
+            streamed_rss_result(
+                "indexer-a",
+                "budget-guid-alpha",
+                "Synthetic.Alpha.Harbor.2024.1080p.WEB-DL-GRP",
+            ),
+            streamed_rss_result(
+                "indexer-a",
+                "budget-guid-beta",
+                "Synthetic.Beta.Harbor.2024.1080p.WEB-DL-GRP",
+            ),
+        ],
+    });
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        indexer_client,
+    );
+    let (alpha, _) = seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &wanted_items,
+        "Synthetic Alpha Harbor",
+        2024,
+    )
+    .await;
+    let (beta, _) = seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &wanted_items,
+        "Synthetic Beta Harbor",
+        2024,
+    )
+    .await;
+    let unprocessed = app.runtime.acquisition.rss_unprocessed_titles.clone();
+
+    // A spent budget still processes one title, then yields.
+    let first = app
+        .run_scheduled_rss_sync_within(std::time::Duration::ZERO)
+        .await
+        .expect("first RSS cycle");
+    assert_eq!(first.releases_matched, 2, "{first:?}");
+    assert_eq!(first.releases_grabbed, 1, "{first:?}");
+    assert_eq!(unprocessed.lock().unwrap().len(), 1);
+
+    // The feed offers nothing new, but the carried title is taken up.
+    let second = app
+        .run_scheduled_rss_sync_within(std::time::Duration::ZERO)
+        .await
+        .expect("second RSS cycle");
+    assert_eq!(second.releases_fetched, 0, "{second:?}");
+    assert_eq!(second.releases_grabbed, 1, "{second:?}");
+    assert!(unprocessed.lock().unwrap().is_empty());
+
+    let grabbed_titles = download_submissions
+        .store
+        .lock()
+        .await
+        .iter()
+        .map(|submission| submission.title_id.clone())
+        .collect::<HashSet<_>>();
+    assert_eq!(grabbed_titles, HashSet::from([alpha.id, beta.id]));
+}

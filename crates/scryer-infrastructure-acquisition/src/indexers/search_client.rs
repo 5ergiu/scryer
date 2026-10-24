@@ -24,9 +24,9 @@ use scryer_application::{
     SEARCH_STRATEGY_CONVERGED, SEARCH_STRATEGY_OPEN, SchedulerAdmission, SchedulerBatchRequest,
     SchedulerCandidate, SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome,
     SchedulerIntent, SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
-    SchedulerSnapshotFilter, SearchLearningContext, SearchMode, UpstreamScheduler,
-    blake3_identity_hex, escalation_backoff::indexer_backoff_ladder, indexer_search_eligibility,
-    indexer_search_identity, rss_poll_is_due,
+    SchedulerSnapshotEntry, SchedulerSnapshotFilter, SearchLearningContext, SearchMode,
+    UpstreamScheduler, blake3_identity_hex, escalation_backoff::indexer_backoff_ladder,
+    indexer_search_eligibility, indexer_search_identity, rss_poll_is_due,
 };
 use scryer_domain::{
     IndexerCapsSearchNode, IndexerCapsSnapshot, IndexerConfig, IndexerProviderCapabilities,
@@ -1715,12 +1715,25 @@ const DEFAULT_RSS_INDEXER_POLL_CONCURRENCY: usize = 2;
 /// Overrides [`DEFAULT_RSS_INDEXER_POLL_CONCURRENCY`].
 pub const RSS_INDEXER_POLL_CONCURRENCY_ENV: &str = "SCRYER_RSS_INDEXER_CONCURRENCY";
 /// Provider pages one RSS poll may hand on; its item cap is counted in pages
-/// of [`RSS_POLL_ITEMS_PER_PAGE`]. Five pages of a hundred is the window the
-/// RSS seen-GUID set keeps per indexer.
-const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 5;
+/// of [`RSS_POLL_ITEMS_PER_PAGE`]. Ten pages of a hundred is Sonarr's
+/// per-indexer RSS ceiling (`MaxNumResultsPerQuery`), now that one poll
+/// carries every category an indexer is routed, and it is the window the RSS
+/// seen-GUID set keeps per indexer. A poll cut here before it reached the
+/// previous poll's marker logs the window it did not cover.
+const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 10;
 /// Overrides [`DEFAULT_RSS_POLL_PAGE_BUDGET`].
 pub const RSS_POLL_PAGE_BUDGET_ENV: &str = "SCRYER_RSS_POLL_PAGE_BUDGET";
 const RSS_POLL_ITEMS_PER_PAGE: usize = 100;
+/// The scheduler key every RSS poll of an indexer records its cadence and
+/// catch-up marker under. One per indexer, whatever categories it carries.
+const RSS_INDEXER_REQUEST_KEY: &str = "rss:*";
+
+/// A scheduler key an indexer's RSS feed was recorded under when it was polled
+/// once per category (`rss:<categories>`). Read only to carry those feeds'
+/// markers over to the merged poll.
+fn is_legacy_rss_request_key(key: Option<&str>) -> bool {
+    key.is_some_and(|key| key.starts_with("rss:") && key != RSS_INDEXER_REQUEST_KEY)
+}
 
 /// Absent, blank, unparseable and zero all fall back to the default.
 fn parse_rss_indexer_poll_concurrency(raw: Option<&str>) -> usize {
@@ -3596,15 +3609,69 @@ impl MultiIndexerSearchClient {
         let Some(snapshot) = snapshot else {
             return SchedulerRssActivity::default();
         };
-        snapshot
+        let same_feed_owner = |entry: &&SchedulerSnapshotEntry| {
+            &entry.host_key == host_key
+                && &entry.destination_key == destination_key
+                && entry.account_quota_key.as_ref() == account_quota_key
+        };
+        let exact = snapshot
             .entries
             .iter()
-            .filter(|entry| {
-                &entry.host_key == host_key
-                    && &entry.destination_key == destination_key
-                    && entry.account_quota_key.as_ref() == account_quota_key
-                    && entry.rss_request_key.as_deref() == rss_request_key
-            })
+            .filter(same_feed_owner)
+            .filter(|entry| entry.rss_request_key.as_deref() == rss_request_key)
+            .collect::<Vec<_>>();
+        if !exact.is_empty() || rss_request_key != Some(RSS_INDEXER_REQUEST_KEY) {
+            return Self::fold_rss_activity(exact);
+        }
+        // The indexer's first merged poll: it has only the cadence and markers
+        // its earlier one-poll-per-category feeds left. Catch-up resumes from
+        // the OLDEST of those markers. Starting from the newest would skip,
+        // for good, every release another category published between its own
+        // marker and the newest one: those GUIDs were never seen, and the
+        // merged marker moves past them. Starting from the oldest costs at most
+        // one re-walk of that span, bounded by the per-poll result cap and
+        // reported by the gap warning; releases already grabbed are
+        // deduplicated downstream. Ordered by key so ties, and the fields the
+        // fold takes from the first entry, are reproducible.
+        let mut legacy = snapshot
+            .entries
+            .iter()
+            .filter(same_feed_owner)
+            .filter(|entry| is_legacy_rss_request_key(entry.rss_request_key.as_deref()))
+            .collect::<Vec<_>>();
+        legacy.sort_by(|left, right| left.rss_request_key.cmp(&right.rss_request_key));
+        let oldest_marker = legacy
+            .iter()
+            .filter(|entry| entry.rss_last_seen_release_published_at.is_some())
+            .fold(
+                None::<&&SchedulerSnapshotEntry>,
+                |oldest, entry| match oldest {
+                    Some(oldest)
+                        if oldest.rss_last_seen_release_published_at
+                            <= entry.rss_last_seen_release_published_at =>
+                    {
+                        Some(oldest)
+                    }
+                    _ => Some(entry),
+                },
+            )
+            .map(|entry| {
+                (
+                    entry.rss_last_seen_release_identity.clone(),
+                    entry.rss_last_seen_release_published_at,
+                )
+            });
+        let mut activity = Self::fold_rss_activity(legacy);
+        if let Some((identity, published_at)) = oldest_marker {
+            activity.last_seen_release_identity = identity;
+            activity.last_seen_release_published_at = published_at;
+        }
+        activity
+    }
+
+    fn fold_rss_activity(entries: Vec<&SchedulerSnapshotEntry>) -> SchedulerRssActivity {
+        entries
+            .into_iter()
             .fold(SchedulerRssActivity::default(), |activity, entry| {
                 // The marker comes from the entry holding the newest release, so
                 // identity and publish time always describe the same release.
@@ -4199,29 +4266,22 @@ impl MultiIndexerSearchClient {
         })
     }
 
-    fn split_rss_category_requests(categories: Option<Vec<String>>) -> Vec<Option<Vec<String>>> {
-        let mut normalized: Vec<String> = categories
-            .unwrap_or_default()
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect();
-        normalized.sort();
-        normalized.dedup();
-
-        if normalized.is_empty() {
-            vec![None]
-        } else if normalized.len() == 1 {
-            vec![Some(normalized)]
-        } else {
-            normalized
-                .into_iter()
-                .map(|value| Some(vec![value]))
-                .collect()
-        }
+    /// The one category list an indexer's RSS poll asks for: every routed
+    /// category, trimmed, sorted and deduplicated, or `None` when nothing is
+    /// routed.
+    ///
+    /// Sonarr reads one feed per indexer with every configured category in a
+    /// single comma-separated `cat=` parameter, and every bundled indexer
+    /// adapter takes the whole list in one request (the *nab family joins it
+    /// into `cat=`; the others map the list onto their own category scheme).
+    /// One poll per category multiplied an indexer's requests by its category
+    /// count, and each of those polls paged back to its own marker.
+    fn merged_rss_category_request(categories: Option<Vec<String>>) -> Option<Vec<String>> {
+        let normalized = Self::normalized_rss_categories(categories.as_deref());
+        (!normalized.is_empty()).then_some(normalized)
     }
 
-    fn rss_request_key(categories: Option<&[String]>) -> String {
+    fn normalized_rss_categories(categories: Option<&[String]>) -> Vec<String> {
         let mut normalized: Vec<String> = categories
             .unwrap_or_default()
             .iter()
@@ -4230,15 +4290,22 @@ impl MultiIndexerSearchClient {
             .collect();
         normalized.sort();
         normalized.dedup();
+        normalized
+    }
+
+    /// The feed-cache key part for one category set. Only the RSS-only feed
+    /// cache uses it, where a non-RSS caller may still ask for a narrower set.
+    fn rss_category_cache_key(categories: Option<&[String]>) -> String {
+        let normalized = Self::normalized_rss_categories(categories);
         if normalized.is_empty() {
-            "rss:*".to_string()
+            RSS_INDEXER_REQUEST_KEY.to_string()
         } else {
             format!("rss:{}", normalized.join(","))
         }
     }
 
     fn rss_feed_cache_key(indexer_id: &str, categories: Option<&[String]>) -> String {
-        format!("{indexer_id}:{}", Self::rss_request_key(categories))
+        format!("{indexer_id}:{}", Self::rss_category_cache_key(categories))
     }
 
     fn execute_legacy_strategy_tier(
@@ -4963,10 +5030,23 @@ impl IndexerClient for MultiIndexerSearchClient {
         let mut deferred = Vec::new();
         for config in candidates {
             let (_, destination_key) = Self::scheduler_keys_for_indexer(config);
-            let mut entries = snapshot
+            let destination_entries = snapshot
                 .entries
                 .iter()
                 .filter(|entry| entry.destination_key == destination_key)
+                .collect::<Vec<_>>();
+            // Once the indexer has a merged RSS cadence, the per-category
+            // cadences it polled under before are history: they never advance
+            // again and would otherwise read as due forever.
+            let has_merged_rss_cadence = destination_entries
+                .iter()
+                .any(|entry| entry.rss_request_key.as_deref() == Some(RSS_INDEXER_REQUEST_KEY));
+            let mut entries = destination_entries
+                .into_iter()
+                .filter(|entry| {
+                    !(has_merged_rss_cadence
+                        && is_legacy_rss_request_key(entry.rss_request_key.as_deref()))
+                })
                 .peekable();
             // No cadence for this destination at all: never polled, so due.
             let is_due = entries.peek().is_none()
@@ -5467,58 +5547,57 @@ impl IndexerClient for MultiIndexerSearchClient {
                         newznab_categories.clone()
                     }
                 });
-            let category_requests = if is_rss_request {
-                Self::split_rss_category_requests(per_indexer_categories)
+            // An RSS poll is one request chain per indexer carrying every routed
+            // category, and one catch-up marker per indexer.
+            let category_request = if is_rss_request {
+                Self::merged_rss_category_request(per_indexer_categories)
             } else {
-                vec![per_indexer_categories]
+                per_indexer_categories
             };
-            for category_request in category_requests {
-                let scheduler_candidate_id = SchedulerCandidateId::new();
-                let rss_request_key =
-                    is_rss_request.then(|| Self::rss_request_key(category_request.as_deref()));
-                let rss_activity = if is_rss_request {
-                    Self::scheduler_rss_activity(
-                        scheduler_snapshot.as_ref(),
-                        &host_key,
-                        &destination_key,
-                        account_quota_key.as_ref(),
-                        rss_request_key.as_deref(),
-                    )
+            let scheduler_candidate_id = SchedulerCandidateId::new();
+            let rss_request_key = is_rss_request.then(|| RSS_INDEXER_REQUEST_KEY.to_string());
+            let rss_activity = if is_rss_request {
+                Self::scheduler_rss_activity(
+                    scheduler_snapshot.as_ref(),
+                    &host_key,
+                    &destination_key,
+                    account_quota_key.as_ref(),
+                    rss_request_key.as_deref(),
+                )
+            } else {
+                SchedulerRssActivity::default()
+            };
+            scheduler_candidates.push(SchedulerCandidate {
+                candidate_id: scheduler_candidate_id.clone(),
+                plugin_config_id: Some(config.id.clone()),
+                plugin_kind: SchedulerPluginKind::Indexer,
+                operation: if is_rss_request {
+                    SchedulerOperation::Rss
                 } else {
-                    SchedulerRssActivity::default()
-                };
-                scheduler_candidates.push(SchedulerCandidate {
-                    candidate_id: scheduler_candidate_id.clone(),
-                    plugin_config_id: Some(config.id.clone()),
-                    plugin_kind: SchedulerPluginKind::Indexer,
-                    operation: if is_rss_request {
-                        SchedulerOperation::Rss
-                    } else {
-                        SchedulerOperation::Search
-                    },
-                    intent: scheduler_intent,
-                    host_key: host_key.clone(),
-                    destination_key: destination_key.clone(),
-                    account_quota_key: account_quota_key.clone(),
-                    rss_request_key: rss_request_key.clone(),
-                    estimated_cost: EstimatedCost::ONE_API_CALL,
-                    expected_value,
-                    learning_context: scheduler_learning_context.clone(),
-                    deadline_at: None,
-                    freshness: is_rss_request.then(|| {
-                        Self::rss_freshness_context(config, scheduler_now, rss_activity.clone())
-                    }),
-                    cancel_token: cancel_token.child_token(),
-                });
-                scheduler_eligible.push(SchedulerEligibleIndexer {
-                    config,
-                    had_persisted_system_backoff: *had_persisted_system_backoff,
-                    candidate_id: scheduler_candidate_id,
-                    category_request,
-                    rss_request_key,
-                    rss_catch_up: rss_activity.rss_catch_up(),
-                });
-            }
+                    SchedulerOperation::Search
+                },
+                intent: scheduler_intent,
+                host_key: host_key.clone(),
+                destination_key: destination_key.clone(),
+                account_quota_key: account_quota_key.clone(),
+                rss_request_key: rss_request_key.clone(),
+                estimated_cost: EstimatedCost::ONE_API_CALL,
+                expected_value,
+                learning_context: scheduler_learning_context.clone(),
+                deadline_at: None,
+                freshness: is_rss_request.then(|| {
+                    Self::rss_freshness_context(config, scheduler_now, rss_activity.clone())
+                }),
+                cancel_token: cancel_token.child_token(),
+            });
+            scheduler_eligible.push(SchedulerEligibleIndexer {
+                config,
+                had_persisted_system_backoff: *had_persisted_system_backoff,
+                candidate_id: scheduler_candidate_id,
+                category_request,
+                rss_request_key,
+                rss_catch_up: rss_activity.rss_catch_up(),
+            });
         }
 
         let unsupported_outcomes = unsupported_indexer_ids
@@ -9706,6 +9785,47 @@ mod tests {
         assert!(!inside_cadence.poll_is_warranted());
     }
 
+    #[tokio::test]
+    async fn superseded_per_category_cadences_do_not_keep_an_indexer_due() {
+        let config = mock_indexer_config();
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config.clone()],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(MockIndexerPluginProvider {
+                rss: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .with_upstream_scheduler(scheduler.clone());
+        // A per-category cadence from long before the merged poll: due.
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:5000",
+            "legacy-marker",
+            fixed_utc("2026-01-01T00:00:00Z"),
+        )
+        .await;
+        assert_eq!(
+            multi.rss_due_indexers().await.expect("due check").due,
+            vec![config.id.clone()]
+        );
+
+        // The merged poll just ran, so the indexer is inside its cadence.
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "merged-marker",
+            Utc::now() - Duration::minutes(1),
+        )
+        .await;
+        let due = multi.rss_due_indexers().await.expect("due check");
+        assert!(due.due.is_empty());
+        assert_eq!(due.deferred, vec![config.id]);
+    }
+
     #[test]
     fn persisted_rss_boundary_is_not_shortened_by_activity_timestamps() {
         let now = Utc::now();
@@ -13676,20 +13796,20 @@ mod tests {
             .expect("rss sync search with categories should succeed");
 
         assert!(response.results.is_empty());
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn rss_sync_search_runs_each_newznab_category_in_a_separate_request() {
+    async fn rss_sync_search_runs_every_newznab_category_in_one_request() {
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, calls) =
             scripted_search_client(caps, |call| match call.categories.as_slice() {
-                [category] if category == "2000" => {
-                    response_with_titles(&["Movies.Release.2000.1080p.WEB-DL"])
-                }
-                [category] if category == "5030" => {
-                    response_with_titles(&["Series.Release.5030.720p.WEB-DL"])
+                [movies, series] if movies == "2000" && series == "5030" => {
+                    response_with_titles(&[
+                        "Movies.Release.2000.1080p.WEB-DL",
+                        "Series.Release.5030.720p.WEB-DL",
+                    ])
                 }
                 other => Err(AppError::Validation(format!(
                     "unexpected rss categories: {:?}",
@@ -13717,25 +13837,15 @@ mod tests {
                 vec![],
             )
             .await
-            .expect("rss sync search should fan out per category");
+            .expect("rss sync search should poll the merged categories");
 
         let calls = calls.lock().expect("call log mutex");
-        let mut categories: Vec<Vec<String>> =
-            calls.iter().map(|call| call.categories.clone()).collect();
-        categories.sort();
-
-        assert_eq!(
-            categories,
-            vec![vec!["2000".to_string()], vec!["5030".to_string()]]
-        );
+        assert_eq!(calls.len(), 1);
         let scheduler_batches = recorded_candidates.lock().expect("scheduler candidates");
         assert_eq!(scheduler_batches.len(), 1);
-        assert_eq!(
-            scheduler_batches[0],
-            vec!["idx-1".to_string(), "idx-1".to_string()]
-        );
+        assert_eq!(scheduler_batches[0], vec!["idx-1".to_string()]);
         let feedback_candidate_ids = recorded_feedback.lock().expect("scheduler feedback");
-        assert_eq!(feedback_candidate_ids.len(), 2);
+        assert_eq!(feedback_candidate_ids.len(), 1);
         assert_eq!(response.results.len(), 2);
     }
 
@@ -13840,53 +13950,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rss_poll_sends_the_marker_stored_for_its_own_category_set() {
-        let movies_marker_at = fixed_utc("2026-09-20T10:00:00Z");
-        let series_marker_at = fixed_utc("2026-09-20T11:30:00Z");
-        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(
-            &scheduler,
-            "rss:2000",
-            "movies-marker-guid",
-            movies_marker_at,
-        )
-        .await;
-        record_previous_rss_poll(
-            &scheduler,
-            "rss:5000",
-            "series-marker-guid",
-            series_marker_at,
-        )
-        .await;
+    async fn rss_poll_is_one_request_per_indexer_with_every_routed_category() {
+        let scheduler = Arc::new(RecordingScheduler::default());
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, calls) = scripted_search_client(caps, |_| response_with_titles(&[]));
         let client = client.with_upstream_scheduler(scheduler);
 
-        run_rss_poll(&client, &["2000", "5000"]).await;
+        run_rss_poll(&client, &["5070", " 2000", "5000", "2000", ""]).await;
 
         let calls = calls.lock().expect("call log mutex");
-        let catch_up_for = |category: &str| {
-            calls
-                .iter()
-                .find(|call| call.categories == vec![category.to_string()])
-                .unwrap_or_else(|| panic!("no rss call for category {category}"))
-                .rss_catch_up
-                .clone()
-        };
+        assert_eq!(calls.len(), 1, "one RSS request chain per indexer");
         assert_eq!(
-            catch_up_for("2000"),
-            Some(IndexerRssCatchUp {
-                last_seen_published_at: movies_marker_at,
-                last_seen_identity: Some("movies-marker-guid".to_string()),
-            })
+            calls[0].categories,
+            vec!["2000".to_string(), "5000".to_string(), "5070".to_string()]
+        );
+    }
+
+    #[test]
+    fn merged_rss_category_request_normalizes_and_keeps_no_category_broad() {
+        assert_eq!(
+            MultiIndexerSearchClient::merged_rss_category_request(Some(vec![
+                "5040".to_string(),
+                " 5030 ".to_string(),
+                "5040".to_string(),
+            ])),
+            Some(vec!["5030".to_string(), "5040".to_string()])
         );
         assert_eq!(
-            catch_up_for("5000"),
-            Some(IndexerRssCatchUp {
-                last_seen_published_at: series_marker_at,
-                last_seen_identity: Some("series-marker-guid".to_string()),
-            })
+            MultiIndexerSearchClient::merged_rss_category_request(Some(vec![" ".to_string()])),
+            None
+        );
+        assert_eq!(
+            MultiIndexerSearchClient::merged_rss_category_request(None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_merged_rss_poll_resumes_from_the_oldest_per_category_marker() {
+        let movies_marker_at = fixed_utc("2026-09-20T10:00:00Z");
+        let series_marker_at = fixed_utc("2026-09-20T11:30:00Z");
+        let anime_marker_at = fixed_utc("2026-09-20T09:15:00Z");
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        for (key, identity, at) in [
+            ("rss:2000", "movies-marker-guid", movies_marker_at),
+            ("rss:5000", "series-marker-guid", series_marker_at),
+            ("rss:5070", "anime-marker-guid", anime_marker_at),
+        ] {
+            record_previous_rss_poll(&scheduler, key, identity, at).await;
+        }
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (client, calls) = scripted_search_client(caps, |_| response_with_titles(&[]));
+        let client = client.with_upstream_scheduler(scheduler.clone());
+
+        run_rss_poll(&client, &["2000", "5000", "5070"]).await;
+
+        {
+            let calls = calls.lock().expect("call log mutex");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].rss_catch_up,
+                Some(IndexerRssCatchUp {
+                    last_seen_published_at: anime_marker_at,
+                    last_seen_identity: Some("anime-marker-guid".to_string()),
+                })
+            );
+        }
+        // The merged poll records its cadence under the indexer's one key.
+        rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
+    }
+
+    #[tokio::test]
+    async fn a_merged_rss_marker_supersedes_every_per_category_marker() {
+        let config = mock_indexer_config();
+        let (host_key, destination_key) =
+            MultiIndexerSearchClient::scheduler_keys_for_indexer(&config);
+        let account_quota_key: Option<scryer_application::AccountQuotaKey> =
+            Some(config.id.clone().into());
+        let scheduler = crate::upstream_scheduler::InMemoryUpstreamScheduler::new();
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:2000",
+            "earlier-legacy",
+            fixed_utc("2026-09-20T08:00:00Z"),
+        )
+        .await;
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:5000",
+            "later-legacy",
+            fixed_utc("2026-09-20T12:00:00Z"),
+        )
+        .await;
+        let activity_now = || async {
+            let snapshot = scheduler
+                .snapshot(SchedulerSnapshotFilter::default())
+                .await
+                .expect("scheduler snapshot should succeed");
+            MultiIndexerSearchClient::scheduler_rss_activity(
+                Some(&snapshot),
+                &host_key,
+                &destination_key,
+                account_quota_key.as_ref(),
+                Some(RSS_INDEXER_REQUEST_KEY),
+            )
+        };
+        assert_eq!(
+            activity_now().await.last_seen_release_identity.as_deref(),
+            Some("earlier-legacy")
+        );
+
+        // Once the merged feed has a marker of its own, the old per-category
+        // markers are never read again, even one that is newer.
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "merged-marker",
+            fixed_utc("2026-09-20T10:00:00Z"),
+        )
+        .await;
+        assert_eq!(
+            activity_now().await.last_seen_release_identity.as_deref(),
+            Some("merged-marker")
         );
     }
 
@@ -13929,7 +14116,7 @@ mod tests {
         }
         assert_eq!(parse_rss_indexer_poll_concurrency(Some(" 4 ")), 4);
         assert_eq!(parse_rss_poll_page_budget(Some("12")), 12);
-        assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 500);
+        assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 1_000);
     }
 
     #[test]
@@ -13988,7 +14175,13 @@ mod tests {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (mut client, _calls) = scripted_search_client(caps, move |_| {
@@ -14032,7 +14225,7 @@ mod tests {
         assert!(guids.contains("paged-guid-98"));
         assert!(!guids.contains("paged-guid-99"));
         assert!(!guids.contains("late-indexed-guid"));
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(
             entry.rss_last_seen_release_identity.as_deref(),
             Some("newest-guid")
@@ -14041,6 +14234,55 @@ mod tests {
         assert_eq!(
             entry.rss_last_feed_gap_end_at,
             Some(newest_at - Duration::minutes(99))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_rss_poll_stops_at_a_thousand_results_and_records_the_gap_it_left() {
+        let marker_at = fixed_utc("2026-09-20T10:00:00Z");
+        let newest_at = fixed_utc("2026-09-21T10:00:00Z");
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (client, _calls) = scripted_search_client(caps, move |_| {
+            // Twelve pages of releases all newer than the marker.
+            let results = (0..1_200)
+                .map(|index| {
+                    dated_rss_result(
+                        &format!("feed-guid-{index}"),
+                        newest_at - Duration::minutes(index),
+                    )
+                })
+                .collect();
+            Ok(IndexerSearchResponse {
+                next_cursor: None,
+                completion: IndexerSearchCompletion::Complete,
+                indexer_outcomes: Vec::new(),
+                results,
+                api_current: None,
+                api_max: None,
+                grab_current: None,
+                grab_max: None,
+            })
+        });
+        assert_eq!(client.rss_poll_page_budget, DEFAULT_RSS_POLL_PAGE_BUDGET);
+        let client = client.with_upstream_scheduler(scheduler.clone());
+
+        let response = run_rss_poll(&client, &["2000", "5000"]).await;
+
+        assert_eq!(response.results.len(), 1_000);
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
+        assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
+        assert_eq!(
+            entry.rss_last_feed_gap_end_at,
+            Some(newest_at - Duration::minutes(999))
         );
     }
 
@@ -14215,7 +14457,13 @@ mod tests {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14254,7 +14502,7 @@ mod tests {
         let response = run_rss_poll(&client, &["2000"]).await;
 
         assert_eq!(response.results.len(), 250);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(
             entry.rss_last_seen_release_identity.as_deref(),
             Some("newest-guid")
@@ -14271,7 +14519,13 @@ mod tests {
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let oldest_at = fixed_utc("2026-09-20T12:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14300,7 +14554,7 @@ mod tests {
         let response = run_rss_poll(&client, &["2000"]).await;
 
         assert_eq!(response.results.len(), 120);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(entry.rss_last_feed_gap_end_at, Some(oldest_at));
         assert_eq!(
@@ -14334,7 +14588,13 @@ mod tests {
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let stray_at = fixed_utc("2026-08-01T09:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14356,7 +14616,7 @@ mod tests {
 
         // The cut-off poll's releases still reach RSS evaluation.
         assert_eq!(response.results.len(), 100);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(entry.rss_last_feed_gap_end_at, Some(stray_at));
         assert_eq!(
@@ -14370,7 +14630,13 @@ mod tests {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14383,7 +14649,7 @@ mod tests {
 
         run_rss_poll(&client, &["2000"]).await;
 
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, None);
         assert_eq!(entry.rss_last_feed_gap_end_at, None);
         assert_eq!(entry.rss_last_seen_release_published_at, Some(newest_at));
