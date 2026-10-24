@@ -76,6 +76,23 @@ fn within_declared_domain(host: &str, declared: &str) -> bool {
         .is_some_and(|label| !label.is_empty())
 }
 
+/// The address a declared host names when it is an IP literal: IPv4 in any
+/// form a URL accepts, or IPv6 with or without brackets.
+fn declared_ip(declared: &str) -> Option<std::net::IpAddr> {
+    let declared = declared.trim();
+    let unbracketed = declared
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(declared);
+    if let Ok(address) = unbracketed.parse::<std::net::Ipv6Addr>() {
+        return Some(std::net::IpAddr::V6(address));
+    }
+    match url::Host::parse(declared.trim_end_matches('.')) {
+        Ok(url::Host::Ipv4(address)) => Some(std::net::IpAddr::V4(address)),
+        _ => None,
+    }
+}
+
 /// Returns true only for a top-level component binary, whatever world it
 /// implements. Every component-backed plugin kind classifies on this first and
 /// lets its generated binding validate the concrete package/world during
@@ -283,7 +300,9 @@ impl ComponentHost {
     /// Static allowlist entries match as written (exact host or glob). A host
     /// the plugin declared from its configuration also covers its subdomains,
     /// so a tracker's download or CDN host on the same domain is reachable,
-    /// but never a different domain: see [`within_declared_domain`].
+    /// but never a different domain: see [`within_declared_domain`]. A
+    /// declared IP literal admits exactly that address, however either side
+    /// spells it.
     fn request_host_allowed(&self, request_url: &str) -> bool {
         if enforce_allowed_hosts(Some(&self.inner.allowed_hosts), request_url).is_ok() {
             return true;
@@ -291,15 +310,23 @@ impl ComponentHost {
         let Ok(url) = url::Url::parse(request_url) else {
             return false;
         };
-        let Some(url::Host::Domain(host)) = url.host() else {
-            return false;
-        };
-        self.inner
+        let declared_hosts = self
+            .inner
             .declared_hosts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|declared| within_declared_domain(host, declared))
+            .unwrap_or_else(|e| e.into_inner());
+        match url.host() {
+            Some(url::Host::Domain(host)) => declared_hosts
+                .iter()
+                .any(|declared| within_declared_domain(host, declared)),
+            Some(url::Host::Ipv4(address)) => declared_hosts
+                .iter()
+                .any(|declared| declared_ip(declared) == Some(std::net::IpAddr::V4(address))),
+            Some(url::Host::Ipv6(address)) => declared_hosts
+                .iter()
+                .any(|declared| declared_ip(declared) == Some(std::net::IpAddr::V6(address))),
+            None => false,
+        }
     }
 
     #[cfg(test)]
@@ -1818,6 +1845,34 @@ mod tests {
                 !within_declared_domain(host, declared),
                 "{host} must not be in {declared}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declared_ip_literal_admits_exactly_that_address() {
+        let host = strategy_test_host(None);
+        host.set_declared_hosts(vec![
+            "192.0.2.7".into(),
+            "[2001:db8::7]".into(),
+            "2001:DB8:0:0:0:0:0:8".into(),
+        ]);
+        for allowed in [
+            "https://192.0.2.7/api",
+            "http://192.0.2.7:9117/download?id=1",
+            "https://[2001:db8::7]/api",
+            "https://[2001:db8:0:0::7]:8443/api",
+            "https://[2001:db8::8]/api",
+        ] {
+            assert!(host.request_host_allowed(allowed), "{allowed}");
+        }
+        for refused in [
+            "https://192.0.2.8/api",
+            "https://198.51.100.7/api",
+            "https://[2001:db8::9]/api",
+            "https://[::ffff:192.0.2.7]/api",
+            "https://7.192.0.2.7.example/",
+        ] {
+            assert!(!host.request_host_allowed(refused), "{refused}");
         }
     }
 
