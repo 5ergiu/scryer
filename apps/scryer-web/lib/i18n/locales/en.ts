@@ -1350,6 +1350,7 @@ const en: LocaleDictionary = {
   "settings.metadataRehydrationStarted":
     "Metadata rehydration started. Titles will update in the background.",
 
+  "theme.label": "Theme",
   "theme.light": "Light",
   "theme.dark": "Dark",
   "theme.system": "System",

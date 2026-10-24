@@ -65,7 +65,6 @@ import {
   Users,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { getPalette } from "@/lib/palettes";
 import { PalettePicker } from "@/components/views/settings/palette-picker";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
@@ -1670,7 +1669,7 @@ function RootSidebarContent({
                   <button id="root-sidebar-theme-toggle" type="button" aria-label={t("palette.choose")}
                     className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <Palette className="size-4 shrink-0" />
-                    <span className="truncate">{t(getPalette(uiSettings.palette).labelKey)}</span>
+                    <span className="truncate">{t("theme.label")}</span>
                   </button>
                 </PopoverTrigger>
                 <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto">
