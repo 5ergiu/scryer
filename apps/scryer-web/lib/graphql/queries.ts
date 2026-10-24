@@ -389,6 +389,7 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       episodeId
       seriesMovieLinkIds
       role
+      episodeLinksPinned
       filePath
       sizeBytes
       qualityLabel
@@ -1104,6 +1105,24 @@ export const ruleSetTestTitleCollectionsQuery = `query RuleSetTestTitleCollectio
       label
       collectionIndex
       collectionType
+    }
+  }
+}`;
+
+/** Every episode of a title, for the episode target picker. */
+export const titleEpisodeTargetsQuery = `query TitleEpisodeTargets($id: ID!) {
+  title(id: $id) {
+    id
+    collections {
+      id
+      episodes {
+        id
+        episodeType
+        seasonNumber
+        episodeNumber
+        absoluteNumber
+        title
+      }
     }
   }
 }`;
@@ -4435,6 +4454,7 @@ export const pendingImportBindingPreviewQuery = `query PendingImportBindingPrevi
       episodeType
       episodeNumber
       seasonNumber
+      absoluteNumber
       episodeLabel
       title
       monitored

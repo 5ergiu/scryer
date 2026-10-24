@@ -702,6 +702,23 @@ export const deleteMediaFileMutation = `mutation DeleteMediaFile($input: DeleteM
   }
 }`;
 
+export const reassignEpisodeFileMutation = `mutation ReassignEpisodeFile($input: ReassignEpisodeFileInput!) {
+  reassignEpisodeFile(input: $input) {
+    file {
+      id
+      episodeId
+      role
+      episodeLinksPinned
+      filePath
+    }
+    previousPath
+    previousEpisodeIds
+    episodeIds
+    demotedFileIds
+    promotedFileIds
+  }
+}`;
+
 export const deleteEpisodeFilesMutation = `mutation DeleteEpisodeFiles($input: DeleteEpisodeFilesInput!) {
   deleteEpisodeFiles(input: $input) {
     acceptedFileIds
