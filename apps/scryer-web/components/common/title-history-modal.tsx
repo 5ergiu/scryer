@@ -174,9 +174,9 @@ export function TitleHistoryModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         id="title-history-dialog"
-        className="w-[calc(100%-1rem)] min-w-0 max-w-[95vw] sm:max-w-5xl lg:max-w-6xl max-h-[90dvh] overflow-hidden flex flex-col p-4 sm:p-6"
+        className="flex h-[min(56rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] min-w-0 max-w-[90rem] flex-col overflow-hidden p-4 sm:max-w-[90rem] sm:p-6"
       >
-        <DialogHeader className="min-w-0 gap-3 text-left lg:flex-row lg:items-center lg:justify-between lg:pr-8">
+        <DialogHeader className="min-w-0 shrink-0 gap-3 text-left lg:flex-row lg:items-center lg:justify-between lg:pr-8">
           <DialogTitle className="min-w-0 break-words pr-8 lg:pr-0">{titleName} — {t("history.title")}</DialogTitle>
           <HistoryEventTypeMultiSelect
             id="title-history-event-types"
@@ -188,7 +188,7 @@ export function TitleHistoryModal({
         </DialogHeader>
 
         {activeScopedEpisode || activeCollection ? (
-          <div className="flex flex-wrap items-center gap-2 pb-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 pb-2">
             <span className="text-xs text-muted-foreground">{t("label.filter")}</span>
             <Button
               type="button"

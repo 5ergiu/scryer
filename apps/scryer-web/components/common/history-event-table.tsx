@@ -475,7 +475,7 @@ export function HistoryEventTable({
 
   return (
     <div className="@container/history min-w-0 overflow-hidden">
-      <Table overflow="clip" layout="fixed" density="dense" className="@max-[64rem]/history:block">
+      <Table overflow="auto" layout="fixed" density="dense" className="@max-[64rem]/history:block">
         <TableHeader className="@max-[64rem]/history:hidden">
           <TableRow>
             <TableHead className="w-10 text-center" />
@@ -483,7 +483,7 @@ export function HistoryEventTable({
             {showTitle ? (
               <TableHead className="w-48">{t("history.titleColumn")}</TableHead>
             ) : null}
-            <TableHead className="w-72">
+            <TableHead>
               {t("queue.releaseTitle")} {t("label.name")}
             </TableHead>
             <TableHead className="w-36 text-center">{t("queue.source")}</TableHead>
@@ -493,7 +493,7 @@ export function HistoryEventTable({
             ) : null}
             <TableHead className="w-40 text-center">{t("history.date")}</TableHead>
             {showActions ? (
-              <TableActionsHead className="w-32">
+              <TableActionsHead className="w-40">
                 {t("history.actions")}
               </TableActionsHead>
             ) : null}
@@ -644,6 +644,7 @@ export function HistoryEventTable({
                             size="sm"
                             disabled={retryingId === event.id}
                             title={t("importHistory.retryHelp")}
+                            className="h-auto min-h-8 max-w-full whitespace-normal py-1.5"
                             onClick={() => void handleRetry(event)}
                           >
                             {retryingId === event.id ? (
