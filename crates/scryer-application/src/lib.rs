@@ -795,7 +795,7 @@ pub use types::{
     TotpEnrollmentChallengeRecord, TotpEnrollmentComplete, TotpEnrollmentStart,
     TotpFailedAttemptRecord, TotpRecoveryCodeRecord, TotpStatus, UiCatalogViewMode,
     UiCatalogViewSetting, UiCatalogViewUpdate, UiDateTimeFormat, UiDefaultLandingView, UiDensity,
-    UiDeviceClass, UiSettings, UiSettingsFacet, UiSettingsUpdate, UiSidebarMode,
+    UiDeviceClass, UiPalette, UiSettings, UiSettingsFacet, UiSettingsUpdate, UiSidebarMode,
     UiTableColumnSetting, UiTableViewMode, UiTheme, UpdateRecycleBinSettings,
     UpdateVerificationSettings, UserAuthFactorStatus, UserLoginSnapshot, VerificationSettings,
     VerifiedLocalCredentials, WantedKind, WantedStatusCount, WebauthnChallengePurpose,

@@ -3004,6 +3004,7 @@ export const generalSettingsQuery = `query GeneralSettings {
 export const myUiSettingsQuery = `query MyUiSettings {
   myUiSettings {
     theme
+    palette
     dateTimeFormat
     highlightColor
     secondaryColor

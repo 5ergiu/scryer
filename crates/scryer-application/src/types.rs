@@ -4496,10 +4496,54 @@ pub struct UiCatalogViewUpdate {
     pub columns: Option<Vec<UiTableColumnSetting>>,
 }
 
+/// Curated appearance saved on the user profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiPalette {
+    #[default]
+    Classic,
+    ScryerDefault,
+    Slate,
+    Ocean,
+    Forest,
+    Plum,
+    Ember,
+    Graphite,
+}
+
+impl UiPalette {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "CLASSIC",
+            Self::ScryerDefault => "SCRYER_DEFAULT",
+            Self::Slate => "SLATE",
+            Self::Ocean => "OCEAN",
+            Self::Forest => "FOREST",
+            Self::Plum => "PLUM",
+            Self::Ember => "EMBER",
+            Self::Graphite => "GRAPHITE",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "CLASSIC" => Some(Self::Classic),
+            "SCRYER_DEFAULT" => Some(Self::ScryerDefault),
+            "SLATE" => Some(Self::Slate),
+            "OCEAN" => Some(Self::Ocean),
+            "FOREST" => Some(Self::Forest),
+            "PLUM" => Some(Self::Plum),
+            "EMBER" => Some(Self::Ember),
+            "GRAPHITE" => Some(Self::Graphite),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiSettings {
     pub user_id: String,
     pub theme: UiTheme,
+    pub palette: UiPalette,
     pub date_time_format: UiDateTimeFormat,
     pub highlight_color: Option<String>,
     pub secondary_color: Option<String>,
@@ -4522,6 +4566,7 @@ pub struct UiSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiSettingsUpdate {
     pub theme: UiTheme,
+    pub palette: UiPalette,
     pub date_time_format: UiDateTimeFormat,
     pub highlight_color: Option<String>,
     pub secondary_color: Option<String>,
@@ -4544,6 +4589,7 @@ impl UiSettings {
         Self {
             user_id: user_id.into(),
             theme: UiTheme::default(),
+            palette: UiPalette::default(),
             date_time_format: UiDateTimeFormat::default(),
             highlight_color: None,
             secondary_color: None,

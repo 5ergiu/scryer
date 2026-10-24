@@ -190,7 +190,7 @@ export function ListsView(props: ListsViewProps) {
   ) : null;
 
   return (
-    <section ref={scrollRef} id="lists-view" className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-[var(--scry-surfE)] [scrollbar-gutter:stable]">
+    <section ref={scrollRef} id="lists-view" className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-transparent [scrollbar-gutter:stable]">
       <div className="w-full px-4 py-6 sm:px-6 lg:px-8">
       <div ref={contentRef} className="mx-auto flex max-w-[1280px] flex-col gap-4">
         <div className="flex items-center gap-4">

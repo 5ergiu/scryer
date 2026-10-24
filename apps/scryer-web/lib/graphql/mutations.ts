@@ -899,6 +899,7 @@ export const updateGeneralSettingsMutation = `mutation UpdateGeneralSettings($in
 export const setMyUiSettingsMutation = `mutation SetMyUiSettings($input: SetMyUiSettingsInput!) {
   setMyUiSettings(input: $input) {
     theme
+    palette
     dateTimeFormat
     highlightColor
     secondaryColor
@@ -929,6 +930,7 @@ export const setMyUiSettingsMutation = `mutation SetMyUiSettings($input: SetMyUi
 export const setMyCatalogViewMutation = `mutation SetMyCatalogView($input: SetMyCatalogViewInput!) {
   setMyCatalogView(input: $input) {
     theme
+    palette
     dateTimeFormat
     highlightColor
     secondaryColor

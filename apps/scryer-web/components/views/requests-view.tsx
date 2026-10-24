@@ -1380,7 +1380,7 @@ export function RequestsView({
     // sideways.
     <section
       id="requests-view"
-      className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-[var(--scry-surfE)] [scrollbar-gutter:stable]"
+      className="scry-scroll flex min-h-0 flex-1 overflow-y-auto bg-transparent [scrollbar-gutter:stable]"
     >
       <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-4 px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex items-start gap-4">

@@ -37,16 +37,18 @@ import {
   Captions,
   Code2,
   ChevronDown,
+  Clock,
   Database,
   Download,
   FileText,
   FolderCog,
+  Gauge,
   Heart,
   Inbox,
   ListPlus,
+  ListChecks,
   MessagesSquare,
-  Monitor,
-  Moon,
+  Palette,
   Network,
   Puzzle,
   Rss,
@@ -56,7 +58,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   SquareTerminal,
-  Sun,
   Tag,
   TextSearch,
   Timer,
@@ -65,19 +66,18 @@ import {
   Users,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { fromUiThemeValue, getNextTheme, toUiThemeValue } from "@/lib/theme";
+import { getPalette } from "@/lib/palettes";
+import { PalettePicker } from "@/components/views/settings/palette-picker";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
 import { cn } from "@/lib/utils";
 import type { PendingImportCounts } from "@/lib/types";
 import { pendingImportCountForView } from "@/lib/types";
-import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useExperimentalFeaturesEnabled, useInstanceFeatures } from "@/lib/context/instance-features-context";
 import {
   useUiSettings,
-  uiSettingsInputFromSettings,
 } from "@/lib/context/ui-settings-context";
 import type { AuthUser } from "@/lib/hooks/use-auth";
-import type { UiSettings } from "@/lib/types/settings";
 import {
   APP_PERMISSIONS,
   LIBRARY_PERMISSIONS,
@@ -510,10 +510,10 @@ const ACTIVITY_SUB_PAGES: Array<{ id: ActivitySection; labelKey: string }> = [
   { id: "history", labelKey: "activity.history" },
 ];
 
-const WANTED_SUB_PAGES: Array<{ id: WantedSection; labelKey: string }> = [
-  { id: "wanted", labelKey: "wanted.tabWanted" },
-  { id: "cutoff", labelKey: "wanted.tabCutoff" },
-  { id: "pending", labelKey: "wanted.tabPending" },
+const WANTED_SUB_PAGES: Array<{ id: WantedSection; labelKey: string; icon: LucideIcon }> = [
+  { id: "wanted", labelKey: "wanted.tabWanted", icon: ListChecks },
+  { id: "cutoff", labelKey: "wanted.tabCutoff", icon: Gauge },
+  { id: "pending", labelKey: "wanted.tabPending", icon: Clock },
 ];
 
 const SIDEBAR_COLLAPSED_GROUPS_STORAGE_KEY = "scryer:sidebar-collapsed-groups";
@@ -652,19 +652,6 @@ function getMediaSettingsLabel(_viewId: ViewId, t: Translate): string {
   return t("nav.settings");
 }
 
-function getThemeLabel(theme: string | undefined, t: Translate): string {
-  switch (theme) {
-    case "light":
-      return t("theme.light");
-    case "dark":
-      return t("theme.dark");
-    case "pride":
-      return t("theme.dark");
-    default:
-      return t("theme.system");
-  }
-}
-
 function RootSidebarContent({
   topNav,
   view,
@@ -689,18 +676,12 @@ function RootSidebarContent({
   const t = useTranslate();
   const experimentalFeaturesEnabled = useExperimentalFeaturesEnabled();
   const { apiExplorerEnabled } = useInstanceFeatures();
-  const setGlobalStatus = useGlobalStatus();
   const { isMobile, setOpenMobile } = useSidebar();
-  const { theme, resolvedTheme, setTheme } = useTheme();
-  const {
-    uiSettings,
-    uiSettingsLoaded,
-    uiSettingsLoading,
-    setUiSettings,
-    saveUiSettings,
-  } = useUiSettings();
-  const themeSaveSequenceRef = React.useRef(0);
+  const { resolvedTheme } = useTheme();
+  const { uiSettings } = useUiSettings();
   const [themeMounted, setThemeMounted] = React.useState(false);
+  const [navExpansion, setNavExpansion] = React.useState<{ route: ViewId; expanded: ViewId | null }>({ route: view, expanded: view });
+  const expandedNavView = navExpansion.route === view ? navExpansion.expanded : view;
   const brandLogoUrl =
     themeMounted && resolvedTheme === "light"
       ? `${import.meta.env.BASE_URL}scryer-lockup-dark.webp`
@@ -721,56 +702,6 @@ function RootSidebarContent({
       return next;
     });
   }, []);
-  const cycleTheme = React.useCallback(() => {
-    const nextTheme = getNextTheme(theme);
-    setTheme(nextTheme);
-
-    if (
-      !uiSettingsLoaded ||
-      uiSettingsLoading ||
-      uiSettings.theme === toUiThemeValue(nextTheme)
-    ) {
-      return;
-    }
-
-    const requestId = themeSaveSequenceRef.current + 1;
-    themeSaveSequenceRef.current = requestId;
-    const previous = uiSettings;
-    const next: UiSettings = { ...uiSettings, theme: toUiThemeValue(nextTheme) };
-    setUiSettings(next);
-    void saveUiSettings((latest) => uiSettingsInputFromSettings({ ...latest, theme: next.theme }))
-      .then((result) => {
-        if (themeSaveSequenceRef.current !== requestId) return;
-        if (result.error || !result.data?.setMyUiSettings) {
-          setUiSettings(previous);
-          setTheme(fromUiThemeValue(previous.theme));
-          setGlobalStatus(result.error?.message ?? t("status.failedToUpdate"), { level: "ERROR" });
-          return;
-        }
-        setUiSettings(result.data.setMyUiSettings);
-      })
-      .catch((error) => {
-        if (themeSaveSequenceRef.current !== requestId) return;
-        setUiSettings(previous);
-        setTheme(fromUiThemeValue(previous.theme));
-        setGlobalStatus(
-          error instanceof Error ? error.message : t("status.failedToUpdate"),
-          { level: "ERROR" },
-        );
-      });
-  }, [
-    saveUiSettings,
-    setGlobalStatus,
-    setTheme,
-    setUiSettings,
-    t,
-    theme,
-    uiSettings,
-    uiSettingsLoaded,
-    uiSettingsLoading,
-  ]);
-  const displayTheme = theme === "pride" ? "dark" : theme;
-  const themeLabel = getThemeLabel(displayTheme, t);
   const canManageSystemSettings = hasAnyAppPermission(user, [
     APP_PERMISSIONS.manageSystemSettings,
   ]);
@@ -1352,6 +1283,7 @@ function RootSidebarContent({
                     item.id,
                   );
                   const isSettingsTop = item.id === "settings";
+                  const isWantedTop = item.id === "wanted";
                   const isSystemTop = item.id === "system";
                   const isActivityTop = item.id === "activity";
                   const isActiveMediaSection =
@@ -1364,23 +1296,21 @@ function RootSidebarContent({
                     isSystemTop &&
                     view === "system" &&
                     systemSection === "overview";
-                  const isActiveActivitySection =
-                    isActivityTop && view === "activity";
                   const mediaFacetImportBadgeCount = isMediaSection
                     ? pendingImportCountForNavView(item.id)
                     : 0;
                   const hasVisibleSystemSubnav = SYSTEM_SUB_PAGES.length > 1;
-                  const shouldShowChildren =
-                    isActiveMediaSection ||
-                    (isActiveSystemSection && hasVisibleSystemSubnav) ||
-                    (isActiveActivitySection && hasVisibleActivitySubnav);
                   const hasExpandableChildren =
                     isMediaSection ||
+                    isSettingsTop ||
+                    isWantedTop ||
                     (isSystemTop && hasVisibleSystemSubnav) ||
                     (isActivityTop && hasVisibleActivitySubnav);
+                  const shouldShowChildren = hasExpandableChildren && expandedNavView === item.id;
                   if (
                     !isMediaSection &&
                     !isSettingsTop &&
+                    !isWantedTop &&
                     !isSystemTop &&
                     !isActivityTop
                   ) {
@@ -1431,6 +1361,10 @@ function RootSidebarContent({
                               : undefined
                           }
                           onClick={(event) => {
+                            if (hasExpandableChildren) {
+                              setNavExpansion({ route: view, expanded: shouldShowChildren ? null : item.id });
+                              return;
+                            }
                             if (isSettingsTop) {
                               handleNavigate(
                                 event,
@@ -1521,7 +1455,7 @@ function RootSidebarContent({
                                           "root-sidebar-settings",
                                           entry.id,
                                         )}
-                                        isActive={settingsSection === entry.id}
+                                        isActive={view === "settings" && settingsSection === entry.id}
                                         className={SUB_NAV_BUTTON_CLASS}
                                         onClick={(event) => {
                                           handleNavigate(
@@ -1556,6 +1490,20 @@ function RootSidebarContent({
                                   ))}
                                 </React.Fragment>
                               ))
+                            ) : isWantedTop ? (
+                              visibleWantedSubPages.map((entry) => (
+                                <SidebarMenuSubItem key={entry.id}>
+                                  <SidebarMenuSubButton
+                                    id={selectorId("root-sidebar-wanted", entry.id)}
+                                    isActive={view === "wanted" && wantedSection === entry.id}
+                                    className={SUB_NAV_BUTTON_CLASS}
+                                    onClick={(event) => handleNavigate(event, "wanted", undefined, undefined, undefined, entry.id)}
+                                  >
+                                    <entry.icon className="h-3.5 w-3.5 shrink-0" />
+                                    <span>{t(entry.labelKey)}</span>
+                                  </SidebarMenuSubButton>
+                                </SidebarMenuSubItem>
+                              ))
                             ) : isSystemTop ? (
                               SYSTEM_SUB_PAGES.map((entry) => (
                                 <SidebarMenuSubItem key={entry.id}>
@@ -1588,7 +1536,7 @@ function RootSidebarContent({
                                       "root-sidebar-activity",
                                       entry.id,
                                     )}
-                                    isActive={activitySection === entry.id}
+                                    isActive={view === "activity" && activitySection === entry.id}
                                     className={SUB_NAV_BUTTON_CLASS}
                                     onClick={(event) => {
                                       handleNavigate(
@@ -1623,7 +1571,7 @@ function RootSidebarContent({
                                         "overview",
                                       )}
                                       isActive={
-                                        contentSettingsSection === "overview"
+                                        view === item.id && contentSettingsSection === "overview"
                                       }
                                       className={SUB_NAV_BUTTON_CLASS}
                                       onClick={(event) => {
@@ -1649,7 +1597,7 @@ function RootSidebarContent({
                                         "import",
                                       )}
                                       isActive={
-                                        contentSettingsSection === "import"
+                                        view === item.id && contentSettingsSection === "import"
                                       }
                                       className={SUB_NAV_BUTTON_CLASS}
                                       onClick={(event) => {
@@ -1676,7 +1624,7 @@ function RootSidebarContent({
                                         item.id,
                                         "settings",
                                       )}
-                                      isActive={isSettingsSubPage(
+                                      isActive={view === item.id && isSettingsSubPage(
                                         contentSettingsSection,
                                       )}
                                       className={SUB_NAV_BUTTON_CLASS}
@@ -1728,24 +1676,19 @@ function RootSidebarContent({
               </a>
             ) : null}
             {themeMounted ? (
-              <button
-                id="root-sidebar-theme-toggle"
-                type="button"
-                onClick={cycleTheme}
-                aria-label={t("theme.switchLabel", { theme: themeLabel })}
-                className={cn(
-                  "flex min-w-0 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-2 py-1 text-xs font-medium text-[var(--scry-muted)] transition hover:border-[var(--scry-border2)] hover:bg-[var(--scry-hover)] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25",
-                )}
-              >
-                {displayTheme === "light" ? (
-                  <Sun className="h-4 w-4" />
-                ) : displayTheme === "dark" ? (
-                  <Moon className="h-4 w-4" />
-                ) : (
-                  <Monitor className="h-4 w-4" />
-                )}
-                <span className="truncate">{themeLabel}</span>
-              </button>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button id="root-sidebar-theme-toggle" type="button" aria-label={t("palette.choose")}
+                    className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <Palette className="size-4 shrink-0" />
+                    <span className="truncate">{t(getPalette(uiSettings.palette).labelKey)}</span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto">
+                  <h3 className="mb-3 text-sm font-semibold">{t("palette.title")}</h3>
+                  <PalettePicker />
+                </PopoverContent>
+              </Popover>
             ) : null}
             <a
               id="root-sidebar-docs-link"

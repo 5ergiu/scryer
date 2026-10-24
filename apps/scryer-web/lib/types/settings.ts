@@ -107,7 +107,10 @@ export type UiTableColumnSetting = {
   visible: boolean;
 };
 
+export type UiPalette = "CLASSIC" | "SCRYER_DEFAULT" | "SLATE" | "OCEAN" | "FOREST" | "PLUM" | "EMBER" | "GRAPHITE";
+
 export type UiSettings = {
+  palette: UiPalette;
   theme: "LIGHT" | "DARK" | "PRIDE" | "SYSTEM";
   dateTimeFormat: UiDateTimeFormat;
   highlightColor: string | null;

@@ -35,6 +35,7 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
         mutation SetMyUiSettings($input: SetMyUiSettingsInput!) {
           setMyUiSettings(input: $input) {
             theme
+            palette
             dateTimeFormat
             highlightColor
             secondaryColor
@@ -58,6 +59,7 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
         json!({
             "input": {
                 "theme": "PRIDE",
+                "palette": "OCEAN",
                 "dateTimeFormat": "ISO24H",
                 "highlightColor": "#ff3366",
                 "secondaryColor": "#2277aa",
@@ -96,6 +98,7 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
         query MyUiSettings {
           myUiSettings {
             theme
+            palette
             dateTimeFormat
             highlightColor
             secondaryColor
@@ -124,6 +127,7 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
     let settings = &read["data"]["myUiSettings"];
     // Retired theme inputs remain accepted and normalize to the supported dark theme.
     assert_eq!(settings["theme"], json!("DARK"));
+    assert_eq!(settings["palette"], json!("OCEAN"));
     assert_eq!(settings["dateTimeFormat"], json!("ISO24H"));
     assert_eq!(settings["highlightColor"], json!("#ff3366"));
     assert_eq!(settings["secondaryColor"], json!("#2277aa"));
@@ -160,6 +164,7 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
         mutation SetMyUiSettings($input: SetMyUiSettingsInput!) {
           setMyUiSettings(input: $input) {
             theme
+            palette
             dateTimeFormat
             noGlow
           }
@@ -183,6 +188,10 @@ async fn graphql_anonymous_ui_settings_round_trip_is_shared() {
     .await;
     assert_no_errors(&old_client_update);
     assert_eq!(
+        old_client_update["data"]["setMyUiSettings"]["palette"],
+        json!("OCEAN")
+    );
+    assert_eq!(
         old_client_update["data"]["setMyUiSettings"]["dateTimeFormat"],
         json!("ISO24H")
     );
@@ -205,6 +214,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
         mutation SetMyUiSettings {
           setMyUiSettings(input: {
             theme: SYSTEM
+            palette: FOREST
             dateTimeFormat: ISO24H
             highlightColor: "#112233"
             secondaryColor: "#445566"
@@ -225,6 +235,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
             ]
           }) {
             theme
+            palette
             dateTimeFormat
             tableColumns { facet tableViewMode columnId columnOrder visible }
           }
@@ -241,6 +252,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
         query MyUiSettings {
           myUiSettings {
             theme
+            palette
             dateTimeFormat
             noGlow
             density
@@ -254,6 +266,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
     )
     .await;
     assert_no_errors(&read_a);
+    assert_eq!(read_a["data"]["myUiSettings"]["palette"], json!("FOREST"));
     assert_eq!(read_a["data"]["myUiSettings"]["theme"], json!("SYSTEM"));
     assert_eq!(
         read_a["data"]["myUiSettings"]["dateTimeFormat"],
@@ -278,6 +291,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
         query MyUiSettings {
           myUiSettings {
             theme
+            palette
             dateTimeFormat
             noGlow
             density
@@ -291,6 +305,7 @@ async fn graphql_ui_settings_are_isolated_per_logged_in_user() {
     )
     .await;
     assert_no_errors(&read_b);
+    assert_eq!(read_b["data"]["myUiSettings"]["palette"], json!("CLASSIC"));
     assert_eq!(read_b["data"]["myUiSettings"]["theme"], json!("DARK"));
     assert_eq!(
         read_b["data"]["myUiSettings"]["dateTimeFormat"],
@@ -324,6 +339,7 @@ async fn graphql_ui_settings_reject_invalid_table_column() {
         mutation SetMyUiSettings($input: SetMyUiSettingsInput!) {
           setMyUiSettings(input: $input) {
             theme
+            palette
           }
         }
         "#,
