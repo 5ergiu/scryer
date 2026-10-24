@@ -130,6 +130,7 @@ import {
   resolveTitleOverviewTargetBySlug,
 } from "@/lib/title-overview-loader";
 import { LoadingMark } from "@/components/common/loading-mark";
+import { overviewTargetFromNavigation } from "@/lib/utils/overview-route-target";
 
 const DashboardContainer = lazy(() =>
   import("@/components/containers/dashboard-container").then((m) => ({
@@ -854,8 +855,23 @@ function AuthenticatedHomePage({
   } = useSmgNotices({
     settingsSubscriptionEnabled: canSubscribeToLibraryEvents,
   });
-  const [resolvedOverviewTarget, setResolvedOverviewTarget] =
-    useState<OverviewTitleTarget | null>(null);
+  const overviewRouteKey = JSON.stringify([view, parsedOverviewLibrarySlug, parsedOverviewSlug]);
+  const navigationOverviewTarget = useMemo(
+    () => overviewTargetFromNavigation(location.state, {
+      view, librarySlug: parsedOverviewLibrarySlug, slug: parsedOverviewSlug,
+    }),
+    [location.state, parsedOverviewLibrarySlug, parsedOverviewSlug, view],
+  );
+  const [overviewResolution, setOverviewResolution] = useState<{
+    key: string;
+    target: OverviewTitleTarget | null;
+  } | null>(null);
+  const resolvedOverviewTarget = overviewResolution?.key === overviewRouteKey
+    ? overviewResolution.target
+    : navigationOverviewTarget;
+  const setResolvedOverviewTarget = useCallback((target: OverviewTitleTarget | null) => {
+    setOverviewResolution({ key: overviewRouteKey, target });
+  }, [overviewRouteKey]);
   const [overviewSlugLoading, setOverviewSlugLoading] = useState(false);
   const [legacyOverviewResolution, setLegacyOverviewResolution] = useState<{
     requestedId: string;
@@ -1101,7 +1117,7 @@ function AuthenticatedHomePage({
       };
     }
 
-    setResolvedOverviewTarget(null);
+    setResolvedOverviewTarget(navigationOverviewTarget);
     setOverviewSlugLoading(true);
     const lookupLibrarySlug =
       parsedOverviewLibrarySlug === view ? null : parsedOverviewLibrarySlug;
@@ -1155,6 +1171,7 @@ function AuthenticatedHomePage({
     };
   }, [
     contentSettingsSection,
+    navigationOverviewTarget,
     navigateTo,
     navigate,
     navigateToOverview,
@@ -1162,6 +1179,7 @@ function AuthenticatedHomePage({
     parsedOverviewLibrarySlug,
     parsedOverviewSlug,
     setGlobalStatus,
+    setResolvedOverviewTarget,
     t,
     view,
   ]);
@@ -1262,7 +1280,10 @@ function AuthenticatedHomePage({
       : null;
   const overviewTitleRoutePending = Boolean(
     isMediaView(view) &&
-      overviewSlugLoading &&
+      (overviewSlugLoading ||
+        (parsedOverviewSlug
+          ? overviewResolution?.key !== overviewRouteKey
+          : legacyOverviewResolution?.requestedId !== legacyOverviewTitleId)) &&
       !overviewTitleId &&
       (parsedOverviewSlug || legacyOverviewTitleId),
   );
