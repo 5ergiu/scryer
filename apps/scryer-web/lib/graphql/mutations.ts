@@ -708,7 +708,6 @@ export const reassignEpisodeFileMutation = `mutation ReassignEpisodeFile($input:
       id
       episodeId
       role
-      episodeLinksPinned
       filePath
     }
     previousPath

@@ -12100,63 +12100,6 @@ async fn a_file_bound_by_hand_without_an_original_path_keeps_its_episodes_throug
     assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
 }
 
-/// Mark every link row of a tracked file as operator pinned, the way an
-/// episode-level Fix Match leaves it.
-async fn pin_tracked_file_links(fixture: &EpisodeRelinkFixture) {
-    for row in fixture
-        .media_files
-        .store
-        .lock()
-        .await
-        .iter_mut()
-        .filter(|row| row.id == fixture.file_id())
-    {
-        row.episode_links_pinned = true;
-    }
-}
-
-#[tokio::test]
-async fn a_rescan_neither_adds_nor_replaces_links_of_a_pinned_file() {
-    // The row is stale, so the scan re-reads the file and parses its name,
-    // which names the first two episodes. The operator pinned the third.
-    let fixture = episode_relink_fixture_with(
-        "Relink Harbor - S01E01-E02 - Tide.mkv",
-        None,
-        RelinkRow::StaleSignature,
-    )
-    .await;
-    let bind = fixture
-        .media_files
-        .replace_file_episode_links(
-            fixture.file_id(),
-            &fixture.episodes(&[1]),
-            &fixture.episodes(&[3]),
-        )
-        .await
-        .expect("bind by hand");
-    assert!(matches!(bind, crate::EpisodeLinkReplacement::Replaced));
-    pin_tracked_file_links(&fixture).await;
-
-    let summary = fixture.rescan().await;
-    assert_eq!(summary.relinked, 0);
-    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
-
-    // A replacement pass refuses a pinned file outright.
-    let replaced = fixture
-        .media_files
-        .replace_file_episode_links(
-            fixture.file_id(),
-            &fixture.episodes(&[3]),
-            &fixture.episodes(&[1, 2]),
-        )
-        .await
-        .expect("replace links");
-    assert!(matches!(replaced, crate::EpisodeLinkReplacement::Skipped));
-    let summary = fixture.rescan().await;
-    assert_eq!(summary.relinked, 0);
-    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[3]));
-}
-
 #[tokio::test]
 async fn reassigning_a_file_to_no_episodes_is_refused_with_a_reason() {
     let fixture = episode_relink_fixture("Relink Harbor - S01E01 - Tide 1.mkv", None).await;

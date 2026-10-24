@@ -177,8 +177,7 @@ async fn reconcile_media_file_associations_tx(
 
 /// Make `episode_ids` the complete episode link set of `file_id`, but only
 /// while the file still looks the way the caller read it: no import source
-/// path, no series movie link, no operator-pinned link, and exactly
-/// `expected_episode_ids` (sorted and
+/// path, no series movie link, and exactly `expected_episode_ids` (sorted and
 /// deduplicated) as its links. Surviving links are neither deleted nor
 /// re-inserted, so their role and filler flag stay as they are; only this
 /// file's rows are touched.
@@ -216,19 +215,6 @@ async fn replace_file_episode_links_tx(
     )
     .await?;
     if series_movie_link.is_some() {
-        return Ok(EpisodeLinkReplacement::Skipped);
-    }
-    // An operator chose this file's episodes; no re-link pass may undo that.
-    let pinned_link = SqlRuntime::fetch_optional(
-        SqlExec::Tx(tx),
-        &format!(
-            "SELECT episode_id FROM file_episode_map WHERE file_id = {{}} AND {} LIMIT 1",
-            bool_column_is_true(dialect, "operator_pinned")
-        ),
-        &[SqlArg::Text(file_id.to_string())],
-    )
-    .await?;
-    if pinned_link.is_some() {
         return Ok(EpisodeLinkReplacement::Skipped);
     }
     let mut current_episode_ids = SqlRuntime::fetch_all(
@@ -275,7 +261,7 @@ async fn replace_file_episode_links_tx(
     Ok(EpisodeLinkReplacement::Replaced)
 }
 
-const FILE_EPISODE_LINK_COLUMNS: &str = "file_id, episode_id, role, is_filler, operator_pinned";
+const FILE_EPISODE_LINK_COLUMNS: &str = "file_id, episode_id, role, is_filler";
 
 fn row_to_file_episode_link(row: &SqlRow) -> AppResult<FileEpisodeLinkRecord> {
     Ok(FileEpisodeLinkRecord {
@@ -283,7 +269,6 @@ fn row_to_file_episode_link(row: &SqlRow) -> AppResult<FileEpisodeLinkRecord> {
         episode_id: row.text("episode_id")?,
         role: MediaFileRole::from_label(&row.text("role")?),
         is_filler: row.opt_bool("is_filler")?.unwrap_or(false),
-        operator_pinned: row.opt_bool("operator_pinned")?.unwrap_or(false),
     })
 }
 
@@ -310,14 +295,13 @@ async fn insert_file_episode_link_tx(
 ) -> AppResult<()> {
     SqlRuntime::execute(
         SqlExec::Tx(tx),
-        "INSERT INTO file_episode_map (file_id, episode_id, role, is_filler, operator_pinned)
-         VALUES ({}, {}, {}, {}, {})",
+        "INSERT INTO file_episode_map (file_id, episode_id, role, is_filler)
+         VALUES ({}, {}, {}, {})",
         &[
             SqlArg::Text(link.file_id.clone()),
             SqlArg::Text(link.episode_id.clone()),
             SqlArg::Text(link.role.as_str().to_string()),
             SqlArg::Bool(link.is_filler),
-            SqlArg::Bool(link.operator_pinned),
         ],
     )
     .await?;
@@ -447,7 +431,6 @@ async fn reassign_file_episode_links_tx(
                 episode_id: episode_id.clone(),
                 role: MediaFileRole::Primary,
                 is_filler,
-                operator_pinned: true,
             },
         )
         .await?;
@@ -2825,12 +2808,7 @@ fn media_file_select_columns(dialect: SqlDialect, episode_expr: &str, role_expr:
             mf.video_codec_parsed, mf.audio_codec_parsed, mf.audio_channels_parsed,
             mf.acquisition_score, mf.scoring_log,
             mf.indexer_source, mf.grabbed_release_title, mf.grabbed_at,
-            mf.edition, mf.original_file_path, mf.release_hash, mf.release_listing_json,
-            EXISTS (
-                SELECT 1 FROM file_episode_map fem_pin
-                 WHERE fem_pin.file_id = mf.id AND {pinned}
-            ) AS episode_links_pinned",
-        pinned = bool_column_is_true(dialect, "fem_pin.operator_pinned"),
+            mf.edition, mf.original_file_path, mf.release_hash, mf.release_listing_json",
     )
 }
 
@@ -3054,7 +3032,6 @@ fn row_to_title_media_file(row: &SqlRow) -> AppResult<TitleMediaFile> {
         subtitle_codecs: analysis_array_field(&analysis, "subtitle_codecs"),
         subtitle_streams,
         has_multiaudio: row.opt_bool("has_multiaudio")?.unwrap_or(false),
-        episode_links_pinned: row.opt_bool("episode_links_pinned")?.unwrap_or(false),
         duration_seconds: row.opt_i32("duration_seconds")?,
         num_chapters: row.opt_i32("num_chapters")?,
         container_format: row.opt_text("container_format")?,
@@ -5491,22 +5468,6 @@ mod tests {
         assert_eq!(outcome, EpisodeLinkReplacement::Skipped);
     }
 
-    async fn pinned_link_rows(
-        services: &SqliteServices,
-        file_id: &str,
-    ) -> Vec<(String, String, bool)> {
-        sqlx::query_as::<_, (String, String, bool)>(
-            "SELECT episode_id, role, operator_pinned != 0
-               FROM file_episode_map
-              WHERE file_id = ?
-              ORDER BY episode_id",
-        )
-        .bind(file_id)
-        .fetch_all(services.pool())
-        .await
-        .expect("episode links should load")
-    }
-
     fn synthetic_episode(title_id: &str, collection_id: &str, id: &str, number: u32) -> Episode {
         Episode {
             id: id.to_string(),
@@ -5535,10 +5496,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reassigning_episode_links_moves_pins_demotes_and_restores_in_one_transaction() {
-        use scryer_application::{
-            EpisodeFileReassignOutcome, EpisodeFileReassignRequest, EpisodeLinkReplacement,
-        };
+    async fn reassigning_episode_links_moves_demotes_and_restores_in_one_transaction() {
+        use scryer_application::{EpisodeFileReassignOutcome, EpisodeFileReassignRequest};
         let services = SqliteServices::new(":memory:")
             .await
             .expect("db should initialize");
@@ -5635,15 +5594,15 @@ mod tests {
                 .expect("seed role should update");
         }
         let before = [
-            pinned_link_rows(&services, &moving_id).await,
-            pinned_link_rows(&services, &sibling_id).await,
-            pinned_link_rows(&services, &holder_id).await,
+            episode_link_rows(&services, &moving_id).await,
+            episode_link_rows(&services, &sibling_id).await,
+            episode_link_rows(&services, &holder_id).await,
         ];
         let rows_now = || async {
             [
-                pinned_link_rows(&services, &moving_id).await,
-                pinned_link_rows(&services, &sibling_id).await,
-                pinned_link_rows(&services, &holder_id).await,
+                episode_link_rows(&services, &moving_id).await,
+                episode_link_rows(&services, &sibling_id).await,
+                episode_link_rows(&services, &holder_id).await,
             ]
         };
         let request = |episode_id: &str, replace: bool| EpisodeFileReassignRequest {
@@ -5681,7 +5640,7 @@ mod tests {
         assert_eq!(rows_now().await, before);
 
         // With `replace`, the holder is demoted, the sibling left behind on the
-        // first episode becomes its primary, and the new link is pinned.
+        // first episode becomes its primary, and the file is primary on the target.
         let EpisodeFileReassignOutcome::Reassigned(reassignment) = media_files
             .reassign_file_episode_links(&request("episode-reassign-2", true))
             .await
@@ -5702,41 +5661,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![sibling_id.as_str()]
         );
-        let primary =
-            |episode: &str, pinned: bool| (episode.to_string(), "primary".to_string(), pinned);
+        let primary = |episode: &str| (episode.to_string(), "primary".to_string(), false);
         let additional = |episode: &str| (episode.to_string(), "additional".to_string(), false);
         assert_eq!(
             rows_now().await,
             [
-                vec![primary("episode-reassign-2", true)],
-                vec![primary("episode-reassign-1", false)],
+                vec![primary("episode-reassign-2")],
+                vec![primary("episode-reassign-1")],
                 vec![additional("episode-reassign-2")],
             ]
         );
-        let moving = media_files
-            .get_media_file_by_id(&moving_id)
-            .await
-            .expect("file should load")
-            .expect("file row");
-        assert!(moving.episode_links_pinned);
-        let holder = media_files
-            .get_media_file_by_id(&holder_id)
-            .await
-            .expect("file should load")
-            .expect("file row");
-        assert!(!holder.episode_links_pinned);
-
-        // A replacement pass leaves a pinned file alone.
-        let outcome = media_files
-            .replace_file_episode_links(
-                &moving_id,
-                &["episode-reassign-2".to_string()],
-                &["episode-reassign-3".to_string()],
-            )
-            .await
-            .expect("a pinned file is not an error");
-        assert_eq!(outcome, EpisodeLinkReplacement::Skipped);
-
         // Restoring puts every link and role back exactly.
         media_files
             .restore_file_episode_links(&reassignment)

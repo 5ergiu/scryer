@@ -104,12 +104,8 @@ async fn seed_primary_file(
     (file_id, path)
 }
 
-/// Every (episode, role, pinned) link row of one file, sorted.
-async fn file_links(
-    ctx: &TestContext,
-    title_id: &str,
-    file_id: &str,
-) -> Vec<(String, String, bool)> {
+/// Every (episode, role) link row of one file, sorted.
+async fn file_links(ctx: &TestContext, title_id: &str, file_id: &str) -> Vec<(String, String)> {
     let mut links = ctx
         .media_files
         .list_media_files_for_title(title_id)
@@ -118,13 +114,8 @@ async fn file_links(
         .into_iter()
         .filter(|file| file.id == file_id)
         .filter_map(|file| {
-            file.episode_id.map(|episode_id| {
-                (
-                    episode_id,
-                    file.role.as_str().to_string(),
-                    file.episode_links_pinned,
-                )
-            })
+            file.episode_id
+                .map(|episode_id| (episode_id, file.role.as_str().to_string()))
         })
         .collect::<Vec<_>>();
     links.sort();
@@ -142,13 +133,13 @@ const REASSIGN_MUTATION: &str = r#"
       reassignEpisodeFile(input: $input) {
         previousPath
         episodeIds
-        file { id filePath episodeLinksPinned }
+        file { id filePath }
       }
     }
 "#;
 
 #[tokio::test]
-async fn reassign_episode_file_renames_the_file_on_disk_and_pins_the_link() {
+async fn reassign_episode_file_renames_the_file_on_disk_and_records_history() {
     let ctx = TestContext::new().await;
     let fixture = reassign_fixture(&ctx, "Reassign Fixture", "97101").await;
     let (file_id, old_path) = seed_primary_file(
@@ -195,7 +186,6 @@ async fn reassign_episode_file_renames_the_file_on_disk_and_pins_the_link() {
         vec![fixture.episodes[0].id.clone()]
     );
     assert_eq!(result.episode_ids, vec![fixture.episodes[1].id.clone()]);
-    assert!(result.file.episode_links_pinned);
 
     // The stored path is the one a fresh rename of the new episode renders.
     let plan = app
@@ -225,22 +215,7 @@ async fn reassign_episode_file_renames_the_file_on_disk_and_pins_the_link() {
     assert_eq!(stored.size_bytes, bytes.len() as i64);
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &file_id).await,
-        vec![(fixture.episodes[1].id.clone(), "primary".to_string(), true)]
-    );
-
-    // A replacement pass of the scanner leaves the pinned link alone.
-    let replaced = ctx
-        .media_files
-        .replace_file_episode_links(
-            &file_id,
-            std::slice::from_ref(&fixture.episodes[1].id),
-            std::slice::from_ref(&fixture.episodes[0].id),
-        )
-        .await
-        .expect("replace links");
-    assert_eq!(
-        replaced,
-        scryer_application::EpisodeLinkReplacement::Skipped
+        vec![(fixture.episodes[1].id.clone(), "primary".to_string())]
     );
 
     let history = gql(
@@ -269,7 +244,7 @@ async fn reassign_episode_file_renames_the_file_on_disk_and_pins_the_link() {
         &ctx,
         r#"
         query Title($id: ID!) {
-          title(id: $id) { mediaFiles { id episodeId episodeLinksPinned } }
+          title(id: $id) { mediaFiles { id episodeId } }
         }
         "#,
         json!({ "id": fixture.title.id }),
@@ -279,9 +254,26 @@ async fn reassign_episode_file_renames_the_file_on_disk_and_pins_the_link() {
     let media_files = files["data"]["title"]["mediaFiles"]
         .as_array()
         .expect("media files");
-    assert!(media_files.iter().any(|file| file["id"] == json!(file_id)
-        && file["episodeId"] == json!(fixture.episodes[1].id)
-        && file["episodeLinksPinned"] == true));
+    assert!(
+        media_files.iter().any(|file| file["id"] == json!(file_id)
+            && file["episodeId"] == json!(fixture.episodes[1].id))
+    );
+
+    // The reassignment leaves nothing behind that holds the links: a later
+    // re-link pass may still re-derive them.
+    let replaced = ctx
+        .media_files
+        .replace_file_episode_links(
+            &file_id,
+            std::slice::from_ref(&fixture.episodes[1].id),
+            std::slice::from_ref(&fixture.episodes[0].id),
+        )
+        .await
+        .expect("replace links");
+    assert_eq!(
+        replaced,
+        scryer_application::EpisodeLinkReplacement::Replaced
+    );
 }
 
 #[tokio::test]
@@ -321,15 +313,11 @@ async fn reassign_episode_file_with_replace_demotes_the_existing_primary() {
     assert!(holder_path.exists(), "the demoted file is never deleted");
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &moving_id).await,
-        vec![(fixture.episodes[1].id.clone(), "primary".to_string(), true)]
+        vec![(fixture.episodes[1].id.clone(), "primary".to_string())]
     );
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &holder_id).await,
-        vec![(
-            fixture.episodes[1].id.clone(),
-            "additional".to_string(),
-            false
-        )]
+        vec![(fixture.episodes[1].id.clone(), "additional".to_string())]
     );
     let first_episode_files = ctx
         .media_files
@@ -381,7 +369,7 @@ async fn graphql_reassign_episode_file_refuses_a_primary_conflict_with_typed_fac
     assert!(moving_path.exists());
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &moving_id).await,
-        vec![(fixture.episodes[0].id.clone(), "primary".to_string(), false)]
+        vec![(fixture.episodes[0].id.clone(), "primary".to_string())]
     );
 }
 
@@ -413,7 +401,7 @@ async fn graphql_reassign_episode_file_refuses_an_episode_of_another_title() {
     assert!(file_path.exists());
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &file_id).await,
-        vec![(fixture.episodes[0].id.clone(), "primary".to_string(), false)]
+        vec![(fixture.episodes[0].id.clone(), "primary".to_string())]
     );
 }
 
@@ -451,6 +439,6 @@ async fn graphql_reassign_episode_file_puts_the_links_back_when_the_rename_fails
     assert_eq!(stored.file_path, file_path.to_string_lossy());
     assert_eq!(
         file_links(&ctx, &fixture.title.id, &file_id).await,
-        vec![(fixture.episodes[0].id.clone(), "primary".to_string(), false)]
+        vec![(fixture.episodes[0].id.clone(), "primary".to_string())]
     );
 }

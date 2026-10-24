@@ -65,7 +65,7 @@ function fileNameOf(path: string): string {
 /**
  * The "Assign to episode" flow for a library file: it loads the title's
  * episodes, lets the operator pick, and reassigns the file. The server renames
- * the file for its new episodes and keeps the choice on later scans.
+ * the file for its new episodes in the same operation.
  */
 export function useEpisodeFileAssignment({
   titleId,

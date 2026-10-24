@@ -1214,7 +1214,6 @@ pub struct FileEpisodeLinkRecord {
     pub episode_id: String,
     pub role: MediaFileRole,
     pub is_filler: bool,
-    pub operator_pinned: bool,
 }
 
 /// An operator's request to make `episode_ids` the episodes one file serves.
@@ -1235,7 +1234,7 @@ pub struct EpisodeFileReassignment {
     pub file_id: String,
     /// The file's own links before the reassignment.
     pub previous_links: Vec<FileEpisodeLinkRecord>,
-    /// The file's links now: primary and pinned for every target episode.
+    /// The file's links now: primary for every target episode.
     pub episode_ids: Vec<String>,
     /// Other files' links that were primary for a target episode and are now
     /// additional, as they were before.

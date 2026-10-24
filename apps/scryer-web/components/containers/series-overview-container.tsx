@@ -295,8 +295,6 @@ export type EpisodeMediaFile = {
   episodeId: string | null;
   seriesMovieLinkIds: string[];
   role: string;
-  /** The file's episodes were chosen by an operator and scans keep them. */
-  episodeLinksPinned?: boolean;
   filePath: string;
   sizeBytes: number;
   qualityLabel: string | null;

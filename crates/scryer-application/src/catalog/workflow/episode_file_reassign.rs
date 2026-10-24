@@ -1,5 +1,5 @@
 //! Episode-level Fix Match: an operator moves one media file to other
-//! episodes of its title, and the choice is pinned against later scans.
+//! episodes of its title in a single re-match and rename.
 //!
 //! The links move in one store transaction, then the file is renamed on disk
 //! to the name the new episodes render, through the library renamer. If the
@@ -17,7 +17,7 @@ use scryer_domain::MediaFileReassignedEventData;
 
 impl AppUseCase {
     /// Make `episode_ids` the episodes one series or anime file serves, as
-    /// their primary file, pin those links, and rename the file to match.
+    /// their primary file, and rename the file to match.
     ///
     /// Another file that is primary for a target episode refuses the request
     /// unless `replace` is set; with it, that file stays linked as an

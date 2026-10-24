@@ -966,7 +966,6 @@ pub fn from_title_media_file(file: scryer_application::TitleMediaFile) -> TitleM
         file_path: file.file_path,
         size_bytes: Long::from(file.size_bytes),
         role: file.role.as_str().to_string(),
-        episode_links_pinned: file.episode_links_pinned,
         quality_label: file.quality_label,
         scan_status: file.scan_status,
         created_at: parse_required_datetime(&file.created_at, "title media file created_at"),

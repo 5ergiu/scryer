@@ -5,7 +5,6 @@ import {
   File as FileIcon,
   HardDrive,
   ListOrdered,
-  Pin,
   Search,
   Star,
   Trash2,
@@ -42,8 +41,6 @@ export type MediaFileOnDisk = MediaInfoFile & {
   sizeBytes: number | null | undefined;
   role?: string | null;
   createdAt?: string | null;
-  /** The file's episodes were chosen by an operator and scans keep them. */
-  episodeLinksPinned?: boolean | null;
 };
 
 function compactMediaValue(value: string | null | undefined): string | null {
@@ -306,21 +303,6 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                           )}
                         >
                           {t("mediaFile.additional")}
-                        </span>
-                      ) : null}
-                      {file.episodeLinksPinned ? (
-                        <span
-                          id={selectorId(roleIdPrefix ?? fileRowIdPrefix, "pinned", file.id)}
-                          title={t("episodeAssign.pinnedHint")}
-                          className={cn(
-                            "inline-flex items-center gap-1",
-                            selectedTitlePresentation
-                              ? "rounded-[6px] bg-[var(--scry-soft)] px-2 py-0.5 text-[10.5px] font-bold text-[var(--scry-text2)]"
-                              : "rounded-full border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-1.5 py-0.5 text-[var(--scry-text2)]",
-                          )}
-                        >
-                          <Pin className="h-3 w-3" aria-hidden="true" />
-                          {t("episodeAssign.pinnedBadge")}
                         </span>
                       ) : null}
                       {fileDate ? <span>{fileDate}</span> : null}

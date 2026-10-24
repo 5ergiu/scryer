@@ -537,10 +537,10 @@ impl LibraryMutations {
 
     /// Assign an imported series file to different episodes of its own title.
     ///
-    /// The links move, the file is renamed on disk to the new episodes' name,
-    /// and the choice is pinned so scans and refreshes keep it. A target with
-    /// a primary file is refused unless `replace` is set, which demotes that
-    /// file to additional; no file is ever deleted.
+    /// The links move and the file is renamed on disk to the new episodes'
+    /// name, in one operation. A target with a primary file is refused unless
+    /// `replace` is set, which demotes that file to additional; no file is
+    /// ever deleted.
     async fn reassign_episode_file(
         &self,
         ctx: &Context<'_>,

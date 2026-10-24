@@ -389,7 +389,6 @@ export const TITLE_MEDIA_FILE_FIELDS = `
       episodeId
       seriesMovieLinkIds
       role
-      episodeLinksPinned
       filePath
       sizeBytes
       qualityLabel

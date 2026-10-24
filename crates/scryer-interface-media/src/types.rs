@@ -558,9 +558,6 @@ pub struct TitleMediaFilePayload {
     pub size_bytes: Long,
     /// File role, such as primary or additional media.
     pub role: String,
-    /// Whether an operator pinned this file's episode links; scans and
-    /// metadata refreshes leave pinned links alone.
-    pub episode_links_pinned: bool,
     /// Human-readable quality label, or null before quality is known.
     pub quality_label: Option<String>,
     /// Raw media scan state; analysis fields remain null until scanning completes.
@@ -943,7 +940,7 @@ pub struct ReassignEpisodeFilePayload {
     pub previous_path: String,
     /// Episodes the file was linked to before the change.
     pub previous_episode_ids: Vec<ID>,
-    /// Episodes the file is linked to now; the links are operator pinned.
+    /// Episodes the file is linked to now, as their primary file.
     pub episode_ids: Vec<ID>,
     /// Files that were primary on a target episode and are now additional.
     pub demoted_file_ids: Vec<ID>,

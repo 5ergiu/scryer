@@ -4758,7 +4758,7 @@ pub struct MediaFileRenamedEventData {
 
 /// An operator moved one media file from the episodes it served to other
 /// episodes of the same title, the episode-level counterpart of a title
-/// rematch. The links it now holds are pinned against scans and refreshes.
+/// rematch. The file is renamed to the name its new episodes render.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MediaFileReassignedEventData {
     pub title: TitleContextSnapshot,

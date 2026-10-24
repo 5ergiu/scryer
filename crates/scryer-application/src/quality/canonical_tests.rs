@@ -660,7 +660,6 @@ fn media_row_as_import_would_write(
         size_bytes: analyzed.actual_size_bytes,
         announced_size_bytes: None,
         role: crate::MediaFileRole::Primary,
-        episode_links_pinned: false,
         source_signature_scheme: None,
         source_signature_value: None,
         content_hashes: None,

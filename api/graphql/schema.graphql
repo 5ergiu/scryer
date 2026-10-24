@@ -19796,10 +19796,10 @@ type MutationRoot {
 	"""
 	Assign an imported series file to different episodes of its own title.
 	
-	The links move, the file is renamed on disk to the new episodes' name,
-	and the choice is pinned so scans and refreshes keep it. A target with
-	a primary file is refused unless `replace` is set, which demotes that
-	file to additional; no file is ever deleted.
+	The links move and the file is renamed on disk to the new episodes'
+	name, in one operation. A target with a primary file is refused unless
+	`replace` is set, which demotes that file to additional; no file is
+	ever deleted.
 	"""
 	reassignEpisodeFile(
 		"""
@@ -25668,7 +25668,7 @@ type ReassignEpisodeFilePayload {
 	"""
 	previousEpisodeIds: [ID!]!
 	"""
-	Episodes the file is linked to now; the links are operator pinned.
+	Episodes the file is linked to now, as their primary file.
 	"""
 	episodeIds: [ID!]!
 	"""
@@ -30614,11 +30614,6 @@ type TitleMediaFilePayload {
 	File role, such as primary or additional media.
 	"""
 	role: String!
-	"""
-	Whether an operator pinned this file's episode links; scans and
-	metadata refreshes leave pinned links alone.
-	"""
-	episodeLinksPinned: Boolean!
 	"""
 	Human-readable quality label, or null before quality is known.
 	"""

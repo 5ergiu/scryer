@@ -4476,7 +4476,6 @@ mod tests {
             episode_id: episode_id.map(str::to_string),
             series_movie_link_ids: Vec::new(),
             role: crate::MediaFileRole::Primary,
-            episode_links_pinned: false,
             file_path: format!("/data/series/{release_title}.mkv"),
             size_bytes: 1,
             announced_size_bytes: None,
