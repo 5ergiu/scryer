@@ -1334,6 +1334,10 @@ pub struct CreateLibraryRootInput {
 #[derive(InputObject, Clone)]
 /// Replacement library root path and default marker.
 pub struct UpdateLibraryRootInput {
+    /// Id of the stored root this entry edits. A root keeps its identity, and the
+    /// titles under it keep their root, when its path changes under the same id.
+    /// Omit it for a new root; an entry without one is matched by path.
+    pub id: Option<ID>,
     /// Absolute filesystem path for the root.
     pub path: String,
     /// Whether this root is the library default.

@@ -273,6 +273,7 @@ async fn upgrade_refuses_a_custom_bin_inside_another_library_root_and_keeps_the_
                 updated_at: now,
             },
             vec![LibraryRootDraft {
+                id: None,
                 path: root_b.to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -425,6 +426,7 @@ impl TitleDeleteFixture {
                     updated_at: now,
                 },
                 vec![LibraryRootDraft {
+                    id: None,
                     path: fixture.root_b().to_string_lossy().to_string(),
                     is_default: true,
                 }],
@@ -923,6 +925,7 @@ async fn title_delete_rechecks_revoked_permissions_before_purging_files() {
 
 fn root_draft(path: &Path) -> LibraryRootDraft {
     LibraryRootDraft {
+        id: None,
         path: path.to_string_lossy().to_string(),
         is_default: true,
     }

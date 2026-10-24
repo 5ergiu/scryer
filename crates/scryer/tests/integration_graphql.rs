@@ -2312,6 +2312,7 @@ async fn configure_default_library_root(
             library.name,
             library.slug,
             vec![LibraryRootDraft {
+                id: None,
                 path: media_root_path.clone(),
                 is_default: true,
             }],
