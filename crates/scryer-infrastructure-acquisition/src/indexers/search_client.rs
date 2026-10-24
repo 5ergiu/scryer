@@ -3624,10 +3624,15 @@ impl MultiIndexerSearchClient {
             return Self::fold_rss_activity(exact);
         }
         // The indexer's first merged poll: it has only the cadence and markers
-        // its earlier one-poll-per-category feeds left. The newest of those
-        // markers is where its merged feed left off, so catch-up starts there
-        // instead of walking history back from nothing. Ordered by key so the
-        // fields the fold takes from the first entry are reproducible.
+        // its earlier one-poll-per-category feeds left. Catch-up resumes from
+        // the OLDEST of those markers. Starting from the newest would skip,
+        // for good, every release another category published between its own
+        // marker and the newest one: those GUIDs were never seen, and the
+        // merged marker moves past them. Starting from the oldest costs at most
+        // one re-walk of that span, bounded by the per-poll result cap and
+        // reported by the gap warning; releases already grabbed are
+        // deduplicated downstream. Ordered by key so ties, and the fields the
+        // fold takes from the first entry, are reproducible.
         let mut legacy = snapshot
             .entries
             .iter()
@@ -3635,7 +3640,33 @@ impl MultiIndexerSearchClient {
             .filter(|entry| is_legacy_rss_request_key(entry.rss_request_key.as_deref()))
             .collect::<Vec<_>>();
         legacy.sort_by(|left, right| left.rss_request_key.cmp(&right.rss_request_key));
-        Self::fold_rss_activity(legacy)
+        let oldest_marker = legacy
+            .iter()
+            .filter(|entry| entry.rss_last_seen_release_published_at.is_some())
+            .fold(
+                None::<&&SchedulerSnapshotEntry>,
+                |oldest, entry| match oldest {
+                    Some(oldest)
+                        if oldest.rss_last_seen_release_published_at
+                            <= entry.rss_last_seen_release_published_at =>
+                    {
+                        Some(oldest)
+                    }
+                    _ => Some(entry),
+                },
+            )
+            .map(|entry| {
+                (
+                    entry.rss_last_seen_release_identity.clone(),
+                    entry.rss_last_seen_release_published_at,
+                )
+            });
+        let mut activity = Self::fold_rss_activity(legacy);
+        if let Some((identity, published_at)) = oldest_marker {
+            activity.last_seen_release_identity = identity;
+            activity.last_seen_release_published_at = published_at;
+        }
+        activity
     }
 
     fn fold_rss_activity(entries: Vec<&SchedulerSnapshotEntry>) -> SchedulerRssActivity {
@@ -13957,7 +13988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_first_merged_rss_poll_resumes_from_the_newest_per_category_marker() {
+    async fn the_first_merged_rss_poll_resumes_from_the_oldest_per_category_marker() {
         let movies_marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let series_marker_at = fixed_utc("2026-09-20T11:30:00Z");
         let anime_marker_at = fixed_utc("2026-09-20T09:15:00Z");
@@ -13982,8 +14013,8 @@ mod tests {
             assert_eq!(
                 calls[0].rss_catch_up,
                 Some(IndexerRssCatchUp {
-                    last_seen_published_at: series_marker_at,
-                    last_seen_identity: Some("series-marker-guid".to_string()),
+                    last_seen_published_at: anime_marker_at,
+                    last_seen_identity: Some("anime-marker-guid".to_string()),
                 })
             );
         }
@@ -14028,7 +14059,7 @@ mod tests {
         };
         assert_eq!(
             activity_now().await.last_seen_release_identity.as_deref(),
-            Some("later-legacy")
+            Some("earlier-legacy")
         );
 
         // Once the merged feed has a marker of its own, the old per-category
