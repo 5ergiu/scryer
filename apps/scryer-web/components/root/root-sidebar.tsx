@@ -45,7 +45,6 @@ import {
   Gauge,
   Heart,
   Inbox,
-  ListPlus,
   ListChecks,
   MessagesSquare,
   Palette,
@@ -428,12 +427,6 @@ const settingsEntries: Array<{
     requiredAnyAppPermission: [APP_PERMISSIONS.manageCatalogSettings],
   },
   {
-    id: "listProviderApps",
-    label: (t) => t("lists.providerApps.settingsLabel"),
-    icon: ListPlus,
-    requiredAnyAppPermission: [APP_PERMISSIONS.manageSystemSettings],
-  },
-  {
     id: "plugins",
     label: (t) => t("settings.plugins"),
     icon: Puzzle,
@@ -680,8 +673,6 @@ function RootSidebarContent({
   const { resolvedTheme } = useTheme();
   const { uiSettings } = useUiSettings();
   const [themeMounted, setThemeMounted] = React.useState(false);
-  const [navExpansion, setNavExpansion] = React.useState<{ route: ViewId; expanded: ViewId | null }>({ route: view, expanded: view });
-  const expandedNavView = navExpansion.route === view ? navExpansion.expanded : view;
   const brandLogoUrl =
     themeMounted && resolvedTheme === "light"
       ? `${import.meta.env.BASE_URL}scryer-lockup-dark.webp`
@@ -1306,7 +1297,7 @@ function RootSidebarContent({
                     isWantedTop ||
                     (isSystemTop && hasVisibleSystemSubnav) ||
                     (isActivityTop && hasVisibleActivitySubnav);
-                  const shouldShowChildren = hasExpandableChildren && expandedNavView === item.id;
+                  const shouldShowChildren = hasExpandableChildren && view === item.id;
                   if (
                     !isMediaSection &&
                     !isSettingsTop &&
@@ -1361,21 +1352,21 @@ function RootSidebarContent({
                               : undefined
                           }
                           onClick={(event) => {
-                            if (hasExpandableChildren) {
-                              setNavExpansion({ route: view, expanded: shouldShowChildren ? null : item.id });
-                              return;
-                            }
+                            event.preventDefault();
+                            if (isMobile && !hasExpandableChildren) setOpenMobile(false);
                             if (isSettingsTop) {
-                              handleNavigate(
-                                event,
+                              onNavigate(
                                 "settings",
                                 defaultSettingsSectionForTopNav,
                               );
                               return;
                             }
+                            if (isWantedTop) {
+                              onNavigate("wanted");
+                              return;
+                            }
                             if (isSystemTop) {
-                              handleNavigate(
-                                event,
+                              onNavigate(
                                 "system",
                                 undefined,
                                 undefined,
@@ -1384,8 +1375,7 @@ function RootSidebarContent({
                               return;
                             }
                             if (isActivityTop) {
-                              handleNavigate(
-                                event,
+                              onNavigate(
                                 "activity",
                                 undefined,
                                 undefined,
@@ -1399,8 +1389,7 @@ function RootSidebarContent({
                               );
                               return;
                             }
-                            handleNavigate(
-                              event,
+                            onNavigate(
                               item.id,
                               undefined,
                               defaultMediaContentSection,
