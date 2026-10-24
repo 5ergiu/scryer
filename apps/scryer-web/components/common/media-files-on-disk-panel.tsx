@@ -9,7 +9,6 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
-import { IconButton } from "@/components/ui/icon-button";
 import { TextActionButton } from "@/components/ui/text-action-button";
 import { ExternalSubtitleSection } from "@/components/common/external-subtitle-section";
 import { DiscTitleButton } from "@/components/common/disc-title-dialog";
@@ -151,6 +150,12 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
     Boolean(onRefreshSubtitles) &&
     canManageLibrarySubtitles(user, libraryId);
   const selectedTitlePresentation = presentation === "selected-title";
+  const fileActionClassName = cn(
+    "w-full justify-center",
+    selectedTitlePresentation
+      ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
+      : undefined,
+  );
   const orderedMediaFiles = React.useMemo(
     () =>
       mediaFiles
@@ -244,10 +249,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                 )}
               >
                 <div
-                  className={cn(
-                    "grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]",
-                    selectedTitlePresentation ? "lg:items-start" : "lg:items-center",
-                  )}
+                  className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_auto]"
                 >
                   <div className="min-w-0 space-y-3">
                     {/* The path wraps, so the icon sits beside its first line. */}
@@ -377,7 +379,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                       selectedTitlePresentation ? "lg:pl-4" : "lg:pl-6",
                     )}
                   >
-                    <div className="text-left sm:text-right">
+                    <div className="w-full text-right">
                       <div
                         className={cn(
                           "font-semibold tracking-tight",
@@ -394,19 +396,15 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                       </div>
                     </div>
                     {(canSearchSubtitles || canRefreshScores || onMakePrimaryFile || onAssignFileToEpisode || onDeleteFile || discAnalysis) ? (
-                      <div className="flex items-start gap-2 lg:justify-end">
-                        <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex w-full flex-col items-stretch gap-2">
+                        <div className="flex w-full flex-col items-stretch gap-2">
                           {canSearchSubtitles ? (
                             <TextActionButton
                               type="button"
                               size="sm"
                               tone="search"
                               id={selectorId(subtitleSearchIdPrefix, file.id)}
-                              className={
-                                selectedTitlePresentation
-                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
-                                  : undefined
-                              }
+                              className={fileActionClassName}
                               onClick={() =>
                                 setSubtitleSearchTarget({
                                   mediaFileId: file.id,
@@ -426,11 +424,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                               appearance="action"
                               id={selectorId(fileRowIdPrefix, "refresh-score", file.id)}
                               selection={{ fileIds: [file.id] }}
-                              className={
-                                selectedTitlePresentation
-                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
-                                  : undefined
-                              }
+                              className={fileActionClassName}
                             />
                           ) : null}
                           {isAdditionalFile && onMakePrimaryFile ? (
@@ -439,11 +433,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                               size="sm"
                               tone="search"
                               id={selectorId(makePrimaryFileIdPrefix, file.id)}
-                              className={
-                                selectedTitlePresentation
-                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
-                                  : undefined
-                              }
+                              className={fileActionClassName}
                               onClick={() => {
                                 void onMakePrimaryFile(file.id);
                               }}
@@ -467,11 +457,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                               size="sm"
                               tone="search"
                               id={selectorId(assignFileIdPrefix, file.id)}
-                              className={
-                                selectedTitlePresentation
-                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
-                                  : undefined
-                              }
+                              className={fileActionClassName}
                               onClick={() => onAssignFileToEpisode(file.id)}
                               title={t("episodeAssign.action")}
                               aria-label={t("episodeAssign.action")}
@@ -484,7 +470,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         {discAnalysis ? (
                           <DiscTitleButton
                             id={selectorId(discTitleIdPrefix, file.id)}
-                            className={selectedTitlePresentation ? "h-8 w-8" : undefined}
+                            className={cn("w-full justify-center", selectedTitlePresentation ? "h-8" : undefined)}
                             file={{
                               id: file.id,
                               filePath: file.filePath,
@@ -495,20 +481,22 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                           />
                         ) : null}
                         {onDeleteFile ? (
-                          <IconButton
-                            label={t("mediaFile.delete")}
+                          <TextActionButton
+                            size="sm"
+                            aria-label={t("mediaFile.delete")}
                             tone="delete"
                             id={selectorId(deleteFileIdPrefix, file.id)}
                             disabled={isDeletingFile}
                             onClick={() => onDeleteFile(file.id)}
-                            className={selectedTitlePresentation ? "h-8 w-8" : undefined}
-                          >
-                            {isDeletingFile ? (
+                            className={cn("w-full justify-center", selectedTitlePresentation ? "h-8 rounded-[8px] text-[11.5px]" : undefined)}
+                            leadingIcon={isDeletingFile ? (
                               <LoadingMark className="h-4 w-4" />
                             ) : (
                               <Trash2 className="h-4 w-4" />
                             )}
-                          </IconButton>
+                          >
+                            {t("label.delete")}
+                          </TextActionButton>
                         ) : null}
                       </div>
                     ) : null}
