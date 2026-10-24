@@ -54,6 +54,15 @@ export function QuickHighlightColorPicker() {
     <section className="mt-4 space-y-3 border-t border-border pt-4" aria-busy={appearanceSaving}>
       <h3 className="text-sm font-semibold">{t("profile.highlightColor")}</h3>
       <div role="group" aria-label={t("profile.highlightColor")} className="flex flex-wrap items-center gap-2">
+        {HIGHLIGHT_COLOR_PRESETS.map((preset) => (
+          <button key={preset.value} type="button" aria-label={t(preset.labelKey)} title={t(preset.labelKey)}
+            aria-pressed={selectedColor === preset.value} disabled={disabled}
+            onClick={() => void select(preset.value)}
+            className="relative size-8 shrink-0 rounded-[9px] outline-none transition hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-wait disabled:opacity-60"
+            style={{ backgroundColor: preset.value }}>
+            {selectedColor === preset.value && <Check className="absolute inset-0 m-auto size-4 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]" />}
+          </button>
+        ))}
         <div className="flex shrink-0 items-center gap-2">
           <Button type="button" variant="outline" size="sm" disabled={disabled || highlightColor === null}
             onClick={() => void select(null)}>{t("label.default")}</Button>
@@ -64,15 +73,6 @@ export function QuickHighlightColorPicker() {
             <Palette className="size-4" aria-hidden="true" />
           </Button>
         </div>
-        {HIGHLIGHT_COLOR_PRESETS.map((preset) => (
-          <button key={preset.value} type="button" aria-label={t(preset.labelKey)} title={t(preset.labelKey)}
-            aria-pressed={selectedColor === preset.value} disabled={disabled}
-            onClick={() => void select(preset.value)}
-            className="relative size-8 shrink-0 rounded-[9px] outline-none transition hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-wait disabled:opacity-60"
-            style={{ backgroundColor: preset.value }}>
-            {selectedColor === preset.value && <Check className="absolute inset-0 m-auto size-4 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]" />}
-          </button>
-        ))}
       </div>
       {customOpen && (
         <div id="theme-quick-custom-highlight" className="min-w-0 rounded-lg border border-border bg-card p-3">
