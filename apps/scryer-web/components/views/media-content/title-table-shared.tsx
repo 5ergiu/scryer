@@ -1129,12 +1129,24 @@ export function TitleTableActionButton({
   children,
   ...props
 }: TitleTableActionButtonProps) {
+  const surfaceClass: Partial<Record<BoxedActionButtonTone, string>> = {
+    auto: "bg-[linear-gradient(var(--scry-success-bg),var(--scry-success-bg))] hover:bg-[linear-gradient(var(--scry-success-bg-strong),var(--scry-success-bg-strong))]",
+    search: "bg-[linear-gradient(var(--scry-info-bg),var(--scry-info-bg))] hover:bg-[linear-gradient(var(--scry-info-bg-strong),var(--scry-info-bg-strong))]",
+    accent: "bg-[linear-gradient(rgba(var(--scry-accent-rgb),0.1),rgba(var(--scry-accent-rgb),0.1))] hover:bg-[linear-gradient(rgba(var(--scry-accent-rgb),0.2),rgba(var(--scry-accent-rgb),0.2))]",
+    delete: "bg-[linear-gradient(var(--scry-danger-bg),var(--scry-danger-bg))] hover:bg-[linear-gradient(var(--scry-danger-bg-strong),var(--scry-danger-bg-strong))]",
+  };
+
   return (
     <IconButton
       label={label}
       tone={tone}
       showTitleAttribute={showTitleAttribute}
-      className={className}
+      className={cn(
+        "relative z-[1]",
+        surfaceClass[tone] && "bg-background hover:bg-background",
+        surfaceClass[tone],
+        className,
+      )}
       {...props}
     >
       {children}
