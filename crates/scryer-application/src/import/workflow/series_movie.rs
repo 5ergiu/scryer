@@ -71,6 +71,11 @@ async fn run_import(
         import_id,
         &subtitle_videos,
         &subtitle_roots,
+        &completed
+            .subtitle_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>(),
     )
     .await;
     let mut subtitle_failed = subtitle_plan.is_err() || target.archive_processing_pending;

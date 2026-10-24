@@ -3287,6 +3287,7 @@ async fn execute_manual_import_with_release_evidence_inner(
                 import_id,
                 &subtitle_videos,
                 &subtitle_roots,
+                &[],
             )
             .await
         }
