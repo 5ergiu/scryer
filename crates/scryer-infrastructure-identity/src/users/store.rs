@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use scryer_application::{
     AppError, AppResult, UiCatalogViewMode, UiCatalogViewSetting, UiCatalogViewUpdate,
-    UiDateTimeFormat, UiDefaultLandingView, UiDensity, UiDeviceClass, UiSettings, UiSettingsFacet,
-    UiSettingsUpdate, UiSidebarMode, UiTableColumnSetting, UiTableViewMode, UiTheme,
-    UserExternalAccountRepository, UserLoginSnapshot, UserRepository, UserUiSettingsRepository,
+    UiDateTimeFormat, UiDefaultLandingView, UiDensity, UiDeviceClass, UiPalette, UiSettings,
+    UiSettingsFacet, UiSettingsUpdate, UiSidebarMode, UiTableColumnSetting, UiTableViewMode,
+    UiTheme, UserExternalAccountRepository, UserLoginSnapshot, UserRepository,
+    UserUiSettingsRepository,
 };
 use scryer_domain::{
     AppPermissionMask, ExternalAccountProvider, ExternalAccountStatus, LibraryGrant, User,
@@ -955,7 +956,7 @@ fn row_to_user(row: &SqlRow) -> AppResult<User> {
 // The language lives on the user's own row; the rest of the interface
 // preferences live in user_ui_settings.
 const UI_SETTINGS_SELECT: &str =
-    "SELECT user_id, theme, date_time_format, highlight_color, secondary_color, high_contrast_mode,
+    "SELECT user_id, theme, palette, date_time_format, highlight_color, secondary_color, high_contrast_mode,
             reduce_motion, hide_sponsor_button, no_glow, density, sidebar_mode, default_landing_view,
             (SELECT locale FROM users WHERE users.id = user_ui_settings.user_id) AS language,
             created_at, updated_at
@@ -1008,12 +1009,13 @@ async fn upsert_ui_settings_tx(
     let now = Utc::now();
     tx.execute(
         "INSERT INTO user_ui_settings (
-             user_id, theme, date_time_format, highlight_color, secondary_color, high_contrast_mode, reduce_motion,
+             user_id, theme, palette, date_time_format, highlight_color, secondary_color, high_contrast_mode, reduce_motion,
              hide_sponsor_button, no_glow, density, sidebar_mode, default_landing_view, created_at, updated_at
          )
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
          ON CONFLICT(user_id) DO UPDATE SET
              theme = excluded.theme,
+             palette = excluded.palette,
              date_time_format = excluded.date_time_format,
              highlight_color = excluded.highlight_color,
              secondary_color = excluded.secondary_color,
@@ -1028,6 +1030,7 @@ async fn upsert_ui_settings_tx(
         &[
             SqlArg::Text(user_id.to_string()),
             SqlArg::Text(settings.theme.as_str().to_string()),
+            SqlArg::Text(settings.palette.as_str().to_string()),
             SqlArg::Text(settings.date_time_format.as_str().to_string()),
             SqlArg::OptText(settings.highlight_color.clone()),
             SqlArg::OptText(settings.secondary_color.clone()),
@@ -1122,6 +1125,8 @@ fn row_to_ui_settings(row: &SqlRow) -> AppResult<UiSettings> {
     Ok(UiSettings {
         user_id: row.text("user_id")?,
         theme: parse_ui_theme(row.text("theme")?)?,
+        palette: UiPalette::parse(&row.text("palette")?)
+            .ok_or_else(|| AppError::Repository("invalid UI palette".into()))?,
         date_time_format: parse_ui_date_time_format(row.text("date_time_format")?)?,
         highlight_color: row.opt_text("highlight_color")?,
         secondary_color: row.opt_text("secondary_color")?,
@@ -1402,6 +1407,44 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn ui_settings_palette_migration_preserves_existing_preferences() {
+        let sqlite = include_str!("../../../scryer/src/db/migrations/0309_user_ui_palette.sql");
+        let postgres =
+            include_str!("../../../scryer/src/db/postgres/migrations/0309_user_ui_palette.sql");
+        assert_eq!(
+            sqlite, postgres,
+            "both engines use the same portable palette DDL"
+        );
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("fixture");
+        sqlx::raw_sql("CREATE TABLE user_ui_settings (user_id TEXT PRIMARY KEY NOT NULL, theme TEXT NOT NULL, highlight_color TEXT); INSERT INTO user_ui_settings VALUES ('existing', 'system', '#123456');")
+            .execute(&pool).await.expect("legacy row");
+        sqlx::raw_sql(sqlite)
+            .execute(&pool)
+            .await
+            .expect("palette migration");
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT theme, highlight_color, palette FROM user_ui_settings WHERE user_id = 'existing'")
+            .fetch_one(&pool).await.expect("migrated row");
+        assert_eq!(row, ("system".into(), "#123456".into(), "CLASSIC".into()));
+        assert!(
+            sqlx::query("UPDATE user_ui_settings SET palette = 'CUSTOM'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("UPDATE user_ui_settings SET palette = NULL")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+    }
+
     async fn test_store() -> UserStore {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -1453,6 +1496,7 @@ mod tests {
             "CREATE TABLE user_ui_settings (
                 user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 theme TEXT NOT NULL DEFAULT 'dark',
+                palette TEXT NOT NULL DEFAULT 'CLASSIC',
                 date_time_format TEXT NOT NULL DEFAULT 'locale',
                 highlight_color TEXT,
                 secondary_color TEXT,
@@ -1840,6 +1884,7 @@ mod tests {
             &user.id,
             UiSettingsUpdate {
                 theme: UiTheme::Dark,
+                palette: UiPalette::Ocean,
                 date_time_format: UiDateTimeFormat::Iso24h,
                 highlight_color: Some("#ff3366".to_string()),
                 secondary_color: Some("#2277aa".to_string()),
@@ -1875,6 +1920,7 @@ mod tests {
         .expect("upsert UI settings");
         assert_eq!(stored.user_id, user.id);
         assert_eq!(stored.theme, UiTheme::Dark);
+        assert_eq!(stored.palette, UiPalette::Ocean);
         assert_eq!(stored.date_time_format, UiDateTimeFormat::Iso24h);
         assert!(stored.hide_sponsor_button);
         assert_eq!(stored.table_columns.len(), 2);
@@ -1897,6 +1943,7 @@ mod tests {
             .expect("load legacy UI settings")
             .expect("UI settings exist");
         assert_eq!(legacy.theme, UiTheme::Dark);
+        assert_eq!(legacy.palette, UiPalette::Ocean);
         assert_eq!(legacy.theme.as_str(), "dark");
         assert_eq!(legacy.table_columns, stored.table_columns);
         assert_eq!(legacy.highlight_color, stored.highlight_color);
@@ -1906,6 +1953,7 @@ mod tests {
             &user.id,
             UiSettingsUpdate {
                 theme: UiTheme::System,
+                palette: UiPalette::Classic,
                 date_time_format: UiDateTimeFormat::Locale,
                 highlight_color: None,
                 secondary_color: None,
@@ -2112,6 +2160,7 @@ mod tests {
             .expect("settings exist");
         let mut update = UiSettingsUpdate {
             theme: UiTheme::Light,
+            palette: UiPalette::Forest,
             date_time_format: current.date_time_format,
             highlight_color: None,
             secondary_color: None,
@@ -2129,6 +2178,7 @@ mod tests {
             .await
             .expect("save theme");
         assert_eq!(after_theme.theme, UiTheme::Light);
+        assert_eq!(after_theme.palette, UiPalette::Forest);
         assert_eq!(after_theme.table_columns, replaced.table_columns);
         assert_eq!(
             after_theme.catalog_views[1].view_mode,

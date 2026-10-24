@@ -28340,6 +28340,10 @@ Complete caller presentation-preferences update.
 """
 input SetMyUiSettingsInput {
 	"""
+	Curated color palette; omitted or null preserves the existing selection.
+	"""
+	palette: UiPaletteValue
+	"""
 	Selected theme.
 	"""
 	theme: UiThemeValue!
@@ -31783,6 +31787,19 @@ enum UiDeviceClassValue {
 }
 
 """
+Curated appearance saved on the caller's profile.
+"""
+enum UiPaletteValue {
+	CLASSIC
+	SCRYER_DEFAULT
+	SLATE
+	OCEAN
+	FOREST
+	PLUM
+	EMBER
+}
+
+"""
 Media facet used by table-column settings.
 """
 enum UiSettingsFacetValue {
@@ -31804,6 +31821,10 @@ enum UiSettingsFacetValue {
 Persisted caller presentation preferences and table-column settings.
 """
 type UiSettingsPayload {
+	"""
+	Selected curated color palette.
+	"""
+	palette: UiPaletteValue!
 	"""
 	Selected theme.
 	"""

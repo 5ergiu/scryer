@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "./component-utilities.css";
+@import "./palettes.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -53,6 +54,7 @@
     "Source Code Pro", Menlo, Consolas, monospace;
   --font-space-grotesk: "Space Grotesk Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
 
+  --scry-table-hover-bg: linear-gradient(90deg, rgba(91, 100, 255, 0.02), rgba(56, 189, 248, 0.012) 72%, transparent 100%);
   --scry-page1: #eef0f7;
   --scry-page2: #e6eaf3;
   --scry-page3: #dde3ed;
@@ -734,8 +736,7 @@ body {
  * A row opts in by carrying one of the data-ui values listed below, so both
  * lists have to stay in sync or a row gets the gradient twice. */
 .dark [data-slot="table-body"] [data-slot="table-row"]:not([data-ui="title-table-row"]):not([data-ui="compact-title-table-row"]):not([data-ui="title-table-empty-row"]):not([data-ui="settings-user-table-row"]):not([data-ui="settings-plugin-table-row"]):not([data-ui="settings-table-row"]):not([data-ui="activity-row"]):not([data-ui="wanted-item-row"]):not([data-ui="pending-release-row"]):not([data-ui="media-info-row"]):not([data-ui="subtitle-search-result-row"]):not([data-ui="list-subscription-row"]):not([data-ui="list-catalog-row"]):not([data-ui="list-catalog-preview"]):hover > [data-slot="table-cell"] {
-  background:
-    linear-gradient(90deg, rgba(91, 100, 255, 0.02), rgba(56, 189, 248, 0.012) 72%, transparent 100%);
+  background: var(--scry-table-hover-bg);
 }
 
 .dark [data-slot="table-body"] [data-ui="title-table-row"]:hover,
@@ -753,8 +754,7 @@ body {
 .dark [data-slot="table-body"] [data-ui="list-catalog-row"]:has(+ [data-ui="list-catalog-preview"]:hover),
 .dark [data-slot="table-body"] [data-ui="list-catalog-row"]:hover + [data-ui="list-catalog-preview"],
 .dark [data-slot="table-body"] [data-ui="list-catalog-preview"]:hover {
-  background:
-    linear-gradient(90deg, rgba(91, 100, 255, 0.02), rgba(56, 189, 248, 0.012) 72%, transparent 100%);
+  background: var(--scry-table-hover-bg);
 }
 
 /* Settings tables are scoped at their page shells so every current and future
@@ -763,8 +763,7 @@ body {
  * their independently tuned row treatment. */
 .dark [data-slot="settings-main-scroll"] [data-slot="table-body"] [data-slot="table-row"]:has(> [data-slot="table-cell"] + [data-slot="table-cell"]):hover,
 .dark [data-slot="facet-settings-scroll"] [data-slot="table-body"] [data-slot="table-row"]:has(> [data-slot="table-cell"] + [data-slot="table-cell"]):hover {
-  background:
-    linear-gradient(90deg, rgba(91, 100, 255, 0.02), rgba(56, 189, 248, 0.012) 72%, transparent 100%);
+  background: var(--scry-table-hover-bg);
 }
 
 .dark [data-slot="settings-main-scroll"] [data-slot="table-body"] [data-slot="table-row"]:has(> [data-slot="table-cell"] + [data-slot="table-cell"]):hover > [data-slot="table-cell"],

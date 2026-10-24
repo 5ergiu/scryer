@@ -327,6 +327,19 @@ pub enum UiThemeValue {
     System,
 }
 
+/// Curated appearance saved on the caller's profile.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
+pub enum UiPaletteValue {
+    Classic,
+    ScryerDefault,
+    Slate,
+    Ocean,
+    Forest,
+    Plum,
+    Ember,
+}
+
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
 /// Date and time display format preference.
@@ -446,6 +459,8 @@ pub struct UiTableColumnSettingPayload {
 #[derive(SimpleObject, Clone)]
 /// Persisted caller presentation preferences and table-column settings.
 pub struct UiSettingsPayload {
+    /// Selected curated color palette.
+    pub palette: UiPaletteValue,
     /// Selected theme.
     pub theme: UiThemeValue,
     /// Selected date and time format.
@@ -507,6 +522,8 @@ pub struct UiTableColumnSettingInput {
 #[derive(InputObject, Clone)]
 /// Complete caller presentation-preferences update.
 pub struct SetMyUiSettingsInput {
+    /// Curated color palette; omitted or null preserves the existing selection.
+    pub palette: Option<UiPaletteValue>,
     /// Selected theme.
     pub theme: UiThemeValue,
     /// Optional date and time format; null preserves the existing value.

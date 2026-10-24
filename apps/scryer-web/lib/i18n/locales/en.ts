@@ -1,6 +1,19 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "palette.title": "Color palette",
+  "palette.description": "Choose an appearance for your account on every device.",
+  "palette.classic": "Classic",
+  "palette.scryerDefault": "Scryer Default",
+  "palette.slate": "Slate",
+  "palette.ocean": "Ocean",
+  "palette.forest": "Forest",
+  "palette.plum": "Plum",
+  "palette.ember": "Ember",
+  "palette.classicMode": "Classic appearance",
+  "palette.choose": "Choose color palette",
+  "palette.useAccent": "Use palette accent",
+  "palette.saveFailed": "Could not save your appearance. Your previous selection has been restored.",
   "titleDelete.refusal.selection": "Select titles without duplicates.",
   "titleDelete.refusal.busy": "A deletion is already running.",
   "titleDelete.refusal.preview": "Refresh the deletion preview and confirm it.",
