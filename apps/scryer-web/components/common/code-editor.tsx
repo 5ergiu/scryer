@@ -18,22 +18,24 @@ import {
 } from "@codemirror/state";
 import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/legacy-modes/mode/javascript";
-import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { xml } from "@codemirror/legacy-modes/mode/xml";
 import { oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
 import { StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { setDiagnostics as setLintDiagnostics } from "@codemirror/lint";
 import { regoAssistance } from "./rego-editor-assistance";
+import { formatScriptIndentation, scriptAssistance, scriptLanguageExtensions, type ScriptEditorLanguage } from "./script-editor-assistance";
+import type { ScriptTriggerValue } from "@/lib/types/scripts";
 import type { RegoFamily } from "@/lib/utils/rego-assistance";
 import { useTheme } from "next-themes";
 import { Check, Copy } from "lucide-react";
 import "@fontsource-variable/jetbrains-mono";
 import { IconButton } from "@/components/ui/icon-button";
+import { Button } from "@/components/ui/button";
 import { CODE_FONT } from "@/lib/fonts";
 import { isDarkTheme } from "@/lib/theme";
 
-export type CodeEditorLanguage = "plain" | "javascript" | "json" | "rego" | "shell" | "xml";
+export type CodeEditorLanguage = "plain" | "javascript" | "json" | "rego" | "xml" | ScriptEditorLanguage;
 
 export type CodeEditorDiagnostic = {
   line: number;
@@ -53,6 +55,8 @@ export type CodeEditorProps = {
   language?: CodeEditorLanguage;
   regoFamily?: RegoFamily;
   regoTranslate?: (key: string) => string;
+  scriptTrigger?: ScriptTriggerValue;
+  scriptTranslate?: (key: string) => string;
   copyable?: boolean;
   copyLabel?: string;
   copiedLabel?: string;
@@ -361,8 +365,8 @@ function languageExtensions(language: CodeEditorLanguage): Extension[] {
     return [StreamLanguage.define(json)];
   }
 
-  if (language === "shell") {
-    return [StreamLanguage.define(shell)];
+  if (["shell", "python", "powershell", "batch", "go"].includes(language)) {
+    return [scriptLanguageExtensions(language as ScriptEditorLanguage)];
   }
 
   if (language === "xml") {
@@ -384,6 +388,8 @@ export default function CodeEditor({
   language = "plain",
   regoFamily,
   regoTranslate,
+  scriptTrigger,
+  scriptTranslate,
   copyable = false,
   copyLabel = "Copy code",
   copiedLabel = "Copied",
@@ -441,9 +447,9 @@ export default function CodeEditor({
       lineNumbers(),
       ...languageExtensions(language),
       syntaxHighlighting(oneDarkHighlightStyle),
-      keymap.of([...defaultKeymap, ...(language === "rego" ? historyKeymap : []), indentWithTab]),
-      ...(language === "rego" ? [history()] : []),
       assistance.of([]),
+      keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+      history(),
       appearance.of(editorTheme),
       editable.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
       updateListener,
@@ -483,11 +489,15 @@ export default function CodeEditor({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({ effects: [
-      assistance.reconfigure(language === "rego" && regoFamily && regoTranslate ? regoAssistance(regoFamily, regoTranslate, readOnly) : []),
+      assistance.reconfigure(language === "rego" && regoFamily && regoTranslate
+        ? regoAssistance(regoFamily, regoTranslate, readOnly)
+        : scriptTrigger && scriptTranslate && ["shell", "python", "powershell", "batch", "go"].includes(language)
+          ? scriptAssistance(language as ScriptEditorLanguage, scriptTrigger, scriptTranslate, readOnly)
+          : []),
       appearance.reconfigure(isDarkTheme(resolvedTheme) ? scryerDark : lightTheme),
       editable.reconfigure([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
     ] });
-  }, [assistance, appearance, editable, language, regoFamily, regoTranslate, readOnly, resolvedTheme]);
+  }, [assistance, appearance, editable, language, regoFamily, regoTranslate, scriptTrigger, scriptTranslate, readOnly, resolvedTheme]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -523,10 +533,23 @@ export default function CodeEditor({
 
   return (
     <div className="group/code-editor relative">
+      {scriptTrigger && scriptTranslate && !readOnly ? (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">{scriptTranslate("script.editor.assistanceHint")}</span>
+          <Button type="button" variant="outline" size="sm" title={scriptTranslate("script.editor.formatHelp")} onClick={() => {
+            if (viewRef.current) {
+              formatScriptIndentation(viewRef.current);
+              viewRef.current.focus();
+            }
+          }}>
+            {scriptTranslate("script.editor.format")}
+          </Button>
+        </div>
+      ) : null}
       <div
         id={id}
         ref={containerRef}
-        className="overflow-auto rounded-lg border border-border text-sm"
+        className="overflow-hidden rounded-lg border border-border text-sm [&>.cm-editor]:h-full [&_.cm-scroller]:overflow-auto"
         style={{ height: computedHeight, minHeight: "120px" }}
       />
       {copyable ? (
