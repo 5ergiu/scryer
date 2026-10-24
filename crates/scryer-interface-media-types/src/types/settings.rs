@@ -331,13 +331,21 @@ pub enum UiThemeValue {
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(rename_items = "SCREAMING_SNAKE_CASE")]
 pub enum UiPaletteValue {
+    /// The original Scryer look, following the selected light or dark theme.
     Classic,
+    /// The Scryer indigo palette, always dark.
     ScryerDefault,
+    /// Cool grey with a blue accent, always light.
     Slate,
+    /// Deep blue-green with a teal accent, always dark.
     Ocean,
+    /// Dark green with a green accent, always dark.
     Forest,
+    /// Dark purple with a violet accent, always dark.
     Plum,
+    /// Warm cream with a burnt-orange accent, always light.
     Ember,
+    /// Neutral charcoal with a sea-green accent, always dark.
     Graphite,
 }
 

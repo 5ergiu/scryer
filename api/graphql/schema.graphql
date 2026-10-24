@@ -31858,13 +31858,37 @@ enum UiDeviceClassValue {
 Curated appearance saved on the caller's profile.
 """
 enum UiPaletteValue {
+	"""
+	The original Scryer look, following the selected light or dark theme.
+	"""
 	CLASSIC
+	"""
+	The Scryer indigo palette, always dark.
+	"""
 	SCRYER_DEFAULT
+	"""
+	Cool grey with a blue accent, always light.
+	"""
 	SLATE
+	"""
+	Deep blue-green with a teal accent, always dark.
+	"""
 	OCEAN
+	"""
+	Dark green with a green accent, always dark.
+	"""
 	FOREST
+	"""
+	Dark purple with a violet accent, always dark.
+	"""
 	PLUM
+	"""
+	Warm cream with a burnt-orange accent, always light.
+	"""
 	EMBER
+	"""
+	Neutral charcoal with a sea-green accent, always dark.
+	"""
 	GRAPHITE
 }
 
