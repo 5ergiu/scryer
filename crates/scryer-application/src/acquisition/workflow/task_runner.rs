@@ -5500,7 +5500,7 @@ const SCHEDULED_TASK_MIN_OVERDUE_BUDGET: std::time::Duration =
 
 /// A job is overdue once it is still running when its next run is due: its
 /// cadence, floored at [`SCHEDULED_TASK_MIN_OVERDUE_BUDGET`].
-fn scheduled_task_overdue_budget(cadence: std::time::Duration) -> std::time::Duration {
+pub(crate) fn scheduled_task_overdue_budget(cadence: std::time::Duration) -> std::time::Duration {
     cadence.max(SCHEDULED_TASK_MIN_OVERDUE_BUDGET)
 }
 

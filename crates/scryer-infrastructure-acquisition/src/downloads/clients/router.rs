@@ -902,6 +902,31 @@ impl PrioritizedDownloadClientRouter {
         self
     }
 
+    /// The clients whose durable failure backoff is still open. Sonarr's
+    /// provider leaves a blocked client out of every read, not just grabs, so
+    /// a client already known to be failing costs no request (and no read
+    /// timeout) until its backoff ends. A status read that fails blocks
+    /// nothing, which is the pre-status behaviour.
+    async fn clients_in_failure_backoff(&self) -> HashSet<String> {
+        let Some(status) = self.download_client_status.as_ref() else {
+            return HashSet::new();
+        };
+        match status.list().await {
+            Ok(statuses) => {
+                let now = chrono::Utc::now();
+                statuses
+                    .into_iter()
+                    .filter(|(_, status)| status.is_blocked(now))
+                    .map(|(client_id, _)| client_id)
+                    .collect()
+            }
+            Err(error) => {
+                warn!(error = %error, "download client status could not be read; reading every client");
+                HashSet::new()
+            }
+        }
+    }
+
     /// Sonarr's `DownloadClientProvider` round-robins over the clients whose
     /// status row is not blocked and only fails when every candidate is. A
     /// blocked client is skipped, never tried and never failed over from.
@@ -1113,11 +1138,26 @@ impl PrioritizedDownloadClientRouter {
                 self.proxy_for_download_client(config).await,
             );
         }
+        let blocked_client_ids = if Self::feedback_read_bypasses_backoff(read_kind) {
+            HashSet::new()
+        } else {
+            self.clients_in_failure_backoff().await
+        };
         let mut skipped_client_ids = Vec::new();
         let reads = clients
             .into_iter()
             .enumerate()
             .filter_map(|(index, config)| {
+                if blocked_client_ids.contains(&config.id) {
+                    debug!(
+                        client_id = %config.id,
+                        client = %config.name,
+                        read_kind = Self::feedback_read_kind_label(read_kind),
+                        "skipping download client feedback read: client is in failure backoff"
+                    );
+                    skipped_client_ids.push(config.id.clone());
+                    return None;
+                }
                 if let Some(remaining) = self.feedback_backoff_remaining(&config.id, read_kind) {
                     debug!(
                         client_id = %config.id,
@@ -10117,6 +10157,64 @@ mod tests {
         let history = router.list_history_with_read_report().await.unwrap();
         assert_eq!(history.polled_client_count, 2);
         assert_eq!(history.unreadable_client_ids, vec!["failing".to_string()]);
+    }
+
+    /// A client in durable failure backoff is left out of every feedback read
+    /// before any request is made, and reported as never asked, so it is
+    /// neither judged nor allowed to stall the read until its backoff ends.
+    #[tokio::test]
+    async fn a_client_in_failure_backoff_is_not_read() {
+        let blocked_client = Arc::new(FailingQueueDownloadClient::default());
+        let healthy_client = Arc::new(MockDownloadClient::default());
+        healthy_client
+            .queue_items
+            .lock()
+            .unwrap()
+            .push(test_queue_item("healthy"));
+        let plugin_provider: Arc<dyn DownloadClientPluginProvider> =
+            Arc::new(MockDownloadClientPluginProvider {
+                accepted_inputs: vec!["nzb_url".to_string()],
+                clients: vec![
+                    ("blocked".to_string(), blocked_client.clone()),
+                    ("healthy".to_string(), healthy_client.clone()),
+                ],
+            });
+        let router = PrioritizedDownloadClientRouter::new(
+            Arc::new(MockDownloadClientConfigRepository {
+                configs: vec![
+                    test_config("blocked", "Blocked", "qbittorrent", 0),
+                    test_config("healthy", "Healthy", "qbittorrent", 10),
+                ],
+            }),
+            Arc::new(MockSettingsRepository::default()),
+            null_staged_nzb_store(),
+            test_pipeline_limit(),
+            Some(plugin_provider),
+        )
+        .with_download_client_status(Arc::new(StubDownloadClientStatusRepository {
+            statuses: HashMap::from([(
+                "blocked".to_string(),
+                scryer_application::DownloadClientBackoffStatus {
+                    disabled_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+                    escalation_level: 1,
+                    ..Default::default()
+                },
+            )]),
+        }));
+
+        let queue = router
+            .list_queue_with_read_report()
+            .await
+            .expect("the healthy client answers");
+        assert_eq!(blocked_client.list_queue_call_count(), 0);
+        assert_eq!(queue.unreadable_client_ids, vec!["blocked".to_string()]);
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].download_client_item_id, "healthy");
+
+        // A title-scoped read still asks every client, as it does through the
+        // short feedback backoff.
+        let _ = router.list_queue_for_title("title-1").await;
+        assert_eq!(blocked_client.list_queue_for_title_call_count(), 1);
     }
 
     /// A read nobody answered is reported as such without becoming an error:
