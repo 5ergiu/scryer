@@ -505,6 +505,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
           episode.absoluteNumber,
         )}
         data-episode-id={episode.id}
+        data-ui="episode-row"
         className={`cv-auto-row-sm${episode.monitored ? "" : " opacity-50"}`}
       >
         {selectionCheckbox ? (
