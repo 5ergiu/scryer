@@ -851,9 +851,218 @@ pub async fn replace_title_search_projection_pg_source_tx(
     replace_title_search_projection_pg_on_connection(&mut *tx, source).await
 }
 
+/// One projection row as the comparison sees it: every column a projection
+/// write sets, plus the row's collation keys ordered by profile. `term_id` is
+/// deliberately absent; it is assigned by the insert, and keeping it is the
+/// point of not rewriting an unchanged projection.
+#[derive(Debug, PartialEq, Eq)]
+struct ProjectedRow {
+    facet: String,
+    term_kind: String,
+    raw_term: String,
+    normalized_term: String,
+    weight: i64,
+    literal_term: String,
+    match_term: String,
+    match_year: Option<i64>,
+    stripped_year_key: String,
+    script: String,
+    numbers_key: String,
+    char_length: i64,
+    romanization_key: Option<String>,
+    language_tag: Option<String>,
+    title_year: Option<i64>,
+    collation_keys: Vec<(String, Vec<u8>)>,
+}
+
+/// The rows a write of `terms` would leave behind, in insert order. Collation
+/// keys are keyed by profile with the last one winning, which is what the
+/// upserting insert does with a repeated profile.
+fn projected_rows(facet: &str, terms: &[TitleSearchTerm]) -> Vec<ProjectedRow> {
+    terms
+        .iter()
+        .map(|term| ProjectedRow {
+            facet: facet.to_string(),
+            term_kind: term.term_kind.to_string(),
+            raw_term: term.raw_term.clone(),
+            normalized_term: term.normalized_term.clone(),
+            weight: term.weight,
+            literal_term: term.literal_term.clone(),
+            match_term: term.match_term.clone(),
+            match_year: term.match_year.map(i64::from),
+            stripped_year_key: term.stripped_year_key.clone(),
+            script: term.script.to_string(),
+            numbers_key: term.numbers_key.clone(),
+            char_length: term.char_length,
+            romanization_key: term.romanization_key.clone(),
+            language_tag: term.language_tag.clone(),
+            title_year: term.title_year.map(i64::from),
+            collation_keys: term
+                .collation_keys
+                .iter()
+                .map(|(profile, key)| (profile.to_string(), key.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        })
+        .collect()
+}
+
+/// The stored rows of one title, in insert order. `$placeholder` is the
+/// dialect's first bind marker.
+macro_rules! stored_projection_select {
+    ($placeholder:literal) => {
+        concat!(
+            "SELECT term_id, facet, term_kind, raw_term, normalized_term, weight, ",
+            "literal_term, match_term, match_year, stripped_year_key, script, numbers_key, ",
+            "char_length, romanization_key, language_tag, title_year ",
+            "FROM title_search_terms WHERE title_id = ",
+            $placeholder,
+            " ORDER BY term_id"
+        )
+    };
+}
+
+/// Decode one stored row into `(term_id, row)`, with its keys still empty.
+/// A macro rather than a function because the two dialects' row types share
+/// no trait that spells these decodes without a wall of bounds.
+macro_rules! stored_projected_row {
+    ($row:expr) => {{
+        let row = $row;
+        let get = |error: sqlx::Error| AppError::Repository(error.to_string());
+        let term_id: i64 = row.try_get("term_id").map_err(get)?;
+        (
+            term_id,
+            ProjectedRow {
+                facet: row.try_get("facet").map_err(get)?,
+                term_kind: row.try_get("term_kind").map_err(get)?,
+                raw_term: row.try_get("raw_term").map_err(get)?,
+                normalized_term: row.try_get("normalized_term").map_err(get)?,
+                weight: row.try_get("weight").map_err(get)?,
+                literal_term: row.try_get("literal_term").map_err(get)?,
+                match_term: row.try_get("match_term").map_err(get)?,
+                match_year: row.try_get("match_year").map_err(get)?,
+                stripped_year_key: row.try_get("stripped_year_key").map_err(get)?,
+                script: row.try_get("script").map_err(get)?,
+                numbers_key: row.try_get("numbers_key").map_err(get)?,
+                char_length: row.try_get("char_length").map_err(get)?,
+                romanization_key: row.try_get("romanization_key").map_err(get)?,
+                language_tag: row.try_get("language_tag").map_err(get)?,
+                title_year: row.try_get("title_year").map_err(get)?,
+                collation_keys: Vec::new(),
+            },
+        )
+    }};
+}
+
+/// Attach `(term_id, profile, key)` triples, already ordered by term and
+/// profile, to the rows they belong to.
+fn attach_collation_keys(
+    rows: Vec<(i64, ProjectedRow)>,
+    keys: Vec<(i64, String, Vec<u8>)>,
+) -> Vec<ProjectedRow> {
+    let mut by_term = std::collections::HashMap::<i64, Vec<(String, Vec<u8>)>>::new();
+    for (term_id, profile, key) in keys {
+        by_term.entry(term_id).or_default().push((profile, key));
+    }
+    rows.into_iter()
+        .map(|(term_id, mut row)| {
+            row.collation_keys = by_term.remove(&term_id).unwrap_or_default();
+            row
+        })
+        .collect()
+}
+
+async fn stored_projected_rows(
+    connection: &mut sqlx::SqliteConnection,
+    title_id: &str,
+) -> AppResult<Vec<ProjectedRow>> {
+    let rows = sqlx::query(stored_projection_select!("?"))
+        .bind(title_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in &rows {
+        decoded.push(stored_projected_row!(row));
+    }
+    let keys: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT keys.term_id, keys.profile, keys.collation_key
+         FROM title_search_collation_keys keys
+         JOIN title_search_terms terms ON terms.term_id = keys.term_id
+         WHERE terms.title_id = ?
+         ORDER BY keys.term_id, keys.profile",
+    )
+    .bind(title_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(attach_collation_keys(decoded, keys))
+}
+
+/// PostgreSQL half of [`stored_projected_rows`].
+async fn stored_projected_rows_pg(
+    connection: &mut sqlx::PgConnection,
+    title_id: &str,
+) -> AppResult<Vec<ProjectedRow>> {
+    let rows = sqlx::query(stored_projection_select!("$1"))
+        .bind(title_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|err| AppError::Repository(err.to_string()))?;
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in &rows {
+        decoded.push(stored_projected_row!(row));
+    }
+    let keys: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT keys.term_id, keys.profile, keys.collation_key
+         FROM title_search_collation_keys keys
+         JOIN title_search_terms terms ON terms.term_id = keys.term_id
+         WHERE terms.title_id = $1
+         ORDER BY keys.term_id, keys.profile",
+    )
+    .bind(title_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|err| AppError::Repository(err.to_string()))?;
+    Ok(attach_collation_keys(decoded, keys))
+}
+
+/// Restate one title's projection, but only when it would come out different.
+///
+/// Most title writes — a hydration refresh, a scan re-persisting what it
+/// found, a bridge replace that names the same cours — leave every searchable
+/// field as it was. Rewriting the rows anyway would hand out new term ids and
+/// claim the title for the fuzzy index, which then commits a segment for a
+/// title whose documents it already holds. Comparing first, inside the same
+/// transaction, keeps the rows, their ids and the queue untouched in that case.
 async fn replace_title_search_projection_pg_on_connection(
     connection: &mut sqlx::PgConnection,
     source: &TitleSearchProjectionSource,
+) -> AppResult<()> {
+    let terms = projected_terms_pg(&mut *connection, source).await?;
+    let wanted = projected_rows(source.facet.as_str(), &terms);
+    if stored_projected_rows_pg(&mut *connection, &source.title_id).await? == wanted {
+        return Ok(());
+    }
+    write_title_search_projection_pg(connection, source, &terms).await
+}
+
+async fn projected_terms_pg(
+    connection: &mut sqlx::PgConnection,
+    source: &TitleSearchProjectionSource,
+) -> AppResult<Vec<TitleSearchTerm>> {
+    let bridged = source
+        .with_tagged_aliases(bridge_cour_aliases_pg(&mut *connection, &source.title_id).await?);
+    Ok(build_title_search_terms(&bridged))
+}
+
+/// Replace the title's rows with `terms` and claim it for the fuzzy index,
+/// unconditionally.
+async fn write_title_search_projection_pg(
+    connection: &mut sqlx::PgConnection,
+    source: &TitleSearchProjectionSource,
+    terms: &[TitleSearchTerm],
 ) -> AppResult<()> {
     sqlx::query(
         "DELETE FROM title_search_collation_keys
@@ -872,11 +1081,8 @@ async fn replace_title_search_projection_pg_on_connection(
 
     enqueue_title_for_fuzzy_index_pg(&mut *connection, &source.title_id).await?;
 
-    let bridged = source
-        .with_tagged_aliases(bridge_cour_aliases_pg(&mut *connection, &source.title_id).await?);
-
     let facet = source.facet.as_str();
-    for term in build_title_search_terms(&bridged) {
+    for term in terms {
         let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
              (title_id, facet, term_kind, raw_term, normalized_term, weight,
@@ -925,18 +1131,41 @@ async fn replace_title_search_projection_pg_on_connection(
     Ok(())
 }
 
+/// SQLite half of [`replace_title_search_projection_pg_on_connection`]:
+/// restate the projection only when it would come out different.
 async fn replace_title_search_projection_source_tx(
     connection: &mut sqlx::SqliteConnection,
     source: &TitleSearchProjectionSource,
 ) -> AppResult<()> {
-    delete_title_search_projection_on_connection(connection, &source.title_id).await?;
+    let terms = projected_terms(&mut *connection, source).await?;
+    let wanted = projected_rows(source.facet.as_str(), &terms);
+    if stored_projected_rows(&mut *connection, &source.title_id).await? == wanted {
+        return Ok(());
+    }
+    write_title_search_projection(connection, source, &terms).await
+}
 
+async fn projected_terms(
+    connection: &mut sqlx::SqliteConnection,
+    source: &TitleSearchProjectionSource,
+) -> AppResult<Vec<TitleSearchTerm>> {
     let bridged =
         source.with_tagged_aliases(bridge_cour_aliases(&mut *connection, &source.title_id).await?);
+    Ok(build_title_search_terms(&bridged))
+}
+
+/// Replace the title's rows with `terms` and claim it for the fuzzy index,
+/// unconditionally.
+async fn write_title_search_projection(
+    connection: &mut sqlx::SqliteConnection,
+    source: &TitleSearchProjectionSource,
+    terms: &[TitleSearchTerm],
+) -> AppResult<()> {
+    delete_title_search_projection_on_connection(connection, &source.title_id).await?;
 
     let facet = source.facet.as_str();
 
-    for term in build_title_search_terms(&bridged) {
+    for term in terms {
         let term_id: i64 = sqlx::query_scalar(
             "INSERT INTO title_search_terms
              (title_id, facet, term_kind, raw_term, normalized_term, weight,
@@ -1096,7 +1325,10 @@ pub async fn rebuild_title_search_projection_on_connection(
         for row in &rows {
             let source = projection_source_from_row(row)?;
             after_id = source.title_id.clone();
-            replace_title_search_projection_source_tx(connection, &source).await?;
+            // Every row was deleted above, so there is nothing to compare
+            // against: write straight through.
+            let terms = projected_terms(&mut *connection, &source).await?;
+            write_title_search_projection(connection, &source, &terms).await?;
         }
     }
 
@@ -1144,7 +1376,8 @@ pub async fn rebuild_title_search_projection_pg_on_connection(
         for row in &rows {
             let source = projection_source_from_pg_row(row)?;
             after_id = source.title_id.clone();
-            replace_title_search_projection_pg_on_connection(connection, &source).await?;
+            let terms = projected_terms_pg(&mut *connection, &source).await?;
+            write_title_search_projection_pg(connection, &source, &terms).await?;
         }
     }
 

@@ -8164,4 +8164,143 @@ mod tests {
         assert!(sql.contains("titles.root_folder_id IN"));
         assert_eq!(args.len(), 3);
     }
+
+    /// Every stored projection column of one title, `term_id` included, plus
+    /// its collation keys, as SQLite quotes them: equal only when the rows
+    /// are byte-identical.
+    async fn title_search_projection_snapshot(
+        pool: &sqlx::SqlitePool,
+        title_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let terms = sqlx::query_scalar(
+            "SELECT quote(term_id) || ',' || quote(facet) || ',' || quote(term_kind) || ','
+                    || quote(raw_term) || ',' || quote(normalized_term) || ',' || quote(weight)
+                    || ',' || quote(literal_term) || ',' || quote(match_term) || ','
+                    || quote(match_year) || ',' || quote(stripped_year_key) || ','
+                    || quote(script) || ',' || quote(numbers_key) || ',' || quote(char_length)
+                    || ',' || quote(romanization_key) || ',' || quote(language_tag) || ','
+                    || quote(title_year)
+             FROM title_search_terms WHERE title_id = ? ORDER BY term_id",
+        )
+        .bind(title_id)
+        .fetch_all(pool)
+        .await
+        .expect("projection rows should load");
+        let keys = sqlx::query_scalar(
+            "SELECT quote(term_id) || ',' || quote(profile) || ',' || quote(collation_key)
+             FROM title_search_collation_keys
+             WHERE term_id IN (SELECT term_id FROM title_search_terms WHERE title_id = ?)
+             ORDER BY term_id, profile",
+        )
+        .bind(title_id)
+        .fetch_all(pool)
+        .await
+        .expect("collation keys should load");
+        (terms, keys)
+    }
+
+    async fn title_search_queue(pool: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT title_id FROM title_search_index_queue ORDER BY seq")
+            .fetch_all(pool)
+            .await
+            .expect("queue should load")
+    }
+
+    async fn clear_title_search_queue(pool: &sqlx::SqlitePool) {
+        sqlx::query("DELETE FROM title_search_index_queue")
+            .execute(pool)
+            .await
+            .expect("queue should clear");
+    }
+
+    async fn create_projection_test_title(store: &TitleStore, pool: &sqlx::SqlitePool) -> String {
+        let library_id = scryer_domain::default_library_id_for_facet(&MediaFacet::Series);
+        let root_folder_id = default_root_folder_id(pool, &library_id).await;
+        let mut title = conflict_test_title(
+            "synthetic-projection-title",
+            "Synthetic Projection Title",
+            &library_id,
+            &root_folder_id,
+            vec![],
+        );
+        title.aliases = vec!["Synthetic Alternate Spelling".to_string()];
+        title.year = Some(2001);
+        TitleRepository::create(store, title)
+            .await
+            .expect("title should create");
+        assert_eq!(
+            title_search_queue(pool).await,
+            vec!["synthetic-projection-title".to_string()],
+            "creating a title claims it for the fuzzy index"
+        );
+        clear_title_search_queue(pool).await;
+        "synthetic-projection-title".to_string()
+    }
+
+    #[tokio::test]
+    async fn title_search_projection_is_untouched_by_a_persist_that_changes_no_searchable_field() {
+        let (store, pool) = migrated_test_store().await;
+        let id = create_projection_test_title(&store, &pool).await;
+        let before = title_search_projection_snapshot(&pool, &id).await;
+        assert!(!before.0.is_empty() && !before.1.is_empty());
+
+        TitleRepository::update_monitored(&store, &id, false)
+            .await
+            .expect("monitored update should persist");
+        TitleRepository::update_metadata(
+            &store,
+            &id,
+            None,
+            None,
+            Some(vec!["synthetic-plain-tag".to_string()]),
+            None,
+        )
+        .await
+        .expect("tag update should persist");
+
+        assert!(
+            title_search_queue(&pool).await.is_empty(),
+            "a persist that leaves every searchable field alone must not claim the title"
+        );
+        assert_eq!(
+            title_search_projection_snapshot(&pool, &id).await,
+            before,
+            "the projection rows, ids included, must be left exactly as they were"
+        );
+    }
+
+    #[tokio::test]
+    async fn title_search_projection_rename_claims_the_title_once() {
+        let (store, pool) = migrated_test_store().await;
+        let id = create_projection_test_title(&store, &pool).await;
+        let before = title_search_projection_snapshot(&pool, &id).await;
+
+        for _ in 0..2 {
+            TitleRepository::update_metadata(
+                &store,
+                &id,
+                Some("Synthetic Renamed Title".to_string()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("rename should persist");
+        }
+
+        assert_eq!(
+            title_search_queue(&pool).await,
+            vec![id.clone()],
+            "the rename claims the title; repeating it changes nothing more"
+        );
+        let after = title_search_projection_snapshot(&pool, &id).await;
+        assert_ne!(after, before);
+        assert!(
+            after
+                .0
+                .iter()
+                .any(|row| row.contains("'synthetic renamed title'")),
+            "the renamed spelling is projected: {after:?}"
+        );
+    }
 }

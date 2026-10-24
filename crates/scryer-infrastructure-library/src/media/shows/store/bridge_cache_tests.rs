@@ -282,3 +282,79 @@ async fn a_read_racing_a_write_never_installs_the_stale_value() {
     assert_eq!(cache.lookup(TITLE), None, "but it must not have cached it");
     assert_eq!(read(&shows, TITLE).await, Some(bridge("new")));
 }
+
+async fn claimed_titles(datastore: &StoreDatastore) -> Vec<String> {
+    let StoreDatastore::Sqlite { pool, .. } = datastore else {
+        panic!("SQLite fixture required")
+    };
+    sqlx::query_scalar("SELECT title_id FROM title_search_index_queue ORDER BY seq")
+        .fetch_all(pool)
+        .await
+        .expect("queue should load")
+}
+
+/// The same cour names under a different generation stamp, which is what a
+/// routine bridge refresh from the gateway looks like.
+fn bridge_with_cours(generated_on: &str, cours: &[&str]) -> AnimeNumberingBridge {
+    AnimeNumberingBridge {
+        generated_on: generated_on.to_string(),
+        seasons: vec![AnimeCommunitySeason {
+            index: 1,
+            anidb_id: None,
+            anilist_id: None,
+            mal_id: None,
+            titles: cours.iter().map(|cour| cour.to_string()).collect(),
+            ranges: Vec::new(),
+            absolute_start: Some(1),
+            contiguous_absolute_start: None,
+            episode_count: Some(12),
+        }],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn numbering_bridge_replace_with_the_same_cour_names_does_not_claim_the_title() {
+    let datastore = datastore().await;
+    insert_title(&datastore, TITLE).await;
+    let (shows, _) = stores(&datastore);
+
+    shows
+        .replace_anime_numbering_bridge(
+            TITLE,
+            Some(&bridge_with_cours("first", &["Synthetic Cour Alpha"])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_titles(&datastore).await,
+        vec![TITLE.to_string()],
+        "the first bridge adds cour names, so the title is claimed"
+    );
+
+    shows
+        .replace_anime_numbering_bridge(
+            TITLE,
+            Some(&bridge_with_cours("second", &["Synthetic Cour Alpha"])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_titles(&datastore).await,
+        vec![TITLE.to_string()],
+        "a bridge naming the same cours leaves the projection and the queue alone"
+    );
+
+    shows
+        .replace_anime_numbering_bridge(
+            TITLE,
+            Some(&bridge_with_cours("third", &["Synthetic Cour Bravo"])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_titles(&datastore).await,
+        vec![TITLE.to_string(), TITLE.to_string()],
+        "a changed cour name is claimed again"
+    );
+}
