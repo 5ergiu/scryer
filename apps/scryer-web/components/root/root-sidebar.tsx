@@ -673,6 +673,16 @@ function RootSidebarContent({
   const { resolvedTheme } = useTheme();
   const { uiSettings } = useUiSettings();
   const [themeMounted, setThemeMounted] = React.useState(false);
+  const [socialMenuOpen, setSocialMenuOpen] = React.useState(false);
+  const socialTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const socialContentRef = React.useRef<HTMLDivElement>(null);
+  const socialOpenedByPointerRef = React.useRef(false);
+  const handleSocialPointerLeave = (event: React.PointerEvent) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node &&
+        (socialTriggerRef.current?.contains(next) || socialContentRef.current?.contains(next))) return;
+    setSocialMenuOpen(false);
+  };
   const brandLogoUrl =
     themeMounted && resolvedTheme === "light"
       ? `${import.meta.env.BASE_URL}scryer-lockup-dark.webp`
@@ -1692,20 +1702,41 @@ function RootSidebarContent({
             </a>
             <div
               className={cn(
-                "group/social relative min-w-0 group-data-[collapsible=icon]:hidden",
+                "relative min-w-0 group-data-[collapsible=icon]:hidden",
                 uiSettings.hideSponsorButton && "col-span-2",
               )}
             >
+              <Popover open={socialMenuOpen} onOpenChange={setSocialMenuOpen}>
+              <PopoverTrigger asChild>
               <button
                 id="root-sidebar-social-links"
+                ref={socialTriggerRef}
                 type="button"
                 aria-haspopup="menu"
+                onPointerEnter={(event) => {
+                  if (event.pointerType !== "mouse") return;
+                  socialOpenedByPointerRef.current = true;
+                  setSocialMenuOpen(true);
+                }}
+                onPointerLeave={handleSocialPointerLeave}
+                onPointerDown={() => { socialOpenedByPointerRef.current = false; }}
+                onKeyDown={() => { socialOpenedByPointerRef.current = false; }}
                 className="flex w-full min-w-0 items-center justify-center gap-1.5 rounded-lg border border-transparent bg-transparent px-2 py-1 text-xs font-medium text-[var(--scry-muted)] transition hover:border-[var(--scry-border2)] hover:bg-[var(--scry-hover)] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
               >
                 <MessagesSquare className="h-4 w-4" />
                 <span className="truncate">Social</span>
               </button>
-              <div className="pointer-events-none invisible absolute bottom-full left-0 z-50 w-full pb-1.5 opacity-0 transition-opacity group-hover/social:pointer-events-auto group-hover/social:visible group-hover/social:opacity-100 group-focus-within/social:pointer-events-auto group-focus-within/social:visible group-focus-within/social:opacity-100">
+              </PopoverTrigger>
+              <PopoverContent ref={socialContentRef} side="right" align="end" sideOffset={0} collisionPadding={8} avoidCollisions={false}
+                onPointerLeave={handleSocialPointerLeave}
+                onOpenAutoFocus={(event) => {
+                  event.preventDefault();
+                  if (!socialOpenedByPointerRef.current) {
+                    socialContentRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+                  }
+                }}
+                onCloseAutoFocus={(event) => { if (socialOpenedByPointerRef.current) event.preventDefault(); }}
+                className="z-[90] w-40 max-w-[var(--radix-popover-content-available-width)] border-0 bg-transparent p-0 pl-1.5 shadow-none">
                 <div
                   role="menu"
                   aria-label="Social links"
@@ -1742,7 +1773,8 @@ function RootSidebarContent({
                     <span>Discord</span>
                   </a>
                 </div>
-              </div>
+              </PopoverContent>
+              </Popover>
             </div>
           </div>
         </SidebarFooter>
