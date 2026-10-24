@@ -374,7 +374,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
         data-episode-id={episode.id}
         className={cn(
           "@container rounded-lg border border-border bg-card/50 p-3",
-          !episode.monitored && "opacity-60",
+          !episode.monitored && "opacity-[var(--scry-unmonitored-opacity,0.6)]",
         )}
       >
         <div className="flex items-start gap-3">
@@ -509,7 +509,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
         )}
         data-episode-id={episode.id}
         data-ui="episode-row"
-        className={`cv-auto-row-sm${episode.monitored ? "" : " opacity-50"}`}
+        className={cn("cv-auto-row-sm", !episode.monitored && "opacity-[var(--scry-unmonitored-opacity,0.5)]")}
       >
         {selectionCheckbox ? (
           <TableCell className="px-2 text-center align-middle">

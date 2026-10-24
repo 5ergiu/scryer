@@ -39,9 +39,9 @@ export function ExternalMediaLinkButton({
       target="_blank"
       rel="noreferrer"
       className={cn(
-        "inline-flex items-center gap-2 rounded-md border",
+        "inline-flex items-center gap-2 rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         size === "compact"
-          ? "h-8 border-[var(--scry-border3)] bg-[rgba(6,10,22,0.68)] px-2.5 py-1 text-xs font-semibold text-[var(--scry-muted2)] hover:bg-[rgba(var(--scry-accent-rgb),0.18)]"
+          ? "h-8 border-[var(--scry-border3)] bg-background/80 px-2.5 py-1 text-xs font-semibold text-[var(--scry-muted2)] hover:bg-[var(--scry-hover)]"
           : "h-12 border-border bg-card/45 px-3 py-2 text-base hover:bg-muted",
       )}
       aria-label={t("external.openOn", { site })}

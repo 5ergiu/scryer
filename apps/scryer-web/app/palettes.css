@@ -1,4 +1,13 @@
 /* Fixed palettes override appearance tokens; semantic status and facet colors retain their meaning. */
+html:not(.dark) {
+  --scry-unmonitored-opacity: 0.85;
+}
+
+html:not(.dark) [data-ui="episode-progress"] {
+  --scry-success-solid: #047857;
+  --scry-info-solid: #0369a1;
+}
+
 html[data-palette="SCRYER_DEFAULT"] {
   --primary-foreground: #000000;
 }

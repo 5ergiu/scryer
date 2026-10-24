@@ -122,8 +122,8 @@ export function GutterPanel({ id, label, frame, open, onOpenChange, children }: 
           // The panel sits on top of the page: a soft shadow when it only
           // takes gutter space, a deeper one when it covers the content.
           frame.docked
-            ? "shadow-[-12px_0_32px_rgba(0,0,0,0.28)]"
-            : "shadow-[-20px_0_50px_rgba(0,0,0,0.42)]",
+            ? "shadow-[-4px_0_18px_rgba(0,0,0,0.06)] dark:shadow-[-12px_0_32px_rgba(0,0,0,0.28)]"
+            : "shadow-[-12px_0_32px_rgba(0,0,0,0.12)] dark:shadow-[-20px_0_50px_rgba(0,0,0,0.42)]",
           // Visible at once on open so it can take focus; hidden only once
           // it has slid away on close.
           open

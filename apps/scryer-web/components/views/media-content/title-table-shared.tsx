@@ -972,12 +972,13 @@ export function EpisodeProgressBar({
 
   return (
     <div
+      data-ui="episode-progress"
       className={cn("relative", compact ? "w-[8rem]" : "w-[10rem]", className)}
     >
       <Progress
         value={progress.percent}
         className={cn(
-          "border border-border/60 bg-muted/90 shadow-sm",
+          "border border-border/60 bg-muted/90 shadow-none dark:shadow-sm",
           compact ? "h-5 rounded-md" : "h-7 rounded-md",
         )}
         indicatorClassName={progress.indicatorClassName}
@@ -988,9 +989,20 @@ export function EpisodeProgressBar({
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-white [text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
+          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-foreground dark:text-white dark:[text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
           compact ? "text-[11px]" : "text-sm",
         )}
+        style={{ clipPath: `inset(0 0 0 ${Math.min(100, Math.max(0, progress.percent))}%)` }}
+      >
+        {progress.text}
+      </span>
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-white dark:[text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
+          compact ? "text-[11px]" : "text-sm",
+        )}
+        style={{ clipPath: `inset(0 ${100 - Math.min(100, Math.max(0, progress.percent))}% 0 0)` }}
       >
         {progress.text}
       </span>
