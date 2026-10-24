@@ -3171,7 +3171,7 @@ const es: LocaleDictionary = {
   "lists.providerApps.traktSecretHint": "Opcional para Trakt. Trakt inicia la sesión de los miembros con PKCE; solo las apps antiguas de Trakt necesitan un secreto.",
   "lists.providerApps.redirectUri": "URI de redirección",
   "lists.providerApps.redirectHelp": "Registra la URL /lists/oauth/callback de esta instancia con el proveedor. Deja el secreto vacío para conservar el valor guardado.",
-  "episodeAssign.action": "Asignar a episodio",
+  "episodeAssign.action": "Reasignar",
   "episodeAssign.dialogTitle": "Asignar a episodio",
   "episodeAssign.dialogDescription": "Elige el episodio al que pertenece {{name}}. Scryer cambia el nombre del archivo para ese episodio y lo mueve a su lugar.",
   "episodeAssign.pendingDescription": "Scryer no pudo determinar qué episodio es {{name}}. Elige el episodio y Scryer lo importará allí.",

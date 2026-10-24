@@ -3946,7 +3946,7 @@ const nl: LocaleDictionary = {
   "lists.providerApps.traktSecretHint": "Optioneel voor Trakt. Trakt meldt leden aan met PKCE; alleen oudere Trakt-apps hebben een geheim nodig.",
   "lists.providerApps.redirectUri": "Omleidings-URI",
   "lists.providerApps.redirectHelp": "Registreer de URL /lists/oauth/callback van deze instantie bij de aanbieder. Laat het geheim leeg om de opgeslagen waarde te behouden.",
-  "episodeAssign.action": "Toewijzen aan aflevering",
+  "episodeAssign.action": "Opnieuw toewijzen",
   "episodeAssign.dialogTitle": "Toewijzen aan aflevering",
   "episodeAssign.dialogDescription": "Kies de aflevering waar {{name}} bij hoort. Scryer hernoemt het bestand voor die aflevering en verplaatst het naar zijn plek.",
   "episodeAssign.pendingDescription": "Scryer kon niet bepalen welke aflevering {{name}} is. Kies de aflevering en Scryer importeert het daar.",

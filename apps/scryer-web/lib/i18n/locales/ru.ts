@@ -6517,7 +6517,7 @@ const ru: LocaleDictionary = {
   "lists.providerApps.traktSecretHint": "Для Trakt необязательно. Trakt выполняет вход участников через PKCE; секрет нужен только старым приложениям Trakt.",
   "lists.providerApps.redirectUri": "URI перенаправления",
   "lists.providerApps.redirectHelp": "Зарегистрируйте URL /lists/oauth/callback этого экземпляра у провайдера. Оставьте секрет пустым, чтобы сохранить прежнее значение.",
-  "episodeAssign.action": "Назначить эпизоду",
+  "episodeAssign.action": "Переназначить",
   "episodeAssign.dialogTitle": "Назначить эпизоду",
   "episodeAssign.dialogDescription": "Выберите эпизод, к которому относится {{name}}. Scryer переименует файл для этого эпизода и переместит его на место.",
   "episodeAssign.pendingDescription": "Scryer не смог определить, какой это эпизод: {{name}}. Выберите эпизод, и Scryer импортирует файл туда.",

@@ -2980,7 +2980,7 @@ const zh_CN: LocaleDictionary = {
   "lists.providerApps.traktSecretHint": "Trakt 可不填。Trakt 使用 PKCE 让成员登录；只有旧版 Trakt 应用才需要密钥。",
   "lists.providerApps.redirectUri": "重定向 URI",
   "lists.providerApps.redirectHelp": "在提供方注册此实例的 /lists/oauth/callback URL。将密钥留空可保留已保存的值。",
-  "episodeAssign.action": "分配到剧集",
+  "episodeAssign.action": "重新分配",
   "episodeAssign.dialogTitle": "分配到剧集",
   "episodeAssign.dialogDescription": "选择 {{name}} 所属的剧集。Scryer 会按该剧集重命名文件，并将其移动到位。",
   "episodeAssign.pendingDescription": "Scryer 无法判断 {{name}} 是哪一集。选择剧集后，Scryer 会将其导入到该剧集。",

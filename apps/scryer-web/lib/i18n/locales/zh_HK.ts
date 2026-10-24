@@ -4629,7 +4629,7 @@ const zh_HK: LocaleDictionary = {
   "mediaInfo.roleDefault": "Default",
   "mediaInfo.roleForced": "Forced",
   "mediaInfo.roleOriginal": "Original",
-  "episodeAssign.action": "指派至劇集",
+  "episodeAssign.action": "重新指派",
   "episodeAssign.dialogTitle": "指派至劇集",
   "episodeAssign.dialogDescription": "選擇 {{name}} 所屬的劇集。Scryer 會按該劇集重新命名檔案，並將其移至正確位置。",
   "episodeAssign.pendingDescription": "Scryer 無法判斷 {{name}} 是哪一集。選擇劇集後，Scryer 會將其匯入至該劇集。",
