@@ -165,11 +165,11 @@ async fn import_completed_download_with_identity_policy_for_download(
     .await?
     {
         CompletedImportProgress::Ready(request) => *request,
-        CompletedImportProgress::Finished(result) => return Ok(result),
+        CompletedImportProgress::Finished(result) => return Ok(*result),
     };
     let request = match validate_completed_import_source_and_mark_processing(app, request).await? {
         CompletedImportProgress::Ready(request) => *request,
-        CompletedImportProgress::Finished(result) => return Ok(result),
+        CompletedImportProgress::Finished(result) => return Ok(*result),
     };
 
     execute_completed_import(app, actor, request, preparation_permit).await
@@ -461,7 +461,7 @@ fn downgrade_unresolved_submission_identity(
 
 enum CompletedImportProgress {
     Ready(Box<CompletedImportRequest>),
-    Finished(ImportResult),
+    Finished(Box<ImportResult>),
 }
 
 async fn prepare_completed_import_request(
@@ -583,7 +583,7 @@ async fn validate_completed_import_source_and_mark_processing(
         let _ = app
             .update_import_status_and_notify(&request.import_id, ImportStatus::Skipped, result_json)
             .await;
-        return Ok(CompletedImportProgress::Finished(result));
+        return Ok(CompletedImportProgress::Finished(Box::new(result)));
     }
 
     // Mark as processing

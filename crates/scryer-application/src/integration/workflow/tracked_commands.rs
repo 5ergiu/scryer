@@ -3292,17 +3292,16 @@ fn dispatch_prepared_tracked_download_background_work(
     );
 }
 async fn tracked_work_is_retired(app: &AppUseCase, tracked: &TrackedDownload) -> AppResult<bool> {
-    if let Some(title_id) = tracked.title_id.as_deref() {
-        if app
+    if let Some(title_id) = tracked.title_id.as_deref()
+        && app
             .services
             .catalog
             .titles
             .get_by_id(title_id)
             .await?
             .is_none()
-        {
-            return Ok(true);
-        }
+    {
+        return Ok(true);
     }
     Ok(app
         .services

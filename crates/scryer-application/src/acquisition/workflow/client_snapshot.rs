@@ -2576,10 +2576,6 @@ fn standby_scope_within(row: &SubmissionScope, covered: &SubmissionScope) -> boo
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "standby candidate persistence carries the search context explicitly"
-)]
 /// The standby row a ranked search result is parked as, so a later walk can
 /// grab it without searching again.
 fn standby_row(
@@ -2647,6 +2643,10 @@ fn standby_row(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "standby candidate persistence carries the search context explicitly"
+)]
 async fn persist_standby_candidates<F>(
     app: &AppUseCase,
     item: &AcquisitionScopeState,
