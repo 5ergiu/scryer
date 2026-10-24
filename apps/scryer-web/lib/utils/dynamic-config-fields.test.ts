@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ConfigFieldDef } from "../types/indexers.ts";
 import {
   createRequestEpoch,
+  dynamicConfigFieldsFor,
   dynamicTriggerSignature,
   dynamicTriggerValues,
   mergeDynamicConfigFields,
@@ -161,4 +162,29 @@ test("reconcile never gives an informational field a value", () => {
 
   assert.equal("info_cookie" in values, false);
   assert.equal(values.cookie, "");
+});
+
+test("fields answered for one provider never belong to another", () => {
+  const fields: DynamicConfigFields = {
+    fields: [field({ key: "cookie", fieldType: "PASSWORD" })],
+    hiddenFieldKeys: ["username"],
+  };
+  const held = { providerType: "synthetic-a", fields };
+
+  assert.equal(dynamicConfigFieldsFor(held, "synthetic-a"), fields);
+  assert.equal(dynamicConfigFieldsFor(held, "synthetic-b"), null);
+  assert.equal(dynamicConfigFieldsFor(null, "synthetic-a"), null);
+
+  // Reconciling a switch to another provider against nothing held for it
+  // leaves that provider's draft values alone, including one that shares a
+  // key with the previous provider's dynamic field.
+  const otherDraft = { cookie: "kept", region: "eu" };
+  assert.equal(
+    reconcileDynamicConfigValues(
+      otherDraft,
+      dynamicConfigFieldsFor(held, "synthetic-b"),
+      null,
+    ),
+    otherDraft,
+  );
 });
