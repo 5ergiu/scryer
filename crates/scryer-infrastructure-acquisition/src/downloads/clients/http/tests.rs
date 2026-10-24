@@ -2376,3 +2376,263 @@ async fn the_egress_client_is_rebuilt_only_when_its_proxy_changes() {
     HttpDownloadClient::for_config(&config, None, http()).unwrap();
     assert_eq!(engine.egress_builds(), 3);
 }
+
+// ---------------------------------------------------------------------------
+// publishing, partial names and pacing, driven through one file transfer
+
+/// Records every checkpoint; refuses the one that marks the file complete
+/// when `crash_on_complete` is set, as an interruption right after the
+/// publish would.
+#[derive(Default)]
+struct RecordingCheckpoint {
+    recorded: std::sync::Mutex<Vec<HttpJobFile>>,
+    changed: tokio::sync::Notify,
+    crash_on_complete: bool,
+}
+
+#[async_trait::async_trait]
+impl super::transfer::Checkpoint for RecordingCheckpoint {
+    async fn record(&self, file: &HttpJobFile) -> scryer_application::AppResult<()> {
+        if self.crash_on_complete && file.complete {
+            return Err(scryer_application::AppError::Repository(
+                "synthetic interruption".into(),
+            ));
+        }
+        self.recorded.lock().unwrap().push(file.clone());
+        self.changed.notify_one();
+        Ok(())
+    }
+}
+
+impl RecordingCheckpoint {
+    fn last(&self) -> HttpJobFile {
+        self.recorded
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a checkpoint")
+    }
+}
+
+async fn transfer_once(
+    checkpoint: &RecordingCheckpoint,
+    file: &mut HttpJobFile,
+    limiter: Option<&super::transfer::BandwidthLimiter>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), TransferError> {
+    let live_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let context = super::transfer::TransferContext {
+        egress: super::transfer::Egress::Direct,
+        checkpoint,
+        cancel,
+        live_bytes: &live_bytes,
+        limiter,
+        backoff_unit: Duration::from_millis(1),
+        cadence: super::transfer::CheckpointCadence {
+            bytes: u64::MAX,
+            interval: Duration::from_secs(3600),
+        },
+        clock: super::transfer::system_clock(),
+        media_check: None,
+    };
+    super::transfer::transfer_file(&context, file).await
+}
+
+fn fresh_file(download_dir: &Path, url: &str) -> HttpJobFile {
+    let mut file = seeded_job(download_dir, url, 0).files.remove(0);
+    file.total_bytes = None;
+    file.validator = None;
+    file
+}
+
+async fn whole_file_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/clip.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", ETAG)
+                .set_body_bytes(BODY),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn publishing_never_replaces_a_file_already_under_the_final_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("Synthetic.Show.S01E01.mp4");
+    let part = part_path_for(&final_path, 1);
+    std::fs::write(&part, BODY).unwrap();
+    std::fs::write(&final_path, b"someone else's file").unwrap();
+
+    let refused = super::transfer::publish_part(&part, &final_path).await;
+    assert!(
+        matches!(refused, Err(TransferError::Permanent(_))),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"someone else's file");
+    assert_eq!(std::fs::read(&part).unwrap(), BODY);
+
+    // Through a whole transfer, too: the fetched bytes stay in the partial.
+    let server = whole_file_server().await;
+    let checkpoint = RecordingCheckpoint::default();
+    let mut file = fresh_file(dir.path(), &format!("{}/media/clip.mp4", server.uri()));
+    std::fs::create_dir_all(file.final_path.parent().unwrap()).unwrap();
+    std::fs::write(&file.final_path, b"someone else's file").unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = transfer_once(&checkpoint, &mut file, None, &cancel).await;
+    assert!(
+        matches!(result, Err(TransferError::Permanent(_))),
+        "{result:?}"
+    );
+    assert!(!file.complete);
+    assert_eq!(
+        std::fs::read(&file.final_path).unwrap(),
+        b"someone else's file"
+    );
+    assert_eq!(std::fs::read(file.part_path()).unwrap(), BODY);
+}
+
+#[tokio::test]
+async fn publishing_again_after_an_interrupted_publish_drops_only_the_partial_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("Synthetic.Show.S01E01.mp4");
+    let part = part_path_for(&final_path, 1);
+    std::fs::write(&part, BODY).unwrap();
+    // Linked into place, then interrupted before the partial name went.
+    std::fs::hard_link(&part, &final_path).unwrap();
+
+    super::transfer::publish_part(&part, &final_path)
+        .await
+        .expect("the same bytes under both names finish the publish");
+    assert_eq!(std::fs::read(&final_path).unwrap(), BODY);
+    assert!(!part.exists());
+}
+
+#[tokio::test]
+async fn a_fresh_attempt_skips_every_partial_name_already_taken() {
+    let server = whole_file_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = RecordingCheckpoint::default();
+    let mut file = fresh_file(dir.path(), &format!("{}/media/clip.mp4", server.uri()));
+    std::fs::create_dir_all(file.final_path.parent().unwrap()).unwrap();
+    let first = part_path_for(&file.final_path, 1);
+    let second = part_path_for(&file.final_path, 2);
+    std::fs::write(&first, b"first partial").unwrap();
+    std::fs::write(&second, b"second partial").unwrap();
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    transfer_once(&checkpoint, &mut file, None, &cancel)
+        .await
+        .expect("the transfer completes under a free name");
+    assert!(file.complete);
+    assert_eq!(file.attempt, 3);
+    assert_eq!(std::fs::read(&file.final_path).unwrap(), BODY);
+    assert_eq!(std::fs::read(&first).unwrap(), b"first partial");
+    assert_eq!(std::fs::read(&second).unwrap(), b"second partial");
+}
+
+#[tokio::test]
+async fn an_interruption_between_publish_and_record_is_recovered_without_a_refetch() {
+    // No stated length: the length is only known once the body has ended.
+    let (base, heads) = chunked_server(BODY.chunks(5).map(<[u8]>::to_vec).collect()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let crashing = RecordingCheckpoint {
+        crash_on_complete: true,
+        ..Default::default()
+    };
+    let mut file = fresh_file(dir.path(), &format!("{base}/media/clip.mp4"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let interrupted = transfer_once(&crashing, &mut file, None, &cancel).await;
+    assert!(interrupted.is_err(), "the completion record was refused");
+    assert_eq!(std::fs::read(&file.final_path).unwrap(), BODY);
+
+    // Restart from what was durably recorded before the interruption.
+    let mut recovered = crashing.last();
+    assert!(!recovered.complete);
+    assert_eq!(recovered.total_bytes, Some(BODY.len() as u64));
+    assert_eq!(recovered.bytes_done, BODY.len() as u64);
+    let checkpoint = RecordingCheckpoint::default();
+    transfer_once(&checkpoint, &mut recovered, None, &cancel)
+        .await
+        .expect("the published file is recognized");
+    assert!(recovered.complete);
+    assert!(checkpoint.last().complete);
+    assert_eq!(std::fs::read(&recovered.final_path).unwrap(), BODY);
+    assert_eq!(heads.lock().unwrap().len(), 1, "nothing was fetched again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paced_wait_ends_at_once_on_cancel() {
+    let limiter = Arc::new(super::transfer::BandwidthLimiter::new(1));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // The first chunk passes; the next must wait an hour at one byte a second.
+    limiter.consume(3600, &cancel).await.unwrap();
+    let started = tokio::time::Instant::now();
+    let waiting = tokio::spawn({
+        let limiter = Arc::clone(&limiter);
+        let cancel = cancel.clone();
+        async move { limiter.consume(3600, &cancel).await }
+    });
+    cancel.cancel();
+    assert_eq!(
+        waiting.await.unwrap(),
+        Err(super::transfer::PacingCancelled)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_change_repaces_a_pending_wait() {
+    let limiter = Arc::new(super::transfer::BandwidthLimiter::new(1));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    limiter.consume(3600, &cancel).await.unwrap();
+    let started = tokio::time::Instant::now();
+    let waiting = tokio::spawn({
+        let limiter = Arc::clone(&limiter);
+        let cancel = cancel.clone();
+        async move { limiter.consume(3600, &cancel).await }
+    });
+    // Raised to 3600 bytes a second, the pending chunk needs about a second.
+    limiter.set_rate(3600);
+    waiting.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() <= Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_transfer_paused_during_pacing_is_cancelled_and_checkpointed() {
+    let server = whole_file_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = RecordingCheckpoint::default();
+    let mut file = fresh_file(dir.path(), &format!("{}/media/clip.mp4", server.uri()));
+    let limiter = super::transfer::BandwidthLimiter::new(1);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Book the limiter an hour ahead, so the body's first chunk has to wait.
+    limiter.consume(3600, &cancel).await.unwrap();
+    let result = tokio::time::timeout(WAIT_BOUND, async {
+        let transfer = transfer_once(&checkpoint, &mut file, Some(&limiter), &cancel);
+        tokio::pin!(transfer);
+        tokio::select! {
+            result = &mut transfer => return result,
+            // The response was judged and recorded; pause the job.
+            () = checkpoint.changed.notified() => cancel.cancel(),
+        }
+        transfer.await
+    })
+    .await
+    .expect("the cancelled transfer does not sit out the pacing delay");
+    assert_eq!(result, Err(TransferError::Cancelled));
+    assert!(!file.complete);
+    assert!(!file.final_path.exists());
+}

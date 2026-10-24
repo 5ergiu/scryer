@@ -8,11 +8,6 @@ use crate::{AppError, AppResult, MediaAnalysisOutcome, MediaAnalyzer};
 
 pub struct NativeMediaAnalyzer;
 
-/// The `Invalid` reason for a container the analyzer read in full and found
-/// no video stream in. Callers that treat "no video" differently from an
-/// unreadable file match on this exact text.
-pub const NOT_A_VALID_VIDEO_REASON: &str = "file is not a valid video";
-
 #[cfg(any(feature = "runtime-media-analysis", test))]
 #[derive(Clone, PartialEq, Eq)]
 struct AnalysisKey {
@@ -296,9 +291,7 @@ impl MediaAnalyzer for NativeMediaAnalyzer {
                     crate::post_download_gate::build_media_file_analysis(&analysis),
                 )))
             }
-            Ok(_) => Ok(MediaAnalysisOutcome::Invalid(
-                NOT_A_VALID_VIDEO_REASON.to_string(),
-            )),
+            Ok(_) => Ok(MediaAnalysisOutcome::NoVideo),
             Err(error) => Ok(MediaAnalysisOutcome::Invalid(error.to_string())),
         }
         #[cfg(not(feature = "runtime-media-analysis"))]
@@ -493,6 +486,7 @@ mod tests {
                 panic!("expected valid strm analysis, got invalid: {error}");
             }
             MediaAnalysisOutcome::Inconclusive(_) => panic!("unexpected incomplete stream pointer"),
+            MediaAnalysisOutcome::NoVideo => panic!("expected valid strm analysis, got no video"),
         }
     }
 }
