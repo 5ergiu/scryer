@@ -6688,6 +6688,72 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_blocked_plugin_answers_the_form_empty_but_keeps_stored_secrets_redacted() {
+            let (app, _, client) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+            app.runtime
+                .plugins
+                .compatibility_blockers
+                .write()
+                .await
+                .insert("cardigann".into(), "synthetic incompatibility".into());
+
+            let values = BTreeMap::from([("definition".to_string(), "alpha".to_string())]);
+            let answer = app
+                .indexer_dynamic_config_fields(&test_admin(), "cardigann", &values)
+                .await
+                .unwrap();
+            assert_eq!(answer, crate::PluginDynamicConfigFields::default());
+
+            // A stored config still carries the dynamic secret the plugin added
+            // before it was blocked; without the plugin to ask, that key must be
+            // treated as an optional secret, not dropped from redaction.
+            let fields = app
+                .effective_indexer_config_fields(
+                    "cardigann",
+                    &[Some(r#"{"definition":"alpha","cookie":"c1"}"#)],
+                )
+                .await
+                .unwrap();
+            let cookie = fields
+                .iter()
+                .find(|field| field.key == "cookie")
+                .expect("the unknown stored key is listed");
+            assert_eq!(cookie.field_type, scryer_domain::ConfigFieldType::Password);
+            assert!(!cookie.required);
+            assert!(
+                client.dynamic_calls().is_empty(),
+                "a blocked plugin is never asked"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unblocked_plugin_names_its_stored_dynamic_fields() {
+            let (app, _, _) = dynamic_app(
+                &["definition"],
+                RecordingIndexerClient::new(false).with_dynamic_fields(dynamic_answer()),
+            );
+            let fields = app
+                .effective_indexer_config_fields(
+                    "cardigann",
+                    &[Some(r#"{"definition":"alpha","cookie":"c1"}"#)],
+                )
+                .await
+                .unwrap();
+            let expected = dynamic_answer()
+                .fields
+                .into_iter()
+                .find(|field| field.key == "cookie")
+                .expect("the answer declares the cookie");
+            assert_eq!(
+                fields.iter().find(|field| field.key == "cookie"),
+                Some(&expected)
+            );
+        }
+
+        #[tokio::test]
         async fn provider_without_trigger_keys_answers_empty_without_starting_plugin() {
             let (app, _, client) = dynamic_app(
                 &[],

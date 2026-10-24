@@ -98,13 +98,15 @@ impl AppUseCase {
             return Ok(PluginDynamicConfigFields::default());
         }
         let trigger_values = trigger_values_from_map(&trigger_keys, &static_fields, values);
-        self.resolve_dynamic_config_fields(
-            &normalized,
-            &static_fields,
-            &trigger_keys,
-            trigger_values,
-        )
-        .await
+        Ok(self
+            .resolve_dynamic_config_fields(
+                &normalized,
+                &static_fields,
+                &trigger_keys,
+                trigger_values,
+            )
+            .await?
+            .unwrap_or_default())
     }
 
     /// The fields that govern a stored or submitted indexer config: the static
@@ -112,9 +114,10 @@ impl AppUseCase {
     /// `sources` (earlier sources win). Static fields the plugin hides are
     /// never required.
     ///
-    /// When the plugin cannot be asked, every key in `sources` that names no
-    /// static field is treated as an optional secret, so a stored dynamic
-    /// secret is still redacted and kept rather than shown or dropped.
+    /// When the plugin cannot be asked, including when it is blocked on this
+    /// Scryer, every key in `sources` that names no static field is treated as
+    /// an optional secret, so a stored dynamic secret is still redacted and
+    /// kept rather than shown or dropped.
     pub async fn effective_indexer_config_fields(
         &self,
         provider_type: &str,
@@ -151,7 +154,14 @@ impl AppUseCase {
             )
             .await
         {
-            Ok(dynamic) => Ok(merge_dynamic_config_fields(static_fields, &dynamic)),
+            Ok(Some(dynamic)) => Ok(merge_dynamic_config_fields(static_fields, &dynamic)),
+            Ok(None) => {
+                tracing::debug!(
+                    provider_type = normalized.as_str(),
+                    "plugin is blocked; unknown config keys are treated as secrets"
+                );
+                Ok(with_unknown_keys_as_secrets(static_fields, &objects))
+            }
             Err(error) => {
                 tracing::warn!(
                     provider_type = normalized.as_str(),
@@ -177,19 +187,21 @@ impl AppUseCase {
         .unwrap_or_default()
     }
 
+    /// The plugin's answer for `trigger_values`, or `None` when the plugin is
+    /// blocked on this Scryer and so cannot be asked.
     async fn resolve_dynamic_config_fields(
         &self,
         provider_type: &str,
         static_fields: &[scryer_domain::ConfigFieldDef],
         trigger_keys: &[String],
         trigger_values: BTreeMap<String, String>,
-    ) -> AppResult<PluginDynamicConfigFields> {
+    ) -> AppResult<Option<PluginDynamicConfigFields>> {
         if self
             .plugin_component_blocker_for_provider(provider_type)
             .await
             .is_some()
         {
-            return Ok(PluginDynamicConfigFields::default());
+            return Ok(None);
         }
         let provider = self
             .services
@@ -205,7 +217,7 @@ impl AppUseCase {
         };
         let cache = &self.runtime.plugins.dynamic_config_fields_cache;
         if let Some(cached) = cache.get(&cache_key) {
-            return Ok(cached);
+            return Ok(Some(cached));
         }
 
         // The plugin sees only its trigger values: no secrets, no connection
@@ -254,7 +266,7 @@ impl AppUseCase {
             .unwrap_or_default();
         let validated = validate_dynamic_config_fields(static_fields, trigger_keys, answer)?;
         cache.insert(cache_key, validated.clone());
-        Ok(validated)
+        Ok(Some(validated))
     }
 }
 
