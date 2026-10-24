@@ -1667,6 +1667,7 @@ async fn housekeeping_reconciles_same_path_guard_before_db_swap() {
             MediaFacet::Movie,
             "Recovery Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -1816,6 +1817,7 @@ async fn housekeeping_old_moved_recovery_removes_staged_replacement_file() {
             MediaFacet::Movie,
             "Old Moved Recovery Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -1972,6 +1974,7 @@ async fn housekeeping_skips_recent_same_path_guard() {
             MediaFacet::Movie,
             "Recent Guard Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -2114,6 +2117,7 @@ async fn housekeeping_disposes_db_swapped_guard_with_encoded_media_root() {
             MediaFacet::Movie,
             "Encoded Guard Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -2315,6 +2319,7 @@ async fn housekeeping_skips_orphan_cleanup_when_root_is_empty() {
             MediaFacet::Movie,
             "Empty Root Housekeeping Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -2381,6 +2386,7 @@ async fn housekeeping_removes_missing_rows_when_root_is_non_empty() {
             MediaFacet::Movie,
             "Non Empty Root Housekeeping Library".to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: media_dir.path().to_string_lossy().to_string(),
                 is_default: true,
             }],

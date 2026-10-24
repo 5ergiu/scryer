@@ -1112,6 +1112,7 @@ mod tests {
                 library.name,
                 library.slug,
                 vec![crate::LibraryRootDraft {
+                    id: None,
                     path: path_to_stored_string(root),
                     is_default: true,
                 }],

@@ -5536,6 +5536,7 @@ async fn register_import_fixture_root(app: &AppUseCase, facet: MediaFacet, root:
             library.name.clone(),
             library.slug.clone(),
             vec![LibraryRootDraft {
+                id: None,
                 path: root.to_string_lossy().into_owned(),
                 is_default: true,
             }],
@@ -13783,6 +13784,7 @@ async fn disposition_fixture(name: &str, release_title: &str) -> DispositionFixt
             movie_library.name.clone(),
             movie_library.slug.clone(),
             vec![LibraryRootDraft {
+                id: None,
                 path: library_dir.path().to_string_lossy().into_owned(),
                 is_default: true,
             }],
@@ -15363,6 +15365,7 @@ async fn series_movie_link_upgrade_finds_its_incumbent_at_another_path() {
             anime_library.name.clone(),
             anime_library.slug.clone(),
             vec![LibraryRootDraft {
+                id: None,
                 path: library_dir.path().to_string_lossy().into_owned(),
                 is_default: true,
             }],

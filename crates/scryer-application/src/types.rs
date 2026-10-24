@@ -18,6 +18,10 @@ use crate::{AppResult, SubmissionScope};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRootDraft {
+    /// The stored root this draft describes, when the caller is editing one it
+    /// already has. A draft with an id keeps that root's identity even when its
+    /// path changes; a draft without one is matched by path, then allocated.
+    pub id: Option<String>,
     pub path: String,
     pub is_default: bool,
 }

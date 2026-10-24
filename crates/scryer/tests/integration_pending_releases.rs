@@ -213,6 +213,7 @@ async fn direct_wanted_item_lookup_requires_access_to_item_library() {
             updated_at: now,
         },
         vec![LibraryRootDraft {
+            id: None,
             path: adult_root.path().to_string_lossy().to_string(),
             is_default: true,
         }],
