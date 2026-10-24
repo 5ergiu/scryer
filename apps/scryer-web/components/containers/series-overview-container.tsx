@@ -1768,15 +1768,17 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
   const handleAssignFileToEpisode = React.useCallback(
     (fileId: string) => {
       let filePath: string | null = null;
+      let originalReleaseName: string | null = null;
       const episodeIds: string[] = [];
       for (const [episodeId, files] of Object.entries(mediaFilesByEpisode)) {
         const file = files.find((candidate) => candidate.id === fileId);
         if (!file) continue;
         filePath = file.filePath;
+        originalReleaseName ??= file.grabbedReleaseTitle?.trim() || file.sceneName?.trim() || null;
         if (episodeId !== "__unlinked__") episodeIds.push(episodeId);
       }
       if (filePath === null) return;
-      openEpisodeFileAssignment({ fileId, filePath, episodeIds });
+      openEpisodeFileAssignment({ fileId, filePath, originalReleaseName, episodeIds });
     },
     [mediaFilesByEpisode, openEpisodeFileAssignment],
   );

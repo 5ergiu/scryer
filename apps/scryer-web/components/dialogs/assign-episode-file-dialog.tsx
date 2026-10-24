@@ -36,7 +36,8 @@ type Props = {
   /** Prefix of every element id in the dialog. */
   idPrefix: string;
   fileName: string | null;
-  description: string;
+  description?: string;
+  originalReleaseName?: string | null;
   /** The title's episodes; null while they load. */
   episodes: readonly EpisodeTargetEpisode[] | null;
   loadError: string | null;
@@ -55,6 +56,7 @@ export function AssignEpisodeFileDialog({
   idPrefix,
   fileName,
   description,
+  originalReleaseName,
   episodes,
   loadError,
   initialEpisodeIds,
@@ -135,15 +137,25 @@ export function AssignEpisodeFileDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => (applying ? undefined : onOpenChange(next))}>
-      <DialogContent id={`${idPrefix}-dialog`} className="sm:max-w-lg">
+      <DialogContent id={`${idPrefix}-dialog`} className="max-h-[90dvh] overflow-y-auto sm:max-w-lg" aria-describedby={description ? `${idPrefix}-description` : undefined}>
         <DialogHeader>
           <DialogTitle>{t("episodeAssign.dialogTitle")}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
+          {description ? <DialogDescription id={`${idPrefix}-description`}>{description}</DialogDescription> : null}
         </DialogHeader>
         <div className="space-y-4">
           {fileName ? (
             <div className="break-all rounded-md border border-border bg-muted/30 px-3 py-2 font-[var(--font-code)] text-xs text-muted-foreground">
               {fileName}
+            </div>
+          ) : null}
+          {originalReleaseName?.trim() ? (
+            <div className="min-w-0 space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">
+                {t("episodeAssign.originalReleaseName")}
+              </div>
+              <div className="break-all rounded-md border border-border bg-muted/30 px-3 py-2 font-[var(--font-code)] text-xs text-foreground">
+                {originalReleaseName.trim()}
+              </div>
             </div>
           ) : null}
           {loadError ? (

@@ -21,6 +21,7 @@ import type { EpisodeTargetEpisode } from "@/lib/utils/episode-target";
 export type EpisodeFileAssignmentTarget = {
   fileId: string;
   filePath: string;
+  originalReleaseName?: string | null;
   episodeIds: string[];
 };
 
@@ -56,11 +57,6 @@ type ReassignEpisodeFileData = {
     promotedFileIds: string[];
   } | null;
 };
-
-function fileNameOf(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts[parts.length - 1] || path;
-}
 
 /**
  * The "Assign to episode" flow for a library file: it loads the title's
@@ -157,16 +153,13 @@ export function useEpisodeFileAssignment({
     [client, onAssigned, setGlobalStatus, t, target],
   );
 
-  const fileName = target ? fileNameOf(target.filePath) : null;
   const assignmentDialog = (
     <AssignEpisodeFileDialog
       open={target !== null}
       onOpenChange={handleOpenChange}
       idPrefix="episode-file-assign"
       fileName={target?.filePath ?? null}
-      description={t("episodeAssign.dialogDescription", {
-        name: fileName ?? t("episodeAssign.unnamed"),
-      })}
+      originalReleaseName={target?.originalReleaseName}
       episodes={episodes}
       loadError={loadError}
       initialEpisodeIds={target?.episodeIds ?? []}
