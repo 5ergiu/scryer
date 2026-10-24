@@ -9,6 +9,7 @@ export const PALETTES = [
   { id: "FOREST", labelKey: "palette.forest", mode: "dark", background: "#101e19", surface: "#1a2c23", accent: "#25835a", ink: "#e7f3e9" },
   { id: "PLUM", labelKey: "palette.plum", mode: "dark", background: "#211426", surface: "#302039", accent: "#9254bb", ink: "#f7eafa" },
   { id: "EMBER", labelKey: "palette.ember", mode: "light", background: "#f7efe4", surface: "#fffaf3", accent: "#b64b1e", ink: "#38271e" },
+  { id: "GRAPHITE", labelKey: "palette.graphite", mode: "dark", background: "#1a1b1e", surface: "#1f2024", accent: "#3fb39c", ink: "#ecebe6" },
 ] as const;
 
 export function normalizePalette(value: unknown): UiPalette {

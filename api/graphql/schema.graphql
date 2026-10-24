@@ -31797,6 +31797,7 @@ enum UiPaletteValue {
 	FOREST
 	PLUM
 	EMBER
+	GRAPHITE
 }
 
 """

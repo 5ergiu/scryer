@@ -187,6 +187,7 @@ mod tests {
             UiPaletteValue::Forest,
             UiPaletteValue::Plum,
             UiPaletteValue::Ember,
+            UiPaletteValue::Graphite,
         ] {
             let app = to_app_ui_palette(palette);
             assert!(from_ui_palette(app) == palette);
@@ -546,6 +547,7 @@ fn from_ui_palette(value: scryer_application::UiPalette) -> UiPaletteValue {
         scryer_application::UiPalette::Forest => UiPaletteValue::Forest,
         scryer_application::UiPalette::Plum => UiPaletteValue::Plum,
         scryer_application::UiPalette::Ember => UiPaletteValue::Ember,
+        scryer_application::UiPalette::Graphite => UiPaletteValue::Graphite,
     }
 }
 
@@ -558,6 +560,7 @@ fn to_app_ui_palette(value: UiPaletteValue) -> scryer_application::UiPalette {
         UiPaletteValue::Forest => scryer_application::UiPalette::Forest,
         UiPaletteValue::Plum => scryer_application::UiPalette::Plum,
         UiPaletteValue::Ember => scryer_application::UiPalette::Ember,
+        UiPaletteValue::Graphite => scryer_application::UiPalette::Graphite,
     }
 }
 

@@ -1431,6 +1431,27 @@ mod tests {
             "SELECT theme, highlight_color, palette FROM user_ui_settings WHERE user_id = 'existing'")
             .fetch_one(&pool).await.expect("migrated row");
         assert_eq!(row, ("system".into(), "#123456".into(), "CLASSIC".into()));
+        sqlx::query("UPDATE user_ui_settings SET palette = 'OCEAN'")
+            .execute(&pool)
+            .await
+            .expect("existing palette");
+        let graphite = include_str!("../../../scryer/src/db/migrations/0310_graphite_palette.sql");
+        assert_eq!(
+            graphite,
+            include_str!("../../../scryer/src/db/postgres/migrations/0310_graphite_palette.sql")
+        );
+        sqlx::raw_sql(graphite)
+            .execute(&pool)
+            .await
+            .expect("extend palette constraint");
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT theme, highlight_color, palette FROM user_ui_settings WHERE user_id = 'existing'")
+            .fetch_one(&pool).await.expect("preserved row");
+        assert_eq!(row, ("system".into(), "#123456".into(), "OCEAN".into()));
+        sqlx::query("UPDATE user_ui_settings SET palette = 'GRAPHITE'")
+            .execute(&pool)
+            .await
+            .expect("new palette accepted");
         assert!(
             sqlx::query("UPDATE user_ui_settings SET palette = 'CUSTOM'")
                 .execute(&pool)

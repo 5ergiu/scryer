@@ -47,7 +47,6 @@ import { selectorId } from "@/lib/utils/dom-ids";
 import {
   buildIndexerSettingsPath,
   buildRulesPath,
-  buildViewPath,
   indexerSettingsTabFromPath,
   indexerSettingsTabs as allIndexerSettingsTabs,
   maintenanceRulesSectionFromPath,
@@ -343,8 +342,6 @@ export const SettingsContainer = memo(function SettingsContainer({
   selectedLanguage,
   uiLanguage,
   onSelectLanguage,
-  pluginUpdateCount,
-  pluginBlockedCount,
 }: SettingsContainerProps) {
   const t = useTranslate();
   const client = useClient();
@@ -577,9 +574,6 @@ export const SettingsContainer = memo(function SettingsContainer({
       visible: canManageSystemSettings,
     },
   ].filter((item) => item.visible);
-  const showPrimarySettingsSubnav = primarySettingsNav.some(
-    (item) => item.section === settingsSection,
-  );
   // Both kinds of rule are panes of one page, so both carry its gutter.
   const isRulesSection =
     settingsSection === "rules" ||
@@ -689,57 +683,6 @@ export const SettingsContainer = memo(function SettingsContainer({
         showSectionSubnav ? "2xl:flex-row" : "md:flex-row",
       )}
     >
-      {showPrimarySettingsSubnav ? (
-        <aside
-          data-slot="settings-subnav-scroll"
-          className="w-full shrink-0 border-b border-[var(--scry-border3)] bg-[var(--scry-surfF)] p-3 md:h-full md:w-[218px] md:overflow-y-auto md:border-b-0 md:border-r md:p-[22px_14px]"
-        >
-          <nav className="flex gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
-            {primarySettingsNav.map((item) => {
-              const Icon = item.icon;
-              const active = settingsSection === item.section;
-              return (
-                <Link
-                  key={item.section}
-                  id={selectorId("root-sidebar-settings", item.section)}
-                  to={buildViewPath("settings", item.section)}
-                  className={cn(
-                    "flex h-9 shrink-0 items-center gap-2 rounded-[9px] px-3 text-[13px] font-medium text-[var(--scry-muted)] transition hover:bg-[var(--scry-hover)] hover:text-[var(--scry-ink2)] md:w-full",
-                    active &&
-                      "bg-[linear-gradient(90deg,rgba(var(--scry-accent-rgb),0.26),rgba(var(--scry-accent-rgb),0.08))] text-[var(--scry-ink2)] shadow-[inset_2px_0_0_var(--scry-accent-ring)]",
-                  )}
-                >
-                  <Icon
-                    className={cn(
-                      "h-[17px] w-[17px] text-[var(--scry-muted2)]",
-                      active && "text-[var(--scry-accent-text)]",
-                    )}
-                  />
-                  <span className="whitespace-nowrap">{item.label}</span>
-                  {item.section === "plugins" && pluginBlockedCount > 0 ? (
-                    <span
-                      data-ui="settings-nav-plugin-blocked-count"
-                      className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-[var(--scry-danger-solid)] px-1 text-xs font-medium tabular-nums text-[var(--scry-danger-on-solid)]"
-                    >
-                      {pluginBlockedCount}
-                    </span>
-                  ) : null}
-                  {item.section === "plugins" && pluginUpdateCount > 0 ? (
-                    <span
-                      className={cn(
-                        "inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-[var(--scry-warning-solid)] px-1 text-xs font-medium tabular-nums text-[var(--scry-warning-on-solid)]",
-                        pluginBlockedCount > 0 ? "ml-1" : "ml-auto",
-                      )}
-                    >
-                      {pluginUpdateCount}
-                    </span>
-                  ) : null}
-                </Link>
-              );
-            })}
-          </nav>
-        </aside>
-      ) : null}
       {isRulesSection ? (
         <RulesSubnav
           activeSection={effectiveRulesSection}
