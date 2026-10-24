@@ -955,8 +955,12 @@ macro_rules! stored_projected_row {
     }};
 }
 
-/// Attach `(term_id, profile, key)` triples, already ordered by term and
-/// profile, to the rows they belong to.
+/// Attach `(term_id, profile, key)` triples to the rows they belong to.
+///
+/// Each row's keys are sorted by profile here, in byte order, to match
+/// [`projected_rows`]. The SQL `ORDER BY` cannot be trusted for that: a text
+/// column under a locale collation orders profiles differently, and identical
+/// rows would then compare unequal on every write.
 fn attach_collation_keys(
     rows: Vec<(i64, ProjectedRow)>,
     keys: Vec<(i64, String, Vec<u8>)>,
@@ -967,7 +971,9 @@ fn attach_collation_keys(
     }
     rows.into_iter()
         .map(|(term_id, mut row)| {
-            row.collation_keys = by_term.remove(&term_id).unwrap_or_default();
+            let mut keys = by_term.remove(&term_id).unwrap_or_default();
+            keys.sort_by(|left, right| left.0.cmp(&right.0));
+            row.collation_keys = keys;
             row
         })
         .collect()
@@ -991,7 +997,7 @@ async fn stored_projected_rows(
          FROM title_search_collation_keys keys
          JOIN title_search_terms terms ON terms.term_id = keys.term_id
          WHERE terms.title_id = ?
-         ORDER BY keys.term_id, keys.profile",
+         ORDER BY keys.term_id",
     )
     .bind(title_id)
     .fetch_all(&mut *connection)
@@ -1019,7 +1025,7 @@ async fn stored_projected_rows_pg(
          FROM title_search_collation_keys keys
          JOIN title_search_terms terms ON terms.term_id = keys.term_id
          WHERE terms.title_id = $1
-         ORDER BY keys.term_id, keys.profile",
+         ORDER BY keys.term_id",
     )
     .bind(title_id)
     .fetch_all(&mut *connection)
