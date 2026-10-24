@@ -514,6 +514,8 @@ pub(crate) enum MediaProbeOutcome {
     Probed {
         duration_seconds: Option<u64>,
         has_video: Option<bool>,
+        /// The container format the analyzer recognized, e.g. `matroska`.
+        container: Option<String>,
     },
     /// The container could not be read at all (an unsupported format, for
     /// one); nothing about it can be checked.
@@ -546,6 +548,7 @@ impl MediaProbe for NativeMediaProbe {
             Ok(MediaAnalysisOutcome::Valid(analysis)) => MediaProbeOutcome::Probed {
                 duration_seconds: positive(analysis.duration_seconds),
                 has_video: Some(true),
+                container: analysis.container_format.clone(),
             },
             Ok(MediaAnalysisOutcome::Inconclusive(analysis)) => MediaProbeOutcome::Probed {
                 duration_seconds: positive(analysis.duration_seconds),
@@ -553,10 +556,12 @@ impl MediaProbe for NativeMediaProbe {
                 has_video: (analysis.video_codec.is_some()
                     || analysis.details.selected_video_id.is_some())
                 .then_some(true),
+                container: analysis.container_format.clone(),
             },
             Ok(MediaAnalysisOutcome::NoVideo) => MediaProbeOutcome::Probed {
                 duration_seconds: None,
                 has_video: Some(false),
+                container: None,
             },
             Ok(MediaAnalysisOutcome::Invalid(reason)) => MediaProbeOutcome::Unverifiable(reason),
             Err(error) => MediaProbeOutcome::Unverifiable(error.to_string()),
@@ -581,6 +586,7 @@ pub(crate) fn judge_media(
     let MediaProbeOutcome::Probed {
         duration_seconds,
         has_video,
+        ..
     } = outcome
     else {
         return Ok(());
@@ -608,7 +614,10 @@ pub(crate) fn judge_media(
     Ok(())
 }
 
-async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), TransferError> {
+async fn verify_media(
+    check: &MediaCheck<'_>,
+    path: &Path,
+) -> Result<MediaProbeOutcome, TransferError> {
     let outcome = check.probe.probe(path).await;
     match &outcome {
         MediaProbeOutcome::Unverifiable(reason) => debug!(
@@ -625,7 +634,46 @@ async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), Transfe
         ),
         MediaProbeOutcome::Probed { .. } => {}
     }
-    judge_media(&outcome, check.expected_duration_seconds, &check.verify)
+    judge_media(&outcome, check.expected_duration_seconds, &check.verify)?;
+    Ok(outcome)
+}
+
+/// The video extension for a container the analyzer names.
+fn container_extension(container: &str) -> Option<&'static str> {
+    match container.to_ascii_lowercase().as_str() {
+        "matroska" | "mkv" => Some("mkv"),
+        "webm" => Some("webm"),
+        "mp4" => Some("mp4"),
+        "mov" => Some("mov"),
+        "mpegts" | "ts" => Some("ts"),
+        "m2ts" => Some("m2ts"),
+        "avi" => Some("avi"),
+        "flv" => Some("flv"),
+        "ogg" => Some("ogv"),
+        "asf" | "wmv" => Some("wmv"),
+        _ => None,
+    }
+}
+
+/// The final name for a media file whose name does not say it is video
+/// (no container was stated and the URL had no usable extension), from the
+/// container the probe read. A name that already carries a video extension
+/// is kept.
+pub(crate) fn media_path_for_probed_container(
+    final_path: &Path,
+    outcome: &MediaProbeOutcome,
+) -> Option<std::path::PathBuf> {
+    if scryer_domain::canonical_video_extension(final_path).is_some() {
+        return None;
+    }
+    let MediaProbeOutcome::Probed {
+        container: Some(container),
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    container_extension(container).map(|extension| final_path.with_extension(extension))
 }
 
 /// The current time, injectable so tests decide when a URL has expired.
@@ -1258,7 +1306,11 @@ async fn finish_file(
     // Checked under the partial's name, so a file that fails never appears
     // under its final one.
     if let Some(check) = &context.media_check {
-        verify_media(check, &part_path).await?;
+        let outcome = verify_media(check, &part_path).await?;
+        // Named for what the probe read, so the import recognizes it.
+        if let Some(named) = media_path_for_probed_container(&file.final_path, &outcome) {
+            file.final_path = named;
+        }
     }
     // Recorded before the file is published, so an interruption between the
     // publish and the record below finds every byte accounted for and

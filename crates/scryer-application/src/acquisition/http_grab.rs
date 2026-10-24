@@ -72,9 +72,9 @@ pub(crate) fn require_http_release_for_http_source(
     http_release: Option<&PluginHttpRelease>,
 ) -> AppResult<()> {
     if matches!(source_kind, Some(DownloadSourceKind::HttpResource)) && http_release.is_none() {
-        return Err(AppError::Validation(
-            "this HTTP release's details are no longer available; search again and grab it from the new results"
-                .to_string(),
+        return Err(AppError::validation_refused(
+            crate::http_release_refusal::DETAILS_UNAVAILABLE,
+            "this HTTP release's details are no longer available; search again and grab it from the new results",
         ));
     }
     Ok(())
@@ -91,10 +91,11 @@ pub(crate) fn require_http_release_for_http_source(
 /// the indexer to resolve again. `Unknown` is the default for indexers that do
 /// not report availability.
 pub(crate) fn refuse_unavailable_http_release(release: &PluginHttpRelease) -> AppResult<()> {
-    let reason = match release.availability {
-        HttpAvailability::Live => "this release is a live stream",
-        HttpAvailability::Upcoming => "this release is not yet available",
-        HttpAvailability::Removed => "this release was removed by the provider",
+    use crate::http_release_refusal::{LIVE, REMOVED, UPCOMING};
+    let (code, reason) = match release.availability {
+        HttpAvailability::Live => (LIVE, "this release is a live stream"),
+        HttpAvailability::Upcoming => (UPCOMING, "this release is not yet available"),
+        HttpAvailability::Removed => (REMOVED, "this release was removed by the provider"),
         HttpAvailability::Available
         | HttpAvailability::Drm
         | HttpAvailability::AuthRequired
@@ -102,9 +103,10 @@ pub(crate) fn refuse_unavailable_http_release(release: &PluginHttpRelease) -> Ap
         | HttpAvailability::GeoRestricted
         | HttpAvailability::Unknown => return Ok(()),
     };
-    Err(AppError::Validation(format!(
-        "{reason}, so it cannot be downloaded; refusing to submit"
-    )))
+    Err(AppError::validation_refused(
+        code,
+        format!("{reason}, so it cannot be downloaded; refusing to submit"),
+    ))
 }
 
 /// Build the host selection for a release from the effective quality profile
@@ -454,7 +456,11 @@ mod tests {
         let error =
             require_http_release_for_http_source(Some(DownloadSourceKind::HttpResource), None)
                 .unwrap_err();
-        assert!(matches!(error, AppError::Validation(_)), "{error:?}");
+        assert_eq!(
+            error.validation_reason(),
+            Some(crate::http_release_refusal::DETAILS_UNAVAILABLE),
+            "{error:?}"
+        );
 
         let listed = release();
         require_http_release_for_http_source(Some(DownloadSourceKind::HttpResource), Some(&listed))
@@ -472,22 +478,22 @@ mod tests {
 
     #[test]
     fn unavailable_releases_are_refused_with_a_reason_per_availability() {
+        use crate::http_release_refusal::{LIVE, REMOVED, UPCOMING};
         for (availability, reason) in [
-            (HttpAvailability::Live, "live stream"),
-            (HttpAvailability::Upcoming, "not yet available"),
-            (HttpAvailability::Removed, "removed by the provider"),
+            (HttpAvailability::Live, LIVE),
+            (HttpAvailability::Upcoming, UPCOMING),
+            (HttpAvailability::Removed, REMOVED),
         ] {
             let listed = PluginHttpRelease {
                 availability,
                 ..release()
             };
             let error = refuse_unavailable_http_release(&listed).unwrap_err();
-            match error {
-                AppError::Validation(message) => {
-                    assert!(message.contains(reason), "{availability:?}: {message}")
-                }
-                other => panic!("{availability:?}: unexpected error {other:?}"),
-            }
+            assert_eq!(
+                error.validation_reason(),
+                Some(reason),
+                "{availability:?}: {error:?}"
+            );
         }
     }
 

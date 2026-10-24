@@ -10,6 +10,7 @@ mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
+pub mod http_release_refusal;
 pub mod login_challenge_refusal;
 pub mod public_url;
 pub mod rate_limit_proxy_policy;

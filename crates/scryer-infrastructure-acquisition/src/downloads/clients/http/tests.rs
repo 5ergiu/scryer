@@ -4,7 +4,9 @@ use std::time::Duration;
 use chrono::Utc;
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue};
-use scryer_application::{DownloadClient, DownloadClientAddRequest, DownloadSourceKind};
+use scryer_application::{
+    DownloadClient, DownloadClientAddRequest, DownloadSourceKind, http_release_refusal,
+};
 use scryer_domain::{DownloadClientConfig, MediaFacet, Title};
 use scryer_plugin_sdk::{
     HttpAvailability, HttpResourceRole, HttpSubtitleMode, HttpTransport, PluginHttpDownloadSource,
@@ -459,18 +461,24 @@ fn separate_tracks_and_page_only_releases_are_refused() {
     video.separate_tracks = true;
     let audio = resource("https://media.invalid/a.m4a", HttpResourceRole::Audio);
     let error = plan_download(&source(vec![video, audio]), Path::new("/srv/dl")).unwrap_err();
-    assert!(error.to_string().contains("separate_tracks"), "{error}");
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::SEPARATE_TRACKS),
+        "{error}"
+    );
 
     let mut page = resource("https://synthetic.invalid/watch/1", HttpResourceRole::Muxed);
     page.transport = HttpTransport::ProviderPage;
     let error = plan_download(&source(vec![page]), Path::new("/srv/dl")).unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported_transport"),
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::UNSUPPORTED_TRANSPORT),
         "{error}"
     );
     let error = plan_download(&source(Vec::new()), Path::new("/srv/dl")).unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported_transport"),
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::UNSUPPORTED_TRANSPORT),
         "{error}"
     );
 }
@@ -925,8 +933,9 @@ async fn a_provider_page_only_release_is_refused_and_nothing_is_queued() {
         .submit_download(&request(source(vec![page])))
         .await
         .unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported_transport"),
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::UNSUPPORTED_TRANSPORT),
         "{error}"
     );
     assert!(client.list_queue().await.unwrap().is_empty());
@@ -1466,6 +1475,7 @@ fn probed(
     super::transfer::MediaProbeOutcome::Probed {
         duration_seconds,
         has_video,
+        container: None,
     }
 }
 
@@ -2635,4 +2645,100 @@ async fn a_transfer_paused_during_pacing_is_cancelled_and_checkpointed() {
     assert_eq!(result, Err(TransferError::Cancelled));
     assert!(!file.complete);
     assert!(!file.final_path.exists());
+}
+
+#[test]
+fn a_selection_without_media_or_required_subtitles_is_refused_by_code() {
+    let thumbnail = resource("https://media.invalid/t.jpg", HttpResourceRole::Thumbnail);
+    let error = plan_download(&source(vec![thumbnail]), Path::new("/srv/dl")).unwrap_err();
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::NO_MEDIA_RESOURCE),
+        "{error}"
+    );
+
+    let mut wanting = source(vec![muxed("https://media.invalid/clip.mp4", 720)]);
+    wanting.selected.subtitle_mode = HttpSubtitleMode::SidecarRequired;
+    wanting.selected.subtitle_languages = vec!["en".into()];
+    let error = plan_download(&wanting, Path::new("/srv/dl")).unwrap_err();
+    assert_eq!(
+        error.validation_reason(),
+        Some(http_release_refusal::NO_SUBTITLE_RESOURCE),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_unnamed_media_file_takes_the_extension_of_the_container_it_holds() {
+    use super::transfer::{MediaProbeOutcome, media_path_for_probed_container};
+    let mut opaque = resource("https://media.invalid/download", HttpResourceRole::Muxed);
+    opaque.container = None;
+    let plan = plan_download(&source(vec![opaque]), Path::new("/srv/dl")).unwrap();
+    let planned = &plan.files[0].final_path;
+    assert_eq!(scryer_domain::canonical_video_extension(planned), None);
+
+    let read = |container: Option<&str>| MediaProbeOutcome::Probed {
+        duration_seconds: None,
+        has_video: Some(true),
+        container: container.map(str::to_string),
+    };
+    let named = media_path_for_probed_container(planned, &read(Some("matroska")))
+        .expect("a recognized container names the file");
+    assert_eq!(
+        named,
+        Path::new("/srv/dl/Synthetic.Show.S01E01/Synthetic.Show.S01E01.mkv")
+    );
+    assert_eq!(
+        scryer_domain::canonical_video_extension(&named),
+        Some("mkv")
+    );
+
+    // An unread container, or a name that already says video, stays as it is.
+    assert_eq!(media_path_for_probed_container(planned, &read(None)), None);
+    assert_eq!(
+        media_path_for_probed_container(&named, &read(Some("mp4"))),
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_unnamed_media_download_is_published_under_its_probed_container() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), serde_json::json!({}));
+    let client = client(&config);
+    let probe = FixedProbe::new(super::transfer::MediaProbeOutcome::Probed {
+        duration_seconds: None,
+        has_video: Some(true),
+        container: Some("matroska".into()),
+    });
+    client.engine().set_media_probe(probe.clone());
+    let mut opaque = resource(
+        &format!("{}/download", server.uri()),
+        HttpResourceRole::Muxed,
+    );
+    opaque.container = None;
+    let grab = client
+        .submit_download(&request(source(vec![opaque])))
+        .await
+        .unwrap();
+    let done = wait_for_job(&client, &grab.job_id, |job| job.state.is_terminal()).await;
+    assert_eq!(done.state, HttpJobState::Completed, "{:?}", done.error);
+    let published = &done.files[0].final_path;
+    assert_eq!(
+        scryer_domain::canonical_video_extension(published),
+        Some("mkv")
+    );
+    assert_eq!(std::fs::read(published).unwrap(), BODY);
+    // Nothing is left under the placeholder name.
+    let entries: Vec<_> = std::fs::read_dir(&done.output_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
 }
