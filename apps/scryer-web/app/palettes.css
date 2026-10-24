@@ -80,11 +80,26 @@ html[data-palette="PAPYRUS"] {
   --palette-page: #d8d0c4;
   --palette-surface: #ece6dc;
   --palette-ink: #37312b;
+  --palette-nav-surface: #c9c0b2;
+  --palette-panel-divider: #b0a493;
   --scry-accent: #80634b;
   --scry-accent-rgb: 128, 99, 75;
   --scry-accent2: color-mix(in srgb, var(--scry-accent) 85%, black);
   --scry-accent-text: color-mix(in srgb, var(--scry-accent) 85%, black);
   --scry-muted: color-mix(in srgb, var(--palette-ink) 78%, var(--palette-page));
+}
+
+html[data-palette="PAPYRUS"] :is([data-slot="settings-subnav-scroll"], [data-slot="facet-settings-subnav"]) {
+  --palette-chrome-bg: #ddd5c8;
+}
+
+html[data-palette="PAPYRUS"] [data-slot="facet-secondary-nav"] {
+  --palette-chrome-bg: var(--palette-surface);
+}
+
+html[data-palette="PAPYRUS"] :is([data-slot="sidebar"], [data-slot="root-header"], [data-slot="settings-subnav-scroll"], [data-slot="facet-settings-subnav"], [data-slot="facet-secondary-nav"]) {
+  --scry-border3: var(--palette-panel-divider);
+  --border-color: var(--palette-panel-divider);
 }
 
 html[data-palette="GRAPHITE"] {
