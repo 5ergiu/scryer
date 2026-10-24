@@ -28,8 +28,8 @@ import {
   runConnectionFeedback,
 } from "@/lib/utils/connection-feedback";
 import {
-  buildDownloadClientBaseUrl,
   buildDownloadClientConfigValues,
+  downloadClientConnectionTestBlocker,
   normalizeDownloadClientDraft,
   buildDownloadClientDraftFromRecord,
   buildDownloadClientTypeOptions,
@@ -607,10 +607,7 @@ export function SettingsDownloadClientsContainer({
     const draft = normalizeDownloadClientDraft(downloadClientDraft);
     setDownloadClientDraft(draft);
     const payload = {
-      name: draft.name.trim(),
       clientType: normalizeDownloadClientType(draft.clientType),
-      host: draft.host.trim(),
-      baseUrl: buildDownloadClientBaseUrl(draft),
       config: buildDownloadClientConfigValues(
         draft,
         selectedDownloadClientConfigFields,
@@ -619,15 +616,9 @@ export function SettingsDownloadClientsContainer({
       proxyConfigId: draft.proxyConfigId,
     };
 
-    if (!payload.name || !payload.host) {
-      const message = t("settings.downloadClientValidation");
-      setGlobalStatus(message);
-      return;
-    }
-
-    if (!payload.baseUrl) {
-      const message = t("settings.downloadClientBaseUrlRequired");
-      setGlobalStatus(message);
+    const blocker = downloadClientConnectionTestBlocker(draft);
+    if (blocker) {
+      setGlobalStatus(t(blocker));
       return;
     }
 

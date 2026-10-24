@@ -374,6 +374,23 @@ export function buildDownloadClientBaseUrl(rawDraft: DownloadClientDraft) {
   return `${protocol}://${host}${normalizedPort}${normalizedPath}`;
 }
 
+/// The translation key of the reason a connection test cannot run yet, or
+/// null when it can. A hostless client is tested without an address, the same
+/// way a save accepts it.
+export function downloadClientConnectionTestBlocker(
+  rawDraft: DownloadClientDraft,
+): "settings.downloadClientValidation" | "settings.downloadClientBaseUrlRequired" | null {
+  const draft = normalizeDownloadClientDraft(rawDraft);
+  const hostless = isHostlessDownloadClientType(draft.clientType);
+  if (!draft.name.trim() || (!draft.host.trim() && !hostless)) {
+    return "settings.downloadClientValidation";
+  }
+  if (!hostless && !buildDownloadClientBaseUrl(draft)) {
+    return "settings.downloadClientBaseUrlRequired";
+  }
+  return null;
+}
+
 export function cleanPayloadObject(payload: Record<string, unknown>) {
   return Object.entries(payload).reduce<Record<string, unknown>>((accumulator, [key, value]) => {
     if (typeof value === "undefined" || value === null) {
