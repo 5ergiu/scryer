@@ -10165,9 +10165,13 @@ pub trait IndexerManagementClient: Send + Sync {
             "managed child sync is not supported for this provider".to_string(),
         ))
     }
+    /// A sync plan that also carries capabilities, fetched only for the child
+    /// keys in `caps_due`. Every other child comes back without a snapshot and
+    /// costs no capabilities request.
     async fn enrichment_sync_plan(
         &self,
         _parent_config_id: &str,
+        _caps_due: &std::collections::HashSet<String>,
     ) -> AppResult<Option<IndexerSyncPlan>> {
         Ok(None)
     }

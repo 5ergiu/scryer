@@ -110,6 +110,14 @@ fn merge_managed_child_metadata(existing: Option<&str>, desired: Option<&str>) -
     serde_json::to_string(&desired_value).ok()
 }
 
+/// Whether a sync rewrite of a managed child changed anything besides its
+/// write time.
+fn managed_child_visibly_changed(before: &IndexerConfig, after: &IndexerConfig) -> bool {
+    let mut after = after.clone();
+    after.updated_at = before.updated_at;
+    *before != after
+}
+
 /// A query budget is a positive count; `None` means the indexer has none.
 /// A parent that syncs managed children never searches under its own rate
 /// limit domain, so a budget there would pace nothing.
@@ -1638,6 +1646,32 @@ impl AppUseCase {
                         })
                         .await
                 );
+                // Capabilities fetched over the old connection stay usable but
+                // become due, so the caps pass that follows this sync refetches
+                // them instead of waiting out their week.
+                let updated = match updated.caps_snapshot_json.as_deref().filter(|_| {
+                    crate::integration::indexer_caps_cache::connection_identity(&existing)
+                        != crate::integration::indexer_caps_cache::connection_identity(&updated)
+                }) {
+                    Some(snapshot) => {
+                        match crate::integration::indexer_caps_cache::mark_snapshot_stale(snapshot)
+                        {
+                            Some(stale) => try_sync_step!(
+                                self.services
+                                    .integrations
+                                    .indexer_configs
+                                    .update(IndexerConfigUpdate {
+                                        id: updated.id.clone(),
+                                        caps_snapshot_json: Some(Some(stale)),
+                                        ..Default::default()
+                                    })
+                                    .await
+                            ),
+                            None => updated,
+                        }
+                    }
+                    None => updated,
+                };
                 if crate::indexer_search_identity(&existing, None)
                     != crate::indexer_search_identity(&updated, None)
                 {
@@ -1647,7 +1681,9 @@ impl AppUseCase {
                     )
                     .await;
                 }
-                indexers_changed = true;
+                if managed_child_visibly_changed(&existing, &updated) {
+                    indexers_changed = true;
+                }
                 apply_managed_child_routing(
                     &mut routing_by_scope,
                     &updated.id,
@@ -1717,6 +1753,9 @@ impl AppUseCase {
 
         routing_by_scope
             .retain(|scope, entries| previous_routing_by_scope.get(scope) != Some(entries));
+        if !routing_by_scope.is_empty() {
+            indexers_changed = true;
+        }
         try_sync_step!(
             self.save_indexer_routing_by_scope(actor, routing_by_scope)
                 .await

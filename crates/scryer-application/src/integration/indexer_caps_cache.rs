@@ -41,6 +41,39 @@ pub(crate) fn serialize_snapshot(
     serde_json::to_string(&value).map_err(|error| AppError::Repository(error.to_string()))
 }
 
+/// Keeps the stored capabilities searchable but drops their fetch time, so
+/// the next caps pass treats them as due. Used when the connection they were
+/// fetched over changes.
+pub(crate) fn mark_snapshot_stale(raw: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value.as_object_mut()?.remove(FETCHED_AT)?;
+    serde_json::to_string(&value).ok()
+}
+
+/// Whether two stored snapshots describe the same capabilities, ignoring when
+/// each was fetched.
+pub(crate) fn same_snapshot_content(left: Option<&str>, right: Option<&str>) -> bool {
+    fn content(raw: Option<&str>) -> Option<serde_json::Value> {
+        let mut value: serde_json::Value = serde_json::from_str(raw?).ok()?;
+        if let Some(object) = value.as_object_mut() {
+            object.remove(FETCHED_AT);
+        }
+        Some(value)
+    }
+    match (left, right) {
+        (None, None) => true,
+        (Some(_), Some(_)) => {
+            let (left_content, right_content) = (content(left), content(right));
+            if left_content.is_some() && right_content.is_some() {
+                left_content == right_content
+            } else {
+                left == right
+            }
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 enum FetchFailure {
     Temporary(String, Option<std::time::Duration>, RateLimitCooldownAction),
@@ -175,6 +208,28 @@ mod tests {
             config.caps_snapshot_json = Some(raw.into());
             assert!(fresh_snapshot(&config, fetched).is_none());
         }
+    }
+
+    #[test]
+    fn stale_marking_keeps_content_but_makes_the_snapshot_due() {
+        let mut config = config();
+        let fetched = config.created_at;
+        let raw =
+            serialize_snapshot(&scryer_domain::IndexerCapsSnapshot::default(), fetched).unwrap();
+        let stale = mark_snapshot_stale(&raw).unwrap();
+        assert!(same_snapshot_content(Some(&raw), Some(&stale)));
+        config.caps_snapshot_json = Some(stale.clone());
+        assert!(fresh_snapshot(&config, fetched).is_none());
+        assert!(mark_snapshot_stale(&stale).is_none());
+        let later = serialize_snapshot(
+            &scryer_domain::IndexerCapsSnapshot::default(),
+            fetched + chrono::Duration::days(1),
+        )
+        .unwrap();
+        assert_ne!(raw, later);
+        assert!(same_snapshot_content(Some(&raw), Some(&later)));
+        assert!(!same_snapshot_content(Some(&raw), None));
+        assert!(same_snapshot_content(None, None));
     }
 
     #[test]

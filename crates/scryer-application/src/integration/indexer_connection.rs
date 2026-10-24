@@ -1214,7 +1214,7 @@ mod tests {
         NullTitleRepository, NullUserRepository,
     };
     use async_trait::async_trait;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1817,6 +1817,8 @@ mod tests {
         active_plan_sync_calls: Arc<AtomicUsize>,
         max_concurrent_plan_sync_calls: Arc<AtomicUsize>,
         dynamic_trigger_keys: Vec<String>,
+        enrichment_caps_json: Option<String>,
+        enrichment_requests: Arc<std::sync::Mutex<Vec<HashSet<String>>>>,
     }
 
     impl RecordingPluginProvider {
@@ -1850,6 +1852,8 @@ mod tests {
                 active_plan_sync_calls: Arc::new(AtomicUsize::new(0)),
                 max_concurrent_plan_sync_calls: Arc::new(AtomicUsize::new(0)),
                 dynamic_trigger_keys: Vec::new(),
+                enrichment_caps_json: None,
+                enrichment_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -1926,10 +1930,33 @@ mod tests {
         plan_sync_delay: Option<Duration>,
         active_plan_sync_calls: Arc<AtomicUsize>,
         max_concurrent_plan_sync_calls: Arc<AtomicUsize>,
+        enrichment_caps_json: Option<String>,
+        enrichment_requests: Arc<std::sync::Mutex<Vec<HashSet<String>>>>,
     }
 
     #[async_trait]
     impl IndexerManagementClient for RecordingIndexerManagementClient {
+        async fn enrichment_sync_plan(
+            &self,
+            _parent_config_id: &str,
+            caps_due: &HashSet<String>,
+        ) -> AppResult<Option<crate::IndexerSyncPlan>> {
+            let Some(caps_json) = self.enrichment_caps_json.clone() else {
+                return Ok(None);
+            };
+            self.enrichment_requests
+                .lock()
+                .unwrap()
+                .push(caps_due.clone());
+            let mut plan = self.sync_plan.clone();
+            for child in &mut plan.children {
+                child.caps_snapshot_json = caps_due
+                    .contains(&child.child_key)
+                    .then(|| caps_json.clone());
+            }
+            Ok(Some(plan))
+        }
+
         async fn validate_connection(&self) -> AppResult<crate::IndexerValidationResult> {
             Ok(self.validate_result.clone())
         }
@@ -2006,6 +2033,8 @@ mod tests {
                 plan_sync_delay: self.plan_sync_delay,
                 active_plan_sync_calls: self.active_plan_sync_calls.clone(),
                 max_concurrent_plan_sync_calls: self.max_concurrent_plan_sync_calls.clone(),
+                enrichment_caps_json: self.enrichment_caps_json.clone(),
+                enrichment_requests: self.enrichment_requests.clone(),
             }))
         }
 
@@ -5786,6 +5815,218 @@ mod tests {
         assert_eq!(child_rate("zero"), Some(0));
         assert_eq!(child_rate("custom"), Some(7));
         assert_eq!(child_rate("new"), Some(2));
+    }
+
+    fn managed_test_child(
+        id: &str,
+        caps_snapshot_json: Option<String>,
+        is_enabled: bool,
+        disabled_until: Option<chrono::DateTime<Utc>>,
+    ) -> IndexerConfig {
+        let now = Utc::now();
+        IndexerConfig {
+            id: id.to_string(),
+            name: format!("Synthetic {id}"),
+            provider_type: "torrent_rss".to_string(),
+            base_url: format!("https://{id}.example/rss"),
+            api_key_encrypted: None,
+            rate_limit_seconds: None,
+            rate_limit_burst: None,
+            max_queries_per_minute: None,
+            disabled_until,
+            is_enabled,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            proxy_config_id: None,
+            download_client_id: None,
+            seeding_profile_id: None,
+            managed_parent_config_id: Some("parent".to_string()),
+            managed_child_key: Some(id.to_string()),
+            managed_metadata_json: None,
+            caps_snapshot_json,
+            last_health_status: None,
+            last_error_message: None,
+            last_error_at: None,
+            config_json: Some(format!(r#"{{"feed_url":"https://{id}.example/rss"}}"#)),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_caps_pass_fetches_only_due_children_and_then_nothing() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let now = Utc::now();
+        let mut parent = managed_test_child("parent", None, true, None);
+        parent.provider_type = "manager".to_string();
+        parent.managed_parent_config_id = None;
+        parent.managed_child_key = None;
+        parent.enable_interactive_search = false;
+        parent.enable_auto_search = false;
+        parent.config_json = Some(r#"{"base_url":"https://manager.example"}"#.to_string());
+        indexer_repo.create(parent).await.unwrap();
+        let snapshot_at = |at| {
+            Some(
+                crate::integration::indexer_caps_cache::serialize_snapshot(
+                    &scryer_domain::IndexerCapsSnapshot::default(),
+                    at,
+                )
+                .unwrap(),
+            )
+        };
+        for child in [
+            managed_test_child("fresh", snapshot_at(now), true, None),
+            managed_test_child(
+                "expired",
+                snapshot_at(now - chrono::Duration::days(8)),
+                true,
+                None,
+            ),
+            managed_test_child("new", None, true, None),
+            managed_test_child(
+                "cooling",
+                None,
+                true,
+                Some(now + chrono::Duration::hours(1)),
+            ),
+            managed_test_child("off", None, false, None),
+        ] {
+            indexer_repo.create(child).await.unwrap();
+        }
+        let mut provider = RecordingPluginProvider::with_sync_plan(crate::IndexerSyncPlan {
+            children: ["fresh", "expired", "new", "cooling", "off"]
+                .into_iter()
+                .map(|key| crate::ManagedIndexerChildPlan {
+                    child_key: key.to_string(),
+                    name: format!("Synthetic {key}"),
+                    provider_type: "torrent_rss".to_string(),
+                    config_json: format!(r#"{{"feed_url":"https://{key}.example/rss"}}"#),
+                    is_enabled: true,
+                    enable_interactive_search: true,
+                    enable_auto_search: true,
+                    managed_metadata_json: None,
+                    caps_snapshot_json: None,
+                    routing_scopes: Vec::new(),
+                })
+                .collect(),
+        });
+        provider.enrichment_caps_json =
+            Some(serde_json::to_string(&scryer_domain::IndexerCapsSnapshot::default()).unwrap());
+        let provider = Arc::new(provider);
+        let app = test_app(
+            indexer_repo.clone(),
+            Some(provider.clone()),
+            Arc::new(RecordingSettingsRepository::default()),
+        );
+
+        app.enrich_managed_indexer_children(&test_admin(), "parent")
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.enrichment_requests.lock().unwrap().clone(),
+            vec![HashSet::from(["expired".to_string(), "new".to_string()])],
+            "only children with a missing or expired snapshot that may be contacted are due"
+        );
+        for id in ["expired", "new"] {
+            let stored = indexer_repo.get_by_id(id).await.unwrap().unwrap();
+            assert!(
+                crate::integration::indexer_caps_cache::fresh_snapshot(&stored, Utc::now())
+                    .is_some(),
+                "{id} stores a dated snapshot"
+            );
+        }
+
+        app.enrich_managed_indexer_children(&test_admin(), "parent")
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.enrichment_requests.lock().unwrap().len(),
+            1,
+            "a pass with every snapshot fresh must not ask for caps"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_child_connection_change_makes_its_caps_due() {
+        let indexer_repo = Arc::new(RecordingIndexerConfigRepo::new());
+        let mut parent = managed_test_child("parent", None, true, None);
+        parent.provider_type = "manager".to_string();
+        parent.managed_parent_config_id = None;
+        parent.managed_child_key = None;
+        parent.enable_interactive_search = false;
+        parent.enable_auto_search = false;
+        parent.config_json = Some(r#"{"base_url":"https://manager.example"}"#.to_string());
+        indexer_repo.create(parent).await.unwrap();
+        let fresh = crate::integration::indexer_caps_cache::serialize_snapshot(
+            &scryer_domain::IndexerCapsSnapshot::default(),
+            Utc::now(),
+        )
+        .unwrap();
+        for id in ["moved", "same"] {
+            indexer_repo
+                .create(managed_test_child(id, Some(fresh.clone()), true, None))
+                .await
+                .unwrap();
+        }
+        let plan_child = |key: &str, feed: &str| crate::ManagedIndexerChildPlan {
+            child_key: key.to_string(),
+            name: format!("Synthetic {key}"),
+            provider_type: "torrent_rss".to_string(),
+            config_json: format!(r#"{{"feed_url":"{feed}"}}"#),
+            is_enabled: true,
+            enable_interactive_search: true,
+            enable_auto_search: true,
+            managed_metadata_json: None,
+            caps_snapshot_json: None,
+            routing_scopes: Vec::new(),
+        };
+        let sync_with = |moved_feed: &'static str| {
+            let provider = Arc::new(RecordingPluginProvider::with_sync_plan(
+                crate::IndexerSyncPlan {
+                    children: vec![
+                        plan_child("moved", moved_feed),
+                        plan_child("same", "https://same.example/rss"),
+                    ],
+                },
+            ));
+            test_app(
+                indexer_repo.clone(),
+                Some(provider),
+                Arc::new(RecordingSettingsRepository::default()),
+            )
+        };
+        // The first sync settles each child on its synced form; only a later
+        // change to that form is a connection change.
+        sync_with("https://moved.example/rss")
+            .sync_indexer_config(&test_admin(), "parent")
+            .await
+            .unwrap();
+        for id in ["moved", "same"] {
+            indexer_repo
+                .update(crate::IndexerConfigUpdate {
+                    id: id.to_string(),
+                    caps_snapshot_json: Some(Some(fresh.clone())),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        sync_with("https://elsewhere.example/rss")
+            .sync_indexer_config(&test_admin(), "parent")
+            .await
+            .unwrap();
+
+        let moved = indexer_repo.get_by_id("moved").await.unwrap().unwrap();
+        assert!(
+            moved.caps_snapshot_json.is_some(),
+            "stale caps stay searchable"
+        );
+        assert!(
+            crate::integration::indexer_caps_cache::fresh_snapshot(&moved, Utc::now()).is_none()
+        );
+        let same = indexer_repo.get_by_id("same").await.unwrap().unwrap();
+        assert_eq!(same.caps_snapshot_json.as_deref(), Some(fresh.as_str()));
     }
 
     #[tokio::test]
