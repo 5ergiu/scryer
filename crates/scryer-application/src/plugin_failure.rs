@@ -292,10 +292,13 @@ impl AppError {
                 "plugin reported an error"
             );
         }
+        // The sentence reaches clients unmasked, so a credential the plugin
+        // echoed back in a URL is redacted here, as the detail already is.
         Self::PluginFailed {
             message: format!(
                 "{context}: plugin error {:?}: {}",
-                error.code, error.public_message
+                error.code,
+                redact_url_credentials(&error.public_message)
             ),
             failure: PluginFailure::from_plugin_error(error),
         }
@@ -304,7 +307,7 @@ impl AppError {
     /// A plugin call that failed before the plugin could answer.
     pub fn plugin_host_failed(reason: PluginFailureReason, message: impl Into<String>) -> Self {
         Self::PluginFailed {
-            message: message.into(),
+            message: redact_url_credentials(&message.into()),
             failure: PluginFailure::new(reason),
         }
     }
@@ -388,6 +391,27 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), PluginErrorCode::KNOWN.len());
+    }
+
+    #[test]
+    fn a_credential_the_plugin_echoes_in_a_url_never_reaches_the_sentence() {
+        let secret = "synthetic-secret-value";
+        let error = plugin_error(
+            PluginErrorCode::AuthFailed,
+            &format!("fetch of https://user:{secret}@tracker.invalid/api?apikey={secret} failed"),
+        );
+        let failed = AppError::plugin_failed(&error, "indexer indexer_test component");
+        let sentence = failed.to_string();
+        assert!(!sentence.contains(secret), "{sentence}");
+        assert!(sentence.contains("tracker.invalid"), "{sentence}");
+        let detail = failed.plugin_failure().and_then(|f| f.detail.clone());
+        assert!(detail.is_some_and(|detail| !detail.contains(secret)));
+
+        let host = AppError::plugin_host_failed(
+            PluginFailureReason::HostFailure,
+            format!("request to https://tracker.invalid/?passkey={secret} timed out"),
+        );
+        assert!(!host.to_string().contains(secret), "{host}");
     }
 
     #[test]

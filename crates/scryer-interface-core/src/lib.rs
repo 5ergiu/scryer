@@ -730,15 +730,21 @@ pub fn to_gql_error(err: AppError) -> Error {
         // masked: the sentence is the host's own, the reason names the
         // condition for clients that translate it, and the plugin's own public
         // sentence, when it gave one, rides beside it as the detail.
-        AppError::PluginFailed { message, failure } => {
-            Error::new(message).extend_with(|_, extensions| {
-                extensions.set("code", "PLUGIN_FAILED");
-                extensions.set("reason", failure.reason.as_str());
-                if let Some(detail) = failure.detail {
-                    extensions.set("detail", detail);
-                }
-            })
-        }
+        // Neither text is masked, so a credential echoed back in a URL is
+        // redacted on the way out whichever constructor built the error.
+        AppError::PluginFailed { message, failure } => Error::new(
+            scryer_application::url_redaction::redact_url_credentials(&message),
+        )
+        .extend_with(|_, extensions| {
+            extensions.set("code", "PLUGIN_FAILED");
+            extensions.set("reason", failure.reason.as_str());
+            if let Some(detail) = failure.detail {
+                extensions.set(
+                    "detail",
+                    scryer_application::url_redaction::redact_url_credentials(&detail),
+                );
+            }
+        }),
         AppError::ImportEvidenceUnavailable(message) => repository_gql_error(message),
         error @ AppError::ImportSourceInspection { .. }
         | error @ AppError::UnsupportedImportSource { .. }
@@ -1224,6 +1230,39 @@ mod tests {
             Some("PLUGIN_TIMED_OUT")
         );
         assert_eq!(graphql_error_extension_string(&bare, "detail"), None);
+    }
+
+    #[test]
+    fn a_plugin_failure_never_carries_a_url_credential_to_the_client() {
+        use scryer_application::{PluginFailure, PluginFailureReason};
+
+        let secret = "synthetic-secret-value";
+        let echoed = format!(
+            "fetch of https://user:{secret}@tracker.invalid/api?apikey={secret} was refused"
+        );
+        let built = [
+            AppError::plugin_host_failed(PluginFailureReason::HostFailure, echoed.clone()),
+            AppError::PluginFailed {
+                message: echoed.clone(),
+                failure: PluginFailure {
+                    reason: PluginFailureReason::AuthFailed,
+                    detail: Some(echoed.clone()),
+                },
+            },
+        ];
+        for failed in built {
+            let error = to_gql_error(failed);
+            assert_eq!(graphql_error_code(&error), Some("PLUGIN_FAILED"));
+            assert!(!error.message.contains(secret), "{}", error.message);
+            assert!(
+                error.message.contains("tracker.invalid"),
+                "{}",
+                error.message
+            );
+            if let Some(detail) = graphql_error_extension_string(&error, "detail") {
+                assert!(!detail.contains(secret), "{detail}");
+            }
+        }
     }
 
     #[test]

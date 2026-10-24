@@ -365,7 +365,8 @@ fn decode_download_add_result<T>(result: PluginResult<T>, context: &str) -> AppR
 fn plugin_error_message(error: &PluginError, context: &str) -> String {
     format!(
         "{context}: plugin error {:?}: {}",
-        error.code, error.public_message
+        error.code,
+        scryer_application::url_redaction::redact_url_credentials(&error.public_message)
     )
 }
 
