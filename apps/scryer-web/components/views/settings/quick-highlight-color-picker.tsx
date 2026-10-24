@@ -54,8 +54,16 @@ export function QuickHighlightColorPicker() {
     <section className="mt-4 space-y-3 border-t border-border pt-4" aria-busy={appearanceSaving}>
       <h3 className="text-sm font-semibold">{t("profile.highlightColor")}</h3>
       <div role="group" aria-label={t("profile.highlightColor")} className="flex flex-wrap items-center gap-2">
-        <Button type="button" variant="outline" size="sm" disabled={disabled || highlightColor === null}
-          onClick={() => void select(null)}>{t("label.default")}</Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={disabled || highlightColor === null}
+            onClick={() => void select(null)}>{t("label.default")}</Button>
+          <Button type="button" size="icon-sm" variant="outline" disabled={disabled} aria-expanded={customOpen}
+            aria-label={t("profile.highlightColorCustom")} title={t("profile.highlightColorCustom")}
+            aria-controls={customOpen ? "theme-quick-custom-highlight" : undefined}
+            onClick={() => customOpen ? closeCustom() : setCustomOpen(true)}>
+            <Palette className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
         {HIGHLIGHT_COLOR_PRESETS.map((preset) => (
           <button key={preset.value} type="button" aria-label={t(preset.labelKey)} title={t(preset.labelKey)}
             aria-pressed={selectedColor === preset.value} disabled={disabled}
@@ -65,11 +73,6 @@ export function QuickHighlightColorPicker() {
             {selectedColor === preset.value && <Check className="absolute inset-0 m-auto size-4 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]" />}
           </button>
         ))}
-        <Button type="button" size="sm" variant="outline" disabled={disabled} aria-expanded={customOpen}
-          aria-controls={customOpen ? "theme-quick-custom-highlight" : undefined}
-          onClick={() => customOpen ? closeCustom() : setCustomOpen(true)}>
-          <Palette className="size-4" />{t("profile.highlightColorCustom")}
-        </Button>
       </div>
       {customOpen && (
         <div id="theme-quick-custom-highlight" className="min-w-0 rounded-lg border border-border bg-card p-3">

@@ -1683,7 +1683,7 @@ function RootSidebarContent({
                     <span className="truncate">{t("theme.label")}</span>
                   </button>
                 </PopoverTrigger>
-                <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto">
+                <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto shadow-[0_12px_32px_rgba(0,0,0,0.18),0_2px_8px_rgba(0,0,0,0.10)] dark:shadow-[0_18px_50px_rgba(0,0,0,0.45),0_4px_14px_rgba(0,0,0,0.3)]">
                   <h3 className="mb-3 text-sm font-semibold">{t("palette.title")}</h3>
                   <PalettePicker />
                   <QuickHighlightColorPicker />
