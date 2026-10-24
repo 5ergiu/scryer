@@ -558,6 +558,9 @@ pub struct TitleMediaFilePayload {
     pub size_bytes: Long,
     /// File role, such as primary or additional media.
     pub role: String,
+    /// Whether an operator pinned this file's episode links; scans and
+    /// metadata refreshes leave pinned links alone.
+    pub episode_links_pinned: bool,
     /// Human-readable quality label, or null before quality is known.
     pub quality_label: Option<String>,
     /// Raw media scan state; analysis fields remain null until scanning completes.
@@ -929,6 +932,23 @@ pub struct FixTitleMatchPayload {
     pub library_scan: Option<LibraryScanSummaryPayload>,
     /// Non-fatal warnings produced while repairing the match.
     pub warnings: Vec<String>,
+}
+
+#[derive(SimpleObject, Clone)]
+/// Result of assigning an imported file to different episodes of its title.
+pub struct ReassignEpisodeFilePayload {
+    /// The file after the change, at its new path.
+    pub file: TitleMediaFilePayload,
+    /// Absolute path the file had before the change.
+    pub previous_path: String,
+    /// Episodes the file was linked to before the change.
+    pub previous_episode_ids: Vec<ID>,
+    /// Episodes the file is linked to now; the links are operator pinned.
+    pub episode_ids: Vec<ID>,
+    /// Files that were primary on a target episode and are now additional.
+    pub demoted_file_ids: Vec<ID>,
+    /// Files that became primary on an episode this file left.
+    pub promoted_file_ids: Vec<ID>,
 }
 
 #[derive(SimpleObject, Clone)]

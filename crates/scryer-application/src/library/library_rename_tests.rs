@@ -1267,6 +1267,7 @@ fn test_media_file(path: &str) -> TitleMediaFile {
         episode_id: None,
         series_movie_link_ids: Vec::new(),
         role: crate::MediaFileRole::Primary,
+        episode_links_pinned: false,
         file_path: path.to_string(),
         size_bytes: 1_000,
         announced_size_bytes: None,

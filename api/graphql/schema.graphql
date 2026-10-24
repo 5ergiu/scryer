@@ -4798,6 +4798,10 @@ enum DomainEventTypeValue {
 	"""
 	MEDIA_FILE_RENAMED
 	"""
+	An operator assigned a media file to different episodes of its title.
+	"""
+	MEDIA_FILE_REASSIGNED
+	"""
 	A media file was deleted.
 	"""
 	MEDIA_FILE_DELETED
@@ -19790,6 +19794,20 @@ type MutationRoot {
 		input: DeleteMediaFileInput!
 	): DeleteMediaFilePayload!
 	"""
+	Assign an imported series file to different episodes of its own title.
+	
+	The links move, the file is renamed on disk to the new episodes' name,
+	and the choice is pinned so scans and refreshes keep it. A target with
+	a primary file is refused unless `replace` is set, which demotes that
+	file to additional; no file is ever deleted.
+	"""
+	reassignEpisodeFile(
+		"""
+		Media-file identity, target episodes, and conflict handling.
+		"""
+		input: ReassignEpisodeFileInput!
+	): ReassignEpisodeFilePayload!
+	"""
 	Accept a background job deleting every media file linked to the supplied
 	episodes of one title.
 	
@@ -25614,6 +25632,56 @@ type QueueUnlinkedReleasePayload {
 }
 
 """
+Operator request to assign an imported series file to different episodes of
+its own title. The file is renamed on disk to the new episodes' name.
+"""
+input ReassignEpisodeFileInput {
+	"""
+	Media-file identity to reassign.
+	"""
+	fileId: ID!
+	"""
+	Episodes of the file's own title the file represents after the change.
+	"""
+	episodeIds: [ID!]!
+	"""
+	Whether a primary file already on a target episode is demoted to an
+	additional file. When false, such a conflict refuses the request.
+	"""
+	replace: Boolean
+}
+
+"""
+Result of assigning an imported file to different episodes of its title.
+"""
+type ReassignEpisodeFilePayload {
+	"""
+	The file after the change, at its new path.
+	"""
+	file: TitleMediaFilePayload!
+	"""
+	Absolute path the file had before the change.
+	"""
+	previousPath: String!
+	"""
+	Episodes the file was linked to before the change.
+	"""
+	previousEpisodeIds: [ID!]!
+	"""
+	Episodes the file is linked to now; the links are operator pinned.
+	"""
+	episodeIds: [ID!]!
+	"""
+	Files that were primary on a target episode and are now additional.
+	"""
+	demotedFileIds: [ID!]!
+	"""
+	Files that became primary on an episode this file left.
+	"""
+	promotedFileIds: [ID!]!
+}
+
+"""
 Policy for recap episodes or scenes.
 """
 enum RecapPolicyValue {
@@ -30546,6 +30614,11 @@ type TitleMediaFilePayload {
 	File role, such as primary or additional media.
 	"""
 	role: String!
+	"""
+	Whether an operator pinned this file's episode links; scans and
+	metadata refreshes leave pinned links alone.
+	"""
+	episodeLinksPinned: Boolean!
 	"""
 	Human-readable quality label, or null before quality is known.
 	"""

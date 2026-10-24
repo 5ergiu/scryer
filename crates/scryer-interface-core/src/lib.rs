@@ -561,12 +561,17 @@ pub fn to_gql_error(err: AppError) -> Error {
         // Still a validation error to every client that reads `code`. The
         // reason rides beside it for clients that translate the failure
         // instead of showing the sentence.
-        AppError::ValidationRefused { message, reason } => {
-            Error::new(format!("validation: {message}")).extend_with(|_, extensions| {
-                extensions.set("code", "VALIDATION_ERROR");
-                extensions.set("reason", reason);
-            })
-        }
+        AppError::ValidationRefused {
+            message,
+            reason,
+            facts,
+        } => Error::new(format!("validation: {message}")).extend_with(|_, extensions| {
+            extensions.set("code", "VALIDATION_ERROR");
+            extensions.set("reason", reason);
+            for fact in &facts {
+                extensions.set(fact.key, fact.value.as_str());
+            }
+        }),
         AppError::LocationOperationBusy(message) => {
             coded_gql_error(message, "LOCATION_OPERATION_BUSY")
         }

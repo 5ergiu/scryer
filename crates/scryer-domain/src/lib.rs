@@ -4192,6 +4192,7 @@ pub enum DomainEventType {
     MediaFileImported,
     MediaFileAnalyzed,
     MediaFileRenamed,
+    MediaFileReassigned,
     MediaFileDeleted,
     MediaFileRestored,
     MediaFileUpgraded,
@@ -4255,6 +4256,7 @@ impl DomainEventType {
             Self::MediaFileImported => "media_file_imported",
             Self::MediaFileAnalyzed => "media_file_analyzed",
             Self::MediaFileRenamed => "media_file_renamed",
+            Self::MediaFileReassigned => "media_file_reassigned",
             Self::MediaFileDeleted => "media_file_deleted",
             Self::MediaFileRestored => "media_file_restored",
             Self::MediaFileUpgraded => "media_file_upgraded",
@@ -4318,6 +4320,7 @@ impl DomainEventType {
             "media_file_imported" => Some(Self::MediaFileImported),
             "media_file_analyzed" => Some(Self::MediaFileAnalyzed),
             "media_file_renamed" => Some(Self::MediaFileRenamed),
+            "media_file_reassigned" => Some(Self::MediaFileReassigned),
             "media_file_deleted" => Some(Self::MediaFileDeleted),
             "media_file_restored" => Some(Self::MediaFileRestored),
             "media_file_upgraded" => Some(Self::MediaFileUpgraded),
@@ -4751,6 +4754,29 @@ pub struct MediaFileRenamedEventData {
     pub renamed_count: i32,
     #[serde(default)]
     pub episode_ids: Vec<String>,
+}
+
+/// An operator moved one media file from the episodes it served to other
+/// episodes of the same title, the episode-level counterpart of a title
+/// rematch. The links it now holds are pinned against scans and refreshes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaFileReassignedEventData {
+    pub title: TitleContextSnapshot,
+    pub file_id: String,
+    /// The file's path before and after the reassignment rename. Equal when
+    /// the file already carried the name the new episodes render.
+    pub previous_path: String,
+    pub file_path: String,
+    /// Episodes the file served before the reassignment.
+    #[serde(default)]
+    pub previous_episode_ids: Vec<String>,
+    /// Episodes the file serves now.
+    #[serde(default)]
+    pub episode_ids: Vec<String>,
+    /// Files that were primary for a target episode and were kept as
+    /// additional files of it.
+    #[serde(default)]
+    pub demoted_file_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -5201,6 +5227,7 @@ pub enum DomainEventPayload {
     MediaFileImported(MediaFileImportedEventData),
     MediaFileAnalyzed(MediaFileAnalyzedEventData),
     MediaFileRenamed(MediaFileRenamedEventData),
+    MediaFileReassigned(MediaFileReassignedEventData),
     MediaFileDeleted(MediaFileDeletedEventData),
     MediaFileRestored(MediaFileRestoredEventData),
     MediaFileUpgraded(MediaFileUpgradedEventData),
@@ -5266,6 +5293,7 @@ impl DomainEventPayload {
             Self::MediaFileImported(_) => DomainEventType::MediaFileImported,
             Self::MediaFileAnalyzed(_) => DomainEventType::MediaFileAnalyzed,
             Self::MediaFileRenamed(_) => DomainEventType::MediaFileRenamed,
+            Self::MediaFileReassigned(_) => DomainEventType::MediaFileReassigned,
             Self::MediaFileDeleted(_) => DomainEventType::MediaFileDeleted,
             Self::MediaFileRestored(_) => DomainEventType::MediaFileRestored,
             Self::MediaFileUpgraded(_) => DomainEventType::MediaFileUpgraded,

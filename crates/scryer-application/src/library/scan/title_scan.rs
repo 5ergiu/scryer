@@ -3122,6 +3122,18 @@ impl AppUseCase {
                 matching_elapsed = matching_elapsed.saturating_add(matching_started.elapsed());
                 let target_episodes = if is_disc_image {
                     Vec::new()
+                } else if let Some(pinned_episode_ids) = existing
+                    .filter(|existing| existing.episode_links_pinned)
+                    .and(stored_episode_ids)
+                    .filter(|ids| !ids.is_empty())
+                {
+                    // An operator chose this file's episodes. The filename
+                    // neither adds nor replaces a link of a pinned file.
+                    title_episodes
+                        .iter()
+                        .filter(|episode| pinned_episode_ids.contains(&episode.id))
+                        .cloned()
+                        .collect()
                 } else {
                     filename_parse.target_episodes()
                 };
@@ -3581,7 +3593,9 @@ fn fresh_numbering_is_trustworthy(
 const SCAN_RELINK_ENABLED: bool = false;
 
 fn episode_links_may_be_reconciled(existing: &TitleMediaFile) -> bool {
-    SCAN_RELINK_ENABLED && episode_links_look_scan_placed(existing)
+    SCAN_RELINK_ENABLED
+        && !existing.episode_links_pinned
+        && episode_links_look_scan_placed(existing)
 }
 
 /// An import or pending bind carries its original path and a series movie

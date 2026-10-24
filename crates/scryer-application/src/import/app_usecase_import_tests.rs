@@ -2017,6 +2017,7 @@ fn scoped_media_file(
             episode_id: episode_ids.first().map(|value| (*value).to_string()),
             series_movie_link_ids: Vec::new(),
             role: crate::MediaFileRole::Primary,
+            episode_links_pinned: false,
             file_path: file_path.to_string(),
             size_bytes: 1_000,
             announced_size_bytes: None,

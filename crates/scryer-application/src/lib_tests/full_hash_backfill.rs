@@ -23,6 +23,7 @@ pub(super) fn seed_row(id: &str, path: &Path, title_id: &str) -> TitleMediaFile 
         episode_id: None,
         series_movie_link_ids: Vec::new(),
         role: crate::MediaFileRole::Primary,
+        episode_links_pinned: false,
         file_path: crate::stored_paths::path_to_stored_string(path),
         size_bytes: std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0),
         announced_size_bytes: None,

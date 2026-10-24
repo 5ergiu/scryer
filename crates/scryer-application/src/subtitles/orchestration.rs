@@ -2626,6 +2626,7 @@ mod tests {
             episode_id: Some("episode-1".into()),
             series_movie_link_ids: Vec::new(),
             role: crate::MediaFileRole::Primary,
+            episode_links_pinned: false,
             file_path: "/tmp/video.mkv".into(),
             size_bytes: 1024,
             announced_size_bytes: None,

@@ -1661,9 +1661,9 @@ fn ensure_delete_context_roots_available(context: &UserDeleteContext) -> AppResu
             crate::fs_safety::resolve_available_root_for_path(&path, &roots).map_err(|error| {
                 match error {
                     // Title deletion has its own code for a folder outside the roots.
-                    AppError::ValidationRefused { message, reason }
-                        if reason == crate::delete_refusal::PATH_OUTSIDE_ROOTS =>
-                    {
+                    AppError::ValidationRefused {
+                        message, reason, ..
+                    } if reason == crate::delete_refusal::PATH_OUTSIDE_ROOTS => {
                         AppError::validation_refused(
                             crate::title_delete::FOLDER_OUTSIDE_ROOTS,
                             message,

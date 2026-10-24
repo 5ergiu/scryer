@@ -340,6 +340,7 @@ fn mock_media_file(id: String, input: &InsertMediaFileInput) -> TitleMediaFile {
         episode_id: None,
         series_movie_link_ids: Vec::new(),
         role: input.role,
+        episode_links_pinned: false,
         file_path: input.file_path.clone(),
         size_bytes: input.size_bytes,
         announced_size_bytes: input.announced_size_bytes,
@@ -559,6 +560,7 @@ impl MediaFileRepository for MockMediaFileRepo {
             || rows
                 .iter()
                 .any(|entry| !entry.series_movie_link_ids.is_empty())
+            || rows.iter().any(|entry| entry.episode_links_pinned)
             || current != sorted(expected_episode_ids)
         {
             return Ok(crate::EpisodeLinkReplacement::Skipped);

@@ -915,6 +915,10 @@ pub struct TitleMediaFile {
     /// files, adopted downloads, and files that landed short of the band.
     pub announced_size_bytes: Option<i64>,
     pub role: crate::MediaFileRole,
+    /// An operator assigned this file to its episodes (`reassignEpisodeFile`),
+    /// which pins every one of its episode links. Library scans, metadata
+    /// refreshes and re-link passes leave a pinned file's links alone.
+    pub episode_links_pinned: bool,
     pub source_signature_scheme: Option<String>,
     pub source_signature_value: Option<String>,
     /// Persisted full-file hashes (migration 0205, FR-041/046/047), separate
@@ -1361,6 +1365,22 @@ pub struct FixTitleMatchResult {
     pub hydrated: bool,
     pub library_scan: Option<LibraryScanSummary>,
     pub warnings: Vec<String>,
+}
+
+/// What an episode-file reassignment did. Every list is sorted.
+#[derive(Clone, Debug)]
+pub struct ReassignEpisodeFileResult {
+    /// The file as stored now: its new path, links and pin.
+    pub file: TitleMediaFile,
+    pub previous_path: String,
+    /// Episodes the file served before.
+    pub previous_episode_ids: Vec<String>,
+    /// Episodes the file serves now, as their primary file.
+    pub episode_ids: Vec<String>,
+    /// Files that were primary for a target episode and are now additional.
+    pub demoted_file_ids: Vec<String>,
+    /// Files that became primary for an episode the reassigned file left.
+    pub promoted_file_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]

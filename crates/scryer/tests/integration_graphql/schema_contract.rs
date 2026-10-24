@@ -823,8 +823,11 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // Keeping a title adds `createOperatorKeepClaim`: 273->274.
     // Keeping a title is a tag rule's job, so `createOperatorKeepClaim` goes:
     // 274->273.
+    // Episode-level Fix Match adds `reassignEpisodeFile`, which moves one
+    // imported file to other episodes of its title: 273->274.
+    assert!(mutation_field_names.contains(&"reassignEpisodeFile"));
     assert_eq!(
-        mutation_field_count, 273,
+        mutation_field_count, 274,
         "mutation fields: {mutation_field_names:?}"
     );
     // Cross-library transfer (T082, FR-055/FR-056) surfaces destination-title
@@ -1164,9 +1167,13 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // confirmation input replaces the mode and arming inputs; request rules drop
     // the instance-gate object, its input, and the mode input: public types
     // 971->967, OBJECT 524->523, INPUT_OBJECT 240->237.
-    assert_eq!(public_types.len(), 967);
-    assert_eq!(kind_count("OBJECT"), 523);
-    assert_eq!(kind_count("INPUT_OBJECT"), 237);
+    // Episode-level Fix Match adds its input and payload: public types
+    // 967->969, OBJECT 523->524, INPUT_OBJECT 237->238.
+    assert!(public_type_names.contains(&"ReassignEpisodeFileInput"));
+    assert!(public_type_names.contains(&"ReassignEpisodeFilePayload"));
+    assert_eq!(public_types.len(), 969);
+    assert_eq!(kind_count("OBJECT"), 524);
+    assert_eq!(kind_count("INPUT_OBJECT"), 238);
     assert_eq!(kind_count("ENUM"), 195);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
@@ -4743,6 +4750,7 @@ async fn graphql_introspection_title_acquisition_inputs_use_id_fields() {
           setEpisodeMonitored: __type(name: "SetEpisodeMonitoredInput") { inputFields { name type { ...TypeRef } } }
           setSeriesMovieMonitored: __type(name: "SetSeriesMovieMonitoredInput") { inputFields { name type { ...TypeRef } } }
           deleteMediaFile: __type(name: "DeleteMediaFileInput") { inputFields { name type { ...TypeRef } } }
+          reassignEpisodeFile: __type(name: "ReassignEpisodeFileInput") { inputFields { name type { ...TypeRef } } }
           manualImportCandidateMapping: __type(name: "ManualImportCandidateMappingInput") { inputFields(includeDeprecated: true) { name type { ...TypeRef } } }
           beginManualImportSelection: __type(name: "BeginManualImportSelectionInput") { inputFields { name type { ...TypeRef } } }
           queueManualImport: __type(name: "QueueManualImportInput") { inputFields { name type { ...TypeRef } } }
@@ -4853,6 +4861,7 @@ async fn graphql_introspection_title_acquisition_inputs_use_id_fields() {
         ("setEpisodeMonitored", "episodeId"),
         ("setSeriesMovieMonitored", "seriesMovieLinkId"),
         ("deleteMediaFile", "fileId"),
+        ("reassignEpisodeFile", "fileId"),
         ("deleteEpisodeFiles", "titleId"),
         ("deleteEpisodeFilesPreview", "titleId"),
         ("beginManualImportSelection", "clientId"),
@@ -4888,6 +4897,7 @@ async fn graphql_introspection_title_acquisition_inputs_use_id_fields() {
     assert_non_null_id_list("deleteEpisodeFiles", "episodeIds");
     assert_non_null_id_list("deleteEpisodeFilesPreview", "episodeIds");
     assert_non_null_id_list("bindPendingImport", "episodeIds");
+    assert_non_null_id_list("reassignEpisodeFile", "episodeIds");
     assert_non_null_id_list("manualImportCandidateMapping", "episodeIds");
     assert_nullable_id_list("queueDownloadScope", "episodeSet");
 

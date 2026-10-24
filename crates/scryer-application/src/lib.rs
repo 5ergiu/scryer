@@ -62,6 +62,7 @@ pub use indexer_category::{
     CATEGORY_MISMATCH_CODE, IndexerCategoryFamily, NZB_HEAD_PROBE_BYTES, enforce_nzb_category_gate,
     indexer_category_contradicts_facet, indexer_category_family, nzb_head_category,
 };
+pub mod episode_file_reassign_refusal;
 mod integration;
 mod jobs;
 mod library;
@@ -351,8 +352,9 @@ pub use contracts::{
     DownloadClientBindingRecord, DownloadClientConfigUpdate, DownloadClientMarkImportedRequest,
     DownloadClientRetryOutcome, DownloadClientStatus, DownloadOrigin, DownloadPasswordCandidates,
     DownloadRecord, DownloadSubmission, DownloadSubmissionActorSnapshot,
-    DownloadSubmissionIdentity, DownloadSubmissionPurpose, EpisodeLinkReplacement, EpisodeUpdate,
-    ImportArtifact, IndexerArtifactLease, IndexerArtifactResolutionRequest,
+    DownloadSubmissionIdentity, DownloadSubmissionPurpose, EpisodeFileReassignOutcome,
+    EpisodeFileReassignRequest, EpisodeFileReassignment, EpisodeLinkReplacement, EpisodeUpdate,
+    FileEpisodeLinkRecord, ImportArtifact, IndexerArtifactLease, IndexerArtifactResolutionRequest,
     IndexerConfigSyncResult, IndexerConfigUpdate, IndexerDownloadClientMappingCatalog,
     IndexerDownloadClientMappingClient, IndexerDownloadClientMappingIndexer,
     IndexerDownloadClientProviderCompatibility, IndexerRoutingEntry, IndexerRoutingPlan,
@@ -778,12 +780,12 @@ pub use types::{
     PendingImportReasonClass, PendingImportSearchAttempt, PendingImportStatus,
     PendingImportTitleSearchItem, PendingRelease, PendingReleaseObservation, PendingReleaseRole,
     PendingReleaseStatus, PendingReleaseStatusCount, PendingTitleHydration,
-    PrimaryCollectionSummary, RecycleBinBatchJobAccepted, RecycleBinSettings,
-    RecycleRestoreConflictPolicy, RecycleRestorePreview, RecycleRestorePreviewItem, RecycledItem,
-    ReleaseDecision, ReleaseDownloadAttemptOutcome, ReleaseDownloadFailureRecord,
-    ReleaseDownloadFailureSignature, ResolvePendingImportResult, RuntimePathStyle,
-    ScopedExternalId, SortDirection, SystemHealth, TitleAcquisitionDiagnostics, TitleAward,
-    TitleCatalogAggregates, TitleCatalogContentStatus, TitleCatalogFilter,
+    PrimaryCollectionSummary, ReassignEpisodeFileResult, RecycleBinBatchJobAccepted,
+    RecycleBinSettings, RecycleRestoreConflictPolicy, RecycleRestorePreview,
+    RecycleRestorePreviewItem, RecycledItem, ReleaseDecision, ReleaseDownloadAttemptOutcome,
+    ReleaseDownloadFailureRecord, ReleaseDownloadFailureSignature, ResolvePendingImportResult,
+    RuntimePathStyle, ScopedExternalId, SortDirection, SystemHealth, TitleAcquisitionDiagnostics,
+    TitleAward, TitleCatalogAggregates, TitleCatalogContentStatus, TitleCatalogFilter,
     TitleCatalogFilterCounts, TitleCatalogFilterOptions, TitleCatalogPresence,
     TitleCatalogProfileNames, TitleCatalogResult, TitleCatalogSort, TitleCatalogSortKey,
     TitleCatalogTagFilterOption, TitleCredit, TitleEpisodeProgressSummary, TitleExternalRating,
@@ -839,6 +841,23 @@ pub struct AutoEligibilityReason {
     pub block_codes: Vec<String>,
 }
 
+/// One value a refusal hands its client, published as the GraphQL extension
+/// named `key`. The key is API once released, like the reason it travels with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusalFact {
+    pub key: &'static str,
+    pub value: String,
+}
+
+impl RefusalFact {
+    pub fn new(key: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            key,
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("unauthorized: {0}")]
@@ -857,10 +876,15 @@ pub enum AppError {
     /// reasons in SCREAMING_SNAKE (lists keep theirs in `lists::refusal`), not
     /// by adding a variant. A reason names the condition, never the wording,
     /// and is part of the API once released.
+    ///
+    /// `facts` are values a client needs to act on the refusal (the id of the
+    /// record in the way, say). Each travels as its own extension beside
+    /// `reason`, never inside the sentence. Most refusals carry none.
     #[error("validation: {message}")]
     ValidationRefused {
         message: String,
         reason: &'static str,
+        facts: Vec<RefusalFact>,
     },
 
     /// A title mutation is deferred until its location operation releases ownership.
@@ -1061,6 +1085,29 @@ impl AppError {
         Self::ValidationRefused {
             message: message.into(),
             reason,
+            facts: Vec::new(),
+        }
+    }
+
+    /// A named validation failure that also hands the client the values it
+    /// needs to act on it. See [`AppError::ValidationRefused`].
+    pub fn validation_refused_with_facts(
+        reason: &'static str,
+        message: impl Into<String>,
+        facts: Vec<RefusalFact>,
+    ) -> Self {
+        Self::ValidationRefused {
+            message: message.into(),
+            reason,
+            facts,
+        }
+    }
+
+    /// The facts a named validation failure carries beside its reason.
+    pub fn refusal_facts(&self) -> &[RefusalFact] {
+        match self {
+            Self::ValidationRefused { facts, .. } => facts,
+            _ => &[],
         }
     }
 

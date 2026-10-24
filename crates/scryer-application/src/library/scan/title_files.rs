@@ -554,6 +554,7 @@ mod tests {
             episode_id: Some("episode-1".into()),
             series_movie_link_ids: Vec::new(),
             role: crate::MediaFileRole::Primary,
+            episode_links_pinned: false,
             file_path: "/library/Show/Season 01/Show.S01E01.mkv".into(),
             size_bytes,
             announced_size_bytes: None,
