@@ -1442,6 +1442,19 @@ pub struct DeleteMediaFileInput {
     pub typed_confirmation: Option<String>,
 }
 
+#[derive(InputObject)]
+/// Operator request to assign an imported series file to different episodes of
+/// its own title. The file is renamed on disk to the new episodes' name.
+pub struct ReassignEpisodeFileInput {
+    /// Media-file identity to reassign.
+    pub file_id: ID,
+    /// Episodes of the file's own title the file represents after the change.
+    pub episode_ids: Vec<ID>,
+    /// Whether a primary file already on a target episode is demoted to an
+    /// additional file. When false, such a conflict refuses the request.
+    pub replace: Option<bool>,
+}
+
 #[derive(SimpleObject, Clone)]
 /// Result of a media-file deletion request.
 pub struct DeleteMediaFilePayload {

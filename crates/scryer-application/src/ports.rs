@@ -7772,6 +7772,34 @@ pub trait MediaFileRepository: Send + Sync {
         episode_ids: &[String],
     ) -> AppResult<EpisodeLinkReplacement>;
 
+    /// Make `request.episode_ids` the episodes `request.file_id` serves, in one
+    /// transaction. The file becomes primary for every target. Another file that is
+    /// primary for a target either refuses the request or, with `replace`,
+    /// stays linked as an additional file. On an episode the file leaves, a
+    /// sole remaining additional file is promoted to primary. Nothing on disk
+    /// is touched and no file row is deleted. Every outcome but
+    /// [`EpisodeFileReassignOutcome::Reassigned`] wrote nothing.
+    async fn reassign_file_episode_links(
+        &self,
+        _request: &EpisodeFileReassignRequest,
+    ) -> AppResult<EpisodeFileReassignOutcome> {
+        Err(AppError::Repository(
+            "episode file reassignment is unavailable".into(),
+        ))
+    }
+
+    /// Undo [`Self::reassign_file_episode_links`]: restore the file's previous
+    /// links and the roles of the files it demoted or promoted, in one
+    /// transaction.
+    async fn restore_file_episode_links(
+        &self,
+        _reassignment: &EpisodeFileReassignment,
+    ) -> AppResult<()> {
+        Err(AppError::Repository(
+            "episode file reassignment is unavailable".into(),
+        ))
+    }
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,

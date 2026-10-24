@@ -195,6 +195,7 @@ type Props = {
   deleteLoading?: boolean;
   onDeleteFile?: (fileId: string) => void;
   onMakePrimaryFile?: (fileId: string) => Promise<void> | void;
+  onAssignFileToEpisode?: (fileId: string) => void;
   primaryMovieFileUpdatingId?: string | null;
   /**
    * Open the confirm flow for deleting the media files of the selected
@@ -270,6 +271,7 @@ function SeriesOverviewViewImpl({
   deleteLoading = false,
   onDeleteFile,
   onMakePrimaryFile,
+  onAssignFileToEpisode,
   primaryMovieFileUpdatingId = null,
   onRequestDeleteEpisodeFiles,
   episodeSelectionResetToken,
@@ -1421,6 +1423,7 @@ function SeriesOverviewViewImpl({
                     libraryId={title?.libraryId ?? null}
                     onRefreshSubtitles={onRefreshSubtitles}
                     onMakePrimaryFile={canManageTitle ? onMakePrimaryFile : undefined}
+                    onAssignFileToEpisode={canManageTitle ? onAssignFileToEpisode : undefined}
                     primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
                     releaseBlocklistEntries={releaseBlocklistEntries}
                     clearingReleaseBlocklistEntryId={clearingReleaseBlocklistEntryId}

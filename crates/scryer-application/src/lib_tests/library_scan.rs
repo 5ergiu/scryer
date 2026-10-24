@@ -12101,6 +12101,23 @@ async fn a_file_bound_by_hand_without_an_original_path_keeps_its_episodes_throug
 }
 
 #[tokio::test]
+async fn reassigning_a_file_to_no_episodes_is_refused_with_a_reason() {
+    let fixture = episode_relink_fixture("Relink Harbor - S01E01 - Tide 1.mkv", None).await;
+    for episode_ids in [Vec::new(), vec!["   ".to_string()]] {
+        let error = fixture
+            .app
+            .reassign_episode_file(&fixture.user, fixture.file_id(), &episode_ids, false)
+            .await
+            .expect_err("no episodes is refused");
+        assert_eq!(
+            error.validation_reason(),
+            Some(crate::episode_file_reassign_refusal::NO_EPISODES)
+        );
+    }
+    assert_eq!(fixture.linked_episode_ids().await, fixture.episodes(&[1]));
+}
+
+#[tokio::test]
 async fn title_rescan_leaves_a_correctly_linked_file_untouched() {
     let fixture = episode_relink_fixture("Relink Harbor - S01E01 - Tide 1.mkv", None).await;
 

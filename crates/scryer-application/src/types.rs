@@ -1363,6 +1363,22 @@ pub struct FixTitleMatchResult {
     pub warnings: Vec<String>,
 }
 
+/// What an episode-file reassignment did. Every list is sorted.
+#[derive(Clone, Debug)]
+pub struct ReassignEpisodeFileResult {
+    /// The file as stored now: its new path and links.
+    pub file: TitleMediaFile,
+    pub previous_path: String,
+    /// Episodes the file served before.
+    pub previous_episode_ids: Vec<String>,
+    /// Episodes the file serves now, as their primary file.
+    pub episode_ids: Vec<String>,
+    /// Files that were primary for a target episode and are now additional.
+    pub demoted_file_ids: Vec<String>,
+    /// Files that became primary for an episode the reassigned file left.
+    pub promoted_file_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PendingImportCounts {
     pub movie: i64,

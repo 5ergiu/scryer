@@ -4,6 +4,7 @@ import { RefreshScoresButton } from "@/components/common/refresh-scores-button";
 import {
   File as FileIcon,
   HardDrive,
+  ListOrdered,
   Search,
   Star,
   Trash2,
@@ -79,6 +80,8 @@ type MediaFilesOnDiskPanelProps<TFile extends MediaFileOnDisk> = {
   deletingFileIds?: ReadonlySet<string>;
   onMakePrimaryFile?: (fileId: string) => Promise<void> | void;
   primaryFileUpdatingId?: string | null;
+  /** Opens the episode picker that moves a file to other episodes. */
+  onAssignFileToEpisode?: (fileId: string) => void;
   showPrimaryRoleBadge?: boolean;
   showSubtitleSearch?: boolean;
   presentation?: "default" | "selected-title";
@@ -88,6 +91,7 @@ type MediaFilesOnDiskPanelProps<TFile extends MediaFileOnDisk> = {
   subtitleSearchIdPrefix?: string;
   deleteFileIdPrefix?: string;
   makePrimaryFileIdPrefix?: string;
+  assignFileIdPrefix?: string;
   discTitleIdPrefix?: string;
   mediaInfoIdPrefix?: string;
 };
@@ -105,6 +109,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
   deletingFileIds,
   onMakePrimaryFile,
   primaryFileUpdatingId,
+  onAssignFileToEpisode,
   showPrimaryRoleBadge = false,
   showSubtitleSearch = Boolean(onRefreshSubtitles),
   presentation = "default",
@@ -114,6 +119,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
   subtitleSearchIdPrefix = "media-file-search-subtitles",
   deleteFileIdPrefix = "media-file-delete",
   makePrimaryFileIdPrefix = "media-file-make-primary",
+  assignFileIdPrefix = "media-file-assign-episode",
   discTitleIdPrefix = "media-file-disc-title",
   mediaInfoIdPrefix = "media-file-info",
 }: MediaFilesOnDiskPanelProps<TFile>) {
@@ -387,7 +393,7 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                         {formatMediaFileSize(file.sizeBytes)}
                       </div>
                     </div>
-                    {(canSearchSubtitles || canRefreshScores || onMakePrimaryFile || onDeleteFile || discAnalysis) ? (
+                    {(canSearchSubtitles || canRefreshScores || onMakePrimaryFile || onAssignFileToEpisode || onDeleteFile || discAnalysis) ? (
                       <div className="flex items-start gap-2 lg:justify-end">
                         <div className="flex flex-wrap items-center gap-2">
                           {canSearchSubtitles ? (
@@ -453,6 +459,25 @@ export function MediaFilesOnDiskPanel<TFile extends MediaFileOnDisk>({
                               }
                             >
                               {t("mediaFile.makePrimary")}
+                            </TextActionButton>
+                          ) : null}
+                          {onAssignFileToEpisode ? (
+                            <TextActionButton
+                              type="button"
+                              size="sm"
+                              tone="search"
+                              id={selectorId(assignFileIdPrefix, file.id)}
+                              className={
+                                selectedTitlePresentation
+                                  ? "h-8 rounded-[8px] border border-[var(--scry-border2)] bg-[var(--scry-soft)] px-3 text-[11.5px] font-medium text-[var(--scry-text2)] shadow-none hover:bg-[var(--scry-hover)]"
+                                  : undefined
+                              }
+                              onClick={() => onAssignFileToEpisode(file.id)}
+                              title={t("episodeAssign.action")}
+                              aria-label={t("episodeAssign.action")}
+                              leadingIcon={<ListOrdered className="h-3.5 w-3.5" />}
+                            >
+                              {t("episodeAssign.action")}
                             </TextActionButton>
                           ) : null}
                         </div>

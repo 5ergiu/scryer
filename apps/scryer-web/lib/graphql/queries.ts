@@ -1108,6 +1108,24 @@ export const ruleSetTestTitleCollectionsQuery = `query RuleSetTestTitleCollectio
   }
 }`;
 
+/** Every episode of a title, for the episode target picker. */
+export const titleEpisodeTargetsQuery = `query TitleEpisodeTargets($id: ID!) {
+  title(id: $id) {
+    id
+    collections {
+      id
+      episodes {
+        id
+        episodeType
+        seasonNumber
+        episodeNumber
+        absoluteNumber
+        title
+      }
+    }
+  }
+}`;
+
 export const episodeCollectionRefQuery = `query EpisodeCollectionRef($titleId: ID!, $episodeId: ID!) {
   episode(titleId: $titleId, episodeId: $episodeId) {
     id
@@ -4435,6 +4453,7 @@ export const pendingImportBindingPreviewQuery = `query PendingImportBindingPrevi
       episodeType
       episodeNumber
       seasonNumber
+      absoluteNumber
       episodeLabel
       title
       monitored

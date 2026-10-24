@@ -66,6 +66,10 @@ import {
 } from "@/lib/title-overview-loader";
 import { SeriesOverviewView } from "@/components/views/series-overview";
 import { FixTitleMatchDialog } from "@/components/dialogs/fix-title-match-dialog";
+import {
+  useEpisodeFileAssignment,
+  type EpisodeFileReassignment,
+} from "@/components/common/episode-file-assignment";
 import { ConfirmDialog } from "@/components/common/confirm-dialog";
 import { useDownloadConflictConfirmation } from "@/components/common/download-conflict-confirmation";
 import { DeletePreviewSummary } from "@/components/common/delete-preview-summary";
@@ -1741,6 +1745,42 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
     [client, refreshTitleDetail, setGlobalStatus, t, title],
   );
 
+  // A reassigned file leaves its old episodes and joins new ones, and a
+  // replaced primary is demoted on its episode, so every loaded episode on
+  // either side reloads its files along with the title.
+  const handleEpisodeFileAssigned = React.useCallback(
+    async (change: EpisodeFileReassignment) => {
+      const affectedEpisodeIds = new Set([...change.previousEpisodeIds, ...change.episodeIds]);
+      await refreshTitleDetail();
+      await Promise.all(
+        Array.from(affectedEpisodeIds)
+          .filter((episodeId) => episodeDetailsLoadedRef.current.has(episodeId))
+          .map((episodeId) => fetchEpisodeDetail(episodeId)),
+      );
+    },
+    [fetchEpisodeDetail, refreshTitleDetail],
+  );
+  const episodeFileAssignment = useEpisodeFileAssignment({
+    titleId: title?.id ?? null,
+    onAssigned: handleEpisodeFileAssigned,
+  });
+  const openEpisodeFileAssignment = episodeFileAssignment.openAssignment;
+  const handleAssignFileToEpisode = React.useCallback(
+    (fileId: string) => {
+      let filePath: string | null = null;
+      const episodeIds: string[] = [];
+      for (const [episodeId, files] of Object.entries(mediaFilesByEpisode)) {
+        const file = files.find((candidate) => candidate.id === fileId);
+        if (!file) continue;
+        filePath = file.filePath;
+        if (episodeId !== "__unlinked__") episodeIds.push(episodeId);
+      }
+      if (filePath === null) return;
+      openEpisodeFileAssignment({ fileId, filePath, episodeIds });
+    },
+    [mediaFilesByEpisode, openEpisodeFileAssignment],
+  );
+
   const deleteTitleConfirmDisabled =
     deleteFilesOnDisk &&
     (titleDeletePreviewLoading ||
@@ -2074,11 +2114,13 @@ export const SeriesOverviewContainer = React.memo(function SeriesOverviewContain
         episodeSelectionResetToken={episodeSelectionResetToken}
         pendingEpisodeIds={pendingEpisodeFileDeletionEpisodeIds}
         onMakePrimaryFile={canManageTitle ? handleMakePrimaryMovieFile : undefined}
+        onAssignFileToEpisode={canManageTitle ? handleAssignFileToEpisode : undefined}
         primaryMovieFileUpdatingId={primaryMovieFileUpdatingId}
         onOpenFixMatch={handleOpenFixMatch}
         moreLikeThisActions={moreLikeThisStripProps}
       />
       {moreLikeThisActions.dialogs}
+      {episodeFileAssignment.assignmentDialog}
       <FixTitleMatchDialog
         open={fixMatchOpen}
         onOpenChange={setFixMatchOpen}

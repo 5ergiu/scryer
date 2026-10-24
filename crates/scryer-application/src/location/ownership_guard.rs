@@ -619,6 +619,15 @@ pub const MEDIA_FILE_DELETE_ENTRY: GuardedEntry = GuardedEntry {
     constant: "MEDIA_FILE_DELETE_ENTRY",
 };
 
+/// An operator moving one media file to other episodes of its title, which
+/// rewrites its episode links and renames it on disk.
+pub const EPISODE_FILE_REASSIGN_ENTRY: GuardedEntry = GuardedEntry {
+    action: GuardedAction::MediaFileMutation,
+    module: "catalog/workflow/episode_file_reassign.rs",
+    function: "reassign_episode_file",
+    constant: "EPISODE_FILE_REASSIGN_ENTRY",
+};
+
 /// Primary media-file changes, which rewrite which file a title serves.
 pub const MEDIA_FILE_PRIMARY_ENTRY: GuardedEntry = GuardedEntry {
     action: GuardedAction::MediaFileMutation,
@@ -820,6 +829,7 @@ pub const GUARDED_ENTRIES: &[&GuardedEntry] = &[
     &TITLE_DELETE_ENTRY,
     &MEDIA_FILE_DELETE_ENTRY,
     &MEDIA_FILE_PRIMARY_ENTRY,
+    &EPISODE_FILE_REASSIGN_ENTRY,
     &LIBRARY_ROOTS_UPDATE_ENTRY,
     &LIBRARY_DELETE_ENTRY,
     &RECYCLE_RESTORE_ENTRY,
@@ -1420,6 +1430,10 @@ mod tests {
         (
             "catalog/workflow/delete.rs",
             include_str!("../catalog/workflow/delete.rs"),
+        ),
+        (
+            "catalog/workflow/episode_file_reassign.rs",
+            include_str!("../catalog/workflow/episode_file_reassign.rs"),
         ),
         (
             "maintenance_rules/action_execution.rs",

@@ -183,6 +183,20 @@ impl MediaFileRepository for FailingPathUpdateMediaFileRepo {
             .await
     }
 
+    async fn reassign_file_episode_links(
+        &self,
+        request: &scryer_application::EpisodeFileReassignRequest,
+    ) -> AppResult<scryer_application::EpisodeFileReassignOutcome> {
+        self.inner.reassign_file_episode_links(request).await
+    }
+
+    async fn restore_file_episode_links(
+        &self,
+        reassignment: &scryer_application::EpisodeFileReassignment,
+    ) -> AppResult<()> {
+        self.inner.restore_file_episode_links(reassignment).await
+    }
+
     async fn link_file_to_series_movie(
         &self,
         file_id: &str,
