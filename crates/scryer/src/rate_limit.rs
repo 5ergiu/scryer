@@ -168,22 +168,25 @@ impl ScryerRateLimiter {
                     20,
                     300,
                 ),
+                // Only the authentication buckets above are tight. These meter
+                // ordinary signed-in use, where a single page can issue dozens
+                // of requests, so only abuse should reach them.
                 search: Bucket::from_env(
                     "SCRYER_SEARCH_RATE_LIMIT_REQUESTS",
                     "SCRYER_SEARCH_RATE_LIMIT_WINDOW_SECS",
-                    30,
+                    3_000,
                     60,
                 ),
                 mutation: Bucket::from_env(
                     "SCRYER_MUTATION_RATE_LIMIT_REQUESTS",
                     "SCRYER_MUTATION_RATE_LIMIT_WINDOW_SECS",
-                    120,
+                    3_000,
                     60,
                 ),
                 api: Bucket::from_env(
                     "SCRYER_API_RATE_LIMIT_REQUESTS",
                     "SCRYER_API_RATE_LIMIT_WINDOW_SECS",
-                    300,
+                    3_000,
                     60,
                 ),
                 authless_client: Bucket::from_env(
