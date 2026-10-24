@@ -16,7 +16,11 @@ test("expiry clears results and dialog, blocks late snapshots, and permits a new
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   Object.defineProperty(globalThis, "window", { configurable: true, value: browser });
-  Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
+  // No settings reference slot is mounted, so the plugin list portal stays closed.
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: Object.assign(new EventTarget(), { getElementById: () => null }),
+  });
   t.after(() => {
     if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
     else Reflect.deleteProperty(globalThis, "window");
@@ -45,6 +49,7 @@ test("expiry clears results and dialog, blocks late snapshots, and permits a new
       useMemo: (fn: () => unknown) => fn(),
       useEffect: (fn: () => void | (() => void)) => effects.push(fn),
     },
+    "react-dom": { createPortal: () => "portal" },
     "react-router": { useSearchParams: () => [new URLSearchParams()] },
     urql: { useClient: () => ({ query: () => ({ toPromise: () => new Promise(() => {}) }) }) },
     "@/lib/context/translate-context": { useTranslate: () => (key: string) => key },
@@ -58,6 +63,8 @@ test("expiry clears results and dialog, blocks late snapshots, and permits a new
     "@/lib/utils/indexer-search-expiry": expiry,
     "@/lib/utils/indexer-search-download": { downloadIndexerSearchArtifacts: async () => { downloads++; } },
     "@/components/common/grab-dialog": { GrabDialog: "grab-dialog" },
+    "@/components/containers/settings/settings-container": { SETTINGS_REFERENCE_SLOT_ID: "settings-reference-slot" },
+    "@/components/views/settings/filtered-plugin-list": { FilteredPluginList: "plugin-list" },
     "@/components/views/settings/settings-indexer-search-section": { SettingsIndexerSearchSection: "search-view" },
   };
   const file = new URL("../../components/containers/settings/settings-indexer-search-container.tsx", import.meta.url);
@@ -65,7 +72,7 @@ test("expiry clears results and dialog, blocks late snapshots, and permits a new
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const module = { exports: {} as { SettingsIndexerSearchContainer: () => {
-    props: { children: [{ props: SettingsIndexerSearchSectionProps }, { props: { open: boolean } }] };
+    props: { children: [unknown, { props: SettingsIndexerSearchSectionProps }, { props: { open: boolean } }] };
   } } };
   new Function("require", "module", "exports", code)((id: string) => overrides[id] ?? require(id), module, module.exports);
   const render = () => {
@@ -74,7 +81,7 @@ test("expiry clears results and dialog, blocks late snapshots, and permits a new
     effects = [];
     const { children } = module.exports.SettingsIndexerSearchContainer().props;
     cleanups = effects.map((effect) => effect()).filter((cleanup): cleanup is () => void => typeof cleanup === "function");
-    return { view: children[0].props, dialog: children[1].props };
+    return { view: children[1].props, dialog: children[2].props };
   };
   t.after(() => cleanups.forEach((cleanup) => cleanup()));
   render().view.onQueryChange("Example");
