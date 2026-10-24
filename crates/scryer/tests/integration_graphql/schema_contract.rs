@@ -778,8 +778,11 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // brings query fields to 195. Scheduled scripts as jobs add no root field;
     // they ride `jobs`, `jobRuns`, and `triggerJob` with a `customJobId`.
     // Request rules drop the instance gate and its read: 195->194.
+    // Value-dependent indexer config fields add `pluginConfigFields`, the read
+    // the indexer form repeats as trigger fields change: 194->195.
+    assert!(query_field_names.contains(&"pluginConfigFields"));
     assert_eq!(
-        query_field_count, 194,
+        query_field_count, 195,
         "query fields: {query_field_names:?}"
     );
     // First-class proxies (WP4) add one mutation, resetProxyHostKey: SSH host
@@ -1171,10 +1174,24 @@ async fn graphql_introspection_schema_census_matches_contract_baseline() {
     // 967->969, OBJECT 523->524, INPUT_OBJECT 237->238.
     assert!(public_type_names.contains(&"ReassignEpisodeFileInput"));
     assert!(public_type_names.contains(&"ReassignEpisodeFilePayload"));
-    assert_eq!(public_types.len(), 969);
-    assert_eq!(kind_count("OBJECT"), 524);
+    // Value-dependent indexer config fields add their payload, a plugin sign-in
+    // challenge adds its payload, and curated palettes add the palette enum:
+    // public types 969->972, OBJECT 524->526, ENUM 195->196.
+    for name in [
+        "PluginDynamicConfigFieldsPayload",
+        "PluginLoginChallengePayload",
+        "UiPaletteValue",
+    ] {
+        assert!(public_type_names.contains(&name), "missing type {name}");
+    }
+    assert_eq!(
+        public_types.len(),
+        972,
+        "public types: {public_type_names:?}"
+    );
+    assert_eq!(kind_count("OBJECT"), 526);
     assert_eq!(kind_count("INPUT_OBJECT"), 238);
-    assert_eq!(kind_count("ENUM"), 195);
+    assert_eq!(kind_count("ENUM"), 196);
     assert_eq!(kind_count("SCALAR"), 10);
     assert_eq!(kind_count("UNION"), 2);
     assert!(mutation_field_names.contains(&"mediaFileDiscEpisodeTargets"));
