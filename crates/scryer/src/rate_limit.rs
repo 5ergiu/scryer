@@ -168,15 +168,16 @@ impl ScryerRateLimiter {
                     20,
                     300,
                 ),
-                // Only the authentication buckets above are tight. These meter
-                // ordinary signed-in use, where a single page can issue dozens
-                // of requests, so only abuse should reach them.
+                // Expensive searches reach SMG and other upstream services, so
+                // this bucket stays tight to protect them.
                 search: Bucket::from_env(
                     "SCRYER_SEARCH_RATE_LIMIT_REQUESTS",
                     "SCRYER_SEARCH_RATE_LIMIT_WINDOW_SECS",
-                    3_000,
+                    30,
                     60,
                 ),
+                // These meter ordinary signed-in use, where a single page can
+                // issue dozens of requests, so only abuse should reach them.
                 mutation: Bucket::from_env(
                     "SCRYER_MUTATION_RATE_LIMIT_REQUESTS",
                     "SCRYER_MUTATION_RATE_LIMIT_WINDOW_SECS",
