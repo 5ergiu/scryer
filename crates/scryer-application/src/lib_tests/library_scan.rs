@@ -11499,6 +11499,14 @@ async fn deleting_a_title_removes_its_pending_imports() {
         .await
         .expect("seed bystander row");
 
+    // Deletion re-reads the actor's stored grants, so the fixture
+    // administrator's permissions have to be persisted like a real account's.
+    app.services
+        .catalog
+        .libraries
+        .set_app_permission_mask_for_user(&user.id, user.authorization.app)
+        .await
+        .expect("persist fixture administrator permissions");
     app.delete_title(&user, &title.id, false, None)
         .await
         .expect("delete title");
