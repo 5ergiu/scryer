@@ -660,7 +660,7 @@ export function HistoryEventTable({
                 </TableRow>
                 {isExpanded ? (
                   <TableRow id={`history-event-details-${event.id}`} className="@max-[64rem]/history:block">
-                    <TableCell colSpan={columnCount} className="bg-card/30 @max-[64rem]/history:block @max-[64rem]/history:p-3 @max-[64rem]/history:pt-0">
+                    <TableCell colSpan={columnCount} className="bg-card/30 @max-[64rem]/history:block @max-[64rem]/history:p-3">
                       <div className="min-w-0 space-y-4 rounded-lg border border-border/60 bg-background/40 p-3 sm:p-4">
                         {detail.hasDetail ? (
                           <HistoryEventDetailContent event={event} />
