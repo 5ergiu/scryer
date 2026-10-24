@@ -11,7 +11,6 @@ export function PalettePicker() {
   const { appearanceSettings: uiSettings, uiSettingsLoaded, uiSettingsLoading, appearanceSaving, changeAppearance } = useUiSettings();
   const disabled = !uiSettingsLoaded || uiSettingsLoading || appearanceSaving;
   const selectedPalette = normalizePalette(uiSettings.palette);
-  const themeLabel = uiSettings.theme === "LIGHT" ? "theme.light" : uiSettings.theme === "SYSTEM" ? "theme.system" : "theme.dark";
   const select = async (change: Parameters<typeof changeAppearance>[0]) => {
     if (await changeAppearance(change) === "failed") {
       setGlobalStatus(t("palette.saveFailed"), { level: "ERROR" });
@@ -45,7 +44,6 @@ export function PalettePicker() {
               {t(palette.labelKey)}
               {selectedPalette === palette.id && <Check className="size-3.5 shrink-0" aria-hidden="true" />}
             </span>
-            <span className="text-xs text-muted-foreground">{t(palette.mode === "light" ? "theme.light" : palette.mode === "dark" ? "theme.dark" : themeLabel)}</span>
           </button>
         ))}
       </div>
