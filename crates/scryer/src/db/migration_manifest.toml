@@ -3494,6 +3494,23 @@ file = "postgres/migrations/0310_graphite_palette.sql"
 engine = "postgres"
 scope = "all"
 
+[[migration]]
+version = 311
+description = "papyrus palette"
+checksum_algo = "blake3"
+
+[[migration.steps]]
+kind = "sql"
+file = "migrations/0311_papyrus_palette.sql"
+engine = "sqlite"
+scope = "all"
+
+[[migration.steps]]
+kind = "sql"
+file = "postgres/migrations/0311_papyrus_palette.sql"
+engine = "postgres"
+scope = "all"
+
 [[baseline]]
 through_version = 254
 file = "baselines/0254_baseline.sql"

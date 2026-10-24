@@ -20,7 +20,7 @@ import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/legacy-modes/mode/javascript";
 import { xml } from "@codemirror/legacy-modes/mode/xml";
 import { oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
-import { StreamLanguage, syntaxHighlighting } from "@codemirror/language";
+import { defaultHighlightStyle, StreamLanguage, syntaxHighlighting } from "@codemirror/language";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { setDiagnostics as setLintDiagnostics } from "@codemirror/lint";
 import { regoAssistance } from "./rego-editor-assistance";
@@ -336,23 +336,26 @@ const diagnosticTheme = EditorView.baseTheme({
 
 const lightTheme = EditorView.theme({
   "&": { backgroundColor: "var(--background)", color: "var(--foreground)" },
-  ".cm-gutters": { backgroundColor: "var(--muted)", borderRight: "1px solid var(--border)", paddingRight: "8px" },
+  ".cm-gutters": { backgroundColor: "var(--muted)", borderRight: "1px solid var(--border-color)", paddingRight: "8px" },
   ".cm-activeLineGutter": { backgroundColor: "var(--accent)" },
   "&.cm-focused": { outline: "2px solid var(--ring)" },
-  ".cm-content": { fontFamily: CODE_FONT, paddingLeft: "8px" },
+  ".cm-content": { fontFamily: CODE_FONT, caretColor: "var(--ring)", paddingLeft: "8px" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--ring)" },
+  ".cm-selectionBackground, ::selection": { backgroundColor: "rgba(var(--scry-accent-rgb), 0.2)" },
+  "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(var(--scry-accent-rgb), 0.3)" },
   ".cm-gutters .cm-gutter": { fontFamily: CODE_FONT },
 });
 
 const scryerDark = EditorView.theme({
-  "&": { backgroundColor: "#0a0e1a", color: "#d4d4d8" },
-  ".cm-content": { fontFamily: CODE_FONT, caretColor: "#5b64ff", paddingLeft: "8px" },
-  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#5b64ff" },
-  ".cm-gutters": { backgroundColor: "#0a0e1a", color: "#3f3f46", borderRight: "1px solid #273255", fontFamily: CODE_FONT, paddingRight: "8px" },
-  ".cm-activeLineGutter": { backgroundColor: "rgba(255,255,255,0.03)", color: "#71717a" },
-  ".cm-activeLine": { backgroundColor: "rgba(255,255,255,0.03)" },
-  "&.cm-focused": { outline: "2px solid hsl(var(--ring))" },
-  ".cm-selectionBackground, ::selection": { backgroundColor: "rgba(91,100,255,0.2)" },
-  "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(91,100,255,0.3)" },
+  "&": { backgroundColor: "var(--background)", color: "var(--foreground)" },
+  ".cm-content": { fontFamily: CODE_FONT, caretColor: "var(--ring)", paddingLeft: "8px" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--ring)" },
+  ".cm-gutters": { backgroundColor: "var(--background)", color: "var(--muted-foreground)", borderRight: "1px solid var(--border-color)", fontFamily: CODE_FONT, paddingRight: "8px" },
+  ".cm-activeLineGutter": { backgroundColor: "var(--accent)", color: "var(--foreground)" },
+  ".cm-activeLine": { backgroundColor: "rgba(var(--scry-accent-rgb), 0.06)" },
+  "&.cm-focused": { outline: "2px solid var(--ring)" },
+  ".cm-selectionBackground, ::selection": { backgroundColor: "rgba(var(--scry-accent-rgb), 0.2)" },
+  "&.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(var(--scry-accent-rgb), 0.3)" },
   ".cm-line": { padding: "0 4px" },
 }, { dark: true });
 
@@ -442,11 +445,13 @@ export default function CodeEditor({
         onChangeRef.current(update.state.doc.toString());
       }
     });
-    const editorTheme = useDarkTheme ? scryerDark : lightTheme;
+    const editorTheme = [
+      useDarkTheme ? scryerDark : lightTheme,
+      syntaxHighlighting(useDarkTheme ? oneDarkHighlightStyle : defaultHighlightStyle),
+    ];
     const extensions = [
       lineNumbers(),
       ...languageExtensions(language),
-      syntaxHighlighting(oneDarkHighlightStyle),
       assistance.of([]),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       history(),
@@ -494,7 +499,10 @@ export default function CodeEditor({
         : scriptTrigger && scriptTranslate && ["shell", "python", "powershell", "batch", "go"].includes(language)
           ? scriptAssistance(language as ScriptEditorLanguage, scriptTrigger, scriptTranslate, readOnly)
           : []),
-      appearance.reconfigure(isDarkTheme(resolvedTheme) ? scryerDark : lightTheme),
+      appearance.reconfigure([
+        isDarkTheme(resolvedTheme) ? scryerDark : lightTheme,
+        syntaxHighlighting(isDarkTheme(resolvedTheme) ? oneDarkHighlightStyle : defaultHighlightStyle),
+      ]),
       editable.reconfigure([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
     ] });
   }, [assistance, appearance, editable, language, regoFamily, regoTranslate, scriptTrigger, scriptTranslate, readOnly, resolvedTheme]);

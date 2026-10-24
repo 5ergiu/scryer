@@ -11,6 +11,7 @@ const en: LocaleDictionary = {
   "palette.plum": "Plum",
   "palette.ember": "Ember",
   "palette.graphite": "Graphite",
+  "palette.papyrus": "Papyrus",
   "palette.classicMode": "Classic appearance",
   "palette.choose": "Choose color palette",
   "palette.useAccent": "Use palette accent",

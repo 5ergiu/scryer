@@ -1452,6 +1452,23 @@ mod tests {
             .execute(&pool)
             .await
             .expect("new palette accepted");
+        let papyrus = include_str!("../../../scryer/src/db/migrations/0311_papyrus_palette.sql");
+        assert_eq!(
+            papyrus,
+            include_str!("../../../scryer/src/db/postgres/migrations/0311_papyrus_palette.sql")
+        );
+        sqlx::raw_sql(papyrus)
+            .execute(&pool)
+            .await
+            .expect("papyrus migration");
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT theme, highlight_color, palette FROM user_ui_settings WHERE user_id = 'existing'")
+            .fetch_one(&pool).await.expect("preserved graphite preference");
+        assert_eq!(row, ("system".into(), "#123456".into(), "GRAPHITE".into()));
+        sqlx::query("UPDATE user_ui_settings SET palette = 'PAPYRUS'")
+            .execute(&pool)
+            .await
+            .expect("papyrus accepted");
         assert!(
             sqlx::query("UPDATE user_ui_settings SET palette = 'CUSTOM'")
                 .execute(&pool)
@@ -1905,7 +1922,7 @@ mod tests {
             &user.id,
             UiSettingsUpdate {
                 theme: UiTheme::Dark,
-                palette: UiPalette::Ocean,
+                palette: UiPalette::Papyrus,
                 date_time_format: UiDateTimeFormat::Iso24h,
                 highlight_color: Some("#ff3366".to_string()),
                 secondary_color: Some("#2277aa".to_string()),
@@ -1941,7 +1958,7 @@ mod tests {
         .expect("upsert UI settings");
         assert_eq!(stored.user_id, user.id);
         assert_eq!(stored.theme, UiTheme::Dark);
-        assert_eq!(stored.palette, UiPalette::Ocean);
+        assert_eq!(stored.palette, UiPalette::Papyrus);
         assert_eq!(stored.date_time_format, UiDateTimeFormat::Iso24h);
         assert!(stored.hide_sponsor_button);
         assert_eq!(stored.table_columns.len(), 2);
@@ -1964,7 +1981,7 @@ mod tests {
             .expect("load legacy UI settings")
             .expect("UI settings exist");
         assert_eq!(legacy.theme, UiTheme::Dark);
-        assert_eq!(legacy.palette, UiPalette::Ocean);
+        assert_eq!(legacy.palette, UiPalette::Papyrus);
         assert_eq!(legacy.theme.as_str(), "dark");
         assert_eq!(legacy.table_columns, stored.table_columns);
         assert_eq!(legacy.highlight_color, stored.highlight_color);

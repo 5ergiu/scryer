@@ -4524,6 +4524,7 @@ pub enum UiPalette {
     Plum,
     Ember,
     Graphite,
+    Papyrus,
 }
 
 impl UiPalette {
@@ -4537,6 +4538,7 @@ impl UiPalette {
             Self::Plum => "PLUM",
             Self::Ember => "EMBER",
             Self::Graphite => "GRAPHITE",
+            Self::Papyrus => "PAPYRUS",
         }
     }
 
@@ -4550,6 +4552,7 @@ impl UiPalette {
             "PLUM" => Some(Self::Plum),
             "EMBER" => Some(Self::Ember),
             "GRAPHITE" => Some(Self::Graphite),
+            "PAPYRUS" => Some(Self::Papyrus),
             _ => None,
         }
     }

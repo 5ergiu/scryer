@@ -31866,6 +31866,7 @@ enum UiPaletteValue {
 	PLUM
 	EMBER
 	GRAPHITE
+	PAPYRUS
 }
 
 """

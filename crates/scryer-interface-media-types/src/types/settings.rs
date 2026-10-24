@@ -339,6 +339,7 @@ pub enum UiPaletteValue {
     Plum,
     Ember,
     Graphite,
+    Papyrus,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]

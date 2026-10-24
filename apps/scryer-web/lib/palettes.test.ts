@@ -21,6 +21,16 @@ test("unknown or missing palettes fall back to Classic", () => {
   for (const palette of PALETTES) assert.equal(normalizePalette(palette.id), palette.id);
 });
 
+test("both saved default identifiers resolve to one appearance and retain the mode preference", () => {
+  assert.equal(PALETTES.filter((palette) => palette.labelKey === "palette.scryerDefault").length, 1);
+  for (const palette of ["CLASSIC", "SCRYER_DEFAULT"] as const) {
+    assert.equal(normalizePalette(palette), "CLASSIC");
+    for (const theme of ["LIGHT", "DARK", "SYSTEM"] as const) {
+      assert.equal(effectiveTheme({ palette, theme }), theme.toLowerCase());
+    }
+  }
+});
+
 test("accent reset removes every inline override so the selected palette takes over", () => {
   const properties = new Map<string, string>();
   const root = { style: {
