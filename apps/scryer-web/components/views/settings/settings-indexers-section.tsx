@@ -2260,7 +2260,7 @@ export function SettingsIndexersSection({
                   <div
                     role="status"
                     aria-live="polite"
-                    className="absolute inset-0 z-10 flex items-center justify-center bg-[rgba(3,7,18,0.72)] p-4 backdrop-blur-[1px]"
+                    className="absolute inset-0 z-10 flex items-center justify-center bg-background/75 p-4 backdrop-blur-[1px]"
                   >
                     <div className="flex items-center gap-2 rounded-[10px] border border-[var(--scry-border2)] bg-[var(--scry-surf)] px-4 py-3 text-sm font-medium text-[var(--scry-ink2)] shadow-[0_12px_28px_rgba(2,6,23,0.28)]">
                       <LoadingMark className="h-4 w-4" />

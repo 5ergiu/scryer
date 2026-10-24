@@ -56,7 +56,7 @@ import { LoadingMark } from "@/components/common/loading-mark";
  * whether the table is the scroller or a block inside one.
  */
 export const HISTORY_TABLE_SHELL_CLASS =
-  "rounded-[14px] border border-[var(--scry-border2)] bg-[var(--scry-surfC)]";
+  "rounded-[14px] border border-[var(--scry-border2)] bg-background";
 
 /** Stand-in rendered when an event carries no name or path to show. */
 const HISTORY_EMPTY_VALUE = "\u2014";

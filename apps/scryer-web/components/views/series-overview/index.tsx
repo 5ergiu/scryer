@@ -1074,11 +1074,14 @@ function SeriesOverviewViewImpl({
   }
 
   const overviewBackdropUrl = title.backgroundUrl;
+  const overviewBackdropGround = fullBleedHero ? "var(--scry-bg)" : "var(--card)";
 
   return (
     <>
-      <div className="space-y-4">
+      <div data-ui="title-overview" className="space-y-4">
       <Card
+        data-ui="title-overview-hero"
+        data-full-bleed={fullBleedHero || undefined}
         className={
           fullBleedHero
             ? "relative -mx-4 -mt-4 overflow-hidden rounded-none border-0 p-0 sm:-mx-5 sm:-mt-5"
@@ -1103,7 +1106,7 @@ function SeriesOverviewViewImpl({
               className="absolute inset-0"
               style={{
                 background:
-                  "linear-gradient(to top, var(--color-card) 0%, var(--color-card) 5%, color-mix(in srgb, var(--color-card) 82%, transparent), color-mix(in srgb, var(--color-card) 52%, transparent)), linear-gradient(135deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012) 40%, transparent 100%)",
+                  `linear-gradient(to top, ${overviewBackdropGround} 0%, ${overviewBackdropGround} 5%, color-mix(in srgb, ${overviewBackdropGround} 82%, transparent), color-mix(in srgb, ${overviewBackdropGround} 52%, transparent)), linear-gradient(135deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.012) 40%, transparent 100%)`,
               }}
             />
             {fullBleedHero ? (
