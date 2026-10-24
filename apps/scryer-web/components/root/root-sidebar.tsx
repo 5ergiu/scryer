@@ -66,6 +66,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { PalettePicker } from "@/components/views/settings/palette-picker";
+import { QuickHighlightColorPicker } from "@/components/views/settings/quick-highlight-color-picker";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { getRuntimeBasePath } from "@/lib/runtime-config";
 import { cn } from "@/lib/utils";
@@ -1675,6 +1676,7 @@ function RootSidebarContent({
                 <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto">
                   <h3 className="mb-3 text-sm font-semibold">{t("palette.title")}</h3>
                   <PalettePicker />
+                  <QuickHighlightColorPicker />
                 </PopoverContent>
               </Popover>
             ) : null}
