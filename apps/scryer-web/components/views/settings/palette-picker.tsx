@@ -5,7 +5,11 @@ import { useUiSettings } from "@/lib/context/ui-settings-context";
 import { normalizePalette, PALETTES } from "@/lib/palettes";
 import { cn } from "@/lib/utils";
 
-export function PalettePicker() {
+/**
+ * `idPrefix` keeps element ids unique when the sidebar popover and the
+ * profile settings page both mount a picker at once.
+ */
+export function PalettePicker({ idPrefix }: { idPrefix: string }) {
   const t = useTranslate();
   const setGlobalStatus = useGlobalStatus();
   const { appearanceSettings: uiSettings, uiSettingsLoaded, uiSettingsLoading, appearanceSaving, changeAppearance } = useUiSettings();
@@ -23,6 +27,7 @@ export function PalettePicker() {
         {PALETTES.map((palette) => (
           <button
             key={palette.id}
+            id={`${idPrefix}-option-${palette.id.toLowerCase()}`}
             type="button"
             aria-pressed={selectedPalette === palette.id}
             disabled={disabled}
@@ -52,7 +57,7 @@ export function PalettePicker() {
       {selectedPalette === "CLASSIC" && (
         <div role="group" aria-label={t("profile.appearance")} className="flex flex-wrap gap-2">
           {([ ["LIGHT", "theme.light"], ["DARK", "theme.dark"], ["SYSTEM", "theme.system"] ] as const).map(([theme, label]) => (
-            <button key={theme} type="button" disabled={disabled} aria-pressed={uiSettings.theme === theme}
+            <button key={theme} id={`${idPrefix}-theme-${theme.toLowerCase()}`} type="button" disabled={disabled} aria-pressed={uiSettings.theme === theme}
               onClick={() => void select({ theme })}
               className={cn("rounded-md border px-3 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring", uiSettings.theme === theme ? "border-primary bg-accent text-accent-foreground" : "border-border text-foreground")}>
               {t(label)}

@@ -401,7 +401,7 @@ export function SettingsProfileSection({
         <div className="space-y-3">
           <div className="font-medium">{t("palette.title")}</div>
           <p className={PROFILE_MUTED_TEXT_CLASS}>{t("palette.description")}</p>
-          <PalettePicker />
+          <PalettePicker idPrefix="profile-palette" />
         </div>
         <div className={PROFILE_ROW_CARD_CLASS}>
           <div className="space-y-1">

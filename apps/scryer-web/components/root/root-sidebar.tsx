@@ -1674,7 +1674,7 @@ function RootSidebarContent({
                 </PopoverTrigger>
                 <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto">
                   <h3 className="mb-3 text-sm font-semibold">{t("palette.title")}</h3>
-                  <PalettePicker />
+                  <PalettePicker idPrefix="palette" />
                 </PopoverContent>
               </Popover>
             ) : null}
