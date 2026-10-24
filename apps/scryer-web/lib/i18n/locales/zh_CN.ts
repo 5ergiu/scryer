@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const zh_CN: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "此发布的详细信息已不可用。请重新搜索以获取。",
+  "httpRelease.refusal.live": "此发布是直播，无法下载。",
+  "httpRelease.refusal.upcoming": "此发布尚未发布。",
+  "httpRelease.refusal.removed": "此发布已被提供方移除。",
+  "httpRelease.refusal.unsupportedTransport": "此发布未以 HTTP 下载器可获取的形式提供。",
+  "httpRelease.refusal.separateTracks": "此发布仅以分离的音频和视频轨道提供，无法合并。",
+  "httpRelease.refusal.noMediaResource": "此发布没有可下载的媒体文件。",
+  "httpRelease.refusal.noSubtitleResource": "此发布未提供所需语言的字幕。",
   "titleDelete.refusal.selection": "请选择不重复的标题。",
   "titleDelete.refusal.busy": "删除操作已在进行中。",
   "titleDelete.refusal.preview": "请刷新删除预览并确认。",

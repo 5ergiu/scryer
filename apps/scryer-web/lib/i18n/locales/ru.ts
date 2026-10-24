@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ru: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "Сведения об этом релизе больше недоступны. Повторите поиск, чтобы скачать его.",
+  "httpRelease.refusal.live": "Этот релиз — прямая трансляция, её нельзя скачать.",
+  "httpRelease.refusal.upcoming": "Этот релиз ещё не опубликован.",
+  "httpRelease.refusal.removed": "Этот релиз удалён поставщиком.",
+  "httpRelease.refusal.unsupportedTransport": "Этот релиз не предлагается в виде, который может получить HTTP-загрузчик.",
+  "httpRelease.refusal.separateTracks": "Этот релиз предлагается только отдельными аудио- и видеодорожками, которые нельзя объединить.",
+  "httpRelease.refusal.noMediaResource": "В этом релизе нет медиафайла для скачивания.",
+  "httpRelease.refusal.noSubtitleResource": "Для этого релиза нет субтитров на нужном языке.",
   "titleDelete.refusal.selection": "Выберите названия без повторов.",
   "titleDelete.refusal.busy": "Удаление уже выполняется.",
   "titleDelete.refusal.preview": "Обновите и подтвердите предварительный просмотр удаления.",

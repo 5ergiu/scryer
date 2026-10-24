@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const es: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "Los detalles de este lanzamiento ya no están disponibles. Busca de nuevo para descargarlo.",
+  "httpRelease.refusal.live": "Este lanzamiento es una transmisión en directo y no se puede descargar.",
+  "httpRelease.refusal.upcoming": "Este lanzamiento aún no se ha publicado.",
+  "httpRelease.refusal.removed": "El proveedor ha retirado este lanzamiento.",
+  "httpRelease.refusal.unsupportedTransport": "Este lanzamiento no se ofrece en un formato que el descargador HTTP pueda obtener.",
+  "httpRelease.refusal.separateTracks": "Este lanzamiento solo se ofrece como pistas de audio y vídeo separadas, que no se pueden combinar.",
+  "httpRelease.refusal.noMediaResource": "Este lanzamiento no tiene ningún archivo multimedia para descargar.",
+  "httpRelease.refusal.noSubtitleResource": "No se ofrecen subtítulos en un idioma deseado para este lanzamiento.",
   "titleDelete.refusal.selection": "Selecciona títulos sin duplicados.",
   "titleDelete.refusal.busy": "Ya hay una eliminación en curso.",
   "titleDelete.refusal.preview": "Actualiza la vista previa de eliminación y confírmala.",

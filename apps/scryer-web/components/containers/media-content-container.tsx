@@ -158,7 +158,7 @@ import { BulkRenamePreviewSummary } from "@/components/common/bulk-rename-previe
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
-import { pluginErrorMessage } from "@/lib/utils/plugin-error-message";
+import { grabErrorMessage } from "@/lib/utils/http-release-error-message";
 import { reportAutomaticSearchFailure } from "@/lib/utils/auto-search-outcome";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
@@ -3528,7 +3528,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         setGlobalStatus(queuedMessage, { level: "SUCCESS" });
       } catch (error) {
         setGlobalStatus(
-          pluginErrorMessage(error, t, t("status.queueFailed")),
+          grabErrorMessage(error, t, t("status.queueFailed")),
           { level: "ERROR" },
         );
         throw error;
@@ -3565,7 +3565,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         setGlobalStatus(t("status.queuedLatest", { name: title.name }), { level: "SUCCESS" });
       } catch (error) {
         setGlobalStatus(
-          pluginErrorMessage(error, t, t("status.queueFailed")),
+          grabErrorMessage(error, t, t("status.queueFailed")),
           { level: "ERROR" },
         );
         throw error;

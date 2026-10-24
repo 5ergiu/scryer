@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const en: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "This release's details are no longer available. Search again to grab it.",
+  "httpRelease.refusal.live": "This release is a live stream, which cannot be downloaded.",
+  "httpRelease.refusal.upcoming": "This release has not been published yet.",
+  "httpRelease.refusal.removed": "This release has been removed by its provider.",
+  "httpRelease.refusal.unsupportedTransport": "This release is not offered in a form the HTTP downloader can fetch.",
+  "httpRelease.refusal.separateTracks": "This release is offered only as separate audio and video tracks, which cannot be combined.",
+  "httpRelease.refusal.noMediaResource": "This release has no media file to download.",
+  "httpRelease.refusal.noSubtitleResource": "No subtitles in a wanted language are offered for this release.",
   "palette.title": "Color palette",
   "palette.description": "Choose an appearance for your account on every device.",
   "palette.classic": "Classic",
