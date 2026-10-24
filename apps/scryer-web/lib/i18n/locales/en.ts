@@ -86,6 +86,7 @@ const en: LocaleDictionary = {
   "settings.hideEnteredPasswords": "Hide entered passwords",
   "settings.pluginSettingsSaveFailed": "Could not save plugin settings.",
   "settings.regoValidationUnavailable": "Validation unavailable. Check your connection and try Validate again.",
+  "settings.regoValidationFailed": "Rule validation failed. Show errors.",
   "settings.regoFileAvailability": "Available only when scoring an imported file with media information. During release searches input.file is null; guard it before reading fields.",
   "settings.regoExtraAvailability": "Indexer-provided attributes. Keys vary by indexer and are not suggested.",
   "settings.regoSnippetLabel": "Snippet",
