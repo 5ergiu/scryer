@@ -420,7 +420,7 @@ export function SettingsProfileSection({
           >
             <Button type="button" variant="outline" size="sm"
               disabled={savingHighlightColor !== null || appearanceSaving || highlightColor === null}
-              onClick={() => onSelectHighlightColor(null)}>{t("palette.useAccent")}</Button>
+              onClick={() => onSelectHighlightColor(null)}>{t("label.default")}</Button>
             {HIGHLIGHT_COLOR_PRESETS.map((preset) => {
               const selected = selectedHighlightColor === preset.value;
               const savingThis = savingHighlightColor === preset.value;
