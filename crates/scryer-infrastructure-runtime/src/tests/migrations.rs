@@ -6746,20 +6746,20 @@ async fn migration_0295_preserves_inherited_movie_availability() {
     );
 }
 
-/// Runs 0305 against a fully migrated schema holding one enabled destructive
+/// Runs 0304 against a fully migrated schema holding one enabled destructive
 /// maintenance rule, one shadow maintenance rule and one enforcing request
 /// rule, with the experimental-features setting stored as `value_json`, or
 /// absent when `experimental` is `None`. Returns the rule rows afterwards as
 /// `(id, enabled, evaluation_mode, effect_arming, destructive_rearm_required)`
 /// and `(id, enabled, evaluation_mode)`.
-async fn rules_after_0305(
+async fn rules_after_0304(
     experimental: Option<&str>,
 ) -> (
     Vec<(String, i64, String, String, i64)>,
     Vec<(String, i64, String)>,
 ) {
     let directory = tempfile::tempdir().expect("synthetic schema fixture");
-    let services = SqliteServices::new(directory.path().join("rules-0305.db").to_string_lossy())
+    let services = SqliteServices::new(directory.path().join("rules-0304.db").to_string_lossy())
         .await
         .expect("migrations should apply");
     let pool = services.pool().clone();
@@ -6808,7 +6808,7 @@ async fn rules_after_0305(
     }
 
     for statement in include_str!(
-        "../../../scryer/src/db/migrations/0305_rules_disabled_unless_experimental.sql"
+        "../../../scryer/src/db/migrations/0304_rules_disabled_unless_experimental.sql"
     )
     .split(';')
     .map(str::trim)
@@ -6817,7 +6817,7 @@ async fn rules_after_0305(
         sqlx::query(statement)
             .execute(&mut *conn)
             .await
-            .expect("0305 should apply");
+            .expect("0304 should apply");
     }
 
     let maintenance = sqlx::query_as(
@@ -6836,9 +6836,9 @@ async fn rules_after_0305(
 }
 
 #[tokio::test]
-async fn migration_0305_disables_every_rule_unless_experimental_features_are_on() {
+async fn migration_0304_disables_every_rule_unless_experimental_features_are_on() {
     for experimental in [None, Some("false"), Some("\"off\"")] {
-        let (maintenance, requests) = rules_after_0305(experimental).await;
+        let (maintenance, requests) = rules_after_0304(experimental).await;
         assert_eq!(
             maintenance,
             vec![
@@ -6868,9 +6868,9 @@ async fn migration_0305_disables_every_rule_unless_experimental_features_are_on(
 }
 
 #[tokio::test]
-async fn migration_0305_keeps_rule_states_when_experimental_features_are_on() {
+async fn migration_0304_keeps_rule_states_when_experimental_features_are_on() {
     for experimental in [Some("true"), Some("\"true\"")] {
-        let (maintenance, requests) = rules_after_0305(experimental).await;
+        let (maintenance, requests) = rules_after_0304(experimental).await;
         assert_eq!(
             maintenance,
             vec![
