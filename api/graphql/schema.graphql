@@ -1325,9 +1325,13 @@ type CalendarEpisodePayload {
 	"""
 	titleBackgroundUrl: String
 	"""
-	Air date, or null when unavailable.
+	Episode air date or movie eligibility date, or null when unavailable.
 	"""
 	airDate: Date
+	"""
+	Whether the movie eligibility date uses an estimated release date.
+	"""
+	airDateEstimated: Boolean!
 	"""
 	Whether both the episode and its parent title are monitored.
 	"""
