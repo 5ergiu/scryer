@@ -31,6 +31,30 @@ pub(crate) fn fresh_snapshot(config: &IndexerConfig, now: DateTime<Utc>) -> Opti
     Some(raw.clone())
 }
 
+/// A Prowlarr managed child with no readable caps snapshot, fresh or not, on
+/// the config or in its managed metadata. Automatic search leaves it out until
+/// its caps are fetched.
+pub(crate) fn awaits_managed_caps(config: &IndexerConfig) -> bool {
+    #[derive(serde::Deserialize)]
+    struct MetadataCaps {
+        #[serde(default)]
+        caps_snapshot: Option<scryer_domain::IndexerCapsSnapshot>,
+    }
+    if !config.is_prowlarr_nab_proxy() {
+        return false;
+    }
+    let on_config = config
+        .caps_snapshot_json
+        .as_deref()
+        .is_some_and(|raw| serde_json::from_str::<scryer_domain::IndexerCapsSnapshot>(raw).is_ok());
+    let in_metadata = config
+        .managed_metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<MetadataCaps>(raw).ok())
+        .is_some_and(|metadata| metadata.caps_snapshot.is_some());
+    !on_config && !in_metadata
+}
+
 pub(crate) fn serialize_snapshot(
     snapshot: &scryer_domain::IndexerCapsSnapshot,
     now: DateTime<Utc>,
@@ -208,6 +232,22 @@ mod tests {
             config.caps_snapshot_json = Some(raw.into());
             assert!(fresh_snapshot(&config, fetched).is_none());
         }
+    }
+
+    #[test]
+    fn only_a_managed_child_without_any_snapshot_awaits_caps() {
+        let mut child = config();
+        assert!(!awaits_managed_caps(&child), "a direct indexer never waits");
+        child.managed_parent_config_id = Some("parent".into());
+        assert!(awaits_managed_caps(&child));
+        let raw = serialize_snapshot(
+            &scryer_domain::IndexerCapsSnapshot::default(),
+            child.created_at,
+        )
+        .unwrap();
+        // An expired or stale snapshot still counts: it keeps the child searchable.
+        child.caps_snapshot_json = mark_snapshot_stale(&raw);
+        assert!(!awaits_managed_caps(&child));
     }
 
     #[test]

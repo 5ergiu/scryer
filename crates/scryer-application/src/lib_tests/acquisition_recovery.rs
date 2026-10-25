@@ -9805,6 +9805,7 @@ async fn acquisition_cycle_active_anime_scan_does_not_block_due_movie_search() {
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -9989,6 +9990,7 @@ async fn acquisition_cycle_active_movie_scan_does_not_block_due_series_search() 
         &app,
         &[MediaFacet::Movie],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10128,6 +10130,7 @@ async fn acquisition_cycle_active_series_scan_defers_due_series_search() {
         &app,
         &[MediaFacet::Series],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10269,6 +10272,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10397,6 +10401,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 

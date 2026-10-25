@@ -5571,6 +5571,13 @@ async fn background_cycle_writes_the_rotation_cursor_only_when_it_moves() {
 async fn covered_movies_ahead_of_an_open_movie(
     covered_count: usize,
 ) -> (AppUseCase, Arc<FixedReleaseIndexerClient>) {
+    covered_movies_ahead_of_an_open_movie_in_batches_of(covered_count, 1).await
+}
+
+async fn covered_movies_ahead_of_an_open_movie_in_batches_of(
+    covered_count: usize,
+    batch: usize,
+) -> (AppUseCase, Arc<FixedReleaseIndexerClient>) {
     let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
     let indexer_client = Arc::new(
         FixedReleaseIndexerClient::new("Top Up Open Fixture.2024.1080p.WEB-DL")
@@ -5675,10 +5682,53 @@ async fn covered_movies_ahead_of_an_open_movie(
         .set_value(
             SETTINGS_SCOPE_SYSTEM,
             crate::acquisition::convergence::ACQUISITION_LONG_TAIL_BACKFILL_MAX_SCOPES_PER_CYCLE_KEY,
-            "1",
+            &batch.to_string(),
         )
         .await;
     (app, indexer_client)
+}
+
+/// A cycle out of time starts no further title, and the next cycle picks up
+/// at the first title it did not reach instead of skipping the rest of the
+/// batch for a whole rotation. A spent budget still walks one title per cycle,
+/// so the rotation always moves.
+#[tokio::test]
+async fn background_acquisition_out_of_budget_resumes_at_the_first_unwalked_title() {
+    let (app, indexer_client) = covered_movies_ahead_of_an_open_movie_in_batches_of(3, 3).await;
+
+    for cycle in 1..=3 {
+        let outcome = app
+            .run_background_acquisition_cycle_with_budget_once(std::time::Duration::ZERO)
+            .await;
+        assert_eq!(outcome.titles_walked, 1, "cycle {cycle} walks one title");
+        assert!(
+            indexer_client.requested_indexer_id_sets().await.is_empty(),
+            "cycle {cycle} reaches a covered movie, not the open one"
+        );
+    }
+
+    let fourth = app
+        .run_background_acquisition_cycle_with_budget_once(std::time::Duration::ZERO)
+        .await;
+    assert_eq!(fourth.titles_walked, 1);
+    assert_eq!(
+        indexer_client.requested_indexer_id_sets().await.len(),
+        1,
+        "the fourth cycle resumes at the open movie the first batch never reached"
+    );
+}
+
+/// Without a budget the same batch is walked whole in one cycle.
+#[tokio::test]
+async fn background_acquisition_within_budget_walks_the_whole_batch() {
+    let (app, indexer_client) = covered_movies_ahead_of_an_open_movie_in_batches_of(3, 3).await;
+
+    let outcome = app
+        .run_background_acquisition_cycle_with_budget_once(std::time::Duration::from_secs(3600))
+        .await;
+
+    assert_eq!(outcome.titles_walked, 4);
+    assert_eq!(indexer_client.requested_indexer_id_sets().await.len(), 1);
 }
 
 /// A scope whose walk had nothing to do does not use up the batch: the cycle

@@ -1060,6 +1060,12 @@ pub struct AppRuntimeAcquisitionState {
     /// library scan, reported so a starved facet is visible in the logs.
     pub(crate) scan_blocked_facet_streaks:
         Arc<std::sync::Mutex<crate::acquisition::workflow::ScanBlockedFacetStreaks>>,
+    /// Scopes a background walk already walked in the batch it was walking
+    /// when it ran out of time. The durable rotation cursors are put back to
+    /// the start of that batch, and the next cycle skips these so it carries
+    /// on with the rest. Kept in memory on purpose: after a restart the batch
+    /// is simply walked again, which coverage makes cheap.
+    pub(crate) interrupted_walk_scope_keys: Arc<std::sync::Mutex<HashSet<String>>>,
     pub(crate) release_candidate_passwords:
         Arc<std::sync::Mutex<HashMap<String, ReleaseCandidatePasswordTicket>>>,
     pub(crate) release_candidate_listings: Arc<std::sync::Mutex<ReleaseCandidateListingTickets>>,
@@ -2593,6 +2599,7 @@ impl AppRuntimeState {
                 download_failure_guards: DownloadFailureGuardTable::default(),
                 title_walk_locks: AcquisitionTitleWalkLocks::default(),
                 scan_blocked_facet_streaks: Arc::default(),
+                interrupted_walk_scope_keys: Arc::default(),
                 release_candidate_passwords: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 release_candidate_listings: Arc::new(std::sync::Mutex::new(
                     ReleaseCandidateListingTickets::default(),
