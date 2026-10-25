@@ -1684,7 +1684,7 @@ function RootSidebarContent({
                   </button>
                 </PopoverTrigger>
                 <PopoverContent side="top" align="start" className="max-h-[80dvh] w-[min(28rem,calc(100vw-2rem))] overflow-y-auto shadow-[0_12px_32px_rgba(0,0,0,0.18),0_2px_8px_rgba(0,0,0,0.10)] dark:shadow-[0_18px_50px_rgba(0,0,0,0.45),0_4px_14px_rgba(0,0,0,0.3)]">
-                  <PalettePicker />
+                  <PalettePicker idPrefix="palette" />
                   <QuickHighlightColorPicker />
                 </PopoverContent>
               </Popover>
