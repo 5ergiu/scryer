@@ -559,8 +559,9 @@ export function SettingsIndexersContainer({
 
   // The sign-in image a provider's login asks the operator to read. It is
   // fetched for the draft (the server restores stored secrets for an indexer
-  // being edited) when the editor opens, when the address, selection, proxy
-  // or indexer changes, after a failed save, and on request. It is never
+  // being edited) when the editor opens, when any value but the answer
+  // (address, credentials, selection, proxy) or the indexer changes, after a
+  // failed save, and on request. It is never
   // stored; the server carries the sign-in it started to the save.
   const [loginChallenge, setLoginChallenge] = useState<LoginChallengeStatus>({
     state: "idle",
@@ -584,10 +585,18 @@ export function SettingsIndexersContainer({
     effectiveSelectedProvider?.configFields.find(
       (field) => field.role === "LOGIN_CHALLENGE_ANSWER",
     )?.key ?? null;
-  const connectionUrlKey =
-    effectiveSelectedProvider?.configFields.find(
-      (field) => field.role === "CONNECTION_URL",
-    )?.key ?? null;
+  // The image belongs to the configuration it was fetched for: the server
+  // keys the sign-in it carries to the save by every value but the answer,
+  // so the fetch follows every non-answer value, credentials included.
+  const loginChallengeConfigSignature =
+    loginChallengeAnswerKey === null
+      ? null
+      : JSON.stringify(
+          Object.entries(indexerDraft.configValues)
+            .filter(([key]) => key !== loginChallengeAnswerKey)
+            .map(([key, value]) => [key, value.trim()])
+            .sort(([left], [right]) => left.localeCompare(right)),
+        );
   const loginChallengeSignature =
     loginChallengeAnswerKey === null
       ? null
@@ -597,9 +606,7 @@ export function SettingsIndexersContainer({
           indexerDraft.proxyConfigId,
           loginChallengeAnswerKey,
           dynamicTriggersSignature,
-          connectionUrlKey
-            ? (indexerDraft.configValues[connectionUrlKey] ?? "").trim()
-            : "",
+          loginChallengeConfigSignature,
           loginChallengeNonce,
         ]);
 
