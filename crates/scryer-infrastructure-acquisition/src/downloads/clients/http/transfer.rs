@@ -61,6 +61,9 @@ pub(crate) const MAX_FORBIDDEN_RETRIES: u32 = 2;
 /// parking a worker for hours.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Partial file names a fresh attempt tries before giving up, when files
+/// already sit under the names it would use.
+const MAX_PART_NAME_PROBES: u32 = 64;
 const EGRESS_LABEL: &str = "HTTP download";
 
 /// Headers this client owns on every request. A resource may not set them.
@@ -417,38 +420,82 @@ pub(crate) trait Checkpoint: Send + Sync {
 pub(crate) struct BandwidthLimiter {
     bytes_per_second: AtomicU64,
     next_free: std::sync::Mutex<tokio::time::Instant>,
+    /// Wakes every pending wait when the rate changes, so it is paced by the
+    /// new rate instead of sleeping out a delay the old one set.
+    rate_changed: tokio::sync::Notify,
 }
+
+/// A paced wait was cut short because the transfer was cancelled.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PacingCancelled;
 
 impl BandwidthLimiter {
     pub(crate) fn new(bytes_per_second: u64) -> Self {
         Self {
             bytes_per_second: AtomicU64::new(bytes_per_second),
             next_free: std::sync::Mutex::new(tokio::time::Instant::now()),
+            rate_changed: tokio::sync::Notify::new(),
         }
     }
 
     pub(crate) fn set_rate(&self, bytes_per_second: u64) {
-        self.bytes_per_second
-            .store(bytes_per_second, Ordering::Relaxed);
-    }
-
-    async fn consume(&self, bytes: u64) {
-        let rate = self.bytes_per_second.load(Ordering::Relaxed);
-        if rate == 0 || bytes == 0 {
+        let previous = self
+            .bytes_per_second
+            .swap(bytes_per_second, Ordering::Relaxed);
+        if previous == bytes_per_second {
             return;
         }
-        let wait = {
-            let mut next_free = self
-                .next_free
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = tokio::time::Instant::now();
-            let start = (*next_free).max(now);
-            *next_free = start + Duration::from_secs_f64(bytes as f64 / rate as f64);
-            start.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
+        // Reservations made at the old rate no longer hold; each pending
+        // wait reserves again from now at the new one.
+        *self.lock_next_free() = tokio::time::Instant::now();
+        self.rate_changed.notify_waiters();
+    }
+
+    fn lock_next_free(&self) -> std::sync::MutexGuard<'_, tokio::time::Instant> {
+        self.next_free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Wait until `bytes` more may be sent, or until `cancel` fires.
+    pub(crate) async fn consume(
+        &self,
+        bytes: u64,
+        cancel: &CancellationToken,
+    ) -> Result<(), PacingCancelled> {
+        loop {
+            let rate_changed = self.rate_changed.notified();
+            tokio::pin!(rate_changed);
+            // Registered before the rate is read, so a change made after
+            // this point always wakes the wait below.
+            rate_changed.as_mut().enable();
+            let rate = self.bytes_per_second.load(Ordering::Relaxed);
+            if rate == 0 || bytes == 0 {
+                return Ok(());
+            }
+            let (start, end, wait) = {
+                let mut next_free = self.lock_next_free();
+                let now = tokio::time::Instant::now();
+                let start = (*next_free).max(now);
+                let end = start + Duration::from_secs_f64(bytes as f64 / rate as f64);
+                *next_free = end;
+                (start, end, start.saturating_duration_since(now))
+            };
+            if wait.is_zero() {
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    // Hand back the slot when nothing was reserved after it.
+                    let mut next_free = self.lock_next_free();
+                    if *next_free == end {
+                        *next_free = start;
+                    }
+                    return Err(PacingCancelled);
+                }
+                () = tokio::time::sleep(wait) => return Ok(()),
+                () = &mut rate_changed => {}
+            }
         }
     }
 }
@@ -467,6 +514,8 @@ pub(crate) enum MediaProbeOutcome {
     Probed {
         duration_seconds: Option<u64>,
         has_video: Option<bool>,
+        /// The container format the analyzer recognized, e.g. `matroska`.
+        container: Option<String>,
     },
     /// The container could not be read at all (an unsupported format, for
     /// one); nothing about it can be checked.
@@ -499,6 +548,7 @@ impl MediaProbe for NativeMediaProbe {
             Ok(MediaAnalysisOutcome::Valid(analysis)) => MediaProbeOutcome::Probed {
                 duration_seconds: positive(analysis.duration_seconds),
                 has_video: Some(true),
+                container: analysis.container_format.clone(),
             },
             Ok(MediaAnalysisOutcome::Inconclusive(analysis)) => MediaProbeOutcome::Probed {
                 duration_seconds: positive(analysis.duration_seconds),
@@ -506,15 +556,13 @@ impl MediaProbe for NativeMediaProbe {
                 has_video: (analysis.video_codec.is_some()
                     || analysis.details.selected_video_id.is_some())
                 .then_some(true),
+                container: analysis.container_format.clone(),
             },
-            Ok(MediaAnalysisOutcome::Invalid(reason))
-                if reason == scryer_application::NOT_A_VALID_VIDEO_REASON =>
-            {
-                MediaProbeOutcome::Probed {
-                    duration_seconds: None,
-                    has_video: Some(false),
-                }
-            }
+            Ok(MediaAnalysisOutcome::NoVideo) => MediaProbeOutcome::Probed {
+                duration_seconds: None,
+                has_video: Some(false),
+                container: None,
+            },
             Ok(MediaAnalysisOutcome::Invalid(reason)) => MediaProbeOutcome::Unverifiable(reason),
             Err(error) => MediaProbeOutcome::Unverifiable(error.to_string()),
         }
@@ -538,6 +586,7 @@ pub(crate) fn judge_media(
     let MediaProbeOutcome::Probed {
         duration_seconds,
         has_video,
+        ..
     } = outcome
     else {
         return Ok(());
@@ -565,7 +614,10 @@ pub(crate) fn judge_media(
     Ok(())
 }
 
-async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), TransferError> {
+async fn verify_media(
+    check: &MediaCheck<'_>,
+    path: &Path,
+) -> Result<MediaProbeOutcome, TransferError> {
     let outcome = check.probe.probe(path).await;
     match &outcome {
         MediaProbeOutcome::Unverifiable(reason) => debug!(
@@ -582,7 +634,46 @@ async fn verify_media(check: &MediaCheck<'_>, path: &Path) -> Result<(), Transfe
         ),
         MediaProbeOutcome::Probed { .. } => {}
     }
-    judge_media(&outcome, check.expected_duration_seconds, &check.verify)
+    judge_media(&outcome, check.expected_duration_seconds, &check.verify)?;
+    Ok(outcome)
+}
+
+/// The video extension for a container the analyzer names.
+fn container_extension(container: &str) -> Option<&'static str> {
+    match container.to_ascii_lowercase().as_str() {
+        "matroska" | "mkv" => Some("mkv"),
+        "webm" => Some("webm"),
+        "mp4" => Some("mp4"),
+        "mov" => Some("mov"),
+        "mpegts" | "ts" => Some("ts"),
+        "m2ts" => Some("m2ts"),
+        "avi" => Some("avi"),
+        "flv" => Some("flv"),
+        "ogg" => Some("ogv"),
+        "asf" | "wmv" => Some("wmv"),
+        _ => None,
+    }
+}
+
+/// The final name for a media file whose name does not say it is video
+/// (no container was stated and the URL had no usable extension), from the
+/// container the probe read. A name that already carries a video extension
+/// is kept.
+pub(crate) fn media_path_for_probed_container(
+    final_path: &Path,
+    outcome: &MediaProbeOutcome,
+) -> Option<std::path::PathBuf> {
+    if scryer_domain::canonical_video_extension(final_path).is_some() {
+        return None;
+    }
+    let MediaProbeOutcome::Probed {
+        container: Some(container),
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    container_extension(container).map(|extension| final_path.with_extension(extension))
 }
 
 /// The current time, injectable so tests decide when a URL has expired.
@@ -1030,15 +1121,18 @@ async fn stream_body(
             .await
             .map_err(|error| disk_error(parent, &error))?;
     }
-    // Never truncate: a fresh attempt writes a file name no earlier attempt
-    // used, and a continuation writes on from the recorded offset.
-    let mut opened = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&part_path)
-        .await
-        .map_err(|error| disk_error(&part_path, &error))?;
+    let mut opened = if offset == 0 {
+        open_fresh_part(context, file).await?
+    } else {
+        // A continuation writes on from the recorded offset of the partial
+        // it was judged against; it never creates or truncates one.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .await
+            .map_err(|error| disk_error(&part_path, &error))?
+    };
+    let part_path = file.part_path();
     opened
         .seek(std::io::SeekFrom::Start(offset))
         .await
@@ -1078,8 +1172,11 @@ async fn stream_body(
                 "the server sent more than the {total} bytes it announced"
             )));
         }
-        if let Some(limiter) = context.limiter {
-            limiter.consume(length).await;
+        if let Some(limiter) = context.limiter
+            && limiter.consume(length, context.cancel).await.is_err()
+        {
+            checkpoint_written(context, file, &mut output, &part_path, written).await?;
+            return Err(StreamError::Cancelled);
         }
         output
             .write_all(&chunk)
@@ -1110,6 +1207,39 @@ async fn stream_body(
             Ok(())
         }
     }
+}
+
+/// Create the partial a fresh attempt writes. Only a name no file holds is
+/// used: an existing file under the attempt's name (an earlier attempt's
+/// partial, or anything else) is left as it is and the next name is tried.
+async fn open_fresh_part(
+    context: &TransferContext<'_>,
+    file: &mut HttpJobFile,
+) -> Result<tokio::fs::File, StreamError> {
+    for _ in 0..MAX_PART_NAME_PROBES {
+        let part_path = file.part_path();
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part_path)
+            .await
+        {
+            Ok(opened) => return Ok(opened),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                file.attempt = file.attempt.saturating_add(1);
+                context
+                    .checkpoint
+                    .record(file)
+                    .await
+                    .map_err(|error| StreamError::Permanent(error.to_string()))?;
+            }
+            Err(error) => return Err(disk_error(&part_path, &error)),
+        }
+    }
+    Err(StreamError::Permanent(format!(
+        "no free partial file name next to {} after {MAX_PART_NAME_PROBES} tries",
+        file.final_path.display()
+    )))
 }
 
 async fn checkpoint_written(
@@ -1176,29 +1306,120 @@ async fn finish_file(
     // Checked under the partial's name, so a file that fails never appears
     // under its final one.
     if let Some(check) = &context.media_check {
-        verify_media(check, &part_path).await?;
+        let outcome = verify_media(check, &part_path).await?;
+        // Named for what the probe read, so the import recognizes it.
+        if let Some(named) = media_path_for_probed_container(&file.final_path, &outcome) {
+            file.final_path = named;
+        }
     }
-    if tokio::fs::try_exists(&file.final_path)
-        .await
-        .unwrap_or(true)
-    {
-        return Err(TransferError::Permanent(format!(
-            "{} already exists; it was left untouched",
-            file.final_path.display()
-        )));
-    }
-    tokio::fs::rename(&part_path, &file.final_path)
-        .await
-        .map_err(|error| {
-            TransferError::Permanent(format!(
-                "could not move {} into place: {error}",
-                part_path.display()
-            ))
-        })?;
+    // Recorded before the file is published, so an interruption between the
+    // publish and the record below finds every byte accounted for and
+    // recognizes the published file instead of fetching it again.
+    // Always recorded: a length learned only when the body ended was never
+    // part of a checkpoint.
     file.total_bytes = Some(total);
     file.bytes_done = total;
+    record(context, file).await?;
+    publish_part(&part_path, &file.final_path).await?;
     file.complete = true;
     record(context, file).await
+}
+
+fn destination_exists(final_path: &Path) -> TransferError {
+    TransferError::Permanent(format!(
+        "{} already exists; it was left untouched",
+        final_path.display()
+    ))
+}
+
+/// Give the checked partial its final name without ever replacing a file
+/// already there.
+///
+/// A hard link is created only when the name is free, atomically, so a file
+/// another writer puts under the final name in the meantime is kept. The
+/// partial name is then dropped; only the job's own `.part` is removed, and
+/// only once its bytes are reachable under the final name. Where the file
+/// system has no hard links, the name is checked and the partial renamed.
+pub(crate) async fn publish_part(part_path: &Path, final_path: &Path) -> Result<(), TransferError> {
+    match tokio::fs::hard_link(part_path, final_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // An interruption after the link and before the partial name was
+            // dropped leaves the same bytes under both names. Anything else
+            // under the final name is not this job's file.
+            if !same_contents(part_path, final_path).await? {
+                return Err(destination_exists(final_path));
+            }
+        }
+        Err(link_error) => {
+            debug!(
+                path = %final_path.display(),
+                error = %link_error,
+                "HTTP download could not hard-link its finished file; renaming it instead"
+            );
+            if tokio::fs::try_exists(final_path).await.unwrap_or(true) {
+                return Err(destination_exists(final_path));
+            }
+            return tokio::fs::rename(part_path, final_path)
+                .await
+                .map_err(|error| {
+                    TransferError::Permanent(format!(
+                        "could not move {} into place: {error}",
+                        part_path.display()
+                    ))
+                });
+        }
+    }
+    tokio::fs::remove_file(part_path).await.map_err(|error| {
+        TransferError::Permanent(format!(
+            "{} is in place but its partial {} could not be removed: {error}",
+            final_path.display(),
+            part_path.display()
+        ))
+    })
+}
+
+/// Both paths hold the same bytes.
+async fn same_contents(left: &Path, right: &Path) -> Result<bool, TransferError> {
+    use tokio::io::AsyncReadExt;
+    let inspect = |path: &Path, error: std::io::Error| {
+        TransferError::Permanent(format!("cannot inspect {}: {error}", path.display()))
+    };
+    let (left_meta, right_meta) = (
+        tokio::fs::metadata(left)
+            .await
+            .map_err(|error| inspect(left, error))?,
+        tokio::fs::metadata(right)
+            .await
+            .map_err(|error| inspect(right, error))?,
+    );
+    if !right_meta.is_file() || left_meta.len() != right_meta.len() {
+        return Ok(false);
+    }
+    let mut left_file = tokio::fs::File::open(left)
+        .await
+        .map_err(|error| inspect(left, error))?;
+    let mut right_file = tokio::fs::File::open(right)
+        .await
+        .map_err(|error| inspect(right, error))?;
+    let mut left_buf = vec![0u8; 64 * 1024];
+    let mut right_buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = left_file
+            .read(&mut left_buf)
+            .await
+            .map_err(|error| inspect(left, error))?;
+        if read == 0 {
+            return Ok(true);
+        }
+        right_file
+            .read_exact(&mut right_buf[..read])
+            .await
+            .map_err(|error| inspect(right, error))?;
+        if left_buf[..read] != right_buf[..read] {
+            return Ok(false);
+        }
+    }
 }
 
 /// A digest algorithm an indexer may state a checksum in.
@@ -1261,7 +1482,7 @@ impl ExpectedChecksum {
 }
 
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     hex.as_bytes()

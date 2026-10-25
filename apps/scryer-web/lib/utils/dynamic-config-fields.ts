@@ -69,6 +69,24 @@ export function dynamicTriggerSignature(
 /// selection they do not belong to, and newly offered fields start from their
 /// default. Values the operator already typed are kept. Returns `values`
 /// itself when nothing changes.
+/// Dynamic fields together with the provider whose plugin answered them.
+export type ProviderDynamicConfigFields = {
+  providerType: string;
+  fields: DynamicConfigFields;
+};
+
+/// The dynamic fields for `providerType`, or none when the ones held were
+/// answered for a different provider: a provider's fields never shape, or
+/// reconcile away values from, another provider's form.
+export function dynamicConfigFieldsFor(
+  held: ProviderDynamicConfigFields | null,
+  providerType: string,
+): DynamicConfigFields | null {
+  return held !== null && held.providerType === providerType
+    ? held.fields
+    : null;
+}
+
 export function reconcileDynamicConfigValues(
   values: Record<string, string>,
   previous: DynamicConfigFields | null,

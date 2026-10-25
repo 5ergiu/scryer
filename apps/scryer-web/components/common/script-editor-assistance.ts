@@ -92,7 +92,7 @@ const batchMode: StreamParser<{ depth: number }> = {
     if (/^\s*$/.test(stream.string.slice(0, stream.pos)) && stream.match(/(?:@?rem\b|::).*/i)) return "comment";
     if (stream.match(/^\^./)) return null;
     if (stream.match(/^%[^%\s]+%|^![^!\s]+!|^%%[A-Za-z]|^%[0-9*]/)) return "variableName";
-    if (stream.match(/^"(?:[^"\r\n]|\^.)*"/)) return "string";
+    if (stream.match(/^"(?:[^"^\r\n]|\^.)*"/)) return "string";
     if (stream.match(/^:[\w-]+/)) return "labelName";
     if (stream.match(/^\d+/)) return "number";
     const word = stream.match(/^[\w-]+/);

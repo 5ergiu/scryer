@@ -10,6 +10,7 @@ mod discovery;
 mod download_client_config;
 mod download_client_path_mappings;
 mod download_identity;
+pub mod http_release_refusal;
 pub mod login_challenge_refusal;
 pub mod public_url;
 pub mod rate_limit_proxy_policy;
@@ -550,7 +551,7 @@ pub use library_scan_progress::{
     LibraryScanTracker,
 };
 pub use location::model::VerificationDepth;
-pub use media::analyzer::{NOT_A_VALID_VIDEO_REASON, NativeMediaAnalyzer};
+pub use media::analyzer::NativeMediaAnalyzer;
 pub use notifications::dispatcher::start_notification_dispatcher;
 pub use null_repositories::NullIndexerErrorRepository;
 pub use null_repositories::{

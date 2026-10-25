@@ -1158,7 +1158,14 @@ pub enum MediaAnalysisOutcome {
     Valid(Box<MediaFileAnalysis>),
     /// Parsed metadata whose completeness cannot support automatic acceptance.
     Inconclusive(Box<MediaFileAnalysis>),
+    /// The container was read in full and holds no video stream.
+    NoVideo,
     Invalid(String),
+}
+
+impl MediaAnalysisOutcome {
+    /// The sentence recorded for a file that holds no video stream.
+    pub const NO_VIDEO_MESSAGE: &'static str = "file is not a valid video";
 }
 
 /// Input for inserting a media file record with rich metadata.

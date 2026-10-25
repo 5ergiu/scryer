@@ -976,10 +976,12 @@ impl SearchDiagnosticsContext {
             })
             .flatten();
         let (completion_state, incomplete_reason, retry_after) = match response.completion {
-            // A replay leaves out the password-hinted results (see
+            // A replay leaves out the results it cannot rebuild (see
             // `candidate_reusable_until`), so it would not be the whole
             // answer; recording the run as partial has it asked live again.
-            IndexerSearchCompletion::Complete if response.results.iter().any(has_password_hint) => {
+            IndexerSearchCompletion::Complete
+                if response.results.iter().any(replay_cannot_rebuild) =>
+            {
                 ("received_partial", None, None)
             }
             IndexerSearchCompletion::Complete => ("received_complete", None, None),
@@ -1316,22 +1318,25 @@ fn candidate_extra_bool(candidate: &IndexerSearchResult, key: &str) -> Option<bo
 }
 
 /// Until when a stored candidate may stand in for a live search. The stored
-/// row does not keep a result's password hint, so a replay would hand back
-/// the release without it; such a result is stored already past reuse and is
-/// only ever taken from a live search.
+/// row keeps neither a result's password hint nor its HTTP release
+/// description, so a replay would hand back the release without them; such a
+/// result is stored already past reuse and is only ever taken from a live
+/// search.
 fn candidate_reusable_until(candidate: &IndexerSearchResult, now: DateTime<Utc>) -> DateTime<Utc> {
-    if has_password_hint(candidate) {
+    if replay_cannot_rebuild(candidate) {
         now - Duration::seconds(1)
     } else {
         now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS)
     }
 }
 
-fn has_password_hint(candidate: &IndexerSearchResult) -> bool {
-    candidate
-        .password_hint
-        .as_deref()
-        .is_some_and(|hint| !hint.is_empty())
+/// Whether a stored row would lose something the live result carried.
+fn replay_cannot_rebuild(candidate: &IndexerSearchResult) -> bool {
+    candidate.http.is_some()
+        || candidate
+            .password_hint
+            .as_deref()
+            .is_some_and(|hint| !hint.is_empty())
 }
 
 fn normalized_candidate(
@@ -11447,6 +11452,52 @@ mod tests {
             candidate_reusable_until(&hinted, now) < now,
             "a replay would drop the hint, so the result is stored past reuse"
         );
+    }
+
+    #[tokio::test]
+    async fn an_http_release_result_is_only_ever_taken_from_a_live_search() {
+        let now = Utc::now();
+        let mut http = search_result("Synthetic.Show.S01E01.720p.WEB");
+        http.http = Some(scryer_plugin_sdk::PluginHttpRelease {
+            provider: "synthetic-provider".into(),
+            item_id: "item-1".into(),
+            page_url: "https://provider.invalid/watch/item-1".into(),
+            ..Default::default()
+        });
+        assert!(
+            candidate_reusable_until(&http, now) < now,
+            "a replay would drop the HTTP release description"
+        );
+
+        let repo_impl = InMemorySearchLearningRepository::default();
+        let diagnostics = repo_impl.diagnostics.clone();
+        let context = SearchDiagnosticsContext {
+            repository: StdArc::new(repo_impl),
+            indexer_id: "indexer-http".into(),
+            provider_type: "synthetic".into(),
+            search_session_id: "session-http".into(),
+            scope_key: "scope-http".into(),
+            indexer_fingerprint: "fingerprint-http".into(),
+            background: false,
+        };
+        let response = IndexerSearchResponse {
+            results: vec![http],
+            completion: IndexerSearchCompletion::Complete,
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+            indexer_outcomes: Vec::new(),
+            next_cursor: None,
+        };
+        context
+            .persist_response("signature-http", "primary", 1, &response, None, None)
+            .await
+            .expect("the response is recorded");
+        let recorded = diagnostics.lock().expect("search diagnostics mutex");
+        let (run, candidates) = &recorded[0];
+        assert_eq!(run.completion_state, "received_partial");
+        assert!(candidates[0].reusable_until < candidates[0].created_at);
     }
 
     #[test]

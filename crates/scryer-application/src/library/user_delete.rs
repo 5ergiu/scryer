@@ -1507,7 +1507,7 @@ fn build_title_delete_manifest(context: TitleDeleteContext) -> AppResult<UserDel
 
     let roots = normalized_roots
         .iter()
-        .map(|root| path_to_stored_string(root))
+        .map(path_to_stored_string)
         .collect::<Vec<_>>();
     // Failure to prepare a prefilter must fall through to the original exact check.
     let mut overlap =

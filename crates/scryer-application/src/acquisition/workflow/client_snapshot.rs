@@ -2576,6 +2576,73 @@ fn standby_scope_within(row: &SubmissionScope, covered: &SubmissionScope) -> boo
     }
 }
 
+/// The standby row a ranked search result is parked as, so a later walk can
+/// grab it without searching again.
+fn standby_row(
+    wanted_item_id: &str,
+    title_id: &str,
+    candidate: &IndexerSearchResult,
+    source_hint_value: String,
+    rank: usize,
+    now: &DateTime<Utc>,
+) -> PendingRelease {
+    let candidate_score = candidate
+        .quality_profile_decision
+        .as_ref()
+        .map(|decision| decision.preference_score)
+        .unwrap_or(0);
+    let scoring_log_json = candidate
+        .quality_profile_decision
+        .as_ref()
+        .and_then(|decision| {
+            serde_json::to_string(
+                &decision
+                    .scoring_log
+                    .iter()
+                    .map(|entry| serde_json::json!({"code": entry.code, "delta": entry.delta, "kind": entry.kind}))
+                    .collect::<Vec<_>>(),
+            )
+            .ok()
+        });
+
+    PendingRelease {
+        http_release: candidate.http.clone(),
+        id: Id::new().0,
+        wanted_item_id: wanted_item_id.to_string(),
+        title_id: title_id.to_string(),
+        release_title: candidate.title.clone(),
+        release_url: Some(source_hint_value),
+        source_kind: candidate.source_kind,
+        release_size_bytes: candidate.size_bytes,
+        release_score: candidate_score,
+        scoring_log_json,
+        indexer_source: Some(candidate.source.clone()),
+        indexer_id: candidate.indexer_id.clone(),
+        release_guid: candidate.guid.clone(),
+        added_at: (*now + chrono::Duration::microseconds(rank as i64))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        last_observed_at: now.to_rfc3339(),
+        delay_until: now.to_rfc3339(),
+        status: PendingReleaseStatus::Standby,
+        grabbed_at: None,
+        source_password: crate::normalize_release_password(candidate.password_hint.as_deref()),
+        published_at: candidate.published_at.clone(),
+        info_hash: candidate
+            .extra
+            .get("info_hash")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        seed_minimums: crate::ReleaseSeedMinimums::from_release_extra(&candidate.extra),
+        seeders: crate::acquisition::seed_goals::seeders_from_extra(&candidate.extra),
+        release_identity: String::new(),
+        coverage_identity: String::new(),
+        role: crate::types::PendingReleaseRole::Fallback,
+        last_decision_code: None,
+        release_age_unknown: false,
+        release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "standby candidate persistence carries the search context explicitly"
@@ -2655,61 +2722,7 @@ where
             continue;
         }
 
-        let candidate_score = candidate
-            .quality_profile_decision
-            .as_ref()
-            .map(|decision| decision.preference_score)
-            .unwrap_or(0);
-        let scoring_log_json = candidate
-            .quality_profile_decision
-            .as_ref()
-            .and_then(|decision| {
-                serde_json::to_string(
-                    &decision
-                        .scoring_log
-                        .iter()
-                        .map(|entry| serde_json::json!({"code": entry.code, "delta": entry.delta, "kind": entry.kind}))
-                        .collect::<Vec<_>>(),
-                )
-                .ok()
-            });
-
-        let standby = PendingRelease {
-            http_release: None,
-            id: Id::new().0,
-            wanted_item_id: item.id.clone(),
-            title_id: title.id.clone(),
-            release_title: candidate.title.clone(),
-            release_url: Some(source_hint_value),
-            source_kind: candidate.source_kind,
-            release_size_bytes: candidate.size_bytes,
-            release_score: candidate_score,
-            scoring_log_json,
-            indexer_source: Some(candidate.source.clone()),
-            indexer_id: candidate.indexer_id.clone(),
-            release_guid: candidate.guid.clone(),
-            added_at: (*now + chrono::Duration::microseconds(rank as i64))
-                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-            last_observed_at: now.to_rfc3339(),
-            delay_until: now.to_rfc3339(),
-            status: PendingReleaseStatus::Standby,
-            grabbed_at: None,
-            source_password: crate::normalize_release_password(candidate.password_hint.as_deref()),
-            published_at: candidate.published_at.clone(),
-            info_hash: candidate
-                .extra
-                .get("info_hash")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            seed_minimums: crate::ReleaseSeedMinimums::from_release_extra(&candidate.extra),
-            seeders: crate::acquisition::seed_goals::seeders_from_extra(&candidate.extra),
-            release_identity: String::new(),
-            coverage_identity: String::new(),
-            role: crate::types::PendingReleaseRole::Fallback,
-            last_decision_code: None,
-            release_age_unknown: false,
-            release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
-        };
+        let standby = standby_row(&item.id, &title.id, candidate, source_hint_value, rank, now);
 
         if app
             .services
@@ -2811,6 +2824,61 @@ mod client_snapshot_tests {
                 "{state:?} is an outcome, recorded by the completed/failed sets instead"
             );
         }
+    }
+
+    #[test]
+    fn a_parked_http_result_keeps_the_release_description_it_was_found_with() {
+        let release = scryer_plugin_sdk::PluginHttpRelease {
+            provider: "synthetic-provider".into(),
+            item_id: "item-1".into(),
+            page_url: "https://provider.invalid/watch/item-1".into(),
+            ..Default::default()
+        };
+        let candidate = IndexerSearchResult {
+            http: Some(release.clone()),
+            indexer_id: Some("indexer-http".into()),
+            source: "synthetic".into(),
+            title: "Synthetic.Show.S01E01.720p.WEB".into(),
+            link: Some("https://provider.invalid/watch/item-1".into()),
+            download_url: Some("https://provider.invalid/watch/item-1".into()),
+            source_kind: None,
+            size_bytes: None,
+            published_at: None,
+            thumbs_up: None,
+            thumbs_down: None,
+            indexer_languages: None,
+            indexer_subtitles: None,
+            indexer_grabs: None,
+            password_hint: None,
+            parsed_release_metadata: None,
+            quality_profile_decision: None,
+            extra: Default::default(),
+            response_attributes: Default::default(),
+            guid: None,
+            info_url: None,
+            provenance: None,
+            candidate_token: None,
+            queue_scope: None,
+            coverage_scope: None,
+            auto_eligible: None,
+            auto_decision_code: None,
+            auto_decision_summary: None,
+            release_listing_json: None,
+        };
+        let row = standby_row(
+            "wanted",
+            "title",
+            &candidate,
+            "https://provider.invalid/watch/item-1".into(),
+            0,
+            &Utc::now(),
+        );
+        assert_eq!(row.status, PendingReleaseStatus::Standby);
+        assert_eq!(row.http_release, Some(release));
+
+        let plain = IndexerSearchResult { http: None, ..candidate };
+        let row = standby_row("wanted", "title", &plain, "https://x.invalid/a.nzb".into(), 0, &Utc::now());
+        assert_eq!(row.http_release, None);
     }
 
     fn standby(id: &str, score: i32, added_at: &str) -> PendingRelease {

@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const nl: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "De details van deze release zijn niet meer beschikbaar. Zoek opnieuw om hem op te halen.",
+  "httpRelease.refusal.live": "Deze release is een livestream en kan niet worden gedownload.",
+  "httpRelease.refusal.upcoming": "Deze release is nog niet gepubliceerd.",
+  "httpRelease.refusal.removed": "Deze release is door de aanbieder verwijderd.",
+  "httpRelease.refusal.unsupportedTransport": "Deze release wordt niet aangeboden in een vorm die de HTTP-downloader kan ophalen.",
+  "httpRelease.refusal.separateTracks": "Deze release wordt alleen als losse audio- en videosporen aangeboden, die niet kunnen worden samengevoegd.",
+  "httpRelease.refusal.noMediaResource": "Deze release heeft geen mediabestand om te downloaden.",
+  "httpRelease.refusal.noSubtitleResource": "Voor deze release worden geen ondertitels in een gewenste taal aangeboden.",
   "titleDelete.refusal.selection": "Selecteer titels zonder duplicaten.",
   "titleDelete.refusal.busy": "Er wordt al een verwijdering uitgevoerd.",
   "titleDelete.refusal.preview": "Vernieuw het verwijdervoorbeeld en bevestig het.",

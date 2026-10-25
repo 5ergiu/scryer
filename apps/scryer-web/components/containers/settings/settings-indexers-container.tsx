@@ -69,6 +69,7 @@ import {
 import { useSeedingProfileOptions } from "@/lib/hooks/use-seeding-profile-options";
 import {
   createRequestEpoch,
+  dynamicConfigFieldsFor,
   dynamicTriggerSignature,
   dynamicTriggerValues,
   mergeDynamicConfigFields,
@@ -76,6 +77,7 @@ import {
   reconcileDynamicConfigValues,
   type DynamicConfigFields,
   type DynamicConfigFieldsStatus,
+  type ProviderDynamicConfigFields,
 } from "@/lib/utils/dynamic-config-fields";
 import { loginChallengeErrorMessage } from "@/lib/utils/login-challenge-error-message";
 import { getDefaultIndexerRouting } from "@/lib/constants/indexers";
@@ -395,15 +397,23 @@ export function SettingsIndexersContainer({
   // Fields the selected plugin adds for the values entered so far. Asked for on
   // open and whenever a trigger value changes; the request epoch makes sure a
   // slow answer for an earlier selection never lands over a later one.
-  const [dynamicConfigFields, setDynamicConfigFields] =
-    useState<DynamicConfigFields | null>(null);
+  // Held with the provider they were answered for, so switching the provider
+  // type never shows or reconciles against the previous provider's fields.
+  const [heldDynamicConfigFields, setHeldDynamicConfigFields] =
+    useState<ProviderDynamicConfigFields | null>(null);
   const [dynamicConfigFieldsStatus, setDynamicConfigFieldsStatus] =
     useState<DynamicConfigFieldsStatus>({ state: "idle" });
-  const dynamicConfigFieldsRef = useRef<DynamicConfigFields | null>(null);
+  const heldDynamicConfigFieldsRef = useRef<ProviderDynamicConfigFields | null>(
+    null,
+  );
   const dynamicConfigFieldsEpochRef = useRef(createRequestEpoch());
   const normalizedDraftProviderType = indexerDraft.providerType
     .trim()
     .toLowerCase();
+  const dynamicConfigFields = dynamicConfigFieldsFor(
+    heldDynamicConfigFields,
+    normalizedDraftProviderType,
+  );
   const staticSelectedProvider =
     providerTypes.find(
       (pt) => pt.providerType === normalizedDraftProviderType,
@@ -422,10 +432,14 @@ export function SettingsIndexersContainer({
     : null;
 
   const applyDynamicConfigFields = useCallback(
-    (next: DynamicConfigFields | null) => {
-      const previous = dynamicConfigFieldsRef.current;
-      dynamicConfigFieldsRef.current = next;
-      setDynamicConfigFields(next);
+    (providerType: string, next: DynamicConfigFields | null) => {
+      const previous = dynamicConfigFieldsFor(
+        heldDynamicConfigFieldsRef.current,
+        providerType,
+      );
+      const held = next ? { providerType, fields: next } : null;
+      heldDynamicConfigFieldsRef.current = held;
+      setHeldDynamicConfigFields(held);
       // The baseline moves with the draft, so fields arriving for a stored
       // selection do not count as an unsaved edit.
       setIndexerDraft((prev) => {
@@ -454,9 +468,17 @@ export function SettingsIndexersContainer({
 
   useEffect(() => {
     const epoch = dynamicConfigFieldsEpochRef.current.next();
+    if (
+      heldDynamicConfigFieldsRef.current !== null &&
+      heldDynamicConfigFieldsRef.current.providerType !==
+        normalizedDraftProviderType
+    ) {
+      heldDynamicConfigFieldsRef.current = null;
+      setHeldDynamicConfigFields(null);
+    }
     if (dynamicTriggersSignature === null || !normalizedDraftProviderType) {
-      dynamicConfigFieldsRef.current = null;
-      setDynamicConfigFields(null);
+      heldDynamicConfigFieldsRef.current = null;
+      setHeldDynamicConfigFields(null);
       setDynamicConfigFieldsStatus({ state: "idle" });
       return;
     }
@@ -485,6 +507,7 @@ export function SettingsIndexersContainer({
             | DynamicConfigFields
             | undefined;
           applyDynamicConfigFields(
+            normalizedDraftProviderType,
             answer &&
               (answer.fields.length > 0 || answer.hiddenFieldKeys.length > 0)
               ? answer
@@ -536,8 +559,9 @@ export function SettingsIndexersContainer({
 
   // The sign-in image a provider's login asks the operator to read. It is
   // fetched for the draft (the server restores stored secrets for an indexer
-  // being edited) when the editor opens, when the address, selection, proxy
-  // or indexer changes, after a failed save, and on request. It is never
+  // being edited) when the editor opens, when any value but the answer
+  // (address, credentials, selection, proxy) or the indexer changes, after a
+  // failed save, and on request. It is never
   // stored; the server carries the sign-in it started to the save.
   const [loginChallenge, setLoginChallenge] = useState<LoginChallengeStatus>({
     state: "idle",
@@ -561,10 +585,18 @@ export function SettingsIndexersContainer({
     effectiveSelectedProvider?.configFields.find(
       (field) => field.role === "LOGIN_CHALLENGE_ANSWER",
     )?.key ?? null;
-  const connectionUrlKey =
-    effectiveSelectedProvider?.configFields.find(
-      (field) => field.role === "CONNECTION_URL",
-    )?.key ?? null;
+  // The image belongs to the configuration it was fetched for: the server
+  // keys the sign-in it carries to the save by every value but the answer,
+  // so the fetch follows every non-answer value, credentials included.
+  const loginChallengeConfigSignature =
+    loginChallengeAnswerKey === null
+      ? null
+      : JSON.stringify(
+          Object.entries(indexerDraft.configValues)
+            .filter(([key]) => key !== loginChallengeAnswerKey)
+            .map(([key, value]) => [key, value.trim()])
+            .sort(([left], [right]) => left.localeCompare(right)),
+        );
   const loginChallengeSignature =
     loginChallengeAnswerKey === null
       ? null
@@ -574,9 +606,7 @@ export function SettingsIndexersContainer({
           indexerDraft.proxyConfigId,
           loginChallengeAnswerKey,
           dynamicTriggersSignature,
-          connectionUrlKey
-            ? (indexerDraft.configValues[connectionUrlKey] ?? "").trim()
-            : "",
+          loginChallengeConfigSignature,
           loginChallengeNonce,
         ]);
 
@@ -602,7 +632,10 @@ export function SettingsIndexersContainer({
             Object.entries(
               omitHiddenConfigValues(
                 normalizeIndexerConfigValues(fields, draft.configValues),
-                dynamicConfigFieldsRef.current,
+                dynamicConfigFieldsFor(
+                  heldDynamicConfigFieldsRef.current,
+                  normalizedDraftProviderType,
+                ),
               ),
             ).filter(([key]) => !answerKeys.has(key)),
           );

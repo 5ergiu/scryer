@@ -35,6 +35,8 @@ mod migration_progress_tests;
 #[cfg(test)]
 mod movie_availability_facet_settings_upgrade_tests;
 pub mod notification_targets;
+#[cfg(test)]
+mod pending_release_http_release_upgrade_tests;
 pub mod post_0_16_6_prerelease;
 pub mod post_processing_output;
 pub mod release_url_scrub;

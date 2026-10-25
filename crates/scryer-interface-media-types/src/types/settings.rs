@@ -347,6 +347,7 @@ pub enum UiPaletteValue {
     Ember,
     /// Neutral charcoal with a sea-green accent, always dark.
     Graphite,
+    /// Warm parchment with a sepia accent, always light.
     Papyrus,
 }
 

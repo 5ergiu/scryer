@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ja: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "このリリースの詳細は利用できなくなりました。もう一度検索して取得してください。",
+  "httpRelease.refusal.live": "このリリースはライブ配信のため、ダウンロードできません。",
+  "httpRelease.refusal.upcoming": "このリリースはまだ公開されていません。",
+  "httpRelease.refusal.removed": "このリリースは提供元によって削除されました。",
+  "httpRelease.refusal.unsupportedTransport": "このリリースは HTTP ダウンローダーが取得できる形式で提供されていません。",
+  "httpRelease.refusal.separateTracks": "このリリースは音声と映像が別々のトラックでのみ提供されており、結合できません。",
+  "httpRelease.refusal.noMediaResource": "このリリースにはダウンロードできるメディアファイルがありません。",
+  "httpRelease.refusal.noSubtitleResource": "このリリースには希望する言語の字幕が提供されていません。",
   "titleDelete.refusal.selection": "重複しないタイトルを選択してください。",
   "titleDelete.refusal.busy": "削除はすでに実行中です。",
   "titleDelete.refusal.preview": "削除プレビューを更新して確認してください。",

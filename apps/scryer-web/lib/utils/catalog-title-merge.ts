@@ -54,17 +54,25 @@ export type ActiveCatalogListFilters = {
   facet: TitleRecord["facet"];
   query: string;
   libraryIds: readonly string[];
+  /**
+   * The list also narrows on filters only the server can evaluate (quick and
+   * advanced filters), so a title the list has not loaded cannot be shown to
+   * belong in it.
+   */
+  serverFiltered: boolean;
 };
 
 export function buildActiveCatalogListFilters(
   facet: TitleRecord["facet"],
   query: string,
   libraryIds: readonly string[],
+  serverFiltered = false,
 ): ActiveCatalogListFilters {
   return {
     facet,
     query: query.trim().toLocaleLowerCase(),
     libraryIds: [...libraryIds],
+    serverFiltered,
   };
 }
 
@@ -95,6 +103,11 @@ export function upsertCatalogTitleRecord(
   filters?: ActiveCatalogListFilters,
 ): TitleRecord[] {
   const existingIndex = titles.findIndex((item) => item.id === title.id);
+  // Under server-only filters a title not already listed is left for the
+  // server to place; inserting it would show a row the filters exclude.
+  if (filters?.serverFiltered && existingIndex === -1) {
+    return titles;
+  }
   if (filters && !catalogTitleMatchesActiveListFilters(title, filters)) {
     if (existingIndex === -1) {
       return titles;
@@ -121,7 +134,9 @@ export function upsertCatalogTitleRecord(
  *
  * A title that is not loaded is inserted only when it is new
  * (`insertIfMissing`): an update to a title on a page that has not been
- * loaded yet must not pull it into the list out of order.
+ * loaded yet must not pull it into the list out of order. A new title is
+ * never inserted while server-only filters are active; the caller reloads
+ * the list instead.
  */
 export function applyRefreshedCatalogTitle(
   titles: TitleRecord[],

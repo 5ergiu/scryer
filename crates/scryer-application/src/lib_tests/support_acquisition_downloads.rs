@@ -1,5 +1,11 @@
 use super::*;
 
+/// The two ends of a one-shot gate a test holds a stub call at.
+pub(super) type OneshotGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 #[derive(Clone)]
 pub(super) struct MockReleaseAttemptRecord {
     pub(super) title_id: Option<String>,
@@ -307,14 +313,7 @@ pub(super) struct TrackingDownloadSubmissionRepo {
     pub(super) linked_registry:
         Arc<Mutex<Option<Arc<super::downloads::RecordingDownloadRegistry>>>>,
     pub(super) simulate_password_retry: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) password_claim_gate: Arc<
-        Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                tokio::sync::oneshot::Receiver<()>,
-            )>,
-        >,
-    >,
+    pub(super) password_claim_gate: Arc<Mutex<Option<OneshotGate>>>,
     pub(super) store: Arc<Mutex<Vec<DownloadSubmission>>>,
     pub(super) record_submission_error: Arc<Mutex<Option<String>>>,
     pub(super) identities: DownloadSubmissionIdentities,
@@ -2267,14 +2266,7 @@ impl StubSubmitError {
 
 #[derive(Default, Clone)]
 pub(super) struct StubDownloadClient {
-    pub(super) password_retry_gate: Arc<
-        Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                tokio::sync::oneshot::Receiver<()>,
-            )>,
-        >,
-    >,
+    pub(super) password_retry_gate: Arc<Mutex<Option<OneshotGate>>>,
     pub(super) native_data_removal: bool,
     pub(super) observation_error: Arc<Mutex<Option<String>>>,
     /// Scripted `observe_download` answers, consumed front to back before the

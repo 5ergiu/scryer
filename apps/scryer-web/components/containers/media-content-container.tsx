@@ -95,6 +95,7 @@ import {
 import {
   EMPTY_TITLE_QUICK_FILTERS,
   buildTitleCatalogQueryVariables,
+  titleCatalogFilterInput,
   titleCatalogProjectionForTable,
   loadTitleCatalogSelection,
   titleCatalogQueryKey,
@@ -158,7 +159,7 @@ import { BulkRenamePreviewSummary } from "@/components/common/bulk-rename-previe
 import type { MetadataTvdbSearchItem } from "@/lib/graphql/smg-queries";
 import { metadataResultExternalIds } from "@/lib/utils/metadata-result-external-ids";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
-import { pluginErrorMessage } from "@/lib/utils/plugin-error-message";
+import { grabErrorMessage } from "@/lib/utils/http-release-error-message";
 import { reportAutomaticSearchFailure } from "@/lib/utils/auto-search-outcome";
 import { useTranslate } from "@/lib/context/translate-context";
 import { useGlobalStatus } from "@/lib/context/global-status-context";
@@ -1133,6 +1134,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
     facet: activeFacet,
     query: "",
     libraryIds: [],
+    serverFiltered: false,
   });
   const catalogTitleRequestSeqRef = React.useRef(0);
   const catalogBootstrapRequestSeqRef = React.useRef(0);
@@ -1972,6 +1974,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         activeFacet,
         query,
         libraryIds,
+        titleCatalogFilterInput(effectiveTitleQuickFilters, advancedFilters) !== null,
       );
       const requestSeq = ++catalogTitleRequestSeqRef.current;
       catalogPageRequestGate.reset();
@@ -2780,6 +2783,11 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
       applyRefreshedTitleRecord(titleId, title, requestEpoch, {
         insertIfMissing: added,
       });
+      // Only the server knows whether a new title passes the active quick or
+      // advanced filters, so the list is reloaded rather than guessed at.
+      if (added && title && activeCatalogListFiltersRef.current.serverFiltered) {
+        void reloadTitles(undefined, undefined, { mode: "background" });
+      }
     },
   });
 
@@ -3528,7 +3536,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         setGlobalStatus(queuedMessage, { level: "SUCCESS" });
       } catch (error) {
         setGlobalStatus(
-          pluginErrorMessage(error, t, t("status.queueFailed")),
+          grabErrorMessage(error, t, t("status.queueFailed")),
           { level: "ERROR" },
         );
         throw error;
@@ -3565,7 +3573,7 @@ export const MediaContentContainer = React.memo(function MediaContentContainer({
         setGlobalStatus(t("status.queuedLatest", { name: title.name }), { level: "SUCCESS" });
       } catch (error) {
         setGlobalStatus(
-          pluginErrorMessage(error, t, t("status.queueFailed")),
+          grabErrorMessage(error, t, t("status.queueFailed")),
           { level: "ERROR" },
         );
         throw error;

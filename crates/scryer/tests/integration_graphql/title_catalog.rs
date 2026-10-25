@@ -1012,9 +1012,11 @@ async fn graphql_title_options_input_uses_root_folder_id() {
             .collect::<Vec<_>>();
         assert!(root_fields.contains(&"path"));
         assert!(root_fields.contains(&"isDefault"));
-        assert!(
-            !root_fields.contains(&"id"),
-            "{input_name} should not accept id"
+        // Only an update names the stored root it edits.
+        assert_eq!(
+            root_fields.contains(&"id"),
+            input_name == "updateLibraryRootInput",
+            "{input_name} id field"
         );
     }
 

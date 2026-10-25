@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use scryer_application::{AppError, AppResult};
+use scryer_application::{AppError, AppResult, http_release_refusal};
 use scryer_plugin_sdk::{
     HttpResourceRole, HttpSubtitleMode, HttpSubtitleRole, HttpTransport, PluginHttpDownloadSource,
     PluginHttpResource,
@@ -45,10 +45,11 @@ pub(crate) struct PlannedFile {
 
 /// Decide what to fetch and where it goes, or refuse with the reason.
 ///
-/// Refusals carry a stable leading token so callers and logs can tell them
-/// apart: `unsupported_transport` when the release offers nothing this client
-/// can fetch, `separate_tracks` when only an audio and video pair is on
-/// offer, `no_media_resource` when nothing playable was selected.
+/// Refusals carry a reason code from
+/// [`scryer_application::http_release_refusal`] so callers can tell them
+/// apart: the release offers nothing this client can fetch, only an audio
+/// and video pair is on offer, nothing playable was selected, or no required
+/// subtitle sidecar was offered.
 pub(crate) fn plan_download(
     source: &PluginHttpDownloadSource,
     download_dir: &Path,
@@ -56,14 +57,17 @@ pub(crate) fn plan_download(
     let basename = validate_output_basename(&source.policy.output_basename)?;
     let offered = source.release.offered_transports();
     if !offered.contains(&HttpTransport::DirectFile) {
-        return Err(AppError::Validation(format!(
-            "unsupported_transport: this release offers only {}; the HTTP downloader fetches direct files",
-            offered
-                .iter()
-                .map(transport_label)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(AppError::validation_refused(
+            http_release_refusal::UNSUPPORTED_TRANSPORT,
+            format!(
+                "this release offers only {}; the HTTP downloader fetches direct files",
+                offered
+                    .iter()
+                    .map(transport_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     }
 
     let selected: Vec<&PluginHttpResource> = if source.selected.resources.is_empty() {
@@ -98,13 +102,14 @@ pub(crate) fn plan_download(
             )
         });
         if needs_muxing {
-            return Err(AppError::Validation(
-                "separate_tracks: this release offers separate audio and video tracks, which need muxing; the HTTP downloader does not mux"
-                    .to_string(),
+            return Err(AppError::validation_refused(
+                http_release_refusal::SEPARATE_TRACKS,
+                "this release offers separate audio and video tracks, which need muxing; the HTTP downloader does not mux",
             ));
         }
-        return Err(AppError::Validation(
-            "no_media_resource: the selection holds no direct media file to download".to_string(),
+        return Err(AppError::validation_refused(
+            http_release_refusal::NO_MEDIA_RESOURCE,
+            "the selection holds no direct media file to download",
         ));
     }
     let ranked = rank_media(&media_candidates, source);
@@ -177,7 +182,10 @@ pub(crate) fn plan_download(
 }
 
 /// Where a media resource lands: the basename with the resource's own
-/// extension, so a fallback in another container gets the right one.
+/// extension, so a fallback in another container gets the right one. With
+/// no container stated and no extension in the URL, the file is planned as
+/// `.bin` and renamed for the container its probe reads before it is
+/// published.
 pub(crate) fn media_final_path(
     output_dir: &Path,
     basename: &str,
@@ -308,9 +316,9 @@ fn choose_subtitles<'a>(
         && source.selected.subtitle_mode == HttpSubtitleMode::SidecarRequired
         && !source.selected.subtitle_languages.is_empty()
     {
-        return Err(AppError::Validation(
-            "no_subtitle_resource: subtitle sidecars are required but none in a wanted language was offered"
-                .to_string(),
+        return Err(AppError::validation_refused(
+            http_release_refusal::NO_SUBTITLE_RESOURCE,
+            "subtitle sidecars are required but none in a wanted language was offered",
         ));
     }
     Ok(chosen)

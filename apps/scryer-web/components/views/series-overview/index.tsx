@@ -12,7 +12,7 @@ import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useExperimentalFeaturesEnabled } from "@/lib/context/instance-features-context";
 import { useUiDateTimeFormat } from "@/lib/context/ui-settings-context";
 import { useDownloadConflictConfirmation } from "@/components/common/download-conflict-confirmation";
-import { pluginErrorMessage } from "@/lib/utils/plugin-error-message";
+import { grabErrorMessage } from "@/lib/utils/http-release-error-message";
 import { isAbortError } from "@/lib/graphql/urql-client";
 import {
   runIterativeReleaseSearch,
@@ -775,7 +775,7 @@ function SeriesOverviewViewImpl({
           await onTitleChanged?.();
         })
         .catch((error: unknown) => {
-          setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+          setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
         });
     },
     [
@@ -816,7 +816,7 @@ function SeriesOverviewViewImpl({
         setGlobalStatus(t("status.queuedLatest", { name: title.name }), { level: "SUCCESS" });
         await onTitleChanged?.();
       } catch (error: unknown) {
-        setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+        setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [onTitleChanged, client, setGlobalStatus, t, title],
@@ -841,7 +841,7 @@ function SeriesOverviewViewImpl({
       dispatchEpisodePanel({ type: "SET_AUTO_SEARCH_LOADING", episodeId, loading: true });
       Promise.resolve(onAutoSearchEpisode(episode))
         .catch((error: unknown) => {
-          setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+          setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
         })
         .finally(() => {
           dispatchEpisodePanel({ type: "SET_AUTO_SEARCH_LOADING", episodeId, loading: false });
@@ -968,7 +968,7 @@ function SeriesOverviewViewImpl({
           await onTitleChanged?.();
         })
         .catch((error: unknown) => {
-          setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+          setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
         });
     },
     [
@@ -1011,7 +1011,7 @@ function SeriesOverviewViewImpl({
         setGlobalStatus(t("status.queueSuccess", { name: release.title }), { level: "SUCCESS" });
         await onTitleChanged?.();
       } catch (error: unknown) {
-        setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+        setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
       }
     },
     [client, onTitleChanged, setGlobalStatus, t, title],
@@ -1036,7 +1036,7 @@ function SeriesOverviewViewImpl({
       }));
       Promise.resolve(onAutoSearchSeriesMovie(link))
         .catch((error: unknown) => {
-          setGlobalStatus(pluginErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
+          setGlobalStatus(grabErrorMessage(error, t, t("status.queueFailed")), { level: "ERROR" });
         })
         .finally(() => {
           setAutoSearchSeriesMovieLoadingByLink((prev) => ({

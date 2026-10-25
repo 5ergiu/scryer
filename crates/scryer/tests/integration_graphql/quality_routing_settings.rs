@@ -582,11 +582,15 @@ async fn graphql_introspection_exposes_plugin_config_field_metadata_enums() {
             "FILTERED_SELECT",
             "NUMBER",
             "PATH",
-            "TAG"
+            "TAG",
+            "INFO"
         ]
     );
     assert_eq!(enum_names("valueSource"), vec!["USER", "HOST_BINDING"]);
-    assert_eq!(enum_names("fieldRole"), vec!["CONNECTION_URL"]);
+    assert_eq!(
+        enum_names("fieldRole"),
+        vec!["CONNECTION_URL", "LOGIN_CHALLENGE_ANSWER"]
+    );
     assert_eq!(
         enum_names("conditionOp"),
         vec!["EQ", "NE", "IN", "NOT_IN", "NON_EMPTY"]

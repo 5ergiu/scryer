@@ -854,12 +854,18 @@ impl HttpEngine {
                 return Ok(());
             };
             let finishes = file.complete && job.files.get(index).is_some_and(|slot| !slot.complete);
+            // The progress file carries bytes only; a new final name goes
+            // into the document.
+            let renamed = job
+                .files
+                .get(index)
+                .is_some_and(|slot| slot.final_path != file.final_path);
             if let Some(slot) = job.files.get_mut(index) {
                 *slot = file.clone();
             }
             job.progress_revision = job.progress_revision.saturating_add(1);
             job.updated_at = Utc::now();
-            (!finishes).then(|| HttpJobProgress::of(job))
+            (!finishes && !renamed).then(|| HttpJobProgress::of(job))
         };
         // A successor loads the queue only after every worker here has
         // stopped, so a final checkpoint during shutdown still belongs here.

@@ -1,6 +1,14 @@
 import type { LocaleDictionary } from "../types";
 
 const ko: LocaleDictionary = {
+  "httpRelease.refusal.detailsUnavailable": "이 릴리스의 세부 정보를 더 이상 사용할 수 없습니다. 다시 검색해서 가져오세요.",
+  "httpRelease.refusal.live": "이 릴리스는 라이브 스트림이므로 다운로드할 수 없습니다.",
+  "httpRelease.refusal.upcoming": "이 릴리스는 아직 공개되지 않았습니다.",
+  "httpRelease.refusal.removed": "이 릴리스는 제공자가 삭제했습니다.",
+  "httpRelease.refusal.unsupportedTransport": "이 릴리스는 HTTP 다운로더가 가져올 수 있는 형식으로 제공되지 않습니다.",
+  "httpRelease.refusal.separateTracks": "이 릴리스는 오디오와 비디오 트랙이 분리된 형태로만 제공되어 합칠 수 없습니다.",
+  "httpRelease.refusal.noMediaResource": "이 릴리스에는 다운로드할 미디어 파일이 없습니다.",
+  "httpRelease.refusal.noSubtitleResource": "이 릴리스에는 원하는 언어의 자막이 제공되지 않습니다.",
   "titleDelete.refusal.selection": "중복 없이 제목을 선택하세요.",
   "titleDelete.refusal.busy": "삭제가 이미 진행 중입니다.",
   "titleDelete.refusal.preview": "삭제 미리보기를 새로 고치고 확인하세요.",
