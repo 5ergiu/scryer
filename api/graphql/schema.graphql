@@ -31890,6 +31890,9 @@ enum UiPaletteValue {
 	Neutral charcoal with a sea-green accent, always dark.
 	"""
 	GRAPHITE
+	"""
+	Warm parchment with a sepia accent, always light.
+	"""
 	PAPYRUS
 }
 
