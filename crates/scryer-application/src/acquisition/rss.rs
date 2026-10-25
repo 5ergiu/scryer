@@ -125,11 +125,11 @@ pub const MINIMUM_RSS_TARGET_INTERVAL: std::time::Duration = std::time::Duration
 ///
 /// The worker only *considers* RSS on a tick; whether a given indexer is due is
 /// the scheduler's decision, and that decision is a quarter of an hour apart by
-/// default. Waking every minute to re-ask it therefore did fourteen rounds of
-/// work out of fifteen for nothing. Five minutes is the resolution of the whole
-/// RSS lane, and no cadence shorter than that can take effect unless the worker
-/// wakes at least that often — which is why a shortened cadence pulls this down
-/// with it.
+/// default. Each indexer owns one tick of every cadence (three ticks at the
+/// defaults), so a tick polls about a third of the indexers rather than all of
+/// them every third tick. Five minutes is the resolution of the whole RSS lane,
+/// and no cadence shorter than that can take effect unless the worker wakes at
+/// least that often — which is why a shortened cadence pulls this down with it.
 pub const DEFAULT_RSS_SYNC_TICK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Shortens (or lengthens) how often the sync worker wakes, independently of
 /// the cadence itself. A harness that shortens the cadence normally wants the
