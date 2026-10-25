@@ -296,8 +296,10 @@ pub struct CalendarEpisodePayload {
     /// Proxied background of an episode's parent title, shown when the episode
     /// has no still of its own. Null for a movie or a title without one.
     pub title_background_url: Option<String>,
-    /// Air date, or null when unavailable.
+    /// Episode air date or movie eligibility date, or null when unavailable.
     pub air_date: Option<Date>,
+    /// Whether the movie eligibility date uses an estimated release date.
+    pub air_date_estimated: bool,
     /// Whether both the episode and its parent title are monitored.
     pub monitored: bool,
     /// Compact availability derived from the episode's primary media file.

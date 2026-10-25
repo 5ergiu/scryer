@@ -14,6 +14,7 @@ import { useTranslate } from "@/lib/context/translate-context";
 type ColorMode = "rgb" | "hsl";
 
 type Props = {
+  idPrefix?: string;
   value: string;
   onPreview: (value: string) => void;
   onApply: (value: string) => void;
@@ -153,6 +154,7 @@ function ColorChannelInput({
 }
 
 export default function HighlightColorPicker({
+  idPrefix = "settings-profile-highlight",
   value,
   onPreview,
   onApply,
@@ -225,21 +227,21 @@ export default function HighlightColorPicker({
         {mode === "rgb" ? (
           <>
             <ColorChannelInput
-              id="settings-profile-highlight-r"
+              id={`${idPrefix}-r`}
               label="R"
               value={rgb.r}
               maximum={255}
               onChange={(nextValue) => updateRgbChannel("r", nextValue)}
             />
             <ColorChannelInput
-              id="settings-profile-highlight-g"
+              id={`${idPrefix}-g`}
               label="G"
               value={rgb.g}
               maximum={255}
               onChange={(nextValue) => updateRgbChannel("g", nextValue)}
             />
             <ColorChannelInput
-              id="settings-profile-highlight-b"
+              id={`${idPrefix}-b`}
               label="B"
               value={rgb.b}
               maximum={255}
@@ -249,7 +251,7 @@ export default function HighlightColorPicker({
         ) : (
           <>
             <ColorChannelInput
-              id="settings-profile-highlight-h"
+              id={`${idPrefix}-h`}
               label="H"
               value={hsl.h}
               maximum={360}
@@ -257,7 +259,7 @@ export default function HighlightColorPicker({
               onChange={(nextValue) => updateHslChannel("h", nextValue)}
             />
             <ColorChannelInput
-              id="settings-profile-highlight-s"
+              id={`${idPrefix}-s`}
               label="S"
               value={hsl.s}
               maximum={100}
@@ -265,7 +267,7 @@ export default function HighlightColorPicker({
               onChange={(nextValue) => updateHslChannel("s", nextValue)}
             />
             <ColorChannelInput
-              id="settings-profile-highlight-l"
+              id={`${idPrefix}-l`}
               label="L"
               value={hsl.l}
               maximum={100}

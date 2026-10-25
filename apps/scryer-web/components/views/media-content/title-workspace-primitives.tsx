@@ -39,7 +39,7 @@ export function TitleWorkspaceHero({
           onError={() => setFailedBackgroundUrl(displayedBackgroundUrl)}
         />
       ) : null}
-      <div className="absolute inset-0 bg-[linear-gradient(105deg,rgba(8,12,22,0.96)_30%,rgba(8,12,22,0.55)_70%,rgba(8,12,22,0.2))]" />
+      <div className="absolute inset-0 bg-[linear-gradient(105deg,color-mix(in_srgb,var(--scry-bg)_96%,transparent)_30%,color-mix(in_srgb,var(--scry-bg)_55%,transparent)_70%,color-mix(in_srgb,var(--scry-bg)_20%,transparent))]" />
       <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-b from-transparent to-[var(--scry-bg)]" />
       <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-1.5">
         {headerActions}
@@ -47,7 +47,7 @@ export function TitleWorkspaceHero({
           <button
             type="button"
             aria-label={closeLabel}
-            className="flex size-8 items-center justify-center rounded-[9px] border !border-[rgba(var(--scry-accent-rgb),0.55)] bg-slate-950/60 text-[#dde4f5] backdrop-blur-md transition hover:bg-slate-950/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--scry-focus)]"
+            className="flex size-8 items-center justify-center rounded-[9px] border border-[var(--scry-border2)] bg-background/90 text-foreground backdrop-blur-md transition hover:bg-[var(--scry-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={onClose}
           >
             <X className="h-4 w-4" />
@@ -67,7 +67,7 @@ export function TitleWorkspacePosterFrame({
   children: React.ReactNode;
 }) {
   return (
-    <div className="relative mx-auto h-[300px] w-[200px] shrink-0 overflow-hidden rounded-[9px] border border-[#2a3556] bg-[var(--scry-inset)] shadow-[0_8px_22px_rgba(0,0,0,0.5)] sm:mx-0">
+    <div className="relative mx-auto h-[300px] w-[200px] shrink-0 overflow-hidden rounded-[9px] border border-[var(--scry-border2)] bg-[var(--scry-inset)] shadow-[0_4px_14px_rgba(0,0,0,0.12)] dark:shadow-[0_8px_22px_rgba(0,0,0,0.5)] sm:mx-0">
       {children}
     </div>
   );

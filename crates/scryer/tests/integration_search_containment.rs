@@ -1,20 +1,23 @@
-//! A Newznab indexer whose answer for one title is larger than the plugin's
-//! page ceiling. The background lane must not ask it the same capped question
-//! on every pass: the strategy is contained, waits out a backoff that survives
-//! a restart, and is never reported complete. Operator searches still ask, and
-//! do not reset the background backoff.
+//! A Newznab indexer whose answer for one title is larger than one background
+//! pass reads. The built-in Newznab plugin pages through the provider one page
+//! per call, so the background lane must not ask it the same question from the
+//! top on every pass: each pass reads a bounded number of pages and the next
+//! one resumes from the cursor where it stopped, across a restart, until the
+//! provider has nothing further. A pass that stops with pages left is never
+//! reported complete and is not held as contained. Operator searches still
+//! ask, and do not reset the background read.
 
 mod common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use common::{disable_platform_keystore_for_tests, initialize_wasm_runtime_for_tests};
 use scryer_application::{
     IndexerClient, IndexerConfigRepository, IndexerErrorOperation, IndexerPluginProvider,
-    IndexerSearchCompletion, IndexerSearchIncompleteReason, IndexerSearchLearningContext,
-    IndexerSearchOutcome, IndexerSearchResponse, ReleaseSearchSubjectKind, SearchMode,
+    IndexerSearchCompletion, IndexerSearchLearningContext, IndexerSearchOutcome,
+    IndexerSearchResponse, ReleaseSearchSubjectKind, SearchMode,
 };
 use scryer_domain::IndexerConfig;
 use scryer_infrastructure_acquisition::indexers::{
@@ -26,15 +29,25 @@ use scryer_infrastructure_datastore::SqliteServices;
 use tokio_util::sync::CancellationToken;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate, matchers::method};
 
-/// More hits than the plugin's page ceiling will read in one invocation.
+/// More hits than one background pass reads.
 const TOTAL_HITS: usize = 3_200;
+/// The page size the plugin asks this fixture for.
+const PAGE_SIZE: usize = 100;
 const INDEXER_ID: &str = "synthetic-ceiling-indexer";
 const COVERAGE_SCOPE: &str = "title:synthetic-ceiling-title";
 
+/// One search page the fixture served: the query it answered and the offset
+/// it started at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServedPage {
+    query: String,
+    offset: usize,
+}
+
 /// Serves a synthetic Newznab feed of [`TOTAL_HITS`] items, paged by the
-/// request's `offset` and `limit`, and counts every search page it serves.
+/// request's `offset` and `limit`, and records every search page it serves.
 struct CeilingFeed {
-    search_pages: Arc<AtomicUsize>,
+    served: Arc<Mutex<Vec<ServedPage>>>,
 }
 
 impl Respond for CeilingFeed {
@@ -47,7 +60,6 @@ impl Respond for CeilingFeed {
         if params.get("t").map(String::as_str) == Some("caps") {
             return ResponseTemplate::new(200).set_body_string(r#"{"channel":{"item":[]}}"#);
         }
-        self.search_pages.fetch_add(1, Ordering::SeqCst);
         let offset = params
             .get("offset")
             .and_then(|value| value.parse::<usize>().ok())
@@ -55,7 +67,11 @@ impl Respond for CeilingFeed {
         let limit = params
             .get("limit")
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(100);
+            .unwrap_or(PAGE_SIZE);
+        self.served.lock().expect("served pages").push(ServedPage {
+            query: params.get("q").cloned().unwrap_or_default(),
+            offset,
+        });
         let items = (offset..TOTAL_HITS.min(offset + limit))
             .map(|position| {
                 let guid = format!("synthetic-guid-{position}");
@@ -205,35 +221,59 @@ fn indexer_outcome(response: &IndexerSearchResponse) -> IndexerSearchOutcome {
         })
 }
 
-fn assert_contained(outcome: IndexerSearchOutcome, what: &str) {
-    match outcome {
-        IndexerSearchOutcome::Partial {
-            reason: Some(IndexerSearchIncompleteReason::PageCeilingReached),
-            retry_after: Some(retry_after),
-            ..
-        } => assert!(
-            retry_after > std::time::Duration::from_secs(50 * 60)
-                && retry_after <= std::time::Duration::from_secs(3_600),
-            "{what}: a first containment waits about an hour, got {retry_after:?}"
-        ),
-        other => panic!("{what}: expected a contained partial outcome, got {other:?}"),
-    }
+/// The pages served since `mark` for `query`, in the order they were asked.
+fn offsets_since(served: &Mutex<Vec<ServedPage>>, mark: usize, query: &str) -> Vec<usize> {
+    served.lock().expect("served pages")[mark..]
+        .iter()
+        .filter(|page| page.query == query)
+        .map(|page| page.offset)
+        .collect()
+}
+
+fn served_count(served: &Mutex<Vec<ServedPage>>) -> usize {
+    served.lock().expect("served pages").len()
+}
+
+/// A background pass that stopped with pages left: not coverage, and still
+/// moving rather than contained.
+fn assert_resumable(outcome: IndexerSearchOutcome, what: &str) {
+    assert!(
+        matches!(outcome, IndexerSearchOutcome::Partial { .. }),
+        "{what}: a pass that stopped with pages left is partial, got {outcome:?}"
+    );
     assert!(
         !outcome.coverage_eligible(),
-        "{what}: a contained indexer is never coverage"
+        "{what}: an unfinished paged read is never coverage"
     );
 }
 
+/// Asserts that a pass read consecutive pages starting at `from`, and returns
+/// the offset the next page would start at.
+fn assert_reads_on_from(offsets: &[usize], from: usize, what: &str) -> usize {
+    assert!(!offsets.is_empty(), "{what}: the pass asked the indexer");
+    let expected = (0..offsets.len())
+        .map(|page| from + page * PAGE_SIZE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offsets, expected,
+        "{what}: the pass resumes where the last one stopped and reads each page once"
+    );
+    from + offsets.len() * PAGE_SIZE
+}
+
+const TITLE_QUERY: &str = "Synthetic Ceiling Title";
+const OTHER_QUERY: &str = "Synthetic Other Title";
+
 #[tokio::test]
-async fn a_capped_strategy_is_contained_across_passes_and_restarts() {
+async fn a_long_paged_read_resumes_across_passes_and_restarts() {
     disable_platform_keystore_for_tests();
     initialize_wasm_runtime_for_tests();
 
     let server = MockServer::start().await;
-    let search_pages = Arc::new(AtomicUsize::new(0));
+    let served = Arc::new(Mutex::new(Vec::new()));
     Mock::given(method("GET"))
         .respond_with(CeilingFeed {
-            search_pages: search_pages.clone(),
+            served: served.clone(),
         })
         .mount(&server)
         .await;
@@ -249,18 +289,26 @@ async fn a_capped_strategy_is_contained_across_passes_and_restarts() {
         .await
         .expect("create indexer");
 
-    // Pass one asks the indexer and reads up to the plugin's page ceiling.
+    // Pass one reads a bounded run of pages from the top of the feed.
     let first = search(
         &client,
-        "Synthetic Ceiling Title",
+        TITLE_QUERY,
         context("synthetic-ceiling-title", "background-1", true),
     )
     .await;
-    let first_pages = search_pages.load(Ordering::SeqCst);
-    assert!(first_pages > 1, "the first pass pages through the feed");
+    let first_offsets = offsets_since(&served, 0, TITLE_QUERY);
+    assert!(
+        first_offsets.len() > 1,
+        "the first pass pages through the feed"
+    );
+    let mut next_offset = assert_reads_on_from(&first_offsets, 0, "first pass");
+    assert!(
+        next_offset < TOTAL_HITS,
+        "one pass stops short of the whole feed"
+    );
     assert!(
         !first.results.is_empty() && first.results.len() < TOTAL_HITS,
-        "the ceiling stops the plugin short of the whole feed: {} results",
+        "the first pass returns what it read: {} results",
         first.results.len()
     );
     assert!(
@@ -268,9 +316,9 @@ async fn a_capped_strategy_is_contained_across_passes_and_restarts() {
             .results
             .iter()
             .any(|result| result.title.contains(&format!("Part{}-", TOTAL_HITS - 1))),
-        "the release past the ceiling is not reachable in one invocation"
+        "the last release is not reachable in one pass"
     );
-    assert_contained(indexer_outcome(&first), "first pass");
+    assert_resumable(indexer_outcome(&first), "first pass");
     client
         .link_search_session_coverage_scope("background-1", COVERAGE_SCOPE)
         .await
@@ -284,85 +332,130 @@ async fn a_capped_strategy_is_contained_across_passes_and_restarts() {
         .await
         .expect("read holds");
     assert!(
-        holds.contains_key(INDEXER_ID),
-        "the acquisition gate sees the contained indexer"
+        !holds.contains_key(INDEXER_ID),
+        "a paged read with pages left is resumed, not held as contained"
     );
 
-    // Pass two, five minutes later in production terms, does not ask again.
+    // Pass two continues from the cursor instead of asking from the top, and
+    // still replays what pass one found.
+    let mark = served_count(&served);
     let second = search(
         &client,
-        "Synthetic Ceiling Title",
+        TITLE_QUERY,
         context("synthetic-ceiling-title", "background-2", true),
     )
     .await;
-    assert_eq!(
-        search_pages.load(Ordering::SeqCst),
-        first_pages,
-        "a contained strategy is not re-asked before it is due"
+    next_offset = assert_reads_on_from(
+        &offsets_since(&served, mark, TITLE_QUERY),
+        next_offset,
+        "second pass",
     );
-    assert_contained(indexer_outcome(&second), "second pass");
+    assert_resumable(indexer_outcome(&second), "second pass");
     assert!(
-        !second.results.is_empty(),
-        "the held strategy still replays what it found"
+        second.results.len() > first.results.len(),
+        "the resumed pass replays earlier pages alongside the new ones: {} results",
+        second.results.len()
     );
 
-    // A restart (a new application instance on the same database) keeps it.
+    // A restart (a new application instance on the same database) keeps the
+    // cursor.
     drop(client);
     drop(db);
     let (client, _db) = open_client(&db_path, &encryption_key).await;
+    let mark = served_count(&served);
     let restarted = search(
         &client,
-        "Synthetic Ceiling Title",
+        TITLE_QUERY,
         context("synthetic-ceiling-title", "background-3", true),
     )
     .await;
-    assert_eq!(
-        search_pages.load(Ordering::SeqCst),
-        first_pages,
-        "the backoff survives a restart"
+    next_offset = assert_reads_on_from(
+        &offsets_since(&served, mark, TITLE_QUERY),
+        next_offset,
+        "after restart",
     );
-    assert_contained(indexer_outcome(&restarted), "after restart");
+    assert_resumable(indexer_outcome(&restarted), "after restart");
 
-    // Another title is not held by this one's containment.
-    let before_other = search_pages.load(Ordering::SeqCst);
+    // Another title starts its own read from the top.
+    let mark = served_count(&served);
     search(
         &client,
-        "Synthetic Other Title",
+        OTHER_QUERY,
         context("synthetic-other-title", "background-4", true),
     )
     .await;
-    assert!(
-        search_pages.load(Ordering::SeqCst) > before_other,
-        "a second title is searched in the same window"
+    assert_reads_on_from(
+        &offsets_since(&served, mark, OTHER_QUERY),
+        0,
+        "another title",
     );
 
-    // An operator search asks live, and does not reset the background backoff.
-    let before_operator = search_pages.load(Ordering::SeqCst);
+    // An operator search asks live, and does not move the background cursor.
+    let mark = served_count(&served);
     let operator = search(
         &client,
-        "Synthetic Ceiling Title",
+        TITLE_QUERY,
         context("synthetic-ceiling-title", "operator-1", false),
     )
     .await;
-    assert!(
-        search_pages.load(Ordering::SeqCst) > before_operator,
-        "an operator search asks the indexer"
-    );
-    assert!(
-        !indexer_outcome(&operator).coverage_eligible(),
-        "an operator search past the ceiling is still reported partial"
-    );
-    let after_operator = search_pages.load(Ordering::SeqCst);
-    let background_again = search(
-        &client,
-        "Synthetic Ceiling Title",
-        context("synthetic-ceiling-title", "background-5", true),
-    )
-    .await;
     assert_eq!(
-        search_pages.load(Ordering::SeqCst),
-        after_operator,
-        "the operator's search did not reset the background backoff"
+        offsets_since(&served, mark, TITLE_QUERY).first(),
+        Some(&0),
+        "an operator search asks the indexer from the top"
     );
-    assert_contained(indexer_outcome(&background_again), "after operator search");
+    assert!(
+        !operator.results.is_empty(),
+        "the operator search returns what it read"
+    );
+
+    // Later background passes carry on from the cursor until the provider
+    // has nothing further; each page is read exactly once by the background
+    // lane and the last release is finally reached.
+    let mut last_release_reached = false;
+    let mut completed = false;
+    let max_passes = TOTAL_HITS / PAGE_SIZE + 1;
+    for pass in 5..5 + max_passes {
+        let mark = served_count(&served);
+        let response = search(
+            &client,
+            TITLE_QUERY,
+            context(
+                "synthetic-ceiling-title",
+                &format!("background-{pass}"),
+                true,
+            ),
+        )
+        .await;
+        next_offset = assert_reads_on_from(
+            &offsets_since(&served, mark, TITLE_QUERY),
+            next_offset,
+            &format!("background pass {pass}"),
+        );
+        last_release_reached |= response
+            .results
+            .iter()
+            .any(|result| result.title.contains(&format!("Part{}-", TOTAL_HITS - 1)));
+        let outcome = indexer_outcome(&response);
+        if outcome.coverage_eligible() {
+            completed = true;
+            break;
+        }
+        assert_resumable(outcome, &format!("background pass {pass}"));
+        assert!(
+            next_offset <= TOTAL_HITS,
+            "background pass {pass}: the read stops once the feed runs out"
+        );
+    }
+    assert!(
+        completed,
+        "the background read completes once the provider has nothing further"
+    );
+    assert!(
+        next_offset > TOTAL_HITS - PAGE_SIZE,
+        "the background read reached the end of the feed (next offset {next_offset})"
+    );
+    assert!(
+        last_release_reached,
+        "the release past the first pass is reached by a later one"
+    );
 }

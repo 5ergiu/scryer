@@ -1022,13 +1022,15 @@ async fn title_matching_port_on_postgres() -> AppResult<()> {
                 .await?;
         let index_dir =
             tempfile::tempdir().map_err(|error| AppError::Repository(error.to_string()))?;
-        let fuzzy = scryer_infrastructure_library_search::TitleFuzzyIndex::open(
+        // Drains on every read, so the fixture's writes are visible at once.
+        let fuzzy = scryer_infrastructure_library_search::TitleFuzzyIndex::open_with_drain_interval(
             index_dir.path(),
             std::sync::Arc::new(
                 scryer_infrastructure_library::media::titles::fuzzy_source::DatastoreTitleTermSource::new(
                     services.datastore(),
                 ),
             ),
+            std::time::Duration::ZERO,
         )
         .await?;
         let catalog = TitleStore::new(services.datastore()).with_fuzzy_index(fuzzy.clone());

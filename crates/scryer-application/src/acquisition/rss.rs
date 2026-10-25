@@ -28,10 +28,10 @@ use scryer_domain::{DomainEventPayload, ReleaseGrabbedEventData};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
-/// How many GUIDs each indexer's seen set keeps between its own polls: five
-/// feed pages of the usual hundred items. A poll that returns more than this,
-/// such as a caught-up poll paging back to its marker, keeps all of them.
-const RSS_SEEN_GUIDS_PER_INDEXER: usize = 500;
+/// How many GUIDs each indexer's seen set keeps between its own polls: the
+/// ten feed pages of a hundred items one RSS poll may hand on. A poll that
+/// returns more than this keeps all of them.
+const RSS_SEEN_GUIDS_PER_INDEXER: usize = 1_000;
 
 /// The process-local record of feed GUIDs already taken through matching, so
 /// an unchanged feed item is not matched again on a later poll.
@@ -125,11 +125,11 @@ pub const MINIMUM_RSS_TARGET_INTERVAL: std::time::Duration = std::time::Duration
 ///
 /// The worker only *considers* RSS on a tick; whether a given indexer is due is
 /// the scheduler's decision, and that decision is a quarter of an hour apart by
-/// default. Waking every minute to re-ask it therefore did fourteen rounds of
-/// work out of fifteen for nothing. Five minutes is the resolution of the whole
-/// RSS lane, and no cadence shorter than that can take effect unless the worker
-/// wakes at least that often — which is why a shortened cadence pulls this down
-/// with it.
+/// default. Each indexer owns one tick of every cadence (three ticks at the
+/// defaults), so a tick polls about a third of the indexers rather than all of
+/// them every third tick. Five minutes is the resolution of the whole RSS lane,
+/// and no cadence shorter than that can take effect unless the worker wakes at
+/// least that often — which is why a shortened cadence pulls this down with it.
 pub const DEFAULT_RSS_SYNC_TICK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Shortens (or lengthens) how often the sync worker wakes, independently of
 /// the cadence itself. A harness that shortens the cadence normally wants the
@@ -393,6 +393,7 @@ fn pending_release_as_rss_result(pending: &PendingRelease) -> IndexerSearchResul
 
     let response_attributes = external::restore_announcement(pending, &mut extra);
     IndexerSearchResult {
+        http: None,
         indexer_id: pending.indexer_id.clone(),
         source: pending
             .indexer_source
@@ -1266,6 +1267,36 @@ struct TitleQueueSnapshot {
 /// polls still running in the search client's bounded RSS lane.
 const RSS_FEED_PAGES_IN_FLIGHT: usize = 1;
 
+/// The wall-clock budget one RSS cycle gets: the overdue budget the scheduler
+/// watchdog gives the `rss_sync` job. Past it the cycle stops taking new
+/// titles and leaves the rest to the next tick.
+fn rss_sync_cycle_budget() -> std::time::Duration {
+    super::acquisition_workflow::scheduled_task_overdue_budget(rss_sync_tick_period())
+}
+
+/// Matched releases whose titles a cycle did not reach before its budget ran
+/// out, in the order the next cycle takes them up.
+///
+/// Their GUIDs are already in the seen set and the indexers' markers have
+/// moved past them, so no later poll would offer them again: they are carried
+/// here instead, and the next cycle processes them before anything new.
+/// Process-local, like the seen set.
+#[derive(Debug, Default)]
+pub(crate) struct RssUnprocessedTitles {
+    titles: Vec<(String, Vec<IndexerSearchResult>)>,
+}
+
+impl RssUnprocessedTitles {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.titles.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.titles.len()
+    }
+}
+
 /// Active unknown-age pending rows, by the identities a feed item can match
 /// them on. A matching item bypasses the process-local seen filter.
 struct RssUnknownAgeBypass {
@@ -1353,6 +1384,9 @@ impl AppUseCase {
             }
         };
         if due.poll_is_warranted() {
+            return Some(due);
+        }
+        if !self.rss_unprocessed_titles_snapshot_is_empty() {
             return Some(due);
         }
 
@@ -1549,9 +1583,30 @@ impl AppUseCase {
         Ok(())
     }
 
+    fn rss_unprocessed_titles_snapshot_is_empty(&self) -> bool {
+        self.runtime
+            .acquisition
+            .rss_unprocessed_titles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     pub(crate) async fn run_scheduled_rss_sync(&self) -> AppResult<RssSyncReport> {
+        self.run_scheduled_rss_sync_within(rss_sync_cycle_budget())
+            .await
+    }
+
+    /// One RSS cycle that stops taking up new titles once `budget` has passed
+    /// since it started. At least one title is processed per cycle, so a cycle
+    /// whose feed intake used the whole budget still moves forward.
+    pub(crate) async fn run_scheduled_rss_sync_within(
+        &self,
+        budget: std::time::Duration,
+    ) -> AppResult<RssSyncReport> {
         let now = Utc::now();
         let sync_start = std::time::Instant::now();
+        let deadline = sync_start + budget;
 
         // Cheapest gate first, and ahead of every other read this function
         // makes. With no enabled indexer there is nothing to poll at all, and
@@ -1844,6 +1899,41 @@ impl AppUseCase {
             }
         }
 
+        // Titles an earlier cycle matched but ran out of budget for go first,
+        // in the order it left them; this cycle's own titles follow in a
+        // stable order.
+        let carried = std::mem::take(
+            &mut self
+                .runtime
+                .acquisition
+                .rss_unprocessed_titles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .titles,
+        );
+        let mut title_order: Vec<String> = Vec::with_capacity(matched_by_title.len());
+        let mut ordered: HashSet<String> = HashSet::new();
+        for (title_id, releases) in carried {
+            let identities = matched_identities.entry(title_id.clone()).or_default();
+            let target = matched_by_title.entry(title_id.clone()).or_default();
+            for release in releases {
+                if identities.insert(rss_release_identity(&release)) {
+                    target.push(release);
+                }
+            }
+            if ordered.insert(title_id.clone()) {
+                title_order.push(title_id);
+            }
+        }
+        let mut fresh_titles = matched_by_title
+            .keys()
+            .filter(|title_id| !ordered.contains(*title_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        fresh_titles.sort();
+        title_order.extend(fresh_titles);
+        drop(ordered);
+
         debug!(
             matched = matched_count,
             titles_matched = matched_by_title.len(),
@@ -1867,7 +1957,35 @@ impl AppUseCase {
         // wanted row. The activity ledger row, when present, still supplies
         // upgrade state and is created on the first anchored write.
         let locked_titles = self.location_owned_title_ids().await?;
-        for (title_id, releases) in &matched_by_title {
+        let mut titles_processed = 0usize;
+        for (index, title_id) in title_order.iter().enumerate() {
+            if index > 0 && std::time::Instant::now() >= deadline {
+                let remaining = title_order[index..]
+                    .iter()
+                    .filter_map(|title_id| {
+                        matched_by_title
+                            .remove(title_id)
+                            .map(|releases| (title_id.clone(), releases))
+                    })
+                    .collect::<Vec<_>>();
+                info!(
+                    processed = titles_processed,
+                    remaining = remaining.len(),
+                    budget_secs = budget.as_secs(),
+                    "RSS sync: cycle budget reached; the remaining titles continue next cycle"
+                );
+                self.runtime
+                    .acquisition
+                    .rss_unprocessed_titles
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .titles = remaining;
+                break;
+            }
+            titles_processed += 1;
+            let Some(releases) = matched_by_title.get(title_id) else {
+                continue;
+            };
             if locked_titles.contains(title_id) {
                 continue;
             }
@@ -1952,7 +2070,7 @@ impl AppUseCase {
             matched = report.releases_matched,
             grabbed = report.releases_grabbed,
             held = report.releases_held,
-            titles_processed = matched_by_title.len(),
+            titles_processed,
             resident_kib,
             peak_resident_kib,
             "RSS sync cycle completed"
@@ -3349,6 +3467,7 @@ impl AppUseCase {
                     }
                     .to_rfc3339();
                 let pending = PendingRelease {
+                    http_release: candidate.http.clone(),
                     id: Id::new().0,
                     wanted_item_id: wanted.id.clone(),
                     title_id: title.id.clone(),
@@ -3580,7 +3699,9 @@ impl AppUseCase {
         grabbed_episode_ids.dedup();
         let canonical_result = self
             .submit_canonical_download(CanonicalDownloadSubmissionIntent {
+                http_release: best.http.clone(),
                 request: DownloadClientAddRequest {
+                    http: None,
                     title: title.clone(),
                     search_facet: Some(subject.search_facet.clone()),
                     purpose: crate::DownloadSubmissionPurpose::Standard,
@@ -4233,6 +4354,7 @@ mod tests {
             .unwrap();
         let raw = "Score.Movie.2024.1080p.WEB-DL.H.264-GROUP";
         let release = IndexerSearchResult {
+            http: None,
             indexer_id: None,
             source: "fixture".into(),
             title: raw.into(),
@@ -5698,6 +5820,7 @@ mod tests {
     #[test]
     fn rss_unknown_listing_identity_matches_a_hydrated_candidate() {
         let pending = PendingRelease {
+            http_release: None,
             id: "pending-1".to_string(),
             wanted_item_id: "wanted-1".to_string(),
             title_id: "title-1".to_string(),
@@ -5770,6 +5893,7 @@ mod tests {
 
     fn listing_pending(release_listing_json: Option<&str>) -> PendingRelease {
         PendingRelease {
+            http_release: None,
             id: "pending-listing".to_string(),
             wanted_item_id: "wanted-1".to_string(),
             title_id: "title-1".to_string(),

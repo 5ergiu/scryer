@@ -20,10 +20,12 @@ async fn anime_title(catalog: &TitleStore, id: &str, name: &str) -> Title {
     title
 }
 
+/// Drains on every read, so a test can write and read straight back.
 async fn open_index(services: &SqliteServices, dir: &std::path::Path) -> Arc<TitleFuzzyIndex> {
-    TitleFuzzyIndex::open(
+    TitleFuzzyIndex::open_with_drain_interval(
         dir,
         Arc::new(DatastoreTitleTermSource::new(services.datastore())),
+        std::time::Duration::ZERO,
     )
     .await
     .expect("index must open ready")

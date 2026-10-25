@@ -32,11 +32,17 @@
 //!   projection row. A queued title is therefore never lost to a rollback,
 //!   and draining is idempotent: a drain rewrites a title's documents from
 //!   the projection as it stands at drain time.
+//! * Reads drain the queue at most once per [`QUEUE_DRAIN_INTERVAL`], so a
+//!   burst of reads during a burst of writes costs one commit, not one per
+//!   read. The stamp check and any rebuild it calls for still run on every
+//!   read. [`TitleFuzzyIndex::sync`] drains unconditionally for a caller that
+//!   must see a write it just made.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use scryer_application::{AppError, AppResult};
@@ -62,6 +68,18 @@ pub const FUZZY_INDEX_DIR: &str = "title-fuzzy-index";
 const BATCH_TERMS: usize = 20_000;
 /// Titles read out of the queue per drain pass.
 const QUEUE_DRAIN_BATCH: i64 = 512;
+/// The longest a fuzzy read may lag a write the database has accepted.
+///
+/// Every drain is a tantivy commit: a new segment, a merge sooner or later,
+/// and files replaced on disk. Reads arrive many times a minute from the
+/// acquisition walk, RSS matching and import checks, and while a scan is
+/// writing titles the queue is rarely empty, so draining on every read made
+/// the commit rate the read rate. Ten seconds caps that at six commits a
+/// minute however busy reads are. It only delays the bounded-distance lane:
+/// the exact lanes read the projection in SQL and see a write as soon as it
+/// commits, and ten seconds is well inside the cadence of the background work
+/// that reads this lane.
+pub const QUEUE_DRAIN_INTERVAL: Duration = Duration::from_secs(10);
 /// Writer heap per batch. Tantivy's floor is 15 MB; a batch is small and
 /// short-lived, so nothing is gained by giving it more.
 const WRITER_HEAP_BYTES: usize = 15_000_000;
@@ -226,8 +244,22 @@ pub struct TitleFuzzyIndex {
     /// [`Self::write_lock`].
     meta: std::sync::RwLock<Option<ProjectionStamp>>,
     rebuild_complete: AtomicBool,
+    /// When the last drain that emptied the queue started. Only read and
+    /// written under [`Self::write_lock`].
+    last_drain: std::sync::Mutex<Option<Instant>>,
+    /// See [`QUEUE_DRAIN_INTERVAL`].
+    drain_interval: Duration,
     // Keep directory ownership until the index and reader have been dropped.
     _ownership: std::fs::File,
+}
+
+/// How fresh a read needs the index to be with respect to the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Freshness {
+    /// Drain whatever is queued.
+    Current,
+    /// Drain only if the last drain is older than the drain interval.
+    Bounded,
 }
 
 /// A resolver-lane request: one bucket of the name index, the same
@@ -259,11 +291,25 @@ impl TitleFuzzyIndex {
     /// Open the index, completing any required recovery and rebuild first.
     /// Failure to provide the complete index is an error, never an empty match.
     pub async fn open(data_dir: &Path, source: Arc<dyn TitleTermSource>) -> AppResult<Arc<Self>> {
-        let dir = data_dir.join(FUZZY_INDEX_DIR);
-        Self::open_inner(dir, source).await
+        Self::open_with_drain_interval(data_dir, source, QUEUE_DRAIN_INTERVAL).await
     }
 
-    async fn open_inner(dir: PathBuf, source: Arc<dyn TitleTermSource>) -> AppResult<Arc<Self>> {
+    /// [`Self::open`] with a different bound on how far reads may lag the
+    /// queue. `Duration::ZERO` drains on every read.
+    pub async fn open_with_drain_interval(
+        data_dir: &Path,
+        source: Arc<dyn TitleTermSource>,
+        drain_interval: Duration,
+    ) -> AppResult<Arc<Self>> {
+        let dir = data_dir.join(FUZZY_INDEX_DIR);
+        Self::open_inner(dir, source, drain_interval).await
+    }
+
+    async fn open_inner(
+        dir: PathBuf,
+        source: Arc<dyn TitleTermSource>,
+        drain_interval: Duration,
+    ) -> AppResult<Arc<Self>> {
         let (_, fields) = build_schema();
         let open_dir = dir.clone();
         let (ownership, index, reader) =
@@ -282,6 +328,8 @@ impl TitleFuzzyIndex {
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             meta: std::sync::RwLock::new(meta),
             rebuild_complete: AtomicBool::new(false),
+            last_drain: std::sync::Mutex::new(None),
+            drain_interval,
         });
 
         let stamp = handle.source.projection_stamp().await?;
@@ -358,23 +406,64 @@ impl TitleFuzzyIndex {
     /// Apply everything `title_search_index_queue` holds and check that the
     /// projection generation has not changed while draining it.
     ///
-    /// Called before a fuzzy read rather than from a timer, so a caller never
-    /// sees a title the database has already accepted but the index has not.
+    /// Unconditional, unlike the drain a read does: a caller that must see a
+    /// write it has just committed calls this first.
     pub async fn sync(&self) -> AppResult<()> {
         let guard = self.write_guard().await;
-        self.sync_locked(&guard).await
+        self.sync_locked(&guard, Freshness::Current, Instant::now())
+            .await
     }
 
-    async fn sync_locked(&self, guard: &WriteGuard) -> AppResult<()> {
+    /// The read path's drain: rebuild if the stamp says so, and drain the
+    /// queue only when the last drain is older than the drain interval.
+    ///
+    /// Nothing waits here. A read inside the interval skips the queue and
+    /// searches what the last drain committed; the writer lock is held only
+    /// for the stamp check and, at most once per interval, for one drain.
+    async fn sync_for_read(&self, guard: &WriteGuard) -> AppResult<()> {
+        self.sync_locked(guard, Freshness::Bounded, Instant::now())
+            .await
+    }
+
+    /// Whether a drain that started at or after `now - interval` emptied the
+    /// queue. Read under the writer lock.
+    fn drained_within_interval(&self, now: Instant) -> bool {
+        let last = *self
+            .last_drain
+            .lock()
+            .expect("title index drain clock is never held across a panic");
+        last.is_some_and(|last| now.saturating_duration_since(last) < self.drain_interval)
+    }
+
+    fn record_drain(&self, started: Instant) {
+        *self
+            .last_drain
+            .lock()
+            .expect("title index drain clock is never held across a panic") = Some(started);
+    }
+
+    /// `now` is when this drain started. Recording the start rather than the
+    /// end keeps the bound honest: a title enqueued after the drain read the
+    /// queue is at most one interval behind the next read that drains.
+    async fn sync_locked(
+        &self,
+        guard: &WriteGuard,
+        freshness: Freshness,
+        now: Instant,
+    ) -> AppResult<()> {
         loop {
             let stamp = self.source.projection_stamp().await?;
             if !self.ready() || !self.stamp_matches(&stamp) {
                 self.rebuild_locked(guard, stamp).await?;
                 continue;
             }
+            if freshness == Freshness::Bounded && self.drained_within_interval(now) {
+                return Ok(());
+            }
             let queued = self.source.queued_titles(QUEUE_DRAIN_BATCH).await?;
             if queued.is_empty() {
                 if self.source.projection_stamp().await? == stamp {
+                    self.record_drain(now);
                     return Ok(());
                 }
                 continue;
@@ -526,7 +615,7 @@ impl TitleFuzzyIndex {
         queries: &[ResolverFuzzyQuery<'_>],
     ) -> AppResult<Vec<Vec<i64>>> {
         let guard = self.write_guard().await;
-        self.sync_locked(&guard).await?;
+        self.sync_for_read(&guard).await?;
         // Pin a complete generation before allowing another rebuild to start.
         let searcher = self.reader.searcher();
         drop(guard);
@@ -644,7 +733,7 @@ impl TitleFuzzyIndex {
         limit_per_token: usize,
     ) -> AppResult<Vec<UiFuzzyHit>> {
         let guard = self.write_guard().await;
-        self.sync_locked(&guard).await?;
+        self.sync_for_read(&guard).await?;
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -1056,5 +1145,229 @@ mod remove_meta_tests {
 
         assert!(index.write_meta(&stamp()).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+    }
+}
+
+#[cfg(test)]
+mod drain_cadence_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    const INTERVAL: Duration = Duration::from_secs(10);
+
+    /// A projection and queue held in memory, so a test controls exactly
+    /// what is queued and when.
+    #[derive(Default)]
+    struct QueueSource {
+        terms: Mutex<Vec<IndexedTerm>>,
+        queue: Mutex<Vec<QueuedTitle>>,
+        generation: Mutex<i64>,
+        next_id: Mutex<i64>,
+    }
+
+    impl QueueSource {
+        /// What a projection write does: rows plus a queue claim.
+        fn write_title(&self, title_id: &str, name: &str) {
+            let mut next = self.next_id.lock().unwrap();
+            *next += 1;
+            self.terms.lock().unwrap().push(IndexedTerm {
+                term_id: *next,
+                title_id: title_id.to_string(),
+                facet: "series".into(),
+                term_kind: "name".into(),
+                weight: 0,
+                literal_term: name.to_string(),
+                match_term: name.to_string(),
+                normalized_term: name.to_string(),
+                script: "latin".into(),
+                numbers_key: String::new(),
+                char_length: name.chars().count() as i64,
+            });
+            self.queue.lock().unwrap().push(QueuedTitle {
+                seq: *next,
+                title_id: title_id.to_string(),
+            });
+        }
+
+        fn queued(&self) -> usize {
+            self.queue.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl TitleTermSource for QueueSource {
+        async fn page_terms(&self, after: i64, limit: i64) -> AppResult<Vec<IndexedTerm>> {
+            let mut page = self
+                .terms
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|term| term.term_id > after)
+                .cloned()
+                .collect::<Vec<_>>();
+            page.sort_by_key(|term| term.term_id);
+            page.truncate(limit as usize);
+            Ok(page)
+        }
+        async fn terms_for_titles(&self, title_ids: &[String]) -> AppResult<Vec<IndexedTerm>> {
+            Ok(self
+                .terms
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|term| title_ids.contains(&term.title_id))
+                .cloned()
+                .collect())
+        }
+        async fn queued_titles(&self, limit: i64) -> AppResult<Vec<QueuedTitle>> {
+            Ok(self
+                .queue
+                .lock()
+                .unwrap()
+                .iter()
+                .take(limit as usize)
+                .cloned()
+                .collect())
+        }
+        async fn clear_queued(&self, seqs: &[i64]) -> AppResult<()> {
+            self.queue
+                .lock()
+                .unwrap()
+                .retain(|entry| !seqs.contains(&entry.seq));
+            Ok(())
+        }
+        async fn projection_stamp(&self) -> AppResult<ProjectionStamp> {
+            Ok(ProjectionStamp {
+                collation_version: "fixture-collation".into(),
+                projection_generation: *self.generation.lock().unwrap(),
+            })
+        }
+    }
+
+    async fn open_fixture(
+        data_dir: &Path,
+        source: Arc<QueueSource>,
+    ) -> (Arc<TitleFuzzyIndex>, Instant) {
+        let index = TitleFuzzyIndex::open_with_drain_interval(data_dir, source, INTERVAL)
+            .await
+            .expect("fixture index opens");
+        // Open drains unconditionally; every instant below is measured from
+        // that drain rather than from the wall clock.
+        let opened = index
+            .last_drain
+            .lock()
+            .unwrap()
+            .expect("open records its drain");
+        (index, opened)
+    }
+
+    /// A read as the read path does it, at a chosen instant.
+    async fn read_at(index: &TitleFuzzyIndex, now: Instant) {
+        let guard = index.write_guard().await;
+        index
+            .sync_locked(&guard, Freshness::Bounded, now)
+            .await
+            .expect("read-path drain succeeds");
+    }
+
+    fn committed_opstamp(index: &TitleFuzzyIndex) -> u64 {
+        index.index.load_metas().expect("metas load").opstamp
+    }
+
+    fn visible_docs(index: &TitleFuzzyIndex) -> u64 {
+        index.reader.searcher().num_docs()
+    }
+
+    #[tokio::test]
+    async fn reads_inside_the_interval_share_one_commit() {
+        let data = tempfile::tempdir().unwrap();
+        let source = Arc::new(QueueSource::default());
+        let (index, opened) = open_fixture(data.path(), source.clone()).await;
+        let before = committed_opstamp(&index);
+
+        source.write_title("fixture-title-a", "fixture alpha");
+        for offset in [1, 3, 9] {
+            read_at(&index, opened + Duration::from_secs(offset)).await;
+        }
+        assert_eq!(
+            committed_opstamp(&index),
+            before,
+            "no read inside the interval commits"
+        );
+        assert_eq!(source.queued(), 1, "the queued title waits for its drain");
+        assert_eq!(visible_docs(&index), 0);
+
+        // The first read past the interval drains, and the reads after it
+        // inside the next interval do not commit again.
+        read_at(&index, opened + INTERVAL).await;
+        let drained = committed_opstamp(&index);
+        assert!(drained > before, "the read past the interval commits");
+        assert_eq!(source.queued(), 0);
+        assert_eq!(visible_docs(&index), 1);
+
+        source.write_title("fixture-title-b", "fixture bravo");
+        for offset in [11, 14, 19] {
+            read_at(&index, opened + Duration::from_secs(offset)).await;
+        }
+        assert_eq!(committed_opstamp(&index), drained, "still one commit");
+        assert_eq!(source.queued(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_queue_lands_once_the_interval_elapses() {
+        let data = tempfile::tempdir().unwrap();
+        let source = Arc::new(QueueSource::default());
+        let (index, opened) = open_fixture(data.path(), source.clone()).await;
+
+        read_at(&index, opened + INTERVAL).await;
+        source.write_title("fixture-title-a", "fixture alpha");
+        read_at(&index, opened + INTERVAL + Duration::from_secs(1)).await;
+        assert_eq!(source.queued(), 1, "inside the interval of the last drain");
+
+        read_at(&index, opened + INTERVAL * 2).await;
+        assert_eq!(source.queued(), 0, "drained one interval after the last");
+        assert_eq!(visible_docs(&index), 1);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_sync_drains_inside_the_interval() {
+        let data = tempfile::tempdir().unwrap();
+        let source = Arc::new(QueueSource::default());
+        let (index, _opened) = open_fixture(data.path(), source.clone()).await;
+
+        source.write_title("fixture-title-a", "fixture alpha");
+        index.sync().await.expect("sync succeeds");
+        assert_eq!(source.queued(), 0);
+        assert_eq!(visible_docs(&index), 1);
+    }
+
+    #[tokio::test]
+    async fn a_changed_stamp_rebuilds_even_inside_the_interval() {
+        let data = tempfile::tempdir().unwrap();
+        let source = Arc::new(QueueSource::default());
+        let (index, opened) = open_fixture(data.path(), source.clone()).await;
+
+        source.write_title("fixture-title-a", "fixture alpha");
+        *source.generation.lock().unwrap() += 1;
+        read_at(&index, opened + Duration::from_secs(1)).await;
+
+        let stamp = source.projection_stamp().await.unwrap();
+        assert!(index.stamp_matches(&stamp), "the read rebuilt to the stamp");
+        assert_eq!(visible_docs(&index), 1, "the rebuild paged the title in");
+    }
+
+    #[tokio::test]
+    async fn a_zero_interval_drains_on_every_read() {
+        let data = tempfile::tempdir().unwrap();
+        let source = Arc::new(QueueSource::default());
+        let index =
+            TitleFuzzyIndex::open_with_drain_interval(data.path(), source.clone(), Duration::ZERO)
+                .await
+                .expect("fixture index opens");
+        let opened = index.last_drain.lock().unwrap().unwrap();
+
+        source.write_title("fixture-title-a", "fixture alpha");
+        read_at(&index, opened).await;
+        assert_eq!(source.queued(), 0);
     }
 }

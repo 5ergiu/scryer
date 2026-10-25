@@ -357,6 +357,11 @@ impl AppUseCase {
                     "disc analysis requires review before episodes can be made available".into(),
                 ));
             }
+            MediaAnalysisOutcome::NoVideo => {
+                return Err(AppError::Validation(
+                    MediaAnalysisOutcome::NO_VIDEO_MESSAGE.to_string(),
+                ));
+            }
             MediaAnalysisOutcome::Invalid(error) => return Err(AppError::Validation(error)),
         };
         self.validate_disc_selection_update(&title, &expected, &path, &source, &mut analysis)
@@ -430,6 +435,11 @@ impl AppUseCase {
                     .record_media_analysis_attempt(&expected, &analysis)
                     .await?;
                 return Err(AppError::Validation("the requested disc title could not be established; review its inspection status".into()));
+            }
+            MediaAnalysisOutcome::NoVideo => {
+                return Err(AppError::Validation(
+                    MediaAnalysisOutcome::NO_VIDEO_MESSAGE.to_string(),
+                ));
             }
             MediaAnalysisOutcome::Invalid(error) => return Err(AppError::Validation(error)),
         };

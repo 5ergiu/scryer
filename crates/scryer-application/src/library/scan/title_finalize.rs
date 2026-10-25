@@ -286,7 +286,11 @@ async fn persist_scanned_media_analysis_outcome(
             .record_media_analysis_attempt(&current, &analysis)
             .await
             .unwrap_or(false),
-        MediaAnalysisOutcome::Invalid(error_message) => {
+        failed @ (MediaAnalysisOutcome::NoVideo | MediaAnalysisOutcome::Invalid(_)) => {
+            let error_message = match failed {
+                MediaAnalysisOutcome::Invalid(message) => message,
+                _ => MediaAnalysisOutcome::NO_VIDEO_MESSAGE.to_string(),
+            };
             let mark_result = app
                 .services
                 .library
@@ -314,7 +318,7 @@ async fn persist_scanned_media_analysis_outcome(
 fn scanned_media_analysis_status(outcome: &MediaAnalysisOutcome) -> &'static str {
     match outcome {
         MediaAnalysisOutcome::Valid(_) => "scanned",
-        MediaAnalysisOutcome::Invalid(_) => "failed",
+        MediaAnalysisOutcome::NoVideo | MediaAnalysisOutcome::Invalid(_) => "failed",
         MediaAnalysisOutcome::Inconclusive(_) => "incomplete",
     }
 }

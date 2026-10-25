@@ -60,44 +60,32 @@ export function RouteErrorBoundary() {
   }, [error]);
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-6 py-12">
-      {/* Atmospheric background — matches the app's dark theme glow */}
-      <div
-        className="pointer-events-none fixed inset-0"
-        style={{
-          background: [
-            "radial-gradient(circle at 30% 20%, rgba(91, 100, 255, 0.08), transparent 40%)",
-            "radial-gradient(circle at 70% 80%, rgba(var(--scry-danger-rgb), 0.06), transparent 40%)",
-            "linear-gradient(180deg, transparent 0%, rgba(4, 8, 20, 0.5) 100%)",
-          ].join(", "),
-        }}
-      />
-
-      <div className="relative z-10 flex w-full max-w-md flex-col items-center text-center">
+    <div className="flex min-h-dvh items-center justify-center bg-[#070d1c] px-6 py-12 text-[#dbe5ff] [color-scheme:dark]">
+      <div className="flex w-full min-w-0 max-w-md flex-col items-center text-center">
         {/* Logo */}
         <img src={logoUrl} alt="Scryer" className="mb-8 h-16 w-16 opacity-60" />
 
         {/* Status code */}
         {status !== null && (
-          <p className="mb-3 text-6xl font-bold tracking-tight text-foreground/10">{status}</p>
+          <p className="mb-3 text-6xl font-bold tracking-tight text-[#8b96b9]">{status}</p>
         )}
 
         {/* Icon + Title */}
         <div className="mb-3 flex items-center justify-center gap-2.5">
-          <AlertTriangle className="h-5 w-5 text-[var(--scry-danger-text-soft)]" />
-          <h1 className="text-lg font-semibold text-foreground">{title}</h1>
+          <AlertTriangle className="h-5 w-5 shrink-0 text-[#f87171]" />
+          <h1 className="text-lg font-semibold">{title}</h1>
         </div>
 
         {/* Detail */}
-        <p className="mb-6 max-w-sm text-sm leading-relaxed text-muted-foreground">{detail}</p>
+        <p className="mb-6 max-w-sm text-sm leading-relaxed text-[#8b96b9] [overflow-wrap:anywhere]">{detail}</p>
 
         {/* Error message (collapsible for long stack traces) */}
         {error instanceof Error && error.stack && (
           <details className="mb-6 w-full text-left">
-            <summary className="cursor-pointer text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors">
+            <summary className="cursor-pointer text-xs text-[#8b96b9] transition-colors hover:text-[#dbe5ff] focus-visible:outline-2 focus-visible:outline-[#7b8cff]">
               Technical details
             </summary>
-            <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-card/50 p-3 text-[11px] leading-relaxed text-muted-foreground/80">
+            <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-[#1c2746] bg-[#0a1120] p-3 text-[11px] leading-relaxed text-[#8b96b9]">
               {error.stack}
             </pre>
           </details>
@@ -110,7 +98,7 @@ export function RouteErrorBoundary() {
             variant="secondary"
             size="sm"
             onClick={() => navigate("/")}
-            className="gap-2"
+            className="gap-2 border-[#1c2746] bg-[#0b1322] text-[#dbe5ff] hover:bg-[#151f35] hover:text-[#dbe5ff] focus-visible:ring-[#7b8cff]"
           >
             <Home className="h-3.5 w-3.5" />
             Home
@@ -120,7 +108,7 @@ export function RouteErrorBoundary() {
             variant="default"
             size="sm"
             onClick={() => window.location.reload()}
-            className="gap-2"
+            className="gap-2 bg-[#5b64ff] text-white hover:bg-[#4a52e6] focus-visible:ring-[#7b8cff]"
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Retry

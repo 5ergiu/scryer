@@ -291,9 +291,7 @@ impl MediaAnalyzer for NativeMediaAnalyzer {
                     crate::post_download_gate::build_media_file_analysis(&analysis),
                 )))
             }
-            Ok(_) => Ok(MediaAnalysisOutcome::Invalid(
-                "file is not a valid video".to_string(),
-            )),
+            Ok(_) => Ok(MediaAnalysisOutcome::NoVideo),
             Err(error) => Ok(MediaAnalysisOutcome::Invalid(error.to_string())),
         }
         #[cfg(not(feature = "runtime-media-analysis"))]
@@ -488,6 +486,7 @@ mod tests {
                 panic!("expected valid strm analysis, got invalid: {error}");
             }
             MediaAnalysisOutcome::Inconclusive(_) => panic!("unexpected incomplete stream pointer"),
+            MediaAnalysisOutcome::NoVideo => panic!("expected valid strm analysis, got no video"),
         }
     }
 }

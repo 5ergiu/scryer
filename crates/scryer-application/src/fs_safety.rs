@@ -12,10 +12,13 @@ pub(crate) fn most_specific_containing_root(path: &Path, roots: &[PathBuf]) -> O
 
 pub(crate) fn resolve_available_root_for_path(path: &Path, roots: &[PathBuf]) -> AppResult<()> {
     let root = most_specific_containing_root(path, roots).ok_or_else(|| {
-        AppError::Validation(format!(
-            "refusing filesystem operation for {} because it is outside configured media roots",
-            path.display()
-        ))
+        AppError::validation_refused(
+            crate::delete_refusal::PATH_OUTSIDE_ROOTS,
+            format!(
+                "refusing filesystem operation for {} because it is outside configured media roots",
+                path.display()
+            ),
+        )
     })?;
     ensure_root_available(&root)?;
     Ok(())
@@ -267,10 +270,12 @@ mod tests {
             .join("outside.mkv");
         let roots = vec![tempdir.path().join("media")];
 
-        let result = resolve_available_root_for_path(&outside, &roots);
-        assert!(
-            matches!(result, Err(AppError::Validation(_))),
-            "targets outside configured roots must fail closed"
+        let error = resolve_available_root_for_path(&outside, &roots)
+            .expect_err("targets outside configured roots must fail closed");
+        assert_eq!(
+            error.validation_reason(),
+            Some(crate::delete_refusal::PATH_OUTSIDE_ROOTS),
+            "{error}"
         );
     }
 }

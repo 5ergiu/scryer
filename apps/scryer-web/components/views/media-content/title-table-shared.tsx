@@ -299,7 +299,16 @@ export function useTitleTableVirtualizerRebuild<TElement extends HTMLElement>({
       const currentOffset =
         typeof virtualOffset === "number" ? virtualOffset : element.scrollTop;
       if (currentOffset > maxScrollTop || element.scrollTop > maxScrollTop) {
+        const scrollTopBefore = element.scrollTop;
         titleVirtualizer.scrollToOffset(maxScrollTop);
+        // The virtualizer only reads its offset back on a scroll event. When
+        // the element already sits at the clamped position, as a restored
+        // offset past the end of a table that no longer scrolls does, none
+        // follows, and the virtualizer keeps rendering the rows for its stale
+        // offset below an empty spacer.
+        if (element.scrollTop === scrollTopBefore) {
+          element.dispatchEvent(new Event("scroll"));
+        }
       }
     };
     rebuildVirtualTable();
@@ -963,12 +972,13 @@ export function EpisodeProgressBar({
 
   return (
     <div
+      data-ui="episode-progress"
       className={cn("relative", compact ? "w-[8rem]" : "w-[10rem]", className)}
     >
       <Progress
         value={progress.percent}
         className={cn(
-          "border border-border/60 bg-muted/90 shadow-sm",
+          "border border-border/60 bg-muted/90 shadow-none dark:shadow-sm",
           compact ? "h-5 rounded-md" : "h-7 rounded-md",
         )}
         indicatorClassName={progress.indicatorClassName}
@@ -979,9 +989,20 @@ export function EpisodeProgressBar({
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-white [text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
+          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-foreground dark:text-white dark:[text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
           compact ? "text-[11px]" : "text-sm",
         )}
+        style={{ clipPath: `inset(0 0 0 ${Math.min(100, Math.max(0, progress.percent))}%)` }}
+      >
+        {progress.text}
+      </span>
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-0 flex items-center justify-center tabular-nums font-semibold text-white dark:[text-shadow:0_1px_1px_rgba(0,0,0,0.55)]",
+          compact ? "text-[11px]" : "text-sm",
+        )}
+        style={{ clipPath: `inset(0 ${100 - Math.min(100, Math.max(0, progress.percent))}% 0 0)` }}
       >
         {progress.text}
       </span>
@@ -1120,12 +1141,24 @@ export function TitleTableActionButton({
   children,
   ...props
 }: TitleTableActionButtonProps) {
+  const surfaceClass: Partial<Record<BoxedActionButtonTone, string>> = {
+    auto: "bg-[linear-gradient(var(--scry-success-bg),var(--scry-success-bg))] hover:bg-[linear-gradient(var(--scry-success-bg-strong),var(--scry-success-bg-strong))]",
+    search: "bg-[linear-gradient(var(--scry-info-bg),var(--scry-info-bg))] hover:bg-[linear-gradient(var(--scry-info-bg-strong),var(--scry-info-bg-strong))]",
+    accent: "bg-[linear-gradient(rgba(var(--scry-accent-rgb),0.1),rgba(var(--scry-accent-rgb),0.1))] hover:bg-[linear-gradient(rgba(var(--scry-accent-rgb),0.2),rgba(var(--scry-accent-rgb),0.2))]",
+    delete: "bg-[linear-gradient(var(--scry-danger-bg),var(--scry-danger-bg))] hover:bg-[linear-gradient(var(--scry-danger-bg-strong),var(--scry-danger-bg-strong))]",
+  };
+
   return (
     <IconButton
       label={label}
       tone={tone}
       showTitleAttribute={showTitleAttribute}
-      className={className}
+      className={cn(
+        "relative z-[1]",
+        surfaceClass[tone] && "bg-background hover:bg-background",
+        surfaceClass[tone],
+        className,
+      )}
       {...props}
     >
       {children}

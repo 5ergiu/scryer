@@ -112,7 +112,6 @@ pub(crate) struct DownloadFailureContext {
     pub client_item_id: String,
     pub release_title: String,
     pub reason: String,
-    pub remove_from_client_if_configured: bool,
     pub skip_reacquire: bool,
     /// The blocklist entry's reason. `None` records the failure as one the
     /// download client reported; a failure Scryer's own import gate raised
@@ -1020,7 +1019,6 @@ async fn check_grabbed_for_failures(app: &AppUseCase, dl_snapshot: &DownloadClie
                     client_item_id: failed_item.download_client_item_id.clone(),
                     release_title: release_title.clone(),
                     reason: failed_item.reason.clone(),
-                    remove_from_client_if_configured: true,
                     blocklist_reason: None,
                     skip_reacquire: false,
                 },
@@ -1484,41 +1482,9 @@ async fn handle_download_failure_for_download(
         return outcome;
     }
 
-    // NZBGet must retain history until terminal cleanup has inspected its payload.
-    // The tracked-state update below schedules that existing durable cleanup path.
-    if context.remove_from_client_if_configured
-        && !context.client_type.eq_ignore_ascii_case("nzbget")
-        && let Some(title) = attribution.title.as_ref()
-        && app
-            .should_remove_failed_download(
-                Some(title.library_id.as_str()),
-                &title.facet,
-                &context.client_id,
-            )
-            .await
-        && let Err(error) = app
-            .services
-            .integrations
-            .download_client
-            // History cleanup for a download the client itself failed: the
-            // entry goes, what the client kept is left to the client.
-            .delete_queue_item_for_client_id(
-                &context.client_id,
-                &context.client_item_id,
-                true,
-                false,
-            )
-            .await
-    {
-        warn!(
-            title_id = resolved_title_id.as_deref().unwrap_or(""),
-            client_id = context.client_id.as_str(),
-            download_client_item_id = context.client_item_id.as_str(),
-            error = %error,
-            "failed to delete failed download from client history"
-        );
-    }
-
+    // The client entry stays until terminal cleanup removes it, with its
+    // payload, under the "Remove failed" policy. The tracked-state update
+    // below schedules that durable cleanup.
     let _ = app
         .services
         .workflow
@@ -1599,6 +1565,12 @@ pub(crate) const UNCONFIRMED_GRAB_RELEASE_GRACE_MINUTES: i64 = 15;
 /// same depth the submission path reads to judge an existing submission.
 const UNCONFIRMED_GRAB_SNAPSHOT_ACTIVITY_LIMIT: usize = 100;
 
+/// How far before a submission a filled history window must reach before it
+/// proves the submission absent. A client's history clock is its own, so an
+/// accepted job's row may carry a stamp a little earlier than Scryer's
+/// `submitted_at`; the margin keeps clock skew from passing for coverage.
+const UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES: i64 = 60;
+
 /// Release grab intents no download client ever confirmed.
 ///
 /// An intent is old enough once it is past
@@ -1637,10 +1609,9 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
         {
             Ok(rows) => {
                 for row in rows {
-                    if !candidates
-                        .iter()
-                        .any(|(candidate, _)| candidate.download_id == row.download_id)
-                    {
+                    if !candidates.iter().any(|(candidate, _)| {
+                        candidate.submission.download_id == row.submission.download_id
+                    }) {
                         candidates.push((row, UnconfirmedGrabAge::BeforeRestart));
                     }
                 }
@@ -1700,7 +1671,8 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
         .map(|config| config.id.clone())
         .collect::<Vec<_>>();
 
-    for (submission, age) in candidates {
+    for (intent, age) in candidates {
+        let submission = &intent.submission;
         let listed = snapshot
             .items
             .iter()
@@ -1742,19 +1714,19 @@ pub(crate) async fn release_unconfirmed_grab_intents(app: &AppUseCase) {
             continue;
         }
         if !unconfirmed_grab_absence_is_proven(
-            &submission,
-            &snapshot.authoritative_client_ids,
+            &intent,
+            &snapshot,
             &configured_client_ids,
             &enabled_client_ids,
         ) {
             debug!(
                 title_id = submission.title_id.as_str(),
                 download_id = %submission.download_id,
-                "a download client that could hold this unconfirmed grab did not answer; keeping it"
+                "a download client that could hold this unconfirmed grab did not answer in full; keeping it"
             );
             continue;
         }
-        release_unconfirmed_grab_intent(app, &submission, age).await;
+        release_unconfirmed_grab_intent(app, submission, age).await;
     }
 }
 
@@ -1768,25 +1740,62 @@ enum UnconfirmedGrabAge {
 /// Whether the snapshot proves no client holds this intent: the client it was
 /// sent to answered in full (or no longer exists), or, for an intent that
 /// never learned its client, every enabled client answered in full.
+///
+/// "In full" means both reads succeeded and the history window covers the
+/// submission. The queue is listed whole, but recent activity is bounded: a
+/// client whose window filled the limit may hold the job in history older
+/// than the rows it returned, so it covers the submission only when its
+/// oldest returned row predates the submission by
+/// [`UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES`].
 fn unconfirmed_grab_absence_is_proven(
-    submission: &DownloadSubmission,
-    authoritative_client_ids: &HashSet<String>,
+    intent: &crate::UnconfirmedDownloadSubmission,
+    snapshot: &crate::ports::DownloadClientSnapshotOutcome,
     configured_client_ids: &HashSet<String>,
     enabled_client_ids: &[String],
 ) -> bool {
-    match submission
+    let answered_in_full = |client_id: &str| {
+        snapshot.authoritative_client_ids.contains(client_id)
+            && unconfirmed_grab_window_covers_submission(
+                snapshot.saturated_activity_windows.get(client_id),
+                intent.submitted_at,
+            )
+    };
+    match intent
+        .submission
         .download_client_id
         .as_deref()
         .map(str::trim)
         .filter(|client_id| !client_id.is_empty())
     {
         Some(client_id) => {
-            authoritative_client_ids.contains(client_id)
-                || !configured_client_ids.contains(client_id)
+            answered_in_full(client_id) || !configured_client_ids.contains(client_id)
         }
         None => enabled_client_ids
             .iter()
-            .all(|client_id| authoritative_client_ids.contains(client_id)),
+            .all(|client_id| answered_in_full(client_id)),
+    }
+}
+
+/// Whether one client's recent-activity window reaches back to a submission.
+/// `saturated` is the client's entry in
+/// [`crate::ports::DownloadClientSnapshotOutcome::saturated_activity_windows`]:
+/// absent when the client returned fewer rows than the limit, which is its
+/// whole history.
+fn unconfirmed_grab_window_covers_submission(
+    saturated: Option<&Option<DateTime<Utc>>>,
+    submitted_at: Option<DateTime<Utc>>,
+) -> bool {
+    match saturated {
+        None => true,
+        Some(oldest) => match (*oldest, submitted_at) {
+            (Some(oldest), Some(submitted_at)) => {
+                oldest
+                    < submitted_at - Duration::minutes(UNCONFIRMED_GRAB_WINDOW_CLOCK_MARGIN_MINUTES)
+            }
+            // A filled window of unknown age, or a submission of unknown
+            // time, cannot show that the window reaches the submission.
+            _ => false,
+        },
     }
 }
 
@@ -2567,6 +2576,73 @@ fn standby_scope_within(row: &SubmissionScope, covered: &SubmissionScope) -> boo
     }
 }
 
+/// The standby row a ranked search result is parked as, so a later walk can
+/// grab it without searching again.
+fn standby_row(
+    wanted_item_id: &str,
+    title_id: &str,
+    candidate: &IndexerSearchResult,
+    source_hint_value: String,
+    rank: usize,
+    now: &DateTime<Utc>,
+) -> PendingRelease {
+    let candidate_score = candidate
+        .quality_profile_decision
+        .as_ref()
+        .map(|decision| decision.preference_score)
+        .unwrap_or(0);
+    let scoring_log_json = candidate
+        .quality_profile_decision
+        .as_ref()
+        .and_then(|decision| {
+            serde_json::to_string(
+                &decision
+                    .scoring_log
+                    .iter()
+                    .map(|entry| serde_json::json!({"code": entry.code, "delta": entry.delta, "kind": entry.kind}))
+                    .collect::<Vec<_>>(),
+            )
+            .ok()
+        });
+
+    PendingRelease {
+        http_release: candidate.http.clone(),
+        id: Id::new().0,
+        wanted_item_id: wanted_item_id.to_string(),
+        title_id: title_id.to_string(),
+        release_title: candidate.title.clone(),
+        release_url: Some(source_hint_value),
+        source_kind: candidate.source_kind,
+        release_size_bytes: candidate.size_bytes,
+        release_score: candidate_score,
+        scoring_log_json,
+        indexer_source: Some(candidate.source.clone()),
+        indexer_id: candidate.indexer_id.clone(),
+        release_guid: candidate.guid.clone(),
+        added_at: (*now + chrono::Duration::microseconds(rank as i64))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        last_observed_at: now.to_rfc3339(),
+        delay_until: now.to_rfc3339(),
+        status: PendingReleaseStatus::Standby,
+        grabbed_at: None,
+        source_password: crate::normalize_release_password(candidate.password_hint.as_deref()),
+        published_at: candidate.published_at.clone(),
+        info_hash: candidate
+            .extra
+            .get("info_hash")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        seed_minimums: crate::ReleaseSeedMinimums::from_release_extra(&candidate.extra),
+        seeders: crate::acquisition::seed_goals::seeders_from_extra(&candidate.extra),
+        release_identity: String::new(),
+        coverage_identity: String::new(),
+        role: crate::types::PendingReleaseRole::Fallback,
+        last_decision_code: None,
+        release_age_unknown: false,
+        release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "standby candidate persistence carries the search context explicitly"
@@ -2646,60 +2722,7 @@ where
             continue;
         }
 
-        let candidate_score = candidate
-            .quality_profile_decision
-            .as_ref()
-            .map(|decision| decision.preference_score)
-            .unwrap_or(0);
-        let scoring_log_json = candidate
-            .quality_profile_decision
-            .as_ref()
-            .and_then(|decision| {
-                serde_json::to_string(
-                    &decision
-                        .scoring_log
-                        .iter()
-                        .map(|entry| serde_json::json!({"code": entry.code, "delta": entry.delta, "kind": entry.kind}))
-                        .collect::<Vec<_>>(),
-                )
-                .ok()
-            });
-
-        let standby = PendingRelease {
-            id: Id::new().0,
-            wanted_item_id: item.id.clone(),
-            title_id: title.id.clone(),
-            release_title: candidate.title.clone(),
-            release_url: Some(source_hint_value),
-            source_kind: candidate.source_kind,
-            release_size_bytes: candidate.size_bytes,
-            release_score: candidate_score,
-            scoring_log_json,
-            indexer_source: Some(candidate.source.clone()),
-            indexer_id: candidate.indexer_id.clone(),
-            release_guid: candidate.guid.clone(),
-            added_at: (*now + chrono::Duration::microseconds(rank as i64))
-                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-            last_observed_at: now.to_rfc3339(),
-            delay_until: now.to_rfc3339(),
-            status: PendingReleaseStatus::Standby,
-            grabbed_at: None,
-            source_password: crate::normalize_release_password(candidate.password_hint.as_deref()),
-            published_at: candidate.published_at.clone(),
-            info_hash: candidate
-                .extra
-                .get("info_hash")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            seed_minimums: crate::ReleaseSeedMinimums::from_release_extra(&candidate.extra),
-            seeders: crate::acquisition::seed_goals::seeders_from_extra(&candidate.extra),
-            release_identity: String::new(),
-            coverage_identity: String::new(),
-            role: crate::types::PendingReleaseRole::Fallback,
-            last_decision_code: None,
-            release_age_unknown: false,
-            release_listing_json: ReleaseListingSnapshot::json_for_candidate(candidate, *now),
-        };
+        let standby = standby_row(&item.id, &title.id, candidate, source_hint_value, rank, now);
 
         if app
             .services
@@ -2803,8 +2826,64 @@ mod client_snapshot_tests {
         }
     }
 
+    #[test]
+    fn a_parked_http_result_keeps_the_release_description_it_was_found_with() {
+        let release = scryer_plugin_sdk::PluginHttpRelease {
+            provider: "synthetic-provider".into(),
+            item_id: "item-1".into(),
+            page_url: "https://provider.invalid/watch/item-1".into(),
+            ..Default::default()
+        };
+        let candidate = IndexerSearchResult {
+            http: Some(release.clone()),
+            indexer_id: Some("indexer-http".into()),
+            source: "synthetic".into(),
+            title: "Synthetic.Show.S01E01.720p.WEB".into(),
+            link: Some("https://provider.invalid/watch/item-1".into()),
+            download_url: Some("https://provider.invalid/watch/item-1".into()),
+            source_kind: None,
+            size_bytes: None,
+            published_at: None,
+            thumbs_up: None,
+            thumbs_down: None,
+            indexer_languages: None,
+            indexer_subtitles: None,
+            indexer_grabs: None,
+            password_hint: None,
+            parsed_release_metadata: None,
+            quality_profile_decision: None,
+            extra: Default::default(),
+            response_attributes: Default::default(),
+            guid: None,
+            info_url: None,
+            provenance: None,
+            candidate_token: None,
+            queue_scope: None,
+            coverage_scope: None,
+            auto_eligible: None,
+            auto_decision_code: None,
+            auto_decision_summary: None,
+            release_listing_json: None,
+        };
+        let row = standby_row(
+            "wanted",
+            "title",
+            &candidate,
+            "https://provider.invalid/watch/item-1".into(),
+            0,
+            &Utc::now(),
+        );
+        assert_eq!(row.status, PendingReleaseStatus::Standby);
+        assert_eq!(row.http_release, Some(release));
+
+        let plain = IndexerSearchResult { http: None, ..candidate };
+        let row = standby_row("wanted", "title", &plain, "https://x.invalid/a.nzb".into(), 0, &Utc::now());
+        assert_eq!(row.http_release, None);
+    }
+
     fn standby(id: &str, score: i32, added_at: &str) -> PendingRelease {
         PendingRelease {
+            http_release: None,
             id: id.to_string(),
             wanted_item_id: "wanted".to_string(),
             title_id: "title".to_string(),

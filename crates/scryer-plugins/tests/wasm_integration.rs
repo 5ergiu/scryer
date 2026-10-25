@@ -136,6 +136,83 @@ async fn test_indexer_search() {
     assert!(r.source.contains("Test"));
 }
 
+fn challenge_config(base_url: &str, answer: &str) -> IndexerConfig {
+    IndexerConfig {
+        config_json: Some(
+            serde_json::json!({ "base_url": base_url, "challenge_answer": answer }).to_string(),
+        ),
+        ..test_config("test")
+    }
+}
+
+async fn search_title(client: &dyn scryer_application::IndexerClient) -> String {
+    client
+        .search(
+            "Lantern Row".to_string(),
+            std::collections::HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            scryer_application::SearchMode::Interactive,
+            scryer_application::IndexerErrorOperation::InteractiveSearch,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .results
+        .remove(0)
+        .title
+}
+
+/// The login challenge is fetched under the draft settings, and the session
+/// that showed it is the one the answer reaches: a connection test with the
+/// answer starts from it, and the saved indexer after that starts from the
+/// session the test signed in. Different settings never see it.
+#[tokio::test]
+async fn login_challenge_session_carries_to_clients_of_the_same_settings() {
+    let fixtures_dir = fixtures_dir();
+    let provider = scryer_plugins::load_indexer_plugins(&fixtures_dir).unwrap();
+
+    let draft = provider
+        .client_for_provider(&challenge_config("https://tracker.example", ""))
+        .unwrap();
+    let challenge = draft.login_challenge().await.unwrap().unwrap();
+    assert_eq!(challenge.answer_field_key, "challenge_answer");
+    assert_eq!(challenge.content_type, "image/png");
+    assert_eq!(challenge.image_base64, "iVBORw==");
+
+    let answered_test = provider
+        .client_for_provider(&challenge_config("https://tracker.example", "solved"))
+        .unwrap();
+    assert!(
+        search_title(answered_test.as_ref())
+            .await
+            .ends_with("session-challenge-session")
+    );
+
+    let saved = provider
+        .client_for_provider(&challenge_config("https://tracker.example", "solved"))
+        .unwrap();
+    assert!(
+        search_title(saved.as_ref())
+            .await
+            .ends_with("session-signed-in")
+    );
+
+    let elsewhere = provider
+        .client_for_provider(&challenge_config("https://other-tracker.example", "solved"))
+        .unwrap();
+    assert!(!search_title(elsewhere.as_ref()).await.contains("session-"));
+}
+
 /// This is intentionally opt-in: the component artifact is built in the plugin
 /// worktree, while this suite owns only the normal Scryer host path. When both
 /// are available it proves the artifact registers as a WASIp2 indexer component
@@ -1010,7 +1087,7 @@ async fn newznab_component_preserves_only_quota_codes_as_typed_errors() {
 }
 
 #[tokio::test]
-async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
+async fn newznab_builtin_defers_prowlarr_429_with_retry_after() {
     let body = r#"<?xml version="1.0" encoding="UTF-8"?>
 <error code="429" description="User configurable Indexer Query Limit of 100 in last 1 hour(s) reached." />"#;
     let (base_url, request_rx) = spawn_newznab_raw_response_server(
@@ -1053,17 +1130,32 @@ async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .expect_err("Prowlarr's 429 should remain a failed child search")
-        .to_string();
+        .expect_err("Prowlarr's 429 should remain a failed child search");
 
+    // A 429 is a typed deferral that carries the upstream Retry-After. The
+    // indexer's own description is untrusted upstream text: the plugin keeps
+    // it in its debug message, so it never reaches the operator-facing error.
+    match &error {
+        scryer_application::AppError::TemporaryUnavailable { retry_after, .. } => assert_eq!(
+            *retry_after,
+            Some(std::time::Duration::from_secs(321)),
+            "error was {error}"
+        ),
+        other => panic!("expected a temporary deferral, got {other:?}"),
+    }
+    let error = error.to_string();
     assert!(
-        error.contains("User configurable Indexer Query Limit of 100 in last 1 hour(s) reached."),
+        error.contains("the indexer is rate limiting requests"),
         "error was {error}"
     );
     assert!(error.contains("retry after 321s"), "error was {error}");
     assert!(
+        !error.contains("User configurable Indexer Query Limit"),
+        "upstream error text must stay out of the operator-facing error: {error}"
+    );
+    assert!(
         !error.contains("stopped after"),
-        "the host should preserve Prowlarr's real reason instead of the guest's generic error: {error}"
+        "the host should report the rate-limit deferral instead of the guest's generic error: {error}"
     );
     recv_newznab_search_request(&request_rx);
 }

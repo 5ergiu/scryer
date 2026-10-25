@@ -268,6 +268,7 @@ async fn failed_grab_retries_standby_candidate(
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -495,6 +496,7 @@ async fn a_gone_standby_link_expires_and_grabs_the_next_row_in_the_same_walk() {
         .await
         .expect("seed wanted scope");
     let standby = |title_suffix: &str, score| PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted.id.clone(),
         title_id: title.id.clone(),
@@ -1178,7 +1180,6 @@ async fn acquisition_failure_fallback_skips_failed_submission_for_another_episod
             client_item_id: "old-failed-job".to_string(),
             release_title: "Scoped.Failure.Recovery.S02E01.1080p.WEB-DL".to_string(),
             reason: "old download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: true,
         },
@@ -1442,6 +1443,7 @@ async fn tracked_download_failure_reuses_standby_recovery_policy() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -1740,7 +1742,6 @@ async fn tracked_download_failure_keeps_standby_when_submit_unavailable() {
         client_item_id: "failed-job".to_string(),
         release_title: "Failed.Release.1080p.WEB-DL".to_string(),
         reason: "download failed".to_string(),
-        remove_from_client_if_configured: false,
         blocklist_reason: None,
         skip_reacquire: false,
     };
@@ -1961,7 +1962,6 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
             client_item_id: "failed-duplicate".to_string(),
             release_title: "Duplicate.Failed.Release.1080p.WEB-DL".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -2004,7 +2004,6 @@ async fn process_download_failure_returns_already_handled_for_duplicate_failed_d
             client_item_id: "failed-duplicate".to_string(),
             release_title: "Duplicate.Failed.Release.1080p.WEB-DL".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -2176,7 +2175,6 @@ async fn operator_client_failure_is_recorded_without_reopening_scope() {
             client_item_id: "failed-only".to_string(),
             release_title: "Manual.Failed.Only.1080p.WEB-DL".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -2287,7 +2285,6 @@ async fn process_download_failure_dedupes_same_release_title_across_client_item_
             client_item_id: "weaver-1".to_string(),
             release_title: "Pals".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -2309,7 +2306,6 @@ async fn process_download_failure_dedupes_same_release_title_across_client_item_
             client_item_id: "weaver-2".to_string(),
             release_title: "Pals".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -2888,7 +2884,6 @@ async fn season_pack_failure_processed_twice_only_requeues_once_and_blocklists_o
             client_item_id: "failed-season-pack".to_string(),
             release_title: "Season.Pack.Failure.Recovery.S07.1080p.WEB-DL".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -3173,7 +3168,6 @@ async fn episode_set_pack_failure_reopens_only_its_covered_wanted_items() {
             client_item_id: "failed-episode-set-pack".to_string(),
             release_title: "Episode.Set.Pack.Failure.S01.1080p.WEB-DL".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -4125,6 +4119,7 @@ async fn acquisition_cycle_submits_one_hundred_episode_fallbacks_after_empty_pac
 
                 indexer_outcomes: Vec::new(),
                 results: vec![IndexerSearchResult {
+                    http: None,
                     indexer_id: None,
                     source: "nzbgeek".into(),
                     title: release_title.clone(),
@@ -4521,6 +4516,7 @@ fn series_pack_anchor_standby(
 ) -> PendingRelease {
     let release_guid = format!("anchor-standby-{wanted_item_id}");
     PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted_item_id.to_string(),
         title_id: title.id.clone(),
@@ -5593,7 +5589,6 @@ async fn failed_season_pack_walks_the_saved_runner_up_without_an_indexer_query()
                 client_item_id: failed_submission.download_client_item_id.clone(),
                 release_title: first_pack.clone(),
                 reason: "download failed".to_string(),
-                remove_from_client_if_configured: false,
                 blocklist_reason: None,
                 skip_reacquire: false,
             },
@@ -5677,7 +5672,6 @@ async fn failed_season_pack_walks_the_saved_runner_up_without_an_indexer_query()
                 client_item_id: failed_runner_up.download_client_item_id.clone(),
                 release_title: second_pack.clone(),
                 reason: "download failed".to_string(),
-                remove_from_client_if_configured: false,
                 blocklist_reason: None,
                 skip_reacquire: false,
             },
@@ -6005,7 +5999,6 @@ async fn acquisition_cycle_skips_recently_failed_season_pack_from_submission_rel
             client_item_id: "weaver-season-pack-1".to_string(),
             release_title: "Pals".to_string(),
             reason: "download failed".to_string(),
-            remove_from_client_if_configured: false,
             blocklist_reason: None,
             skip_reacquire: false,
         },
@@ -7372,6 +7365,7 @@ async fn pending_release_submit_unavailable_records_pending_without_failed_signa
     let now = Utc::now().to_rfc3339();
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: pending_id.clone(),
             wanted_item_id: wanted_id.clone(),
             title_id: title.id.clone(),
@@ -7709,6 +7703,7 @@ impl IndexerClient for PendingStatusAssertingIndexerClient {
 
             indexer_outcomes: Vec::new(),
             results: vec![IndexerSearchResult {
+                http: None,
                 indexer_id: None,
                 source: "nzbgeek".into(),
                 title: self.release_title.clone(),
@@ -8632,6 +8627,7 @@ async fn standby_reacquisition_re_judges_the_swarm_before_grabbing() {
         .expect("seed wanted item");
 
     let standby = |release_title: &str, score: i32, seeders: Option<i64>| PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted.id.clone(),
         title_id: title.id.clone(),
@@ -9809,6 +9805,7 @@ async fn acquisition_cycle_active_anime_scan_does_not_block_due_movie_search() {
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -9993,6 +9990,7 @@ async fn acquisition_cycle_active_movie_scan_does_not_block_due_series_search() 
         &app,
         &[MediaFacet::Movie],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10132,6 +10130,7 @@ async fn acquisition_cycle_active_series_scan_defers_due_series_search() {
         &app,
         &[MediaFacet::Series],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10208,6 +10207,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -10272,6 +10272,7 @@ async fn acquisition_cycle_retries_standby_candidate_during_unrelated_active_sca
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10352,6 +10353,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -10399,6 +10401,7 @@ async fn acquisition_cycle_keeps_an_old_saved_result_for_an_in_flight_grab() {
         &app,
         &[MediaFacet::Anime],
         crate::acquisition_workflow::BackgroundAcquisitionPass::Full,
+        None,
     )
     .await;
 
@@ -10651,6 +10654,7 @@ async fn acquisition_cycle_drops_saved_results_of_a_completed_scope() {
 
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: Id::new().0,
             wanted_item_id: wanted.id.clone(),
             title_id: title.id.clone(),
@@ -12159,6 +12163,7 @@ impl IndexerClient for AmbiguousIdentityIndexerClient {
                 .map(|release_title| {
                     let release_slug = release_title.replace(' ', ".");
                     IndexerSearchResult {
+                        http: None,
                         indexer_id: None,
                         source: "nzbgeek".into(),
                         title: release_title.clone(),
@@ -12318,6 +12323,11 @@ async fn background_acquisition_parks_ambiguous_best_candidate_for_review() {
     assert_eq!(parked[0].status, PendingReleaseStatus::NeedsReview);
     assert_eq!(parked[0].wanted_item_id, wanted_id);
     assert_eq!(parked[0].release_title, "Tide.Chart.1080p.WEB-DL.x264-GRP");
+    assert_eq!(
+        parked[0].last_decision_code.as_deref(),
+        Some("ambiguous_identity"),
+        "the review row names why it is waiting on a human"
+    );
     assert!(
         download_client
             .submitted_release_titles
@@ -12419,8 +12429,16 @@ async fn queue_best_release_parks_ambiguous_candidate_while_queuing_eligible_rel
     let ambiguous = "Tide.Chart.1080p.WEB-DL.x264-GRP";
 
     for release_titles in [[eligible, ambiguous], [ambiguous, eligible]] {
-        let (app, user, title, wanted_id, pending_releases, _release_attempts, download_client, _) =
-            ambiguous_identity_fixture_with_releases(&release_titles).await;
+        let (
+            app,
+            user,
+            title,
+            wanted_id,
+            pending_releases,
+            _release_attempts,
+            download_client,
+            wanted_items,
+        ) = ambiguous_identity_fixture_with_releases(&release_titles).await;
 
         let outcome = app
             .queue_best_release(
@@ -12444,6 +12462,30 @@ async fn queue_best_release_parks_ambiguous_candidate_while_queuing_eligible_rel
         assert_eq!(parked[0].status, PendingReleaseStatus::NeedsReview);
         assert_eq!(parked[0].wanted_item_id, wanted_id);
         assert_eq!(parked[0].release_title, ambiguous);
+        assert_eq!(
+            parked[0].last_decision_code.as_deref(),
+            Some("ambiguous_identity"),
+            "the review row names why it is waiting on a human"
+        );
+        {
+            let decisions = wanted_items.release_decisions.lock().await;
+            assert!(
+                decisions
+                    .iter()
+                    .any(|decision| decision.title_id == title.id
+                        && decision.wanted_item_id == wanted_id
+                        && decision.release_title == ambiguous
+                        && decision.decision_code == "ambiguous_identity"),
+                "the parked rejection is recorded for diagnostics, got {:?}",
+                decisions
+                    .iter()
+                    .map(|decision| format!(
+                        "{}:{}",
+                        decision.release_title, decision.decision_code
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
         let parked_listing = parked[0].release_listing_json.as_deref();
         assert!(
             parked_listing.is_some(),
@@ -12799,6 +12841,7 @@ async fn assert_pending_release_submit_decision(
     let now = Utc::now().to_rfc3339();
     pending_releases
         .insert_pending_release(&PendingRelease {
+            http_release: None,
             id: pending_id.clone(),
             wanted_item_id: wanted_id.clone(),
             title_id: title.id.clone(),
@@ -17074,6 +17117,7 @@ fn streamed_rss_result(indexer_id: &str, guid: &str, title: &str) -> IndexerSear
         link: Some(format!("https://example.invalid/info/{guid}")),
         download_url: Some(format!("https://example.invalid/download/{guid}.nzb")),
         source_kind: Some(DownloadSourceKind::NzbUrl),
+        http: None,
         size_bytes: None,
         published_at: Some("1970-01-01T00:00:00Z".into()),
         thumbs_up: None,
@@ -17243,4 +17287,117 @@ async fn scheduled_rss_ingests_each_poll_before_the_next_is_fetched() {
         report.releases_grabbed, 1,
         "a match from the first poll must survive to title processing: {report:?}"
     );
+}
+
+/// Answers every RSS poll with the same fixed feed.
+struct FixedFeedRssIndexerClient {
+    results: Vec<IndexerSearchResult>,
+}
+
+#[async_trait::async_trait]
+impl IndexerClient for FixedFeedRssIndexerClient {
+    async fn search(
+        &self,
+        _query: String,
+        _ids: std::collections::HashMap<String, String>,
+        _category: Option<String>,
+        _facet: Option<String>,
+        _id_search_facet: Option<String>,
+        _newznab_categories: Option<Vec<String>>,
+        _indexer_routing: Option<IndexerRoutingPlan>,
+        _mode: SearchMode,
+        _operation: IndexerErrorOperation,
+        _season: Option<u32>,
+        _episode: Option<u32>,
+        _absolute_episode: Option<u32>,
+        _year: Option<i32>,
+        _tagged_aliases: Vec<TaggedAlias>,
+        _learning_context: Option<crate::IndexerSearchLearningContext>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AppResult<IndexerSearchResponse> {
+        Ok(IndexerSearchResponse {
+            next_cursor: None,
+            completion: crate::IndexerSearchCompletion::Complete,
+            indexer_outcomes: Vec::new(),
+            results: self.results.clone(),
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+        })
+    }
+}
+
+/// A cycle past its budget stops taking up titles, and the next cycle
+/// processes the ones it left even though no poll offers their releases
+/// again.
+#[tokio::test]
+async fn an_rss_cycle_past_its_budget_leaves_the_remaining_titles_to_the_next_cycle() {
+    let wanted_items = Arc::new(TrackingAcquisitionScopeStateRepo::default());
+    let download_submissions = Arc::new(TrackingDownloadSubmissionRepo::default());
+    let indexer_client = Arc::new(FixedFeedRssIndexerClient {
+        results: vec![
+            streamed_rss_result(
+                "indexer-a",
+                "budget-guid-alpha",
+                "Synthetic.Alpha.Harbor.2024.1080p.WEB-DL-GRP",
+            ),
+            streamed_rss_result(
+                "indexer-a",
+                "budget-guid-beta",
+                "Synthetic.Beta.Harbor.2024.1080p.WEB-DL-GRP",
+            ),
+        ],
+    });
+    let (app, user) = bootstrap_with_acquisition_tracking_and_indexer(
+        Arc::new(StubDownloadClient::default()),
+        download_submissions.clone(),
+        Arc::new(TrackingPendingReleaseRepo::default()),
+        wanted_items.clone(),
+        indexer_client,
+    );
+    let (alpha, _) = seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &wanted_items,
+        "Synthetic Alpha Harbor",
+        2024,
+    )
+    .await;
+    let (beta, _) = seed_movie_wanted_for_acquisition(
+        &app,
+        &user,
+        &wanted_items,
+        "Synthetic Beta Harbor",
+        2024,
+    )
+    .await;
+    let unprocessed = app.runtime.acquisition.rss_unprocessed_titles.clone();
+
+    // A spent budget still processes one title, then yields.
+    let first = app
+        .run_scheduled_rss_sync_within(std::time::Duration::ZERO)
+        .await
+        .expect("first RSS cycle");
+    assert_eq!(first.releases_matched, 2, "{first:?}");
+    assert_eq!(first.releases_grabbed, 1, "{first:?}");
+    assert_eq!(unprocessed.lock().unwrap().len(), 1);
+
+    // The feed offers nothing new, but the carried title is taken up.
+    let second = app
+        .run_scheduled_rss_sync_within(std::time::Duration::ZERO)
+        .await
+        .expect("second RSS cycle");
+    assert_eq!(second.releases_fetched, 0, "{second:?}");
+    assert_eq!(second.releases_grabbed, 1, "{second:?}");
+    assert!(unprocessed.lock().unwrap().is_empty());
+
+    let grabbed_titles = download_submissions
+        .store
+        .lock()
+        .await
+        .iter()
+        .map(|submission| submission.title_id.clone())
+        .collect::<HashSet<_>>();
+    assert_eq!(grabbed_titles, HashSet::from([alpha.id, beta.id]));
 }

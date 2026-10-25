@@ -156,6 +156,15 @@ impl AppUseCase {
                                     .await?,
                             );
                         }
+                        MediaAnalysisOutcome::NoVideo => {
+                            progress.failed += u32::from(
+                                self.record_failed_analysis_refresh(
+                                    expected,
+                                    MediaAnalysisOutcome::NO_VIDEO_MESSAGE.to_string(),
+                                )
+                                .await?,
+                            );
+                        }
                         MediaAnalysisOutcome::Invalid(message) => {
                             progress.failed += u32::from(
                                 self.record_failed_analysis_refresh(expected, message)

@@ -1012,9 +1012,11 @@ async fn graphql_title_options_input_uses_root_folder_id() {
             .collect::<Vec<_>>();
         assert!(root_fields.contains(&"path"));
         assert!(root_fields.contains(&"isDefault"));
-        assert!(
-            !root_fields.contains(&"id"),
-            "{input_name} should not accept id"
+        // Only an update names the stored root it edits.
+        assert_eq!(
+            root_fields.contains(&"id"),
+            input_name == "updateLibraryRootInput",
+            "{input_name} id field"
         );
     }
 
@@ -4389,6 +4391,7 @@ async fn graphql_wanted_items_reports_standby_count_for_the_scope_anchor() {
     for score in [500, 400] {
         pending_store
             .insert_pending_release(&PendingRelease {
+                http_release: None,
                 id: Id::new().0,
                 wanted_item_id: wanted_item_id.clone(),
                 title_id: title_id.clone(),
@@ -4499,6 +4502,7 @@ async fn graphql_delete_title_cleans_title_workflow_state() {
         ctx.db.encryption_key_state(),
     )
     .insert_pending_release(&PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: "wanted-delete".to_string(),
         title_id: id.clone(),

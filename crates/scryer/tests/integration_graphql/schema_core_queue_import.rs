@@ -1568,6 +1568,7 @@ async fn graphql_traverses_core_graph_relationships() {
     .expect("seed release decision");
 
     let pending_release = PendingRelease {
+        http_release: None,
         id: Id::new().0,
         wanted_item_id: wanted_item.id.clone(),
         title_id: title.id.clone(),
@@ -1999,7 +2000,13 @@ async fn graphql_introspection_exposes_queue_and_source_enums() {
         .collect();
     assert_eq!(
         source_kind_names,
-        vec!["NZB_FILE", "NZB_URL", "TORRENT_FILE", "MAGNET_URI"]
+        vec![
+            "NZB_FILE",
+            "NZB_URL",
+            "TORRENT_FILE",
+            "MAGNET_URI",
+            "HTTP_RESOURCE"
+        ]
     );
 }
 
@@ -2359,6 +2366,7 @@ async fn graphql_download_import_exposes_background_import_blocked_state_from_ca
         seeding: None,
     };
     let completed = CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: "weaver".to_string(),
         client_id: "graphql-weaver-client".to_string(),
         download_client_item_id: item_id.to_string(),
@@ -3536,6 +3544,7 @@ async fn drive_unlinked_completed_grab(with_identity: bool, staged: u8) -> Optio
         seeding: None,
     };
     let completed = CompletedDownload {
+        subtitle_paths: Vec::new(),
         client_type: "weaver".to_string(),
         client_id: client_id.to_string(),
         download_client_item_id: item_id.to_string(),
