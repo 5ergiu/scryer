@@ -1186,7 +1186,7 @@ impl AppUseCase {
                     .filter(|config| {
                         config.is_enabled
                             && config.enable_auto_search
-                            && !crate::integration::indexer_caps_cache::awaits_managed_caps(&config)
+                            && !crate::integration::indexer_caps_cache::awaits_managed_caps(config)
                     })
                     .map(|config| config.id)
                     .collect::<Vec<_>>()
