@@ -404,6 +404,7 @@ fn prepare_search_strategies(
         let request = IndexerSearchStrategyRequest {
             page_cursor: None,
             page_budget: None,
+            result_limit: None,
             strategy_id: strategy_id.clone(),
             labels: vec![strategy.label.clone()],
             query: strategy.request_query,
@@ -1714,16 +1715,25 @@ const INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT: usize = 24;
 const DEFAULT_RSS_INDEXER_POLL_CONCURRENCY: usize = 2;
 /// Overrides [`DEFAULT_RSS_INDEXER_POLL_CONCURRENCY`].
 pub const RSS_INDEXER_POLL_CONCURRENCY_ENV: &str = "SCRYER_RSS_INDEXER_CONCURRENCY";
-/// Provider pages one RSS poll may hand on; its item cap is counted in pages
-/// of [`RSS_POLL_ITEMS_PER_PAGE`]. Ten pages of a hundred is Sonarr's
+/// Provider pages one RSS poll asks for; its item cap, sent to the plugin as
+/// the request's result limit, is counted in pages of
+/// [`RSS_POLL_ITEMS_PER_PAGE`]. Ten pages of a hundred is Sonarr's
 /// per-indexer RSS ceiling (`MaxNumResultsPerQuery`), now that one poll
 /// carries every category an indexer is routed, and it is the window the RSS
-/// seen-GUID set keeps per indexer. A poll cut here before it reached the
-/// previous poll's marker logs the window it did not cover.
+/// seen-GUID set keeps per indexer.
 const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 10;
 /// Overrides [`DEFAULT_RSS_POLL_PAGE_BUDGET`].
 pub const RSS_POLL_PAGE_BUDGET_ENV: &str = "SCRYER_RSS_POLL_PAGE_BUDGET";
 const RSS_POLL_ITEMS_PER_PAGE: usize = 100;
+/// The most results the host keeps from one RSS poll: the plugin's own
+/// 30-page ceiling of a hundred. It is deliberately larger than the request
+/// limit. Following Sonarr, a plugin keeps paging past that limit while every
+/// release it has read is under a day old, so a busy feed can legitimately
+/// return more than it was asked for and those releases must reach scoring.
+/// This is only the safety net for a plugin that ignores the limit outright;
+/// a poll cut here before it reached the previous poll's marker logs the
+/// window it did not cover.
+const RSS_POLL_PLUGIN_CEILING_RESULTS: usize = 30 * RSS_POLL_ITEMS_PER_PAGE;
 /// The scheduler key every RSS poll of an indexer records its cadence and
 /// catch-up marker under. One per indexer, whatever categories it carries.
 const RSS_INDEXER_REQUEST_KEY: &str = "rss:*";
@@ -1765,18 +1775,40 @@ static RSS_POLL_PAGE_BUDGET: std::sync::LazyLock<u32> = std::sync::LazyLock::new
     parse_rss_poll_page_budget(std::env::var(RSS_POLL_PAGE_BUDGET_ENV).ok().as_deref())
 });
 
-/// The most results one RSS poll hands on: its page budget in provider pages.
+/// The most results one RSS poll asks the plugin for: its page budget in
+/// provider pages.
 fn rss_poll_item_cap(page_budget: u32) -> usize {
     (page_budget as usize).saturating_mul(RSS_POLL_ITEMS_PER_PAGE)
+}
+
+/// The most results one RSS poll hands on: the plugin ceiling, or the item
+/// cap when an operator raised the page budget past it.
+fn rss_poll_safety_cap(item_cap: usize) -> usize {
+    item_cap.max(RSS_POLL_PLUGIN_CEILING_RESULTS)
+}
+
+/// Asks every strategy for at most `limit` results; `None` leaves each
+/// strategy's own limit alone.
+fn with_result_limit(
+    mut strategies: Vec<PreparedSearchStrategy>,
+    limit: Option<usize>,
+) -> Vec<PreparedSearchStrategy> {
+    if limit.is_some() {
+        for strategy in &mut strategies {
+            strategy.request.result_limit = limit;
+        }
+    }
+    strategies
 }
 
 /// Cuts one RSS poll back to `cap` results, keeping the newest by publish
 /// time (an undated result counts as newest, so it is never the one dropped)
 /// and the feed order among those kept. Returns how many were dropped.
 ///
-/// The bundled RSS adapters page a feed's catch-up inside the plugin and do
-/// not take a page budget for a feed read, so this is the host-side bound on
-/// what one poll passes on. A cut poll is reported as stopped at its page
+/// An RSS poll asks the plugin for at most its item cap through the request's
+/// result limit, and a plugin may return more only while the feed is all
+/// recent. `cap` is [`rss_poll_safety_cap`], the safety net for a plugin that
+/// does not honor the limit at all. A cut poll is reported as stopped at its page
 /// ceiling, exactly like a plugin that ran out of pages before the previous
 /// poll's marker, so the poll logs the window it did not cover.
 fn truncate_rss_poll_results(results: &mut Vec<IndexerSearchResult>, cap: usize) -> usize {
@@ -6067,7 +6099,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 let request_cancel_token = task_cancel_token.child_token();
                                 let request_deadline =
                                     effective_request_deadline(search_timeout, deadline_at);
-                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: rss_poll_page_budget,
+                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: rss_poll_page_budget, result_limit: rss_poll_item_cap,
                                     strategy_id: String::new(),
                                     labels: Vec::new(),
                                     query,
@@ -6132,7 +6164,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         // bounded poll.
                                         let mut completion = response.completion;
                                         if let Some(cap) = rss_poll_item_cap
-                                            && truncate_rss_poll_results(&mut response.results, cap) > 0
+                                            && truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap)) > 0
                                         {
                                             completion = IndexerSearchCompletion::Partial {
                                                 reason: Some(
@@ -6587,9 +6619,9 @@ impl IndexerClient for MultiIndexerSearchClient {
                         cancel_token: task_cancel_token.child_token(),
                         deadline_at,
                     };
-                let primary_strategies = prepare_search_strategies(
-                    &primary_context,
-                    primary_strategies,
+                let primary_strategies = with_result_limit(
+                    prepare_search_strategies(&primary_context, primary_strategies),
+                    rss_poll_item_cap,
                 );
                 let primary_selection = match select_reusable_strategies(
                     primary_strategies,
@@ -6709,7 +6741,7 @@ response.next_cursor.is_some(),
 );
                             let raw_result_count = response.results.len();
                             let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
-                                truncate_rss_poll_results(&mut response.results, cap)
+                                truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap))
                             });
                             if let Some(summary) = rss_summary.as_mut() {
                                 summary.observe(&response.results);
@@ -6964,9 +6996,9 @@ response.next_cursor.is_some(),
                             cancel_token: task_cancel_token.child_token(),
                             deadline_at,
                         };
-                    let fallback_strategies = prepare_search_strategies(
-                        &fallback_context,
-                        fallback_strategies,
+                    let fallback_strategies = with_result_limit(
+                        prepare_search_strategies(&fallback_context, fallback_strategies),
+                        rss_poll_item_cap,
                     );
                     let fallback_selection = match select_reusable_strategies(
                         fallback_strategies,
@@ -7079,7 +7111,7 @@ response.next_cursor.is_some(),
 );
                                 let raw_result_count = response.results.len();
                                 let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
-                                    truncate_rss_poll_results(&mut response.results, cap)
+                                    truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap))
                                 });
                                 if let Some(summary) = rss_summary.as_mut() {
                                     summary.observe(&response.results);
@@ -10015,7 +10047,9 @@ mod tests {
                 episode: request.episode,
                 absolute_episode: request.absolute_episode,
                 rss_catch_up: request.rss_catch_up,
-                limit: None,
+                limit: request
+                    .result_limit
+                    .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX)),
                 page_cursor: request.page_cursor,
                 page_budget: request.page_budget,
             };
@@ -10630,6 +10664,7 @@ mod tests {
             request: IndexerSearchStrategyRequest {
                 page_cursor: None,
                 page_budget: None,
+                result_limit: None,
                 strategy_id: strategy_id.to_string(),
                 labels: vec![format!("strategy:{strategy_id}")],
                 query: format!("synthetic-{strategy_id}"),
@@ -14117,6 +14152,8 @@ mod tests {
         assert_eq!(parse_rss_indexer_poll_concurrency(Some(" 4 ")), 4);
         assert_eq!(parse_rss_poll_page_budget(Some("12")), 12);
         assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 1_000);
+        assert_eq!(rss_poll_safety_cap(1_000), 3_000);
+        assert_eq!(rss_poll_safety_cap(4_000), 4_000);
     }
 
     #[test]
@@ -14167,11 +14204,12 @@ mod tests {
             let calls = calls.lock().expect("call log mutex");
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].page_budget, Some(3));
+            assert_eq!(calls[0].limit, Some(300));
         }
     }
 
     #[tokio::test]
-    async fn an_rss_poll_over_its_budget_keeps_the_newest_and_records_the_gap() {
+    async fn an_rss_poll_past_its_request_limit_keeps_every_result_under_the_plugin_ceiling() {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
@@ -14209,36 +14247,33 @@ mod tests {
                 grab_max: None,
             })
         });
-        // One page: a hundred results.
+        // One page asked for: a hundred results. The plugin kept paging
+        // because the feed is all recent, which the host must not undo.
         client.rss_poll_page_budget = 1;
         let client = client.with_upstream_scheduler(scheduler.clone());
 
         let response = run_rss_poll(&client, &["2000"]).await;
 
-        assert_eq!(response.results.len(), 100);
+        assert_eq!(response.results.len(), 251);
         let guids = response
             .results
             .iter()
             .filter_map(|result| result.guid.as_deref())
             .collect::<HashSet<_>>();
         assert!(guids.contains("newest-guid"));
-        assert!(guids.contains("paged-guid-98"));
-        assert!(!guids.contains("paged-guid-99"));
-        assert!(!guids.contains("late-indexed-guid"));
+        assert!(guids.contains("paged-guid-248"));
+        assert!(guids.contains("late-indexed-guid"));
         let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(
             entry.rss_last_seen_release_identity.as_deref(),
             Some("newest-guid")
         );
-        assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
-        assert_eq!(
-            entry.rss_last_feed_gap_end_at,
-            Some(newest_at - Duration::minutes(99))
-        );
+        assert_eq!(entry.rss_last_feed_gap_start_at, None);
+        assert_eq!(entry.rss_last_feed_gap_end_at, None);
     }
 
     #[tokio::test]
-    async fn an_rss_poll_stops_at_a_thousand_results_and_records_the_gap_it_left() {
+    async fn an_rss_poll_stops_at_the_plugin_ceiling_and_records_the_gap_it_left() {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-21T10:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
@@ -14251,9 +14286,10 @@ mod tests {
         .await;
         let mut caps = movie_caps();
         caps.rss = true;
-        let (client, _calls) = scripted_search_client(caps, move |_| {
-            // Twelve pages of releases all newer than the marker.
-            let results = (0..1_200)
+        let (client, calls) = scripted_search_client(caps, move |_| {
+            // Thirty-two pages of releases all newer than the marker: a
+            // plugin that ignored its limit and its own ceiling.
+            let results = (0..3_200)
                 .map(|index| {
                     dated_rss_result(
                         &format!("feed-guid-{index}"),
@@ -14277,12 +14313,18 @@ mod tests {
 
         let response = run_rss_poll(&client, &["2000", "5000"]).await;
 
-        assert_eq!(response.results.len(), 1_000);
+        // The plugin was asked for the default item cap, not the ceiling.
+        {
+            let calls = calls.lock().expect("call log mutex");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].limit, Some(1_000));
+        }
+        assert_eq!(response.results.len(), 3_000);
         let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(
             entry.rss_last_feed_gap_end_at,
-            Some(newest_at - Duration::minutes(999))
+            Some(newest_at - Duration::minutes(2_999))
         );
     }
 

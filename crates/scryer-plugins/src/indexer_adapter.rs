@@ -1615,6 +1615,9 @@ fn build_search_context(
     }
 }
 
+/// Results an indexer search asks the plugin for when the host sets no limit.
+const DEFAULT_SEARCH_RESULT_LIMIT: usize = 1000;
+
 fn should_try_generic_search_fallback(request: &PluginSearchRequest) -> bool {
     !request.query.trim().is_empty() && !request.ids.is_empty()
 }
@@ -1641,7 +1644,7 @@ fn plugin_search_request_from_strategy(
         facet: strategy.facet,
         category: strategy.category,
         categories: strategy.newznab_categories.unwrap_or_default(),
-        limit: 1000,
+        limit: strategy.result_limit.unwrap_or(DEFAULT_SEARCH_RESULT_LIMIT),
         season: strategy.season,
         episode: strategy.episode,
         absolute_episode: strategy.absolute_episode,
@@ -3287,6 +3290,7 @@ mod tests {
         IndexerSearchStrategyRequest {
             page_cursor: None,
             page_budget: None,
+            result_limit: None,
             strategy_id: "rss-strategy".to_string(),
             labels: vec!["rss".to_string()],
             query: String::new(),
@@ -3339,6 +3343,28 @@ mod tests {
         assert_eq!(request.rss_catch_up, None);
         let wire = serde_json::to_value(&request).expect("request should serialize");
         assert!(wire.get("rss_catch_up").is_none());
+    }
+
+    #[test]
+    fn strategy_request_sends_the_host_result_limit_to_the_plugin() {
+        let mut strategy = rss_strategy(None);
+        strategy.result_limit = Some(1_000);
+        let request = plugin_search_request_from_strategy(strategy, SearchMode::Auto);
+
+        assert_eq!(request.limit, 1_000);
+        let wire = serde_json::to_value(&request).expect("request should serialize");
+        assert_eq!(wire["limit"], 1_000);
+
+        let mut strategy = rss_strategy(None);
+        strategy.result_limit = Some(300);
+        assert_eq!(
+            plugin_search_request_from_strategy(strategy, SearchMode::Auto).limit,
+            300
+        );
+        assert_eq!(
+            plugin_search_request_from_strategy(rss_strategy(None), SearchMode::Auto).limit,
+            DEFAULT_SEARCH_RESULT_LIMIT
+        );
     }
 
     #[test]

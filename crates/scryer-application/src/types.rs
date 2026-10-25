@@ -2838,6 +2838,9 @@ pub struct IndexerSearchStrategyRequest {
     /// call. `None` reads on until the request's result limit or the end of
     /// the provider's results.
     pub page_budget: Option<u32>,
+    /// The most results the indexer is asked for. `None` leaves the adapter's
+    /// default request limit in force.
+    pub result_limit: Option<usize>,
 }
 
 /// The newest release the scheduler recorded on an indexer's previous
