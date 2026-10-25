@@ -2325,6 +2325,11 @@ pub struct AppRuntimePluginState {
     pub(crate) compatibility_blockers: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     pub(crate) dynamic_config_fields_cache:
         Arc<crate::integration::dynamic_config_fields::DynamicConfigFieldsCache>,
+    /// Subtitle provider configs whose circuit opened in the last subtitle
+    /// search cycle. The next cycle gives each one a single try: a failure
+    /// opens it again at once, a success clears it. In memory on purpose; a
+    /// restart simply gives every provider a fresh start.
+    pub(crate) subtitle_providers_on_probation: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2677,6 +2682,7 @@ impl AppRuntimeState {
                 plugin_install_orchestrator: PluginInstallOrchestrator::default(),
                 compatibility_blockers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 dynamic_config_fields_cache: Arc::default(),
+                subtitle_providers_on_probation: Arc::default(),
             },
             integrations: AppRuntimeIntegrationState {
                 managed_indexer_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
