@@ -1854,6 +1854,8 @@ enum IndexerSkipReason {
     /// An interactive search found the indexer's next pacing slot further out
     /// than it waits.
     QueryBudgetExceeded,
+    /// A Prowlarr managed child whose caps snapshot has not been fetched yet.
+    ManagedCapsPending,
 }
 
 impl IndexerSkipReason {
@@ -1874,6 +1876,7 @@ impl IndexerSkipReason {
             Self::DeadlineExpired => "deadline_expired",
             Self::StrategiesSuppressed => "strategies_suppressed",
             Self::QueryBudgetExceeded => "query_budget_exceeded",
+            Self::ManagedCapsPending => "managed_caps_pending",
         }
     }
 
@@ -1896,6 +1899,7 @@ impl IndexerSkipReason {
             Self::DeadlineExpired => "candidate deadline expired while queued",
             Self::StrategiesSuppressed => "all automatic search strategies are learned-suppressed",
             Self::QueryBudgetExceeded => "over its query budget for an interactive search",
+            Self::ManagedCapsPending => "managed indexer caps not fetched yet",
         }
     }
 }
@@ -5258,6 +5262,19 @@ impl IndexerClient for MultiIndexerSearchClient {
                 );
                 continue;
             }
+            // Without caps a managed child would be searched query-only and
+            // miss id searches it supports; leave it out of automatic searches
+            // until its caps arrive. The RSS sweep needs no caps.
+            if matches!(mode, SearchMode::Auto) && !is_rss_request && awaits_managed_caps(c) {
+                log_indexer_skip(
+                    mode,
+                    is_rss_request,
+                    c.name.as_str(),
+                    IndexerSkipReason::ManagedCapsPending,
+                    None,
+                );
+                continue;
+            }
             enabled.push((c, had_persisted_system_backoff));
         }
 
@@ -8197,6 +8214,11 @@ fn rss_request_form(
     } else {
         RssRequestForm::BareQuery
     }
+}
+
+/// A Prowlarr managed child whose caps have not been fetched yet.
+fn awaits_managed_caps(config: &IndexerConfig) -> bool {
+    config.is_prowlarr_nab_proxy() && stored_caps_snapshot(config).is_none()
 }
 
 fn stored_caps_snapshot(config: &IndexerConfig) -> Option<IndexerCapsSnapshot> {
@@ -13192,6 +13214,63 @@ mod tests {
         assert_eq!(recorded[0].season, None);
         assert_eq!(recorded[0].episode, None);
         assert_eq!(recorded[0].absolute_episode, None);
+    }
+
+    #[tokio::test]
+    async fn automatic_search_leaves_out_a_managed_child_without_caps() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.managed_parent_config_id = Some("parent".into());
+        config.managed_metadata_json = Some(managed_metadata_with_caps(None));
+        assert!(awaits_managed_caps(&config));
+
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_| response_with_titles(&["Harbor.Tempest.09.1080p"])),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: anime_caps(),
+            }),
+        );
+
+        let search = |mode| {
+            multi.search(
+                "Harbor Tempest 09".to_string(),
+                HashMap::from([("anidb_id".to_string(), "1234".to_string())]),
+                Some("anime".to_string()),
+                Some("anime".to_string()),
+                None,
+                Some(vec!["5070".to_string()]),
+                None,
+                mode,
+                Some(1),
+                Some(9),
+                Some(9),
+                vec![],
+            )
+        };
+
+        let automatic = search(SearchMode::Auto)
+            .await
+            .expect("automatic search without candidates still answers");
+        assert!(automatic.results.is_empty());
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "a managed child without caps must not be searched automatically"
+        );
+
+        // An operator's interactive search still reaches it query-only.
+        search(SearchMode::Interactive)
+            .await
+            .expect("interactive search reaches the child");
+        assert_eq!(calls.lock().expect("calls").len(), 1);
     }
 
     #[test]

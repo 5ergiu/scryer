@@ -80,6 +80,7 @@ mod seeding_gate;
 mod seeding_profiles;
 mod series_metadata;
 mod series_title_hydration;
+mod subtitle_circuit;
 mod subtitle_permissions;
 mod title_catalog_reads;
 mod title_delete_missing_folder;

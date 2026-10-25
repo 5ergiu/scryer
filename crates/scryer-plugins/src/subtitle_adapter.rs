@@ -13,15 +13,15 @@ use scryer_application::subtitles::{
 };
 use scryer_application::{
     AppError, AppResult, ArchiveExtractorPluginProvider, ParsedReleaseMetadata,
-    SubtitleGenerationInput, SubtitleProviderClient, SubtitleProviderValidationResult,
-    parse_release_metadata,
+    RateLimitCooldownAction, SubtitleGenerationInput, SubtitleProviderClient,
+    SubtitleProviderValidationResult, parse_release_metadata,
 };
 use scryer_domain::{PluginHostBindingId, SubtitleProviderConfig};
-use scryer_plugin_sdk::PluginResult;
 use scryer_plugin_sdk::command::{
     PluginCommand, PluginCommandRequest, PluginCommandResult, PluginSubtitleCommand,
     PluginSubtitleCommandResult,
 };
+use scryer_plugin_sdk::{IndexerSearchPluginError, PluginError, PluginErrorDetails, PluginResult};
 
 use crate::loader::{allowed_hosts_for_descriptor, parse_config_json_entries};
 use crate::runtime_backing::{PluginInstanceSpec, PluginRuntimeBacking, PreopenSpec};
@@ -172,8 +172,35 @@ impl WasmSubtitleClient {
 fn decode_component_result<T>(result: PluginResult<T>, context: &str) -> AppResult<T> {
     match result {
         PluginResult::Ok(value) => Ok(value),
-        PluginResult::Err(error) => Err(AppError::plugin_failed(&error, context)),
+        PluginResult::Err(error) => Err(subtitle_plugin_error(&error, context)),
     }
+}
+
+/// The error a subtitle plugin's own failure becomes.
+///
+/// A plugin whose pacing would run past the host's deadline answers with the
+/// kit's typed deferral (`IndexerSearchPluginError::Deferred` in `details`).
+/// That is a request to come back later, not a failure of the provider, so it
+/// becomes a temporary error carrying the plugin's retry delay, which the
+/// provider cooldown then honours. Everything else keeps its plugin reason.
+fn subtitle_plugin_error(error: &PluginError, context: &str) -> AppError {
+    let Some(PluginErrorDetails::IndexerSearch(IndexerSearchPluginError::Deferred {
+        retry_after_seconds,
+        ..
+    })) = error.details.as_ref()
+    else {
+        return AppError::plugin_failed(error, context);
+    };
+    let retry_after = retry_after_seconds
+        .or(error.retry_after_seconds)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .filter(|seconds| *seconds > 0)
+        .map(std::time::Duration::from_secs);
+    AppError::rate_limited_temporary_unavailable(
+        format!("{context}: plugin deferred: {}", error.public_message),
+        retry_after,
+        RateLimitCooldownAction::RecordFallback,
+    )
 }
 
 fn wrong_operation_error(plugin_id: &str, expected: &str) -> AppError {
@@ -962,6 +989,67 @@ mod tests {
             failure.detail.as_deref(),
             Some("the daily download allowance is used up")
         );
+    }
+
+    #[test]
+    fn a_deadline_deferral_is_temporary_and_carries_its_cooldown() {
+        let error = decode_component_result::<()>(
+            PluginResult::Err(PluginError {
+                code: scryer_plugin_sdk::PluginErrorCode::UpstreamUnavailable,
+                public_message: "search deferred by upstream pacing".to_string(),
+                debug_message: None,
+                retry_after_seconds: Some(45),
+                details: Some(PluginErrorDetails::IndexerSearch(
+                    IndexerSearchPluginError::Deferred {
+                        reason: scryer_plugin_sdk::IndexerSearchIncompleteReason::RateLimited,
+                        retry_after_seconds: Some(45),
+                    },
+                )),
+            }),
+            EXPORT_SUBTITLE_SEARCH,
+        )
+        .expect_err("a deferral fails this call");
+        match &error {
+            AppError::TemporaryUnavailable {
+                retry_after,
+                rate_limit_cooldown,
+                ..
+            } => {
+                assert_eq!(*retry_after, Some(std::time::Duration::from_secs(45)));
+                assert_eq!(
+                    *rate_limit_cooldown,
+                    RateLimitCooldownAction::RecordFallback
+                );
+            }
+            other => panic!("expected a temporary error, got {other:?}"),
+        }
+        let signal = scryer_application::RateLimitSignal::from_error(&error)
+            .expect("the provider cooldown sees the deferral");
+        assert_eq!(signal.retry_after, Some(std::time::Duration::from_secs(45)));
+        assert!(
+            error.plugin_failure().is_none(),
+            "not a permanent plugin failure"
+        );
+    }
+
+    #[test]
+    fn a_permanent_error_without_the_deferral_detail_stays_permanent() {
+        // The deferral sentence alone is not a signal: the host never reads it.
+        let error = decode_component_result::<()>(
+            PluginResult::Err(PluginError {
+                code: scryer_plugin_sdk::PluginErrorCode::Permanent,
+                public_message:
+                    "the operation deadline expires before the next upstream request may start"
+                        .to_string(),
+                debug_message: None,
+                retry_after_seconds: None,
+                details: None,
+            }),
+            EXPORT_SUBTITLE_SEARCH,
+        )
+        .expect_err("a plugin error fails the call");
+        let failure = error.plugin_failure().expect("a typed plugin failure");
+        assert_eq!(failure.reason.as_str(), "PLUGIN_PERMANENT_FAILURE");
     }
 
     fn movie_query() -> SubtitleQuery {

@@ -92,7 +92,11 @@ impl AppUseCase {
         });
     }
 
-    async fn enrich_managed_indexer_children(
+    /// Fetches capabilities for the managed children that need them: a new
+    /// child, a child whose snapshot is missing, expired or invalidated by a
+    /// connection change, and only while the child is enabled and not backed
+    /// off. A pass where every snapshot is fresh sends nothing to the parent.
+    pub(crate) async fn enrich_managed_indexer_children(
         &self,
         actor: &User,
         config_id: &str,
@@ -108,13 +112,61 @@ impl AppUseCase {
             .clone()
             .lock_owned()
             .await;
-        let parent = self
-            .services
-            .integrations
-            .indexer_configs
+        let indexer_configs = &self.services.integrations.indexer_configs;
+        let parent = indexer_configs
             .get_by_id(config_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("indexer config '{config_id}' not found")))?;
+        let existing_by_key = indexer_configs
+            .list(None)
+            .await?
+            .into_iter()
+            .filter(|candidate| {
+                candidate.managed_parent_config_id.as_deref() == Some(parent.id.as_str())
+            })
+            .filter_map(|candidate| {
+                candidate
+                    .managed_child_key
+                    .clone()
+                    .map(|child_key| (child_key, candidate))
+            })
+            .collect::<HashMap<_, _>>();
+        let system_backoffs = indexer_configs.list_system_backoffs().await?;
+        let now = Utc::now();
+        let caps_due = existing_by_key
+            .iter()
+            .filter(|(_, child)| child.is_enabled)
+            .filter(|(_, child)| {
+                crate::integration::indexer_caps_cache::fresh_snapshot(child, now).is_none()
+            })
+            .filter(|(_, child)| {
+                let backed_off = child
+                    .disabled_until
+                    .into_iter()
+                    .chain(
+                        system_backoffs
+                            .get(&child.id)
+                            .map(|backoff| backoff.disabled_until),
+                    )
+                    .any(|until| until > now);
+                if backed_off {
+                    tracing::debug!(
+                        config_id = %child.id,
+                        "skipping managed child caps fetch while the child is backed off"
+                    );
+                }
+                !backed_off
+            })
+            .map(|(child_key, _)| child_key.clone())
+            .collect::<HashSet<_>>();
+        if caps_due.is_empty() {
+            tracing::debug!(
+                config_id = %parent.id,
+                "managed indexer caps are fresh; nothing to fetch"
+            );
+            return Ok(());
+        }
+
         let provider = self
             .services
             .integrations
@@ -129,53 +181,57 @@ impl AppUseCase {
                     parent.provider_type
                 ))
             })?;
-        let Some(plan) = client.enrichment_sync_plan(&parent.id).await? else {
+        let Some(plan) = client.enrichment_sync_plan(&parent.id, &caps_due).await? else {
             return Ok(());
         };
         let desired_children = self
             .prepare_managed_indexer_sync_plan(&parent, plan)
             .await?;
-        let existing_by_key = self
-            .services
-            .integrations
-            .indexer_configs
-            .list(None)
-            .await?
-            .into_iter()
-            .filter(|candidate| {
-                candidate.managed_parent_config_id.as_deref() == Some(parent.id.as_str())
-            })
-            .filter_map(|candidate| {
-                candidate
-                    .managed_child_key
-                    .clone()
-                    .map(|child_key| (child_key, candidate))
-            })
-            .collect::<HashMap<_, _>>();
 
         let mut enriched = 0_usize;
+        let mut changed = false;
         for desired in desired_children {
-            let Some(caps_snapshot_json) = desired.caps_snapshot_json else {
+            let Some(provider_snapshot_json) = desired.caps_snapshot_json else {
                 continue;
             };
+            if !caps_due.contains(&desired.child_key) {
+                continue;
+            }
             let Some(existing) = existing_by_key.get(&desired.child_key) else {
                 continue;
             };
+            let caps_snapshot_json =
+                match serde_json::from_str::<scryer_domain::IndexerCapsSnapshot>(
+                    &provider_snapshot_json,
+                )
+                .map_err(|error| AppError::Repository(error.to_string()))
+                .and_then(|snapshot| {
+                    crate::integration::indexer_caps_cache::serialize_snapshot(
+                        &snapshot,
+                        Utc::now(),
+                    )
+                }) {
+                    Ok(snapshot_json) => snapshot_json,
+                    Err(error) => {
+                        tracing::warn!(
+                            config_id = %existing.id,
+                            error = %error,
+                            "managed child caps snapshot could not be stored"
+                        );
+                        continue;
+                    }
+                };
             let managed_metadata_json = merge_managed_child_metadata(
                 existing.managed_metadata_json.as_deref(),
                 desired.managed_metadata_json.as_deref(),
             )
             .or_else(|| desired.managed_metadata_json.clone())
             .or_else(|| existing.managed_metadata_json.clone());
-            if existing.caps_snapshot_json.as_deref() == Some(caps_snapshot_json.as_str())
-                && existing.managed_metadata_json == managed_metadata_json
-            {
-                continue;
-            }
-            let updated = self
-                .services
-                .integrations
-                .indexer_configs
+            let content_changed = !crate::integration::indexer_caps_cache::same_snapshot_content(
+                existing.caps_snapshot_json.as_deref(),
+                Some(caps_snapshot_json.as_str()),
+            ) || existing.managed_metadata_json != managed_metadata_json;
+            let updated = indexer_configs
                 .update(IndexerConfigUpdate {
                     id: existing.id.clone(),
                     managed_metadata_json: Some(managed_metadata_json),
@@ -192,13 +248,16 @@ impl AppUseCase {
                 )
                 .await;
             }
+            changed |= content_changed;
             enriched = enriched.saturating_add(1);
         }
-        if enriched > 0 {
+        // A refetch that only renews the fetch time changes nothing anyone sees.
+        if changed {
             self.publish_indexers_changed();
         }
         tracing::info!(
             config_id = %parent.id,
+            due_count = caps_due.len(),
             child_count = enriched,
             duration_ms = started.elapsed().as_millis(),
             "managed indexer caps enrichment completed"

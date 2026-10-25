@@ -31,6 +31,30 @@ pub(crate) fn fresh_snapshot(config: &IndexerConfig, now: DateTime<Utc>) -> Opti
     Some(raw.clone())
 }
 
+/// A Prowlarr managed child with no readable caps snapshot, fresh or not, on
+/// the config or in its managed metadata. Automatic search leaves it out until
+/// its caps are fetched.
+pub(crate) fn awaits_managed_caps(config: &IndexerConfig) -> bool {
+    #[derive(serde::Deserialize)]
+    struct MetadataCaps {
+        #[serde(default)]
+        caps_snapshot: Option<scryer_domain::IndexerCapsSnapshot>,
+    }
+    if !config.is_prowlarr_nab_proxy() {
+        return false;
+    }
+    let on_config = config
+        .caps_snapshot_json
+        .as_deref()
+        .is_some_and(|raw| serde_json::from_str::<scryer_domain::IndexerCapsSnapshot>(raw).is_ok());
+    let in_metadata = config
+        .managed_metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<MetadataCaps>(raw).ok())
+        .is_some_and(|metadata| metadata.caps_snapshot.is_some());
+    !on_config && !in_metadata
+}
+
 pub(crate) fn serialize_snapshot(
     snapshot: &scryer_domain::IndexerCapsSnapshot,
     now: DateTime<Utc>,
@@ -39,6 +63,39 @@ pub(crate) fn serialize_snapshot(
         serde_json::to_value(snapshot).map_err(|error| AppError::Repository(error.to_string()))?;
     value[FETCHED_AT] = serde_json::Value::String(now.to_rfc3339());
     serde_json::to_string(&value).map_err(|error| AppError::Repository(error.to_string()))
+}
+
+/// Keeps the stored capabilities searchable but drops their fetch time, so
+/// the next caps pass treats them as due. Used when the connection they were
+/// fetched over changes.
+pub(crate) fn mark_snapshot_stale(raw: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value.as_object_mut()?.remove(FETCHED_AT)?;
+    serde_json::to_string(&value).ok()
+}
+
+/// Whether two stored snapshots describe the same capabilities, ignoring when
+/// each was fetched.
+pub(crate) fn same_snapshot_content(left: Option<&str>, right: Option<&str>) -> bool {
+    fn content(raw: Option<&str>) -> Option<serde_json::Value> {
+        let mut value: serde_json::Value = serde_json::from_str(raw?).ok()?;
+        if let Some(object) = value.as_object_mut() {
+            object.remove(FETCHED_AT);
+        }
+        Some(value)
+    }
+    match (left, right) {
+        (None, None) => true,
+        (Some(_), Some(_)) => {
+            let (left_content, right_content) = (content(left), content(right));
+            if left_content.is_some() && right_content.is_some() {
+                left_content == right_content
+            } else {
+                left == right
+            }
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -175,6 +232,44 @@ mod tests {
             config.caps_snapshot_json = Some(raw.into());
             assert!(fresh_snapshot(&config, fetched).is_none());
         }
+    }
+
+    #[test]
+    fn only_a_managed_child_without_any_snapshot_awaits_caps() {
+        let mut child = config();
+        assert!(!awaits_managed_caps(&child), "a direct indexer never waits");
+        child.managed_parent_config_id = Some("parent".into());
+        assert!(awaits_managed_caps(&child));
+        let raw = serialize_snapshot(
+            &scryer_domain::IndexerCapsSnapshot::default(),
+            child.created_at,
+        )
+        .unwrap();
+        // An expired or stale snapshot still counts: it keeps the child searchable.
+        child.caps_snapshot_json = mark_snapshot_stale(&raw);
+        assert!(!awaits_managed_caps(&child));
+    }
+
+    #[test]
+    fn stale_marking_keeps_content_but_makes_the_snapshot_due() {
+        let mut config = config();
+        let fetched = config.created_at;
+        let raw =
+            serialize_snapshot(&scryer_domain::IndexerCapsSnapshot::default(), fetched).unwrap();
+        let stale = mark_snapshot_stale(&raw).unwrap();
+        assert!(same_snapshot_content(Some(&raw), Some(&stale)));
+        config.caps_snapshot_json = Some(stale.clone());
+        assert!(fresh_snapshot(&config, fetched).is_none());
+        assert!(mark_snapshot_stale(&stale).is_none());
+        let later = serialize_snapshot(
+            &scryer_domain::IndexerCapsSnapshot::default(),
+            fetched + chrono::Duration::days(1),
+        )
+        .unwrap();
+        assert_ne!(raw, later);
+        assert!(same_snapshot_content(Some(&raw), Some(&later)));
+        assert!(!same_snapshot_content(Some(&raw), None));
+        assert!(same_snapshot_content(None, None));
     }
 
     #[test]

@@ -197,18 +197,24 @@ impl BackgroundAcquisitionCycleOutcome {
     }
 }
 
+/// `budget` bounds the walk: once it has run that long the cycle starts no
+/// further title, lets the titles in flight finish, and leaves the rotation
+/// cursor on the first title it did not reach. `None` walks without a bound.
 async fn run_background_acquisition_cycle(
     app: &AppUseCase,
     pass: BackgroundAcquisitionPass,
+    budget: Option<std::time::Duration>,
 ) -> BackgroundAcquisitionCycleOutcome {
+    let deadline = budget.map(|budget| tokio::time::Instant::now() + budget);
     let blocked_facets = blocked_acquisition_facets_after_quiet_wait(app).await;
-    run_background_acquisition_cycle_with_blocked_facets(app, &blocked_facets, pass).await
+    run_background_acquisition_cycle_with_blocked_facets(app, &blocked_facets, pass, deadline).await
 }
 
 pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     app: &AppUseCase,
     blocked_facets: &[MediaFacet],
     pass: BackgroundAcquisitionPass,
+    deadline: Option<tokio::time::Instant>,
 ) -> BackgroundAcquisitionCycleOutcome {
     let cycle_started = std::time::Instant::now();
     prune_standby_candidates(app).await;
@@ -292,13 +298,31 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
     // where the cursors stopped, so scopes with nothing to do cannot use up the
     // batch ahead of scopes that have. The walk is the only judge of whether a
     // scope had anything to do.
-    let mut walked = HashSet::new();
+    let carried_scope_keys = std::mem::take(
+        &mut *app
+            .runtime
+            .acquisition
+            .interrupted_walk_scope_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    let mut walked = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| carried_scope_keys.contains(&target.scope_key))
+        .map(|(index, _)| index)
+        .collect::<HashSet<_>>();
     let mut hot_cursor = hot_resume;
     let mut cursor = resume;
     let mut budget = max_scopes;
     let mut titles_walked = 0usize;
     let mut skipped_locked_titles = 0usize;
+    let mut stopped_for_budget = false;
     while budget > 0 {
+        if titles_walked > 0 && deadline_passed(deadline) {
+            stopped_for_budget = true;
+            break;
+        }
         let selection = crate::acquisition::targets::select_background_acquisition_batch(
             &targets,
             hot_cursor.as_deref(),
@@ -316,6 +340,7 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
             selection.resume_after.as_deref(),
         )
         .await;
+        let (hot_cursor_before, cursor_before) = (hot_cursor.take(), cursor.take());
         hot_cursor = selection.hot_resume_after;
         cursor = selection.resume_after;
         if selection.indices.is_empty() {
@@ -338,6 +363,8 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
             &indexer_hosts,
             &cycle,
             &dl_snapshot,
+            deadline,
+            titles_walked,
         )
         .await
         else {
@@ -345,6 +372,52 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
         };
         titles_walked += round.titles_walked;
         skipped_locked_titles += round.skipped_locked_titles;
+        if !round.undispatched.is_empty() {
+            // The cursors already moved past this whole selection; put them
+            // back on the first scope the walk did not reach so the next cycle
+            // continues from there instead of skipping it for a full rotation.
+            let rewound_hot = rewound_lane_cursor(
+                &targets,
+                &selection.indices,
+                &round.undispatched,
+                true,
+                hot_cursor_before.as_deref(),
+                hot_cursor.as_deref(),
+            );
+            let rewound_cold = rewound_lane_cursor(
+                &targets,
+                &selection.indices,
+                &round.undispatched,
+                false,
+                cursor_before.as_deref(),
+                cursor.as_deref(),
+            );
+            app.store_background_acquisition_hot_resume_position(
+                hot_cursor.as_deref(),
+                rewound_hot.as_deref(),
+            )
+            .await;
+            app.store_background_acquisition_resume_position(
+                cursor.as_deref(),
+                rewound_cold.as_deref(),
+            )
+            .await;
+            let mut carried = carried_scope_keys;
+            carried.extend(
+                selection
+                    .indices
+                    .iter()
+                    .filter(|index| !round.undispatched.contains(index))
+                    .map(|index| targets[*index].scope_key.clone()),
+            );
+            *app.runtime
+                .acquisition
+                .interrupted_walk_scope_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = carried;
+            stopped_for_budget = true;
+            break;
+        }
         // Indexers that are cooling down or out of quota defer every scope
         // that needs them; selecting more scopes would only defer those too.
         if cycle.deferred_scopes() > 0 {
@@ -363,6 +436,13 @@ pub(crate) async fn run_background_acquisition_cycle_with_blocked_facets(
             .then(|| availability.earliest_recovery_in(&now))
             .flatten(),
     };
+    if stopped_for_budget {
+        info!(
+            titles_walked,
+            elapsed_secs = cycle_started.elapsed().as_secs(),
+            "background acquisition walk reached its time budget; the next cycle continues from its cursor"
+        );
+    }
     // One line per cycle, above the per-title summaries.
     tracing::debug!(
         titles_walked = outcome.titles_walked,
@@ -385,6 +465,36 @@ struct SelectedScopesWalk {
     /// [`TitleWalkStats::spent_nothing`]). A title the walk could not run for
     /// — held by an interactive walk, or failed — gives none back.
     unspent_scopes: usize,
+    /// Selected scopes whose title was never started because the cycle ran out
+    /// of time first.
+    undispatched: HashSet<usize>,
+}
+
+fn deadline_passed(deadline: Option<tokio::time::Instant>) -> bool {
+    deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+}
+
+/// A lane's rotation cursor after a walk stopped early: back where the
+/// selection started (`before`) when the walk left any of that lane's selected
+/// scopes unstarted, otherwise where the selection left it (`after`). The
+/// scopes the walk did reach are carried to the next cycle as already walked,
+/// so it continues with the rest rather than repeating them.
+fn rewound_lane_cursor(
+    targets: &[crate::acquisition::targets::AcquisitionTarget],
+    selected: &[usize],
+    undispatched: &HashSet<usize>,
+    hot: bool,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    if selected
+        .iter()
+        .any(|index| targets[*index].is_hot == hot && undispatched.contains(index))
+    {
+        before.map(str::to_string)
+    } else {
+        after.map(str::to_string)
+    }
 }
 
 /// Walk the selected scopes, at most [`BACKGROUND_ACQUISITION_TITLE_LIMIT`]
@@ -402,6 +512,8 @@ async fn walk_selected_scopes(
     indexer_hosts: &HashMap<String, String>,
     cycle: &Arc<BackgroundAcquisitionCycleCoordinator>,
     dl_snapshot: &DownloadClientSnapshot,
+    deadline: Option<tokio::time::Instant>,
+    titles_walked_before: usize,
 ) -> Option<SelectedScopesWalk> {
     // Count selected episode scopes per (title_id, season_num). Season pack
     // search is only worthwhile when >= 2 episodes from the same season are in
@@ -448,8 +560,18 @@ async fn walk_selected_scopes(
         "background acquisition cycle: dispatching title work"
     );
 
+    let mut dispatched = 0usize;
+    let mut out_of_time = false;
     loop {
         while in_flight.len() < BACKGROUND_ACQUISITION_TITLE_LIMIT {
+            // The budget is checked between titles, never inside one, and a
+            // cycle always walks at least one title so it cannot stall.
+            if titles_walked_before + dispatched > 0 && deadline_passed(deadline) {
+                out_of_time = true;
+            }
+            if out_of_time {
+                break;
+            }
             let Some(title_work) = ready_titles.pop_front() else {
                 break;
             };
@@ -495,6 +617,7 @@ async fn walk_selected_scopes(
                 active_titles = in_flight.len() + 1,
                 "background acquisition title work started"
             );
+            dispatched += 1;
             in_flight.push(async move {
                 let _walk_guard = walk_guard;
                 let title_id = title_work.title_id.clone();
@@ -551,6 +674,17 @@ async fn walk_selected_scopes(
         }
     }
 
+    if !ready_titles.is_empty() {
+        let unreached = ready_titles
+            .iter()
+            .map(|work| work.title_id.as_str())
+            .collect::<HashSet<_>>();
+        round.undispatched = indices
+            .iter()
+            .copied()
+            .filter(|index| unreached.contains(targets[*index].title_id.as_str()))
+            .collect();
+    }
     Some(round)
 }
 /// Whether an in-flight submission should stop this scope being searched again.
@@ -663,7 +797,16 @@ impl AppUseCase {
     pub(crate) async fn run_background_acquisition_cycle_once(
         &self,
     ) -> BackgroundAcquisitionCycleOutcome {
-        run_background_acquisition_cycle(self, BackgroundAcquisitionPass::Full).await
+        run_background_acquisition_cycle(self, BackgroundAcquisitionPass::Full, None).await
+    }
+
+    /// One full cycle under a walk budget, as the poller runs it.
+    #[cfg(test)]
+    pub(crate) async fn run_background_acquisition_cycle_with_budget_once(
+        &self,
+        budget: std::time::Duration,
+    ) -> BackgroundAcquisitionCycleOutcome {
+        run_background_acquisition_cycle(self, BackgroundAcquisitionPass::Full, Some(budget)).await
     }
 
     /// One pass of the given kind, so a test can show what the tick between
@@ -673,7 +816,7 @@ impl AppUseCase {
         &self,
         pass: BackgroundAcquisitionPass,
     ) -> BackgroundAcquisitionCycleOutcome {
-        run_background_acquisition_cycle(self, pass).await
+        run_background_acquisition_cycle(self, pass, None).await
     }
 }
 
@@ -5649,6 +5792,32 @@ impl<T: Send + 'static> ScheduledTaskSupervisor<T> {
     }
 }
 
+/// Admit one background acquisition pass, of whichever variant the cadence
+/// picks for `trigger`. Every variant runs under the one task name, so a
+/// failure check and a walk never overlap; a trigger that finds a pass running
+/// is skipped, not queued. `run` receives the pass and the overdue budget the
+/// supervisor reports against, which the walk also stops at.
+fn admit_background_acquisition_pass<T, Fut>(
+    supervisor: &mut ScheduledTaskSupervisor<T>,
+    walk_cadence: &mut AcquisitionWalkCadence,
+    trigger: BackgroundAcquisitionTrigger,
+    run: impl FnOnce(BackgroundAcquisitionPass, std::time::Duration) -> Fut,
+) -> Option<(BackgroundAcquisitionTrigger, BackgroundAcquisitionPass)>
+where
+    T: Send + 'static,
+    Fut: std::future::Future<Output = T> + Send + 'static,
+{
+    if supervisor.is_running(BACKGROUND_ACQUISITION_CYCLE_TASK) {
+        supervisor.note_skipped(BACKGROUND_ACQUISITION_CYCLE_TASK);
+        return None;
+    }
+    let pass = walk_cadence.pass_for(trigger, tokio::time::Instant::now());
+    let budget = scheduled_task_overdue_budget(walk_cadence.walk_period);
+    supervisor
+        .try_spawn(BACKGROUND_ACQUISITION_CYCLE_TASK, budget, run(pass, budget))
+        .then_some((trigger, pass))
+}
+
 pub async fn start_background_acquisition_poller(
     app: AppUseCase,
     token: tokio_util::sync::CancellationToken,
@@ -6057,21 +6226,12 @@ pub async fn start_background_acquisition_poller(
         walk_cadence: &mut AcquisitionWalkCadence,
         trigger: BackgroundAcquisitionTrigger,
     ) -> Option<(BackgroundAcquisitionTrigger, BackgroundAcquisitionPass)> {
-        if supervisor.is_running(BACKGROUND_ACQUISITION_CYCLE_TASK) {
-            supervisor.note_skipped(BACKGROUND_ACQUISITION_CYCLE_TASK);
-            return None;
-        }
-        let pass = walk_cadence.pass_for(trigger, tokio::time::Instant::now());
         let app = app.clone();
-        supervisor
-            .try_spawn(
-                BACKGROUND_ACQUISITION_CYCLE_TASK,
-                scheduled_task_overdue_budget(walk_cadence.walk_period),
-                run_task(BACKGROUND_ACQUISITION_CYCLE_TASK, async move {
-                    run_background_acquisition_cycle(&app, pass).await
-                }),
-            )
-            .then_some((trigger, pass))
+        admit_background_acquisition_pass(supervisor, walk_cadence, trigger, |pass, budget| {
+            run_task(BACKGROUND_ACQUISITION_CYCLE_TASK, async move {
+                run_background_acquisition_cycle(&app, pass, Some(budget)).await
+            })
+        })
     }
 
     let mut supervisor = ScheduledTaskSupervisor::<ScheduledJobOutput>::new();
@@ -6584,6 +6744,70 @@ mod task_runner_tests {
         })
         .await
         .expect("the held run must finish once released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervisor_admits_one_background_acquisition_pass_whatever_its_variant() {
+        use BackgroundAcquisitionPass::{FailureCheckOnly, Full};
+        use BackgroundAcquisitionTrigger::{DeferredRetry, PollTick, Wake};
+
+        tokio::time::timeout(SUPERVISOR_TEST_BOUND, async {
+            let mut supervisor = ScheduledTaskSupervisor::<()>::new();
+            let mut cadence = AcquisitionWalkCadence::new(secs(60), secs(300));
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let first = admit_background_acquisition_pass(
+                &mut supervisor,
+                &mut cadence,
+                Wake,
+                |pass, budget| {
+                    assert_eq!(pass, Full);
+                    assert_eq!(budget, scheduled_task_overdue_budget(secs(300)));
+                    async move {
+                        let _ = held.await;
+                    }
+                },
+            );
+            assert_eq!(first, Some((Wake, Full)));
+
+            // A failure-check tick and a deferred retry both find the walk
+            // running and are dropped without building their pass at all.
+            let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            for trigger in [PollTick, DeferredRetry] {
+                let built = Arc::clone(&built);
+                let refused = admit_background_acquisition_pass(
+                    &mut supervisor,
+                    &mut cadence,
+                    trigger,
+                    move |_, _| {
+                        built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async {}
+                    },
+                );
+                assert_eq!(refused, None);
+            }
+            assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+            release.send(()).unwrap();
+            let done = supervisor.join_next().await.unwrap();
+            assert_eq!(done.name, BACKGROUND_ACQUISITION_CYCLE_TASK);
+            cadence.record(
+                Full,
+                BackgroundAcquisitionCycleOutcome::default(),
+                tokio::time::Instant::now(),
+            );
+
+            // With the walk finished the next tick runs, as a failure check.
+            let next = admit_background_acquisition_pass(
+                &mut supervisor,
+                &mut cadence,
+                PollTick,
+                |_, _| async {},
+            );
+            assert_eq!(next, Some((PollTick, FailureCheckOnly)));
+            supervisor.join_next().await.unwrap().result.unwrap();
+        })
+        .await
+        .expect("the held pass must finish once released");
     }
 
     #[tokio::test(start_paused = true)]

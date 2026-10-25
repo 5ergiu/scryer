@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -809,7 +809,11 @@ impl ProwlarrManagementClient {
         let response = self
             .outbound_http
             .send_with_rate_limit_and_dispatch_observer(
-                self.child_request_policy(&request_path, &child_key),
+                // Caps can wait for a later pass, so a recorded cooldown of any
+                // length fails fast here instead of holding the sync lock while
+                // it runs out.
+                self.child_request_policy(&request_path, &child_key)
+                    .with_max_inline_cooldown_wait(Duration::ZERO),
                 || {
                     self.outbound_http
                         .client()
@@ -905,7 +909,12 @@ impl ProwlarrManagementClient {
         ))
     }
 
-    async fn build_sync_plan(&self, fetch_caps: bool) -> AppResult<IndexerSyncPlan> {
+    /// Lists Prowlarr's indexers and app profiles. With `caps_due`, it also
+    /// requests capabilities, but only for the enabled children named there.
+    async fn build_sync_plan(
+        &self,
+        caps_due: Option<&HashSet<String>>,
+    ) -> AppResult<IndexerSyncPlan> {
         let config = self.config()?.clone();
         let api = self
             .ensure_supported_api_bucket(IndexerErrorOperation::ManagementSync)
@@ -928,7 +937,7 @@ impl ProwlarrManagementClient {
             .map(|profile| (profile.id, profile))
             .collect::<HashMap<_, _>>();
 
-        if !fetch_caps {
+        let Some(caps_due) = caps_due.filter(|due| !due.is_empty()) else {
             let children = indexers
                 .into_iter()
                 .filter_map(|indexer| {
@@ -936,14 +945,16 @@ impl ProwlarrManagementClient {
                 })
                 .collect();
             return Ok(IndexerSyncPlan { children });
-        }
+        };
 
         let mut planned_children = stream::iter(indexers.into_iter().enumerate())
             .map(|(position, indexer)| {
                 let config = config.clone();
                 async move {
                     let child_key = indexer.id.to_string();
-                    let caps_snapshot = if indexer.enable {
+                    let caps_snapshot = if !caps_due.contains(&child_key) {
+                        None
+                    } else if indexer.enable {
                         match self.fetch_child_caps_snapshot(&config, indexer.id).await {
                             Ok(snapshot) => {
                                 debug!(
@@ -954,11 +965,22 @@ impl ProwlarrManagementClient {
                                 );
                                 Some(snapshot)
                             }
+                            // A rate limit is already recorded on the child's
+                            // cooldown and its indexer errors; repeating it at
+                            // every pass until the cooldown ends adds nothing.
+                            Err(ProwlarrRequestError::RateLimited(_, retry_after_seconds, _)) => {
+                                debug!(
+                                    child_key,
+                                    retry_after_seconds,
+                                    "managed child caps fetch deferred by a rate-limit cooldown"
+                                );
+                                None
+                            }
                             Err(error) => {
                                 warn!(
                                     child_key,
                                     error = ?error,
-                                    "failed to fetch managed child caps snapshot; child will fall back to query-only search"
+                                    "failed to fetch managed child caps snapshot; the stored snapshot is kept until a later fetch succeeds"
                                 );
                                 None
                             }
@@ -1087,18 +1109,19 @@ impl IndexerManagementClient for ProwlarrManagementClient {
     }
 
     async fn plan_sync(&self, _parent_config_id: &str) -> AppResult<IndexerSyncPlan> {
-        self.build_sync_plan(false).await
+        self.build_sync_plan(None).await
     }
 
     async fn enrichment_sync_plan(
         &self,
         _parent_config_id: &str,
+        caps_due: &HashSet<String>,
     ) -> AppResult<Option<IndexerSyncPlan>> {
-        self.build_sync_plan(true).await.map(Some)
+        self.build_sync_plan(Some(caps_due)).await.map(Some)
     }
 
     async fn preview_sync_plan(&self, _parent_config_id: &str) -> AppResult<IndexerSyncPlan> {
-        self.build_sync_plan(false).await
+        self.build_sync_plan(None).await
     }
 
     fn name(&self) -> &str {
@@ -2969,7 +2992,7 @@ mod tests {
 
         let client = ProwlarrManagementClient::new(&test_indexer_config(&server.uri()));
         let plan = client
-            .enrichment_sync_plan("parent")
+            .enrichment_sync_plan("parent", &HashSet::from(["7".to_string()]))
             .await
             .expect("enrichment plan")
             .expect("supported enrichment plan");
@@ -3219,7 +3242,13 @@ mod tests {
 
         let client = ProwlarrManagementClient::new(&test_indexer_config(&server.uri()));
         let plan = client
-            .enrichment_sync_plan("parent")
+            .enrichment_sync_plan(
+                "parent",
+                &["10", "7", "42", "3"]
+                    .map(String::from)
+                    .into_iter()
+                    .collect(),
+            )
             .await
             .expect("enrichment plan")
             .expect("supported enrichment plan");
@@ -3284,7 +3313,7 @@ mod tests {
 
         let client = ProwlarrManagementClient::new(&test_indexer_config(&server.uri()));
         let plan = client
-            .enrichment_sync_plan("parent")
+            .enrichment_sync_plan("parent", &HashSet::from(["7".to_string()]))
             .await
             .expect("enrichment plan")
             .expect("supported enrichment plan");
@@ -3294,6 +3323,164 @@ mod tests {
 
         assert_eq!(metadata.indexer_id, 7);
         assert!(metadata.caps_snapshot.is_none());
+    }
+
+    async fn mount_two_child_listing(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(SYSTEM_STATUS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "appName": "Prowlarr",
+                "version": "2.0.0"
+            })))
+            .mount(server)
+            .await;
+        let child = |id: i64| {
+            json!({
+                "id": id,
+                "name": format!("Synthetic child {id}"),
+                "enable": true,
+                "appProfileId": 1,
+                "protocol": "usenet",
+                "priority": 3,
+                "downloadClientId": 0,
+                "capabilities": { "categories": [] }
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path(INDEXER_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([child(7), child(10)])))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(APP_PROFILE_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": 1,
+                "enableRss": true,
+                "enableAutomaticSearch": true,
+                "enableInteractiveSearch": true
+            }])))
+            .mount(server)
+            .await;
+    }
+
+    const MINIMAL_CAPS_BODY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<caps>
+  <searching>
+    <search available="yes" supportedParams="q" />
+  </searching>
+</caps>"#;
+
+    fn caps_request_count(requests: &[Request], indexer_id: i64) -> usize {
+        requests
+            .iter()
+            .filter(|request| {
+                request.url.path() == format!("/{indexer_id}/api")
+                    && request.url.query().unwrap_or_default().contains("t=caps")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn enrichment_fetches_caps_only_for_due_children() {
+        let server = MockServer::start().await;
+        mount_two_child_listing(&server).await;
+        for indexer_id in [7, 10] {
+            Mock::given(method("GET"))
+                .and(path(format!("/{indexer_id}/api")))
+                .and(query_param("t", "caps"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(MINIMAL_CAPS_BODY))
+                .mount(&server)
+                .await;
+        }
+        let client = ProwlarrManagementClient::new(&test_indexer_config(&server.uri()));
+
+        let plan = client
+            .enrichment_sync_plan("parent", &HashSet::from(["10".to_string()]))
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(caps_request_count(&requests, 10), 1);
+        assert_eq!(caps_request_count(&requests, 7), 0);
+        let snapshots = plan
+            .children
+            .iter()
+            .map(|child| (child.child_key.as_str(), child.caps_snapshot_json.is_some()))
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots, vec![("7", false), ("10", true)]);
+
+        let before = server.received_requests().await.unwrap().len();
+        let plan = client
+            .enrichment_sync_plan("parent", &HashSet::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            caps_request_count(&requests[before..], 7)
+                + caps_request_count(&requests[before..], 10),
+            0,
+            "a pass with nothing due must not request caps"
+        );
+        assert!(
+            plan.children
+                .iter()
+                .all(|child| child.caps_snapshot_json.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn enrichment_does_not_request_caps_for_a_child_under_a_recorded_cooldown() {
+        let server = MockServer::start().await;
+        mount_two_child_listing(&server).await;
+        for indexer_id in [7, 10] {
+            Mock::given(method("GET"))
+                .and(path(format!("/{indexer_id}/api")))
+                .and(query_param("t", "caps"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(MINIMAL_CAPS_BODY))
+                .mount(&server)
+                .await;
+        }
+        let mut config = test_indexer_config(&server.uri());
+        config.id = format!("caps-cooldown-{}", server.address().port());
+        let client = ProwlarrManagementClient::new(&config);
+        // A short cooldown is inside the in-line wait budget other requests
+        // use; caps must not wait it out either.
+        for (child_key, seconds) in [("7", 120), ("10", 37_291)] {
+            client
+                .outbound_http
+                .registry()
+                .record_destination_cooldown(
+                    &DestinationKey::from(indexer_rate_limit_domain_key(
+                        &config.id,
+                        Some(child_key),
+                    )),
+                    Duration::from_secs(seconds),
+                    scryer_outbound_http::RetryAfterSource::Seconds,
+                )
+                .await;
+        }
+
+        let plan = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.enrichment_sync_plan(
+                "parent",
+                &HashSet::from(["7".to_string(), "10".to_string()]),
+            ),
+        )
+        .await
+        .expect("a recorded cooldown must not be waited out in-line")
+        .unwrap()
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(caps_request_count(&requests, 7), 0);
+        assert_eq!(caps_request_count(&requests, 10), 0);
+        assert!(
+            plan.children
+                .iter()
+                .all(|child| child.caps_snapshot_json.is_none())
+        );
     }
 
     #[tokio::test]
