@@ -1087,7 +1087,7 @@ async fn newznab_component_preserves_only_quota_codes_as_typed_errors() {
 }
 
 #[tokio::test]
-async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
+async fn newznab_builtin_defers_prowlarr_429_with_retry_after() {
     let body = r#"<?xml version="1.0" encoding="UTF-8"?>
 <error code="429" description="User configurable Indexer Query Limit of 100 in last 1 hour(s) reached." />"#;
     let (base_url, request_rx) = spawn_newznab_raw_response_server(
@@ -1130,17 +1130,32 @@ async fn newznab_builtin_preserves_prowlarr_429_description_and_retry_after() {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
-        .expect_err("Prowlarr's 429 should remain a failed child search")
-        .to_string();
+        .expect_err("Prowlarr's 429 should remain a failed child search");
 
+    // A 429 is a typed deferral that carries the upstream Retry-After. The
+    // indexer's own description is untrusted upstream text: the plugin keeps
+    // it in its debug message, so it never reaches the operator-facing error.
+    match &error {
+        scryer_application::AppError::TemporaryUnavailable { retry_after, .. } => assert_eq!(
+            *retry_after,
+            Some(std::time::Duration::from_secs(321)),
+            "error was {error}"
+        ),
+        other => panic!("expected a temporary deferral, got {other:?}"),
+    }
+    let error = error.to_string();
     assert!(
-        error.contains("User configurable Indexer Query Limit of 100 in last 1 hour(s) reached."),
+        error.contains("the indexer is rate limiting requests"),
         "error was {error}"
     );
     assert!(error.contains("retry after 321s"), "error was {error}");
     assert!(
+        !error.contains("User configurable Indexer Query Limit"),
+        "upstream error text must stay out of the operator-facing error: {error}"
+    );
+    assert!(
         !error.contains("stopped after"),
-        "the host should preserve Prowlarr's real reason instead of the guest's generic error: {error}"
+        "the host should report the rate-limit deferral instead of the guest's generic error: {error}"
     );
     recv_newznab_search_request(&request_rx);
 }
