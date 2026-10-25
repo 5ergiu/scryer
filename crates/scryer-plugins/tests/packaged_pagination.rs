@@ -80,6 +80,7 @@ fn strategy(cursor: Option<String>) -> IndexerSearchStrategyRequest {
         rss_catch_up: None,
         page_cursor: cursor,
         page_budget: Some(2),
+        result_limit: None,
     }
 }
 
