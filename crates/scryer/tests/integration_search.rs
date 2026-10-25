@@ -154,7 +154,7 @@ async fn nzbgeek_search_movie_by_category() {
         .collect();
     assert_eq!(query.get("t").map(String::as_str), Some("movie"));
     assert_eq!(query.get("q").map(String::as_str), None);
-    assert_eq!(query.get("imdbid").map(String::as_str), Some("001234567"));
+    assert_eq!(query.get("imdbid").map(String::as_str), Some("1234567"));
     assert_eq!(query.get("o").map(String::as_str), Some("json"));
     assert_eq!(query.get("extended").map(String::as_str), Some("1"));
 
@@ -168,9 +168,12 @@ async fn nzbgeek_search_movie_by_category() {
 #[tokio::test]
 async fn nzbgeek_search_movie_extracts_size() {
     let ctx = TestContext::new().await;
+    // A movie search without ids is a text search, which Newznab serves from
+    // the generic `t=search` mode rather than the movie mode.
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("t", "movie"))
+        .and(query_param("t", "search"))
+        .and(query_param("q", "Test"))
         .respond_with(
             ResponseTemplate::new(200).set_body_string(load_fixture("nzbgeek/search_movie.json")),
         )
@@ -209,9 +212,12 @@ async fn nzbgeek_search_movie_extracts_size() {
 #[tokio::test]
 async fn nzbgeek_search_movie_extracts_download_url() {
     let ctx = TestContext::new().await;
+    // A movie search without ids is a text search, which Newznab serves from
+    // the generic `t=search` mode rather than the movie mode.
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("t", "movie"))
+        .and(query_param("t", "search"))
+        .and(query_param("q", "Test"))
         .respond_with(
             ResponseTemplate::new(200).set_body_string(load_fixture("nzbgeek/search_movie.json")),
         )
