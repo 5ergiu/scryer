@@ -233,6 +233,15 @@ fn bootstrap_with_services(
     });
     let download_client = Arc::new(StubDownloadClient::default());
     let indexer_client = Arc::new(MockIndexerClient);
+    // The returned admin's grants are persisted as a real account's are, so a
+    // path that reloads current grants (title deletion) still finds them.
+    let admin = test_admin_user();
+    let libraries = MockLibraryRepo::default();
+    libraries
+        .app_permissions
+        .try_lock()
+        .expect("new fixture store")
+        .insert(admin.id.clone(), admin.authorization.app);
 
     let mut services_builder = AppServices::builder(
         titles.clone(),
@@ -248,7 +257,7 @@ fn bootstrap_with_services(
         String::new(),
     )
     .with_domain_events(Arc::new(MockDomainEventRepo::default()))
-    .with_libraries(Arc::new(MockLibraryRepo::default()));
+    .with_libraries(Arc::new(libraries));
     if let Some(indexer_stats) = indexer_stats {
         services_builder = services_builder.with_indexer_stats(indexer_stats);
     }
@@ -273,7 +282,7 @@ fn bootstrap_with_services(
         services.with_download_registry(Arc::new(FixtureDownloadRegistry::default()))
     });
 
-    (app, test_admin_user())
+    (app, admin)
 }
 
 pub(super) struct MediaRequestTestHarness {

@@ -270,10 +270,12 @@ mod tests {
             .join("outside.mkv");
         let roots = vec![tempdir.path().join("media")];
 
-        let result = resolve_available_root_for_path(&outside, &roots);
-        assert!(
-            matches!(result, Err(AppError::Validation(_))),
-            "targets outside configured roots must fail closed"
+        let error = resolve_available_root_for_path(&outside, &roots)
+            .expect_err("targets outside configured roots must fail closed");
+        assert_eq!(
+            error.validation_reason(),
+            Some(crate::delete_refusal::PATH_OUTSIDE_ROOTS),
+            "{error}"
         );
     }
 }

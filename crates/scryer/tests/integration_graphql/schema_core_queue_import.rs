@@ -2000,7 +2000,13 @@ async fn graphql_introspection_exposes_queue_and_source_enums() {
         .collect();
     assert_eq!(
         source_kind_names,
-        vec!["NZB_FILE", "NZB_URL", "TORRENT_FILE", "MAGNET_URI"]
+        vec![
+            "NZB_FILE",
+            "NZB_URL",
+            "TORRENT_FILE",
+            "MAGNET_URI",
+            "HTTP_RESOURCE"
+        ]
     );
 }
 
