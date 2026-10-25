@@ -36,7 +36,7 @@ These changes are relative to v0.21.20.
 - Pending imports held for ambiguous anime numbering offer the same season and episode picker. The dialog includes the original release name to help identify the intended episode.
 - Keep a library root's identity when its path is edited, preserving its title associations and default-root selection.
 - Automatic import recognizes extensionless video files by content and gives them the matching extension.
-- Preserve the literal anime season when a community interpretation conflicts with a real season unless the alternate reading has supporting evidence. Community searches derive their season from the entry's name or starting TVDB season, avoiding incorrect searches caused by split seasons and placeholder entries.
+- Preserve the literal anime season when a community interpretation conflicts with a real season unless the alternate reading has supporting evidence. Community searches derive their season from the entry's name or starting TVDB season, avoiding incorrect searches caused by split seasons and incomplete season entries.
 - Preserve HTTP download identity through import, so date-only releases use the linked catalog episode's season. Import the subtitle sidecars reported by the HTTP client alongside the media.
 
 ## HTTP acquisition and downloads
