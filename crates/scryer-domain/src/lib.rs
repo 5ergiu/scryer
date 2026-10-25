@@ -2003,6 +2003,8 @@ pub struct CalendarEpisode {
     /// The parent title's background, for an episode; none for a movie.
     pub title_background_url: Option<String>,
     pub air_date: Option<String>,
+    /// Whether the movie eligibility date uses an estimated release date.
+    pub air_date_estimated: bool,
     pub monitored: bool,
 }
 

@@ -2230,6 +2230,7 @@ fn row_to_calendar_episode(row: &SqlRow) -> AppResult<CalendarEpisode> {
         image_url: row.opt_text("image_url")?,
         title_background_url: row.opt_text("title_background_url")?,
         air_date: row.opt_text("air_date")?,
+        air_date_estimated: false,
         monitored: row.bool("monitored")?,
     })
 }

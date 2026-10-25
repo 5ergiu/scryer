@@ -1373,6 +1373,9 @@ impl TitleRepository for MockTitleRepo {
         if let Some(movie_release_dates) = metadata.movie_release_dates {
             title.movie_release_dates = Some(movie_release_dates);
         }
+        if let Some(digital_release_date) = metadata.digital_release_date {
+            title.digital_release_date = Some(digital_release_date);
+        }
         for external_id in metadata.extra_external_ids {
             title
                 .external_ids

@@ -57,6 +57,7 @@ export type CalendarEpisodeItem = {
   /** The parent title's background, shown when an episode has no still of its own. */
   titleBackgroundUrl?: string | null;
   airDate: string | null;
+  airDateEstimated?: boolean;
   monitored: boolean;
   playbackLinks: MediaServerPlaybackLink[];
   mediaAvailability: EpisodeMediaAvailability;
@@ -419,6 +420,7 @@ export function CalendarEventHoverCard({
               <span>
                 <CalendarClock aria-hidden="true" />
                 {airDate}
+                {episode.airDateEstimated ? ` (${t("settings.movieAvailability.estimated")})` : ""}
               </span>
             ) : null}
             <span>{episode.libraryName ?? episode.libraryId}</span>
@@ -618,6 +620,11 @@ export function CalendarView({
         {badge || availabilityPill || time ? (
           <div className="fc-scryer-event-meta">
             {badge ? <span className="fc-scryer-event-badge">{badge}</span> : null}
+            {ep.airDateEstimated ? (
+              <span className="fc-scryer-event-badge">
+                {t("settings.movieAvailability.estimated")}
+              </span>
+            ) : null}
             {availabilityPill ? (
               <span className="fc-scryer-event-badge">
                 {availabilityPill.label}

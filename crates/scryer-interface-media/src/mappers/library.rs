@@ -931,6 +931,7 @@ pub fn from_calendar_episode(
         image_url,
         title_background_url,
         air_date: parse_date(ep.air_date),
+        air_date_estimated: ep.air_date_estimated,
         monitored: ep.monitored,
         media_availability,
         playback_links,
