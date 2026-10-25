@@ -4,90 +4,102 @@ These changes are relative to v0.21.20.
 
 ## Highlights
 
-- Add the HTTP protocol family for indexers and a native HTTP download client, so indexer plugins can offer provider pages, direct files, and streaming manifests that Scryer downloads itself.
-- Request leases are now only a time to delete. The one-click **Keep** and operator keeps are removed, and a live lease no longer protects a title from other maintenance rules. Protect titles with tag-driven rules instead.
-- When a download is removed with its files, a client that can delete its own files is always asked to, and Scryer then removes whatever it left behind. Failed Usenet downloads are removed with their files under **Remove Failed**.
-- Explain plugin failures in the viewer's language, and let indexer plugins add or hide settings fields based on the values entered so far, show read-only notes, and ask for an image CAPTCHA at sign-in.
-- Rework the plugins panel on Settings, Indexers, and Lists into a right-edge panel, and move the Indexers page's sections into tabs.
-- Add a per-user **Glow** preference. New installs start with the decorative glow off; existing instances keep it.
+- Add HTTP indexer support and a native HTTP download client for direct media files and subtitle sidecars.
+- Show movies in the calendar using their configured availability dates, including market selection, library overrides, delays, and labeled estimates.
+- Reassign an imported episode file from the web, and resolve an ambiguous anime import with the same episode picker.
+- Add per-user color palettes, a theme and highlight-color quick menu, and a decorative glow preference.
+- Spread RSS requests across scheduler ticks, combine each indexer's categories into one poll, and reduce repeated capability and search-index work.
+- Change request leases to expiry dates only. Operator keeps and the one-click **Keep** are removed; review the upgrade notes before enabling maintenance rules.
 
-## HTTP acquisition
+## Upgrade notes
 
-- Indexer plugins can declare the HTTP protocol and return HTTP releases. Release searches show these results with the **HTTP** protocol, and a grab is routed to a download client that accepts at least one of the release's transports. Releases the indexer marks live, upcoming, or removed are refused when grabbed, on every submission path; DRM-protected and sign-in gated releases are submitted to the client. A grab whose HTTP details are no longer in the search listing fails with a clear error.
-- Add a built-in **HTTP** download client type that fetches direct-file resources itself. Configure its download folder, concurrent downloads (1 to 8), connections per host (1 to 8), and a shared bandwidth limit. The client picks the best complete media file within the quality profile's ceiling plus requested subtitle sidecars, streams into a `.part` file that is renamed on completion, resumes interrupted transfers (starting over when the indexer says the server cannot resume), honours `Retry-After`, keeps resource headers on their own origin across redirects, stores each file exactly as the server sent it, and routes through the plugin egress policy or the assigned proxy. Its queue and per-transfer progress are persisted under `.scryer-http` inside the download folder so transfers resume after a restart; nothing is deleted, including partial files.
-- A `403` answer is treated as a possible geo-block: the same variant is requested up to three times, then up to three lower-ranked variants are tried before the job fails with a summary of the refused variants and request count. Other `4xx` answers fail without retry. A refusal that arrives after the resource URL has expired fails the file at once and asks for the release to be grabbed again.
-- Finished files are checked before they take their final name. When the indexer states a SHA-256, SHA-1, or MD5 checksum, a mismatch fails the file and leaves the partial on disk. A job fails when no video track is present or the duration falls short of what the indexer declared. Request errors are recorded without their URL so signed CDN tokens never reach the queue, logs, or UI.
-- A subtitle the release marks as optional is skipped when it cannot be fetched, and the job completes with its media file. When the release requires its subtitles, the job fails with a message naming the language and noting that the media file is on disk.
-- A transfer whose file was already moved into place before a restart is recognised as complete instead of being downloaded again.
-- Deleting an HTTP client, or changing it to another type, stops its downloads. Disabling it lets the current file finish and holds the rest of the queue until it is enabled again. Its queue and files stay on disk either way.
-- Progress is checkpointed every 64 MiB or 30 seconds into a small per-transfer file instead of rewriting the whole queue, file writes are buffered between checkpoints, and the client keeps its connections while the assigned proxy is unchanged.
-- HTTP grabs keep their Scryer identity through import, so a release that carries only an air date is filed under the linked catalog episode's season.
-- Indexers whose plugin fixes its own endpoint, and so has no connection URL field, can be created and enabled. HTTP indexer plugins are listed under **Indexers** in Settings.
+- Maintenance rules and request rules remain experimental and require the experimental features switch.
+- A live request lease no longer protects a title from other maintenance rules. Operator keeps, the **Kept** badge, and their controls are removed. Protect titles through rule conditions, such as a tag exclusion, before enabling destructive rules.
+- A request approved **forever** or with a zero-day lease no longer creates a lease. **Keep permanently** ends an existing finite lease and leaves the title without an expiry; it is refused when there is no finite lease to end.
+- Upgrade removes operator keeps and permanent keep claims, along with non-expiring lease rows that have no positive duration. Finite leases and explicitly assigned expiry dates are preserved.
+- The built-in **Expired request leases** rule now matches expired leases without keep-based exemptions. Its grace period, library selection, and storage root are retained. An **Enabled** instance of this rule returns to **Dry run** so its candidates can be reviewed before re-enabling it.
+- The `keep_claim_active` maintenance fact is removed. Update custom rules that read it.
+- Weaver 0.11.5 or newer is required.
+- SQLite applies pending migrations on one connection, fixing upgrades that could fail when a later migration read a schema change through another connection's stale schema cache.
 
-## Request leases and maintenance
+## Movie calendar
 
-- A request lease is now only the time at which a requested title becomes due for deletion. A live lease no longer stops other maintenance rules from acting on the title; protecting a title is the job of a rule, for example one that skips titles with a tag.
-- A request approved **forever** or with a zero-day lease no longer creates a lease, so its title never appears to lease-based rules such as **Expired request leases**.
-- Remove the one-click **Keep** from maintenance candidates, the title page, and the Requests claims panel, along with the **Kept** badge and its release control. Operator keeps no longer exist.
-- **Keep permanently** on a request now ends its lease, leaving the title with no expiry. It is refused for a request that has no finite lease.
-- The built-in **Expired request leases** rule now matches every title whose lease has expired. Its grace period, libraries, and storage root are kept; if it was **Enabled**, it returns to **Dry run** on upgrade so its new candidates can be reviewed before it is enabled again.
-- Rules can no longer read the `keep_claim_active` fact. Edit any custom rule that reads it.
+- Movies no longer need an episode record to appear in the calendar. Each movie event uses the same effective availability date as automatic acquisition, with the title's threshold taking precedence over the library and Movie facet settings.
+- Calendar dates honor the selected release market, theatrical or home-release threshold, configured day offset, and the existing worldwide and theatrical-plus-90-days fallbacks. Legacy theatrical metadata follows the same availability policy.
+- Estimated dates are labeled on calendar events and in their hover cards. Unknown dates, pending market refreshes, and announced-only availability do not create an invented date.
+- Movie events respect library access and filters, preserve the title's monitoring state, and open the movie overview. Episode calendar behavior is preserved.
 
-## Download cleanup
+## Episode assignment, imports, and libraries
 
-- Completed and failed downloads share one cleanup path. A failed Usenet download is no longer removed from the client at failure time while its files are left behind; when **Remove Failed** is on, it is removed together with its files.
-- When cleanup removes a download with its files, SABnzbd, Weaver, and download-client plugins that can delete their own data are always asked to delete the files. Scryer then removes what the client left in the job folder, deleting only files that were already there before the client was asked, so content that appears in the folder afterwards is kept. NZBGet and torrent plugins that remove only the entry still have their files deleted by Scryer before the entry is removed.
-- Cleanup records whether the client or Scryer removed the files, and no longer reports a payload as removed when files were kept.
-- Removing a download no longer removes a newer download that the client has since given the same id, and finished import work is kept while its ownership cannot be read.
-- Deleting a download client refreshes the queue and download tracking at once.
-- A download whose job has left the client during a password retry appears in **Activity > Import**, where removing it ends the retry and asks the client to remove the job from its queue and history.
+- Add **Reassign** to imported episode files. Choose one or more episodes within the same title, then rename and move the file using the library's naming rules. If a selected episode already has a primary file, explicitly replacing it keeps the old file on disk as an additional file. A failed rename restores the original episode links.
+- Reassignment is a one-time match and rename; later scans retain their normal matching behavior. Successful changes appear in title history.
+- Pending imports held for ambiguous anime numbering offer the same season and episode picker. The dialog includes the original release name to help identify the intended episode.
+- Keep a library root's identity when its path is edited, preserving its title associations and default-root selection.
+- Automatic import recognizes extensionless video files by content and gives them the matching extension.
+- Preserve the literal anime season when a community interpretation conflicts with a real season unless the alternate reading has supporting evidence. Community searches derive their season from the entry's name or starting TVDB season, avoiding incorrect searches caused by split seasons and placeholder entries.
+- Preserve HTTP download identity through import, so date-only releases use the linked catalog episode's season. Import the subtitle sidecars reported by the HTTP client alongside the media.
 
-## Title deletion
+## HTTP acquisition and downloads
 
-- Deleting a title also deletes its unfinished imports (password retries, automatic retries, and pending manual imports) and its manual-import selections, and ends any password retry still waiting on its downloads. Finished imports are kept as history, and this cleanup touches no file on disk.
-- Explain every title, media file, episode file, and subtitle deletion refusal in the viewer's language, including a distinct message for a path outside every configured root.
-- Report recycle-bin entries that could not be purged after a title deletion separately, instead of treating the title deletion as failed.
-- Bulk title deletion checks the requesting user's current permissions when each title is deleted.
+- Indexer plugins can advertise HTTP releases, including provider-page, direct-file, HLS, and DASH transports. Grabs route to a download client that supports an offered transport. Native HTTP downloads currently use direct-file resources.
+- Configure the native HTTP client's output folder, 1 to 8 concurrent downloads, 1 to 8 connections per host, and shared bandwidth limit. It selects a complete media resource within the quality profile's ceiling and includes requested subtitle sidecars.
+- Persist the queue and transfer progress under `.scryer-http` in the download folder. Resume interrupted transfers when supported, restart the transfer when the provider declares that resume is unavailable, and recognize files already published before a restart.
+- Buffer file writes and checkpoint progress per transfer, rather than rewriting the whole queue. Reuse the egress client while its assigned proxy is unchanged, and apply bandwidth changes to pending transfer waits.
+- Honor `Retry-After`, preserve resource headers only on their original origin across redirects, and store response bodies as sent. Request errors omit resource URLs so signed CDN tokens are not exposed through those errors.
+- Bound `403` retries and lower-ranked variant fallbacks. Other `4xx` responses fail without retry; a refusal after the resource URL expires asks for a fresh grab.
+- Verify provider-supplied SHA-256, SHA-1, or MD5 checksums before publishing a file, and reject media with no video track or an insufficient declared duration. Validation failures preserve the partial file. Media without a usable filename extension receives one from its probed container.
+- Optional subtitle failures do not fail the media download. Required subtitle failures identify the language and explain that the media file remains on disk.
+- Deleting an HTTP client or changing its type stops its engine. Disabling it allows the current file to finish and holds the remaining queue. These configuration changes preserve its queue and downloaded files.
+- Live, upcoming, and removed HTTP releases are refused consistently on submission, with translated reason codes. DRM and sign-in flags are passed to the receiving client rather than automatically refusing the grab. Missing HTTP details require a fresh search; stored HTTP results are never replayed as live search results, and parked releases retain their HTTP description.
+- Indexers with plugin-defined endpoints can be configured without a connection URL field, and the hostless HTTP download client supports **Test Connection**.
 
-## Plugins
+## RSS, acquisition, and subtitles
 
-- Plugin failures carry a stable reason. Indexer, download-client, notification, and subtitle connection tests show a translated explanation, followed by the plugin's own detail when it gave one, and queue and grab failures explain the plugin's reason in the viewer's language. A reason this version of Scryer does not recognise shows the plugin's detail, or a translated sentence naming the code.
-- An indexer search refused for an invalid API key, passkey, cookie, or username and password names the rejected credential.
-- Lists treat refused credentials and account blocks (captcha, two-factor, banned, disabled) as sign-in problems, a missing list as not found, and an exceeded quota as a rate limit that resumes after the plugin's retry delay.
-- Indexer plugins can add settings fields, or hide built-in ones, based on the values entered so far. The indexer editor asks the plugin again when one of those values changes, and secrets in added fields are stored and redacted like any other.
-- Indexer plugins can ask for an image CAPTCHA at sign-in. The indexer editor shows the image under its answer field with a refresh control and fetches a new one after a refused save; the image is never stored, and the sign-in it starts is reused when the settings are saved.
-- Indexer plugins can show read-only notes among their settings. Notes are never saved or required.
-- An indexer plugin's declared endpoint host also admits its subdomains, and the limit of 64 declared endpoints is removed.
-- Enforce the indexer and archive plugin memory limits across all of a plugin's memories combined, not each memory separately.
-- Bound the work spent reading file names from a grabbed torrent, so an oversized or malformed torrent can no longer exhaust memory.
+- Poll each RSS indexer once with its routed categories merged into one request. The first merged poll resumes from the oldest previous category marker so releases between category checkpoints are not skipped.
+- Distribute indexers across the scheduler's tick slots instead of polling them all together. Each tick admits at most 10 due indexers by default; deferred indexers remain due. `SCRYER_RSS_TICK_INDEXER_LIMIT` adjusts this ceiling.
+- Use a default RSS request budget of 10 pages and 1,000 items, adjustable through `SCRYER_RSS_POLL_PAGE_BUDGET`, and pass the item budget to the plugin. Preserve additional recent-feed results returned during plugin catch-up within a bounded host safety cap, and warn when the previous marker is not reached.
+- Admit one background acquisition pass at a time. Stop its walk at the supervisor's work budget and continue from the unvisited titles on a later cycle instead of overlapping passes or restarting the walk.
+- Cache Prowlarr child capabilities for seven days. Refresh missing, expired, or connection-invalidated snapshots instead of requesting every child's capabilities on each sync. Automatic searches wait for an initial capability snapshot, and rate-limited capability requests defer without holding the sync open.
+- Coalesce pending fuzzy-index updates and avoid rewriting unchanged searchable projections. Compare stored collation keys independently of database text collation.
+- Keep unconfirmed grabs while the client's history does not reach far enough back to prove their absence. Client-history coverage no longer releases an accepted grab and causes it to be downloaded again.
+- Skip download-client feedback requests during failure backoff. Subtitle providers that fail three searches in succession are skipped for the rest of the cycle and probed again on the next cycle. Typed plugin deferrals use the provider cooldown and retry delay rather than becoming permanent failures.
+- Explain acquisition results parked for review because their identity is ambiguous.
 
-## Interface
+## Cleanup and deletion
 
-- The plugins panel on Settings, Indexers, and Lists is a 320 px panel on the right edge. It docks beside the centred page content when there is room and stays open across Lists tabs; on narrower pages, the **Plugins** button opens it over the content with a backdrop. The list refreshes in place when the catalog changes, and a fade and arrow show when more plugins are below.
-- The Indexers page shows **Indexers**, **Indexer Search**, and **Seeding Profiles** as tabs under the page header.
-- Add a **Glow** switch to profile settings to turn off the decorative accent glow.
-- Newly added titles appear in the catalog without a reload when they match the active filters. A missing library root no longer hides a catalog that has titles.
-- The application upgrade control re-reads the available version before starting, so a page opened during the startup update check no longer requests a stale version.
-- On phones, the full-screen interactive search dialog keeps its header and close button clear of the status bar and notch.
+- Completed and failed downloads use the same durable cleanup path. With **Remove Failed** enabled, failed Usenet downloads are removed with their files rather than removing only the client entry.
+- Ask clients that support payload deletion to remove their own files first, then clean up eligible leftovers. The fallback inventory is taken before the client request, preserving files that appear afterward. For clients that remove only the entry, Scryer removes eligible files before removing the entry.
+- Record whether the client or Scryer removed the payload, and avoid reporting files as removed when they were retained. Cleanup preserves newer downloads that reuse a client ID and retains finished import work when its ownership cannot be established.
+- Deleting a title clears its unfinished imports, manual-import selections, and pending password retries while retaining completed import history. Clearing these records does not itself delete files from disk.
+- Recover password retries whose jobs have left the client through **Activity > Import**, where removal ends the retry and requests client queue and history cleanup. Deleting a download client refreshes queue and tracking state immediately.
+- Translate deletion refusals, including paths outside configured roots. Report recycle-bin purge failures separately from title deletion, and check current permissions for each title in a bulk deletion.
 
-## Imports, parsing, and acquisition
+## Plugins and indexer configuration
 
-- Automatic import recognises a video file with no extension by its content, as manual import already did, and gives the imported file the matching extension.
-- When an anime release's community season number is also a real season, Scryer keeps the literal reading unless the alternate one is corroborated by forced alternate numbering, the episode the release names, or a date near the episode's air date.
-- Anime searches that use community season numbering take the season from the community entry's own name, then from the TVDB season it starts, instead of from its position in air order. Split seasons and placeholder entries no longer turn a wanted S03E01 into a search for S05E01, and a community episode that names a different real episode of the title is neither searched for nor accepted.
-- Unconfirmed grabs are released only when the download client's history reaches back far enough to cover the grab. A client with long history no longer causes a grab it accepted to be released and downloaded again.
-- Title acquisition diagnostics explain releases parked for review because their identity is ambiguous.
+- Plugin failures carry stable reason codes and translated explanations across indexer, download-client, notification, subtitle, queue, grab, and connection-test paths. Unknown codes preserve the plugin's detail or show a translated message naming the code. Credential failures identify the rejected credential type, and URL credentials are redacted from failure details.
+- List integrations distinguish sign-in failures, missing lists, account blocks, and quotas; rate-limited lists resume after the plugin's retry delay.
+- Indexer plugins can add value-dependent settings fields, hide built-in fields, display read-only notes, and request image CAPTCHAs. Notes are not saved or required. Added secret fields are stored and redacted as secrets, including while a plugin is blocked.
+- Refresh dynamic fields and sign-in challenges when relevant inputs change, and clear fields belonging to a previous provider when switching provider types. CAPTCHA refresh and refused-save recovery reuse the associated sign-in session without storing the image.
+- Declared endpoint hosts admit their subdomains, declared IP literal hosts are accepted, and the previous 64-endpoint declaration limit is removed. Plugin HTTP requests through a transport proxy return redirects to the plugin instead of following them automatically.
+- Enforce indexer and archive memory limits across all memories in an invocation, and bound torrent filename extraction to contain oversized or malformed inputs.
+- Update bundled Newznab and Torznab plugins to 3.1.0.
 
-## Compatibility and upgrade notes
+## Appearance and editing
 
-- Migrations delete every operator keep, and every lease from a request approved forever or with a zero-day lease. Leases with an expiry, including ones an administrator extended to a specific date, are kept. Titles that relied on an operator keep or a live lease for protection from maintenance rules are no longer protected; add a tag-driven rule before enabling destructive rules.
-- If **Expired request leases** was **Enabled**, re-enable it after reviewing its candidates in **Dry run**.
-- Weaver releases before 0.11.5 are not supported.
-- GraphQL: `createOperatorKeepClaim` and the candidates' `operatorKeepClaimId` field are removed. `LifecycleClaimKindValue.KEEP`, `LifecycleClaimProducerValue.REQUEST_PERMANENT`, and `LifecycleClaimProducerValue.OPERATOR_KEEP` are removed. `convertTitleClaimToPermanent` now ends the lease instead of creating a keep.
-- GraphQL: add the `pluginConfigFields` query, with `indexerId` and `proxyConfigId` arguments and a `loginChallenge` result, and `dynamicConfigTriggerKeys` on provider types. `PluginConfigFieldTypeValue` gains `INFO` and `PluginConfigFieldRoleValue` gains `LOGIN_CHALLENGE_ANSWER`. Title deletion results add `recyclePurged`, `recyclePreserved`, `recycleBusy`, and `recycleFailed`. User UI settings add `noGlow`. `DownloadSourceKindValue` gains `HTTP_RESOURCE`.
-- Plugin failures are reported as `PLUGIN_FAILED` GraphQL errors with `extensions.reason` and, when the plugin gave one, `extensions.detail`. The REST API answers these with `502`.
-- Plugin SDK 3.17.0 adds the `Http` indexer source kind, the `HttpResource` download input kind, HTTP capability blocks for indexers and download clients, and an optional `http` payload on `PluginDownloadSource`.
-- Plugin SDK 3.18.0 adds the `config_fields` indexer action and the optional `dynamic_config_fields` capability, and opens `PluginErrorCode` to any string while keeping its well-known codes. Plugins built against earlier SDKs keep working; Rust SDK users constructing these structs as literals must include the new optional fields when updating their SDK.
-- Plugin SDK 3.19.0 adds the `info` config field type, the `login_challenge_answer` field role, and the `checkCaptcha` indexer action for image sign-in challenges.
-- Plugin HTTP requests sent through a transport proxy no longer follow redirects; the plugin receives the `3xx` response.
-- Migrations add HTTP release storage to pending releases, the per-user glow preference, and the lease changes described above.
+- Choose a per-user palette: Scryer Default, Slate, Ocean, Forest, Plum, Ember, Graphite, or Papyrus. Refine light-palette contrast, navigation surfaces, editor styling, notifications, and artwork fades to match the selected palette.
+- The sidebar's **Theme** menu offers palette and highlight-color controls, including custom colors and reset. Profile settings add **Glow**; new installs start with decorative glow off, while existing instances retain it.
+- Dock the plugins panel beside centered page content when space permits. On narrower pages, open it from **Plugins** over the content with a backdrop. Keep it open across Lists tabs and refresh the catalog in place. Indexers now has **Indexers**, **Indexer Search**, and **Seeding Profiles** tabs.
+- Add interpreter-aware script highlighting, environment-variable completions, snippets, bracket matching, and indentation assistance for shell, Python, PowerShell, batch, and Go scripts. Show rule validation feedback inside the editors.
+- Preserve catalog state while navigating to titles, render restored tables whose saved position exceeds their current size, and keep row actions clickable above highlights. New titles refresh into the active catalog using its filters, and a missing library root no longer hides existing titles.
+- Improve title and episode history on narrow screens, keep long folder names and file details inside their dialogs, preserve parent navigation through mobile submenus, and keep full-screen search controls clear of phone notches.
+- Refresh the available application version before starting an upgrade. Raise default general API and mutation budgets to 3,000 requests per minute while retaining the 30-per-minute search budget and existing authentication limits.
+
+## API and plugin compatibility
+
+- Remove `createOperatorKeepClaim`, maintenance candidates' `operatorKeepClaimId`, `LifecycleClaimKindValue.KEEP`, and the `REQUEST_PERMANENT` and `OPERATOR_KEEP` producer values. `convertTitleClaimToPermanent` now ends a finite lease.
+- Add `reassignEpisodeFile` and its typed refusal reasons, and expose reassignment in activity and title history. Library root updates accept the stored root ID to preserve identity when changing paths.
+- Add `CalendarEpisodePayload.airDateEstimated`. For movie events, `airDate` is the effective availability date.
+- Add palette selection and `noGlow` to user UI settings, along with the palette enum values.
+- Add `pluginConfigFields`, its sign-in challenge result and indexer/proxy context, provider `dynamicConfigTriggerKeys`, the `INFO` field type, and the `LOGIN_CHALLENGE_ANSWER` field role. Add `HTTP_RESOURCE` to download source kinds and recycle-bin outcome counts to title deletion results.
+- Report plugin failures as `PLUGIN_FAILED` GraphQL errors with `extensions.reason` and optional `extensions.detail`; REST responses use status `502`.
+- Plugin SDK 3.17.0 adds HTTP source/input kinds, capabilities, and release payloads. SDK 3.18.0 adds `config_fields`, the optional dynamic-config capability, and open string error codes. SDK 3.19.0 adds informational fields, CAPTCHA answer roles, and `checkCaptcha`. Existing plugin payloads remain supported; Rust SDK users constructing changed structs as literals must include their new optional fields when updating.
