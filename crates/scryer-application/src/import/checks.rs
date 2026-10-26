@@ -759,6 +759,7 @@ mod tests {
         let parsed = parse_release_metadata("Show.S01E01");
         let src = dir.path().join("episode.mkv");
         let dest = dir.path().join("destination.mkv");
+        std::fs::write(&src, b"video").unwrap();
         std::fs::write(&dest, b"video").unwrap();
         let ctx = dummy_ctx(&src, &dest, 5, &parsed, &[]);
         let (verdict, measurement) = run_checks_with_measurement(&ctx, |_| {
