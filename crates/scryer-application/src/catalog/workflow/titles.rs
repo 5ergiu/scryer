@@ -1652,8 +1652,8 @@ impl AppUseCase {
     }
 
     /// The half of [`Self::purge_title_logical_dependents`] that needs nothing
-    /// but the title's id: the rows no foreign key reaches, and the downloads
-    /// that would otherwise keep running for a title that is gone.
+    /// but the title's id: the rows no foreign key reaches, and the download
+    /// state that must be detached from a title that is gone.
     ///
     /// A merged source title — whose `titles` row the merge transaction
     /// already removed, and whose files were repointed rather than deleted —
@@ -1683,19 +1683,27 @@ impl AppUseCase {
     ) -> AppResult<(
         Vec<crate::DownloadSubmission>,
         Vec<scryer_domain::download_identity::DownloadId>,
+        Vec<scryer_domain::download_identity::DownloadId>,
     )> {
         let submissions = &self.services.workflow.download_submissions;
         let download_submissions = submissions.list_for_title(title_id).await?;
         let unbound = submissions.list_active_unbound_for_title(title_id).await?;
-        let submitted_download_ids = download_submissions
-            .iter()
-            .chain(&unbound)
-            .map(|submission| submission.download_id)
-            .collect::<HashSet<_>>()
+        let mut submitted_download_ids = Vec::new();
+        for submission in download_submissions.iter().chain(&unbound) {
+            if !submitted_download_ids.contains(&submission.download_id) {
+                submitted_download_ids.push(submission.download_id);
+            }
+        }
+        let unbound_download_ids = unbound
             .into_iter()
+            .map(|submission| submission.download_id)
             .collect();
 
-        Ok((download_submissions, submitted_download_ids))
+        Ok((
+            download_submissions,
+            submitted_download_ids,
+            unbound_download_ids,
+        ))
     }
 
     async fn purge_title_dependent_records_with_retirement(
@@ -1704,7 +1712,7 @@ impl AppUseCase {
         actor: DomainEventActor,
         explicit: bool,
     ) -> AppResult<()> {
-        let (download_submissions, submitted_download_ids) = if explicit {
+        let (download_submissions, submitted_download_ids, unbound_download_ids) = if explicit {
             self.explicit_title_submissions_to_retire(title_id).await?
         } else {
             self.title_submissions_to_retire(title_id).await
@@ -1713,9 +1721,9 @@ impl AppUseCase {
             .iter()
             .map(ClientJobLocator::from_submission)
             .collect::<HashSet<_>>();
-        let retired_download_ids = submitted_download_ids.clone();
 
         let mut seen_downloads = HashSet::new();
+        let mut live_download_ids = HashSet::new();
         for submission in download_submissions {
             let identity = ClientJobLocator::from_submission(&submission);
             if !seen_downloads.insert(identity.clone()) {
@@ -1737,6 +1745,24 @@ impl AppUseCase {
                     download_item_id = %identity.item_id,
                     tracked_state = tracked_state.as_deref().unwrap_or("none"),
                     "skipping recorded download during title deletion because it is not active"
+                );
+                continue;
+            }
+
+            if explicit
+                && !self
+                    .services
+                    .workflow
+                    .download_registry
+                    .bindings_have_password_retry(std::slice::from_ref(&submission.download_id))
+                    .await?
+            {
+                live_download_ids.insert(submission.download_id);
+                debug!(
+                    title_id = %title_id,
+                    client_type = %identity.client_type,
+                    download_item_id = %identity.item_id,
+                    "leaving active download available for unmatched import after title deletion"
                 );
                 continue;
             }
@@ -1770,17 +1796,42 @@ impl AppUseCase {
                 ),
             }
         }
+        for download_id in unbound_download_ids {
+            if explicit
+                && !self
+                    .services
+                    .workflow
+                    .download_registry
+                    .bindings_have_password_retry(std::slice::from_ref(&download_id))
+                    .await?
+            {
+                live_download_ids.insert(download_id);
+            }
+        }
 
+        let retired_download_ids = submitted_download_ids
+            .iter()
+            .filter(|download_id| !live_download_ids.contains(download_id))
+            .copied()
+            .collect::<Vec<_>>();
         if explicit {
-            self.retire_deleted_title_downloads(title_id, submitted_download_ids)
+            self.retire_deleted_title_downloads(
+                title_id,
+                retired_download_ids.clone(),
+                submitted_download_ids.clone(),
+            )
                 .await?;
         } else {
-            self.retire_title_downloads(title_id, submitted_download_ids)
+            self.retire_title_downloads(
+                title_id,
+                retired_download_ids.clone(),
+                submitted_download_ids.clone(),
+            )
                 .await;
         }
 
         let pending_imports = self
-            .delete_title_pending_imports(title_id, &retired_download_ids, &download_sources)
+            .delete_title_pending_imports(title_id, &submitted_download_ids, &download_sources)
             .await;
         if explicit {
             pending_imports?;
@@ -1916,13 +1967,14 @@ impl AppUseCase {
         Ok(())
     }
 
-    /// The title's submissions a client item is known for, and the canonical
-    /// id of every download the title submitted that must retire with it.
+    /// Return client-bound submissions, all submitted IDs, and active unbound
+    /// IDs separately so deletion can preserve live grab intents.
     async fn title_submissions_to_retire(
         &self,
         title_id: &str,
     ) -> (
         Vec<DownloadSubmission>,
+        Vec<scryer_domain::download_identity::DownloadId>,
         Vec<scryer_domain::download_identity::DownloadId>,
     ) {
         let download_submissions = match self
@@ -1937,17 +1989,15 @@ impl AppUseCase {
                 warn!(
                     title_id = %title_id,
                     error = %err,
-                    "failed to list download submissions while deleting title; skipping download cancellation"
+                    "failed to list download submissions while deleting title; skipping bound-download handling"
                 );
                 Vec::new()
             }
         };
 
-        // `list_for_title` only returns submissions a client item is known
-        // for. A grab the client has not reported yet still holds an active
-        // binding, and must retire with the title too: otherwise the client's
-        // later report attaches to the dead download. It has no item id to
-        // cancel, so it joins the retire list only.
+        // A grab the client has not reported yet has no locator to cancel,
+        // but its active binding must stay live so a later client observation
+        // can be adopted as an unmatched download.
         let unbound_submissions = match self
             .services
             .workflow
@@ -1972,7 +2022,15 @@ impl AppUseCase {
                 submitted_download_ids.push(submission.download_id);
             }
         }
-        (download_submissions, submitted_download_ids)
+        let unbound_download_ids = unbound_submissions
+            .into_iter()
+            .map(|submission| submission.download_id)
+            .collect();
+        (
+            download_submissions,
+            submitted_download_ids,
+            unbound_download_ids,
+        )
     }
 
     /// Move a merged source title's downloads to the destination title.
@@ -2006,8 +2064,13 @@ impl AppUseCase {
                     error = %err,
                     "failed to list the merged title's downloads; they retire with the title"
                 );
-                let (_, download_ids) = self.title_submissions_to_retire(source_title_id).await;
-                self.retire_title_downloads(source_title_id, download_ids)
+                let (_, download_ids, _) =
+                    self.title_submissions_to_retire(source_title_id).await;
+                self.retire_title_downloads(
+                    source_title_id,
+                    download_ids.clone(),
+                    download_ids,
+                )
                     .await;
                 return;
             }
@@ -2119,7 +2182,8 @@ impl AppUseCase {
 
         // Always run, like the delete path: it also drops the source title's
         // remaining cached rows, which the moved ones no longer are.
-        self.retire_title_downloads(source_title_id, unmoved).await;
+        self.retire_title_downloads(source_title_id, unmoved.clone(), unmoved)
+            .await;
     }
 
     /// Local retirement must succeed before removing the catalog row. Client
@@ -2128,6 +2192,7 @@ impl AppUseCase {
         &self,
         title_id: &str,
         download_ids: Vec<scryer_domain::download_identity::DownloadId>,
+        forgotten_download_ids: Vec<scryer_domain::download_identity::DownloadId>,
     ) -> AppResult<()> {
         // A pending password retry goes with the title instead of fencing it.
         self.services
@@ -2141,15 +2206,15 @@ impl AppUseCase {
         self.services
             .workflow
             .download_submissions
-            .abandon_title_download_cleanup(&download_ids)
+            .abandon_title_download_cleanup(&forgotten_download_ids)
             .await?;
         self.services
             .workflow
             .download_submissions
-            .delete_identity_tracked_states_for_downloads(&download_ids)
+            .delete_identity_tracked_states_for_downloads(&forgotten_download_ids)
             .await?;
         if let Some(handle) = self.runtime.acquisition.tracked_download_handle.as_ref() {
-            handle.forget_many(vec![title_id.to_owned()], download_ids);
+            handle.forget_many(vec![title_id.to_owned()], forgotten_download_ids);
         }
         Ok(())
     }
@@ -2157,13 +2222,11 @@ impl AppUseCase {
     /// Forget a deleted title's downloads, the way Sonarr drops a series'
     /// history when the series is deleted.
     ///
-    /// Deleting a title ends every binding its submissions held (one fenced by
-    /// a pending password retry included, with its retry state), removes the
-    /// terminal tracked-state markers recorded against those downloads, and
-    /// drops their rows from the tracked-download cache. Without this a later
-    /// grab of the same client item (the same torrent re-added for a new
-    /// title) resolved onto the dead download and read back its terminal
-    /// outcome. Only database rows and in-memory state change here.
+    /// Deletion clears title-bound state and forgets cached rows for all
+    /// submissions. Ordinary active downloads remain bound and are adopted as
+    /// unmatched. Password-retry-fenced downloads retire with their retry
+    /// state, preventing a later grab of the same client item from reading
+    /// back a stale terminal outcome.
     ///
     /// The deleted title's seeding downloads (and completed ones held for
     /// removal) are no longer cleaned up by Scryer: they stay in the client,
@@ -2171,13 +2234,12 @@ impl AppUseCase {
     /// rather than left to fail the identity check against an ended binding
     /// until they are abandoned. Nothing is sent to the client.
     ///
-    /// Runs after the cancellations are queued: a queued cancel names the
-    /// client item, not the binding, so it still reaches the client. Each
-    /// step logs and continues, matching the rest of the title cleanup.
+    /// Each step logs and continues, matching the rest of title cleanup.
     async fn retire_title_downloads(
         &self,
         title_id: &str,
         download_ids: Vec<scryer_domain::download_identity::DownloadId>,
+        forgotten_download_ids: Vec<scryer_domain::download_identity::DownloadId>,
     ) {
         for download_id in &download_ids {
             if let Err(err) = self
@@ -2205,7 +2267,7 @@ impl AppUseCase {
             .services
             .workflow
             .download_submissions
-            .delete_identity_tracked_states_for_downloads(&download_ids)
+            .delete_identity_tracked_states_for_downloads(&forgotten_download_ids)
             .await
         {
             warn!(
@@ -2217,7 +2279,7 @@ impl AppUseCase {
 
         if let Some(handle) = self.runtime.acquisition.tracked_download_handle.as_ref() {
             match handle
-                .forget_for_title(title_id.to_string(), download_ids)
+                .forget_for_title(title_id.to_string(), forgotten_download_ids)
                 .await
             {
                 Ok(removed) => debug!(
