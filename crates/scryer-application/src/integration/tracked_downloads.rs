@@ -316,14 +316,6 @@ impl TrackedDownload {
         self.status_messages = vec![message.into()];
     }
 
-    pub(crate) fn block_no_video_import_after_retries(&mut self, message: impl Into<String>) {
-        self.no_video_import_retry = None;
-        self.state = TrackedDownloadState::ImportBlocked;
-        self.waiting_for_completed_history = false;
-        self.status = TrackedDownloadStatus::Warning;
-        self.status_messages = vec![message.into()];
-    }
-
     pub(crate) fn clear_no_video_import_retry(&mut self) {
         self.no_video_import_retry = None;
     }

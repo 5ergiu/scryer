@@ -23,8 +23,13 @@ pub(super) fn evaluate_completed_download_path(
         !completed.dest_dir.trim().is_empty() && Path::new(&completed.dest_dir).exists();
 
     if path_available {
-        td.path_missing_since = None;
-        clear_path_warnings(td);
+        if td.path_missing_since.take().is_some() {
+            td.clear_import_execution_retry();
+            td.status_messages.clear();
+            if td.status == TrackedDownloadStatus::Warning {
+                td.status = TrackedDownloadStatus::Ok;
+            }
+        }
         return CompletedDownloadPathState::Ready;
     }
 
@@ -38,7 +43,11 @@ pub(super) fn evaluate_completed_download_path(
 
     td.status = TrackedDownloadStatus::Warning;
     td.status_messages = vec![missing_completed_download_path_message(completed)];
-    CompletedDownloadPathState::Blocked
+    td.import_execution_retry = Some(crate::tracked_downloads::ImportExecutionRetryState {
+        attempts: 1,
+        next_retry_at: now + Duration::minutes(5),
+    });
+    CompletedDownloadPathState::Retry
 }
 
 fn missing_completed_download_path_message(completed: &CompletedDownload) -> String {
@@ -52,16 +61,4 @@ fn missing_completed_download_path_message(completed: &CompletedDownload) -> Str
 fn completed_download_path_is_unsupported_url(dest_dir: &str) -> bool {
     let normalized = dest_dir.trim().to_ascii_lowercase();
     normalized.contains("://") || normalized.starts_with("webdav:")
-}
-
-fn clear_path_warnings(td: &mut TrackedDownload) {
-    td.status_messages.retain(|message| {
-        message != PATH_WAITING_MESSAGE
-            && message != PATH_BLOCKED_MESSAGE
-            && message != PATH_BLOCKED_NZBDAV_SYMLINK_MESSAGE
-            && message != PATH_URL_UNSUPPORTED_MESSAGE
-    });
-    if td.status_messages.is_empty() && td.status == TrackedDownloadStatus::Warning {
-        td.status = TrackedDownloadStatus::Ok;
-    }
 }
