@@ -24,9 +24,9 @@ use scryer_application::{
     SEARCH_STRATEGY_CONVERGED, SEARCH_STRATEGY_OPEN, SchedulerAdmission, SchedulerBatchRequest,
     SchedulerCandidate, SchedulerCandidateId, SchedulerFeedback, SchedulerFeedbackOutcome,
     SchedulerIntent, SchedulerLease, SchedulerOperation, SchedulerPluginKind, SchedulerSnapshot,
-    SchedulerSnapshotFilter, SearchLearningContext, SearchMode, UpstreamScheduler,
-    blake3_identity_hex, escalation_backoff::indexer_backoff_ladder, indexer_search_eligibility,
-    indexer_search_identity, rss_poll_is_due,
+    SchedulerSnapshotEntry, SchedulerSnapshotFilter, SearchLearningContext, SearchMode,
+    UpstreamScheduler, blake3_identity_hex, escalation_backoff::indexer_backoff_ladder,
+    indexer_search_eligibility, indexer_search_identity, rss_poll_is_due,
 };
 use scryer_domain::{
     IndexerCapsSearchNode, IndexerCapsSnapshot, IndexerConfig, IndexerProviderCapabilities,
@@ -404,6 +404,7 @@ fn prepare_search_strategies(
         let request = IndexerSearchStrategyRequest {
             page_cursor: None,
             page_budget: None,
+            result_limit: None,
             strategy_id: strategy_id.clone(),
             labels: vec![strategy.label.clone()],
             query: strategy.request_query,
@@ -975,10 +976,12 @@ impl SearchDiagnosticsContext {
             })
             .flatten();
         let (completion_state, incomplete_reason, retry_after) = match response.completion {
-            // A replay leaves out the password-hinted results (see
+            // A replay leaves out the results it cannot rebuild (see
             // `candidate_reusable_until`), so it would not be the whole
             // answer; recording the run as partial has it asked live again.
-            IndexerSearchCompletion::Complete if response.results.iter().any(has_password_hint) => {
+            IndexerSearchCompletion::Complete
+                if response.results.iter().any(replay_cannot_rebuild) =>
+            {
                 ("received_partial", None, None)
             }
             IndexerSearchCompletion::Complete => ("received_complete", None, None),
@@ -1315,22 +1318,25 @@ fn candidate_extra_bool(candidate: &IndexerSearchResult, key: &str) -> Option<bo
 }
 
 /// Until when a stored candidate may stand in for a live search. The stored
-/// row does not keep a result's password hint, so a replay would hand back
-/// the release without it; such a result is stored already past reuse and is
-/// only ever taken from a live search.
+/// row keeps neither a result's password hint nor its HTTP release
+/// description, so a replay would hand back the release without them; such a
+/// result is stored already past reuse and is only ever taken from a live
+/// search.
 fn candidate_reusable_until(candidate: &IndexerSearchResult, now: DateTime<Utc>) -> DateTime<Utc> {
-    if has_password_hint(candidate) {
+    if replay_cannot_rebuild(candidate) {
         now - Duration::seconds(1)
     } else {
         now + Duration::hours(SEARCH_CANDIDATE_REUSE_HOURS)
     }
 }
 
-fn has_password_hint(candidate: &IndexerSearchResult) -> bool {
-    candidate
-        .password_hint
-        .as_deref()
-        .is_some_and(|hint| !hint.is_empty())
+/// Whether a stored row would lose something the live result carried.
+fn replay_cannot_rebuild(candidate: &IndexerSearchResult) -> bool {
+    candidate.http.is_some()
+        || candidate
+            .password_hint
+            .as_deref()
+            .is_some_and(|hint| !hint.is_empty())
 }
 
 fn normalized_candidate(
@@ -1444,6 +1450,7 @@ fn reusable_candidate_from_record(
     }
 
     Some(IndexerSearchResult {
+        http: None,
         indexer_id: Some(config.id.clone()),
         source: if normalized.source.trim().is_empty() {
             config.name.clone()
@@ -1713,13 +1720,42 @@ const INTERACTIVE_INDEXER_SEARCH_CONCURRENCY_LIMIT: usize = 24;
 const DEFAULT_RSS_INDEXER_POLL_CONCURRENCY: usize = 2;
 /// Overrides [`DEFAULT_RSS_INDEXER_POLL_CONCURRENCY`].
 pub const RSS_INDEXER_POLL_CONCURRENCY_ENV: &str = "SCRYER_RSS_INDEXER_CONCURRENCY";
-/// Provider pages one RSS poll may hand on; its item cap is counted in pages
-/// of [`RSS_POLL_ITEMS_PER_PAGE`]. Five pages of a hundred is the window the
-/// RSS seen-GUID set keeps per indexer.
-const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 5;
+/// How many indexers one RSS tick polls at most, whatever the concurrency.
+/// Indexers due beyond it stay due and go first on the next tick, most
+/// overdue first, so an install with dozens of indexers spreads them over
+/// several ticks instead of hitting every one of them at once.
+const DEFAULT_RSS_TICK_INDEXER_LIMIT: usize = 10;
+/// Overrides [`DEFAULT_RSS_TICK_INDEXER_LIMIT`].
+pub const RSS_TICK_INDEXER_LIMIT_ENV: &str = "SCRYER_RSS_TICK_INDEXER_LIMIT";
+/// Provider pages one RSS poll asks for; its item cap, sent to the plugin as
+/// the request's result limit, is counted in pages of
+/// [`RSS_POLL_ITEMS_PER_PAGE`]. Ten pages of a hundred is Sonarr's
+/// per-indexer RSS ceiling (`MaxNumResultsPerQuery`), now that one poll
+/// carries every category an indexer is routed, and it is the window the RSS
+/// seen-GUID set keeps per indexer.
+const DEFAULT_RSS_POLL_PAGE_BUDGET: u32 = 10;
 /// Overrides [`DEFAULT_RSS_POLL_PAGE_BUDGET`].
 pub const RSS_POLL_PAGE_BUDGET_ENV: &str = "SCRYER_RSS_POLL_PAGE_BUDGET";
 const RSS_POLL_ITEMS_PER_PAGE: usize = 100;
+/// The most results the host keeps from one RSS poll: the plugin's own
+/// 30-page ceiling of a hundred. It is deliberately larger than the request
+/// limit. Following Sonarr, a plugin keeps paging past that limit while every
+/// release it has read is under a day old, so a busy feed can legitimately
+/// return more than it was asked for and those releases must reach scoring.
+/// This is only the safety net for a plugin that ignores the limit outright;
+/// a poll cut here before it reached the previous poll's marker logs the
+/// window it did not cover.
+const RSS_POLL_PLUGIN_CEILING_RESULTS: usize = 30 * RSS_POLL_ITEMS_PER_PAGE;
+/// The scheduler key every RSS poll of an indexer records its cadence and
+/// catch-up marker under. One per indexer, whatever categories it carries.
+const RSS_INDEXER_REQUEST_KEY: &str = "rss:*";
+
+/// A scheduler key an indexer's RSS feed was recorded under when it was polled
+/// once per category (`rss:<categories>`). Read only to carry those feeds'
+/// markers over to the merged poll.
+fn is_legacy_rss_request_key(key: Option<&str>) -> bool {
+    key.is_some_and(|key| key.starts_with("rss:") && key != RSS_INDEXER_REQUEST_KEY)
+}
 
 /// Absent, blank, unparseable and zero all fall back to the default.
 fn parse_rss_indexer_poll_concurrency(raw: Option<&str>) -> usize {
@@ -1728,6 +1764,19 @@ fn parse_rss_indexer_poll_concurrency(raw: Option<&str>) -> usize {
         .filter(|limit| *limit > 0)
         .unwrap_or(DEFAULT_RSS_INDEXER_POLL_CONCURRENCY)
 }
+
+/// Absent, blank, unparseable and zero all fall back to the default.
+fn parse_rss_tick_indexer_limit(raw: Option<&str>) -> usize {
+    raw.map(str::trim)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_RSS_TICK_INDEXER_LIMIT)
+}
+
+/// The per-tick RSS indexer limit for this process, read once.
+static RSS_TICK_INDEXER_LIMIT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    parse_rss_tick_indexer_limit(std::env::var(RSS_TICK_INDEXER_LIMIT_ENV).ok().as_deref())
+});
 
 /// Absent, blank, unparseable and zero all fall back to the default.
 fn parse_rss_poll_page_budget(raw: Option<&str>) -> u32 {
@@ -1751,18 +1800,40 @@ static RSS_POLL_PAGE_BUDGET: std::sync::LazyLock<u32> = std::sync::LazyLock::new
     parse_rss_poll_page_budget(std::env::var(RSS_POLL_PAGE_BUDGET_ENV).ok().as_deref())
 });
 
-/// The most results one RSS poll hands on: its page budget in provider pages.
+/// The most results one RSS poll asks the plugin for: its page budget in
+/// provider pages.
 fn rss_poll_item_cap(page_budget: u32) -> usize {
     (page_budget as usize).saturating_mul(RSS_POLL_ITEMS_PER_PAGE)
+}
+
+/// The most results one RSS poll hands on: the plugin ceiling, or the item
+/// cap when an operator raised the page budget past it.
+fn rss_poll_safety_cap(item_cap: usize) -> usize {
+    item_cap.max(RSS_POLL_PLUGIN_CEILING_RESULTS)
+}
+
+/// Asks every strategy for at most `limit` results; `None` leaves each
+/// strategy's own limit alone.
+fn with_result_limit(
+    mut strategies: Vec<PreparedSearchStrategy>,
+    limit: Option<usize>,
+) -> Vec<PreparedSearchStrategy> {
+    if limit.is_some() {
+        for strategy in &mut strategies {
+            strategy.request.result_limit = limit;
+        }
+    }
+    strategies
 }
 
 /// Cuts one RSS poll back to `cap` results, keeping the newest by publish
 /// time (an undated result counts as newest, so it is never the one dropped)
 /// and the feed order among those kept. Returns how many were dropped.
 ///
-/// The bundled RSS adapters page a feed's catch-up inside the plugin and do
-/// not take a page budget for a feed read, so this is the host-side bound on
-/// what one poll passes on. A cut poll is reported as stopped at its page
+/// An RSS poll asks the plugin for at most its item cap through the request's
+/// result limit, and a plugin may return more only while the feed is all
+/// recent. `cap` is [`rss_poll_safety_cap`], the safety net for a plugin that
+/// does not honor the limit at all. A cut poll is reported as stopped at its page
 /// ceiling, exactly like a plugin that ran out of pages before the previous
 /// poll's marker, so the poll logs the window it did not cover.
 fn truncate_rss_poll_results(results: &mut Vec<IndexerSearchResult>, cap: usize) -> usize {
@@ -1821,6 +1892,8 @@ enum IndexerSkipReason {
     Backoff,
     /// Not enabled for this search mode (interactive / automatic / RSS).
     ModeDisabled,
+    /// The provider's declared `feed_modes` leave automatic search out.
+    AutoSearchNotDeclared,
     /// Excluded by a per-search indexer restriction.
     SearchRestriction,
     /// Disabled for this scope by the routing config.
@@ -1838,6 +1911,8 @@ enum IndexerSkipReason {
     /// An interactive search found the indexer's next pacing slot further out
     /// than it waits.
     QueryBudgetExceeded,
+    /// A Prowlarr managed child whose caps snapshot has not been fetched yet.
+    ManagedCapsPending,
 }
 
 impl IndexerSkipReason {
@@ -1849,6 +1924,7 @@ impl IndexerSkipReason {
             Self::SystemBackoff => "system_backoff",
             Self::Backoff => "backoff",
             Self::ModeDisabled => "mode_disabled",
+            Self::AutoSearchNotDeclared => "auto_search_not_declared",
             Self::SearchRestriction => "search_restriction",
             Self::RoutingDisabled => "routing_disabled",
             Self::NoRssSupport => "no_rss_support",
@@ -1857,6 +1933,7 @@ impl IndexerSkipReason {
             Self::DeadlineExpired => "deadline_expired",
             Self::StrategiesSuppressed => "strategies_suppressed",
             Self::QueryBudgetExceeded => "query_budget_exceeded",
+            Self::ManagedCapsPending => "managed_caps_pending",
         }
     }
 
@@ -1870,6 +1947,7 @@ impl IndexerSkipReason {
             Self::SystemBackoff => "temporarily disabled (system backoff)",
             Self::Backoff => "temporarily disabled (backoff)",
             Self::ModeDisabled => "disabled for search mode",
+            Self::AutoSearchNotDeclared => "automatic search not declared by provider",
             Self::SearchRestriction => "excluded by per-search restriction",
             Self::RoutingDisabled => "disabled for scope via routing config",
             Self::NoRssSupport => "does not support RSS sync",
@@ -1878,6 +1956,7 @@ impl IndexerSkipReason {
             Self::DeadlineExpired => "candidate deadline expired while queued",
             Self::StrategiesSuppressed => "all automatic search strategies are learned-suppressed",
             Self::QueryBudgetExceeded => "over its query budget for an interactive search",
+            Self::ManagedCapsPending => "managed indexer caps not fetched yet",
         }
     }
 }
@@ -1957,6 +2036,23 @@ fn record_indexer_skip(
     .increment(1);
 }
 
+/// Whether a provider's declared `feed_modes` admit automatic search.
+///
+/// A provider that declares no search mode at all (an empty list, or only
+/// `Recent` / `Rss`) predates the vocabulary or is feed-only, and keeps the
+/// behaviour it always had. Only a provider that names a search mode and
+/// leaves `AutomaticSearch` out is opting out of automatic search.
+pub(crate) fn provider_declares_automatic_search(
+    capabilities: &IndexerProviderCapabilities,
+) -> bool {
+    use scryer_domain::IndexerFeedModeCapability as Mode;
+    let declares_search_mode = capabilities
+        .feed_modes
+        .iter()
+        .any(|mode| matches!(mode, Mode::AutomaticSearch | Mode::InteractiveSearch));
+    !declares_search_mode || capabilities.feed_modes.contains(&Mode::AutomaticSearch)
+}
+
 fn log_indexer_skip(
     mode: SearchMode,
     is_rss_request: bool,
@@ -1995,16 +2091,157 @@ fn log_indexer_skip(
     }
 }
 
-fn stable_phase_seconds(key: &str, interval_seconds: u64) -> u64 {
-    if interval_seconds == 0 {
-        return 0;
+/// Where one indexer's RSS polls fall on the sync worker's tick grid.
+///
+/// The worker wakes every tick, but one healthy-quota cadence spans `slots`
+/// ticks (three at the defaults: a 15-minute cadence on a 5-minute tick). Each
+/// indexer owns one of those ticks, so a tick polls roughly a third of the
+/// indexers rather than all of them every third tick. Ticks are numbered from
+/// wall time, so a restart resumes the same pattern instead of starting over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RssTickSlot {
+    tick_secs: i64,
+    slots: i64,
+    slot: i64,
+}
+
+impl RssTickSlot {
+    fn tick_index(&self, at: DateTime<Utc>) -> i64 {
+        at.timestamp().div_euclid(self.tick_secs)
     }
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in key.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+
+    fn tick_start(&self, index: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(index.saturating_mul(self.tick_secs), 0)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC)
     }
-    hash % interval_seconds
+
+    /// Ticks until this indexer's own slot comes round, counting from
+    /// `index`: zero when `index` is its slot.
+    fn ticks_until_slot(&self, index: i64) -> i64 {
+        (self.slot - index).rem_euclid(self.slots)
+    }
+
+    /// The tick at which an indexer last polled at `last_poll_at` is due
+    /// again, given the cadence it has learned.
+    ///
+    /// On the healthy cadence the next poll is the slot tick nearest to one
+    /// cadence after the tick the poll ran on (a tie goes to the later one).
+    /// A poll on its own slot is therefore due exactly a cadence later, and a
+    /// poll off it (held back by the per-tick limit, a never-polled indexer's
+    /// first poll, an escalated poll, a slot moved by an added indexer) is
+    /// pulled back onto the slot within half a cadence either way rather than
+    /// a full extra cycle late or a tick after the last.
+    ///
+    /// A learned cadence longer than the healthy one (quota pressure) only
+    /// ever rounds forward, to the first slot tick at least that far on, so it
+    /// is never shortened. One shorter than a slot cycle cannot be held to the
+    /// slot and runs on its own interval.
+    fn next_due_tick(&self, last_poll_at: DateTime<Utc>, interval: std::time::Duration) -> i64 {
+        let poll_tick = self.tick_index(last_poll_at);
+        let interval_ticks = interval
+            .as_secs()
+            .div_ceil(self.tick_secs as u64)
+            .clamp(1, i64::MAX as u64) as i64;
+        if interval_ticks < self.slots {
+            return poll_tick.saturating_add(interval_ticks);
+        }
+        let target = poll_tick.saturating_add(interval_ticks);
+        let forward = self.ticks_until_slot(target);
+        let backward = (self.slots - forward) % self.slots;
+        if interval_ticks == self.slots && backward > 0 && backward < forward {
+            target - backward
+        } else {
+            target.saturating_add(forward)
+        }
+    }
+}
+
+/// Ticks in one healthy-quota RSS cadence, never fewer than one. A cadence
+/// equal to the tick (the shortened test cadence pulls the tick down with it)
+/// gives one slot: every indexer is a candidate on every tick.
+fn rss_slot_count(target_interval: std::time::Duration, tick: std::time::Duration) -> i64 {
+    let tick_secs = tick.as_secs().max(1);
+    (target_interval.as_secs().max(1).div_ceil(tick_secs) as i64).max(1)
+}
+
+/// Spreads indexers over the slots: sorted by id, the n-th takes slot
+/// `n % slots`, so slot sizes differ by at most one. Ids never change, so an
+/// indexer keeps its slot until an indexer is added or removed ahead of it in
+/// that order; one that moves then has a single gap of two to four ticks while
+/// it settles onto the new slot.
+fn rss_tick_slots_for<'a>(
+    indexer_ids: impl IntoIterator<Item = &'a str>,
+    tick: std::time::Duration,
+    target_interval: std::time::Duration,
+) -> HashMap<String, RssTickSlot> {
+    let slots = rss_slot_count(target_interval, tick);
+    let tick_secs = (tick.as_secs().max(1)).min(i64::MAX as u64) as i64;
+    let mut ids = indexer_ids.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.to_string(),
+                RssTickSlot {
+                    tick_secs,
+                    slots,
+                    slot: index as i64 % slots,
+                },
+            )
+        })
+        .collect()
+}
+
+/// An indexer due on this tick, as the per-tick limit ranks it.
+struct RssTickDueIndexer {
+    indexer_id: String,
+    last_successful_poll_at: Option<DateTime<Utc>>,
+    /// When the slot rule made it due (its `latest_safe_poll_at`).
+    due_since: DateTime<Utc>,
+    slot: RssTickSlot,
+}
+
+/// Splits the indexers due on the tick at `now` into those polled now and
+/// those left due for the next tick.
+///
+/// Most overdue first: never polled before anything, then the oldest last
+/// successful poll, then the longest due, so one held back by the last tick
+/// goes ahead of one whose slot is this tick. Remaining ties go to the
+/// indexer whose own slot is nearest, so a first pass over never-polled
+/// indexers polls each on its own slot, then by id so the split is
+/// reproducible.
+fn rss_tick_poll_selection(
+    mut due: Vec<RssTickDueIndexer>,
+    now: DateTime<Utc>,
+    limit: usize,
+) -> (Vec<String>, Vec<String>) {
+    due.sort_by(|left, right| {
+        left.last_successful_poll_at
+            .is_some()
+            .cmp(&right.last_successful_poll_at.is_some())
+            .then_with(|| {
+                left.last_successful_poll_at
+                    .cmp(&right.last_successful_poll_at)
+            })
+            .then_with(|| left.due_since.cmp(&right.due_since))
+            .then_with(|| {
+                left.slot
+                    .ticks_until_slot(left.slot.tick_index(now))
+                    .cmp(&right.slot.ticks_until_slot(right.slot.tick_index(now)))
+            })
+            .then_with(|| left.indexer_id.cmp(&right.indexer_id))
+    });
+    let deferred = due
+        .split_off(limit.min(due.len()))
+        .into_iter()
+        .map(|entry| entry.indexer_id)
+        .collect();
+    (
+        due.into_iter().map(|entry| entry.indexer_id).collect(),
+        deferred,
+    )
 }
 
 fn should_run_fallback_tier(
@@ -3441,6 +3678,8 @@ pub struct MultiIndexerSearchClient {
     rss_hand_off: Arc<Semaphore>,
     /// Provider pages one RSS poll may hand on.
     rss_poll_page_budget: u32,
+    /// The most indexers one RSS tick polls.
+    rss_tick_indexer_limit: usize,
 }
 
 impl MultiIndexerSearchClient {
@@ -3473,6 +3712,7 @@ impl MultiIndexerSearchClient {
             rss_search_limit: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
             rss_hand_off: Arc::new(Semaphore::new(*RSS_INDEXER_POLL_CONCURRENCY)),
             rss_poll_page_budget: *RSS_POLL_PAGE_BUDGET,
+            rss_tick_indexer_limit: *RSS_TICK_INDEXER_LIMIT,
         }
     }
 
@@ -3574,15 +3814,69 @@ impl MultiIndexerSearchClient {
         let Some(snapshot) = snapshot else {
             return SchedulerRssActivity::default();
         };
-        snapshot
+        let same_feed_owner = |entry: &&SchedulerSnapshotEntry| {
+            &entry.host_key == host_key
+                && &entry.destination_key == destination_key
+                && entry.account_quota_key.as_ref() == account_quota_key
+        };
+        let exact = snapshot
             .entries
             .iter()
-            .filter(|entry| {
-                &entry.host_key == host_key
-                    && &entry.destination_key == destination_key
-                    && entry.account_quota_key.as_ref() == account_quota_key
-                    && entry.rss_request_key.as_deref() == rss_request_key
-            })
+            .filter(same_feed_owner)
+            .filter(|entry| entry.rss_request_key.as_deref() == rss_request_key)
+            .collect::<Vec<_>>();
+        if !exact.is_empty() || rss_request_key != Some(RSS_INDEXER_REQUEST_KEY) {
+            return Self::fold_rss_activity(exact);
+        }
+        // The indexer's first merged poll: it has only the cadence and markers
+        // its earlier one-poll-per-category feeds left. Catch-up resumes from
+        // the OLDEST of those markers. Starting from the newest would skip,
+        // for good, every release another category published between its own
+        // marker and the newest one: those GUIDs were never seen, and the
+        // merged marker moves past them. Starting from the oldest costs at most
+        // one re-walk of that span, bounded by the per-poll result cap and
+        // reported by the gap warning; releases already grabbed are
+        // deduplicated downstream. Ordered by key so ties, and the fields the
+        // fold takes from the first entry, are reproducible.
+        let mut legacy = snapshot
+            .entries
+            .iter()
+            .filter(same_feed_owner)
+            .filter(|entry| is_legacy_rss_request_key(entry.rss_request_key.as_deref()))
+            .collect::<Vec<_>>();
+        legacy.sort_by(|left, right| left.rss_request_key.cmp(&right.rss_request_key));
+        let oldest_marker = legacy
+            .iter()
+            .filter(|entry| entry.rss_last_seen_release_published_at.is_some())
+            .fold(
+                None::<&&SchedulerSnapshotEntry>,
+                |oldest, entry| match oldest {
+                    Some(oldest)
+                        if oldest.rss_last_seen_release_published_at
+                            <= entry.rss_last_seen_release_published_at =>
+                    {
+                        Some(oldest)
+                    }
+                    _ => Some(entry),
+                },
+            )
+            .map(|entry| {
+                (
+                    entry.rss_last_seen_release_identity.clone(),
+                    entry.rss_last_seen_release_published_at,
+                )
+            });
+        let mut activity = Self::fold_rss_activity(legacy);
+        if let Some((identity, published_at)) = oldest_marker {
+            activity.last_seen_release_identity = identity;
+            activity.last_seen_release_published_at = published_at;
+        }
+        activity
+    }
+
+    fn fold_rss_activity(entries: Vec<&SchedulerSnapshotEntry>) -> SchedulerRssActivity {
+        entries
+            .into_iter()
             .fold(SchedulerRssActivity::default(), |activity, entry| {
                 // The marker comes from the entry holding the newest release, so
                 // identity and publish time always describe the same release.
@@ -3627,14 +3921,33 @@ impl MultiIndexerSearchClient {
             })
     }
 
+    /// The indexer's RSS freshness on the tick at `now`, with `latest_safe_poll_at`
+    /// placed on its tick slot.
+    ///
+    /// The slot decides when an indexer becomes due after a poll: the start of
+    /// its slot tick about one learned cadence after the poll (see
+    /// [`RssTickSlot::next_due_tick`] for the rounding). Once due it stays
+    /// due on every later tick until it is polled, so one held back by the
+    /// per-tick limit, or by downtime, is not made to wait another cycle. A
+    /// never-polled indexer is due on the tick it is first seen.
+    ///
+    /// The slot governs only that default timing. A learned cadence longer than
+    /// the healthy one still pushes the next poll later, onto a later slot
+    /// tick; one shorter than a slot cycle still runs on its own interval.
+    /// Freshness escalation (`rss_poll_is_due`'s risk test) still polls an
+    /// indexer off its slot; the poll after it is pulled back onto the slot.
+    ///
+    /// The boundary the scheduler persisted after the last poll is not read:
+    /// it is that poll's finishing time plus the learned cadence, which is what
+    /// the slot rule derives from the same two values without the drift a
+    /// finishing time carries.
     fn rss_freshness_context(
-        config: &IndexerConfig,
         now: DateTime<Utc>,
         activity: SchedulerRssActivity,
+        slot: RssTickSlot,
     ) -> RssFreshnessContext {
-        // The first poll of an indexer has no persisted cadence entry yet, so
-        // the phased window, the safe-poll time and the freshness risk are all
-        // derived from this interval. It has to honour
+        // An indexer with no persisted cadence yet derives its cadence and its
+        // freshness risk from this interval. It has to honour
         // `SCRYER_RSS_TARGET_INTERVAL_SECS` too, or the override would not take
         // effect until after a full default-length window had already elapsed.
         let rss_target_interval_secs = crate::upstream_scheduler::rss_target_interval()
@@ -3642,36 +3955,27 @@ impl MultiIndexerSearchClient {
             .clamp(1, i64::MAX as u64) as i64;
         let last_successful_poll_at = activity.last_successful_poll_at;
         let last_attempt_at = activity.last_attempt_at;
-        let phase = stable_phase_seconds(&config.id, rss_target_interval_secs as u64) as i64;
-        let timestamp = now.timestamp();
-        let window_start = timestamp - timestamp.rem_euclid(rss_target_interval_secs);
-        let phased_safe_poll_at =
-            DateTime::<Utc>::from_timestamp(window_start + phase, 0).unwrap_or(now);
         let target_interval = activity
             .target_interval
-            .and_then(|duration| chrono::Duration::from_std(duration).ok())
-            .unwrap_or_else(|| Duration::seconds(rss_target_interval_secs));
-        let latest_safe_poll_at = [
-            last_successful_poll_at.map(|last_activity| last_activity + target_interval),
-            last_attempt_at.map(|last_activity| last_activity + target_interval),
-            activity.latest_safe_poll_at,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(phased_safe_poll_at);
+            .unwrap_or_else(|| std::time::Duration::from_secs(rss_target_interval_secs as u64));
+        let latest_safe_poll_at = match last_successful_poll_at.max(last_attempt_at) {
+            Some(last_poll_at) => {
+                slot.tick_start(slot.next_due_tick(last_poll_at, target_interval))
+            }
+            None => slot.tick_start(slot.tick_index(now)),
+        };
+        let elapsed_fraction = |since: DateTime<Utc>| {
+            let elapsed = (now - since).num_seconds().max(0) as f64;
+            (elapsed / rss_target_interval_secs as f64).clamp(0.0, 1.0)
+        };
         let freshness_risk = activity.freshness_risk.unwrap_or_else(|| {
             last_successful_poll_at
-                .map(|last_activity| {
-                    let elapsed = (now - last_activity).num_seconds().max(0) as f64;
-                    (elapsed / rss_target_interval_secs as f64).clamp(0.0, 1.0)
-                })
+                .map(elapsed_fraction)
                 .unwrap_or_else(|| {
                     if now >= latest_safe_poll_at {
                         1.0
                     } else {
-                        let elapsed = timestamp - window_start;
-                        (elapsed as f64 / rss_target_interval_secs as f64).clamp(0.0, 1.0)
+                        last_attempt_at.map(elapsed_fraction).unwrap_or(1.0)
                     }
                 })
         });
@@ -3679,9 +3983,7 @@ impl MultiIndexerSearchClient {
         RssFreshnessContext {
             last_successful_poll_at,
             last_attempt_at,
-            target_interval: activity
-                .target_interval
-                .unwrap_or_else(|| std::time::Duration::from_secs(rss_target_interval_secs as u64)),
+            target_interval,
             latest_safe_poll_at,
             estimated_feed_depth: activity.estimated_feed_depth,
             freshness_risk,
@@ -3691,6 +3993,194 @@ impl MultiIndexerSearchClient {
                 .or(last_successful_poll_at),
             account_quota_budget: None,
         }
+    }
+
+    /// Whether an indexer holds an RSS tick slot: enabled, taking part in
+    /// automatic work, and able to serve a feed. Deliberately blind to
+    /// transient state (backoff, a temporary disable), so slots only move when
+    /// an indexer is added, removed, enabled or disabled.
+    fn is_rss_slot_member(&self, config: &IndexerConfig) -> bool {
+        if !config.is_enabled || !Self::auto_mode_enabled(config, true) {
+            return false;
+        }
+        let static_caps = self
+            .plugin_provider
+            .capabilities_for_provider(&config.provider_type);
+        Self::resolve_search_capabilities(config, &static_caps, "series", "series")
+            .caps
+            .rss
+    }
+
+    /// Every slot-holding indexer's tick slot, on this process's tick and
+    /// cadence.
+    fn rss_tick_slots(&self, configs: &[IndexerConfig]) -> HashMap<String, RssTickSlot> {
+        rss_tick_slots_for(
+            configs
+                .iter()
+                .filter(|config| self.is_rss_slot_member(config))
+                .map(|config| config.id.as_str()),
+            scryer_application::rss_sync_tick_period(),
+            crate::upstream_scheduler::rss_target_interval(),
+        )
+    }
+
+    /// The slot for an indexer [`Self::rss_tick_slots`] did not place, so it
+    /// is never left without a cadence: the first slot.
+    fn rss_fallback_tick_slot(slots: &HashMap<String, RssTickSlot>) -> RssTickSlot {
+        slots
+            .values()
+            .next()
+            .map(|slot| RssTickSlot { slot: 0, ..*slot })
+            .unwrap_or_else(|| {
+                let tick = scryer_application::rss_sync_tick_period();
+                RssTickSlot {
+                    tick_secs: (tick.as_secs().max(1)).min(i64::MAX as u64) as i64,
+                    slots: rss_slot_count(crate::upstream_scheduler::rss_target_interval(), tick),
+                    slot: 0,
+                }
+            })
+    }
+
+    /// The due-check on the tick at `now`, by the same slot rule the RSS
+    /// candidates are admitted on. Due here means due on the slot rule, not
+    /// that this tick will poll it: the per-tick limit may hold it to the next.
+    async fn rss_due_indexers_at(&self, now: DateTime<Utc>) -> AppResult<RssDueIndexers> {
+        let configs = self.indexer_configs.list(None).await?;
+        let slots = self.rss_tick_slots(&configs);
+        let candidates = configs
+            .iter()
+            .filter(|config| config.disabled_until.is_none_or(|until| until <= now))
+            .filter(|config| slots.contains_key(&config.id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(RssDueIndexers::unknown());
+        }
+
+        let snapshot = self
+            .upstream_scheduler
+            .snapshot(SchedulerSnapshotFilter::default())
+            .await?;
+        let mut due = Vec::new();
+        let mut deferred = Vec::new();
+        for config in candidates {
+            let (_, destination_key) = Self::scheduler_keys_for_indexer(config);
+            let rss_entries = snapshot
+                .entries
+                .iter()
+                .filter(|entry| entry.destination_key == destination_key)
+                .filter(|entry| entry.rss_request_key.is_some())
+                .collect::<Vec<_>>();
+            // Once the indexer has a merged RSS cadence, the per-category
+            // cadences it polled under before are history: they never advance
+            // again and would otherwise read as due forever.
+            let has_merged_rss_cadence = rss_entries
+                .iter()
+                .any(|entry| entry.rss_request_key.as_deref() == Some(RSS_INDEXER_REQUEST_KEY));
+            let activity = Self::fold_rss_activity(
+                rss_entries
+                    .into_iter()
+                    .filter(|entry| {
+                        !(has_merged_rss_cadence
+                            && is_legacy_rss_request_key(entry.rss_request_key.as_deref()))
+                    })
+                    .collect(),
+            );
+            // No cadence at all means never polled, which the slot rule makes
+            // due on the tick it is first seen.
+            let freshness = Self::rss_freshness_context(now, activity, slots[&config.id]);
+            if rss_poll_is_due(
+                Some(freshness.latest_safe_poll_at),
+                Some(freshness.freshness_risk),
+                now,
+            ) {
+                due.push(config.id.clone());
+            } else {
+                deferred.push(config.id.clone());
+            }
+        }
+        Ok(RssDueIndexers { due, deferred })
+    }
+
+    /// Holds back the RSS candidates due on this tick beyond the per-tick
+    /// limit, most overdue polled first (see [`rss_tick_poll_selection`]).
+    ///
+    /// A held candidate never reaches the scheduler, so nothing about its
+    /// cadence is recorded: it stays due and competes again on the next tick,
+    /// where its older last poll ranks it ahead of that tick's own slot.
+    /// Candidates the slot rule does not make due are left for the scheduler
+    /// to defer as before. Returns a `Deferred` outcome per held indexer.
+    fn hold_rss_indexers_over_tick_limit(
+        &self,
+        candidates: &mut Vec<SchedulerCandidate>,
+        eligible: &mut Vec<SchedulerEligibleIndexer<'_>>,
+        slots: &HashMap<String, RssTickSlot>,
+        now: DateTime<Utc>,
+    ) -> Vec<IndexerQueryOutcome> {
+        let due = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let freshness = candidate.freshness.as_ref()?;
+                if !rss_poll_is_due(
+                    Some(freshness.latest_safe_poll_at),
+                    Some(freshness.freshness_risk),
+                    now,
+                ) {
+                    return None;
+                }
+                let indexer_id = candidate.plugin_config_id.clone()?;
+                let slot = slots
+                    .get(&indexer_id)
+                    .copied()
+                    .unwrap_or_else(|| Self::rss_fallback_tick_slot(slots));
+                Some(RssTickDueIndexer {
+                    indexer_id,
+                    last_successful_poll_at: freshness.last_successful_poll_at,
+                    due_since: freshness.latest_safe_poll_at,
+                    slot,
+                })
+            })
+            .collect::<Vec<_>>();
+        let due_count = due.len();
+        let (polled, held) = rss_tick_poll_selection(due, now, self.rss_tick_indexer_limit);
+        debug!(
+            due = due_count,
+            polled = polled.len(),
+            deferred = held.len(),
+            limit = self.rss_tick_indexer_limit,
+            "RSS tick indexer selection"
+        );
+        if held.is_empty() {
+            return Vec::new();
+        }
+
+        let held = held.into_iter().collect::<HashSet<_>>();
+        let is_held = |candidate: &SchedulerCandidate| {
+            candidate
+                .plugin_config_id
+                .as_ref()
+                .is_some_and(|id| held.contains(id))
+        };
+        let held_candidate_ids = candidates
+            .iter()
+            .filter(|candidate| is_held(candidate))
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect::<HashSet<_>>();
+        candidates.retain(|candidate| !is_held(candidate));
+        eligible.retain(|dispatch| !held_candidate_ids.contains(&dispatch.candidate_id));
+
+        let retry_after = slots.values().next().and_then(|slot| {
+            (slot.tick_start(slot.tick_index(now).saturating_add(1)) - now)
+                .to_std()
+                .ok()
+        });
+        let mut held = held.into_iter().collect::<Vec<_>>();
+        held.sort_unstable();
+        held.into_iter()
+            .map(|indexer_id| IndexerQueryOutcome {
+                indexer_id,
+                outcome: IndexerSearchOutcome::Deferred { retry_after },
+            })
+            .collect()
     }
 
     async fn record_indexer_scheduler_feedback(
@@ -4177,29 +4667,22 @@ impl MultiIndexerSearchClient {
         })
     }
 
-    fn split_rss_category_requests(categories: Option<Vec<String>>) -> Vec<Option<Vec<String>>> {
-        let mut normalized: Vec<String> = categories
-            .unwrap_or_default()
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect();
-        normalized.sort();
-        normalized.dedup();
-
-        if normalized.is_empty() {
-            vec![None]
-        } else if normalized.len() == 1 {
-            vec![Some(normalized)]
-        } else {
-            normalized
-                .into_iter()
-                .map(|value| Some(vec![value]))
-                .collect()
-        }
+    /// The one category list an indexer's RSS poll asks for: every routed
+    /// category, trimmed, sorted and deduplicated, or `None` when nothing is
+    /// routed.
+    ///
+    /// Sonarr reads one feed per indexer with every configured category in a
+    /// single comma-separated `cat=` parameter, and every bundled indexer
+    /// adapter takes the whole list in one request (the *nab family joins it
+    /// into `cat=`; the others map the list onto their own category scheme).
+    /// One poll per category multiplied an indexer's requests by its category
+    /// count, and each of those polls paged back to its own marker.
+    fn merged_rss_category_request(categories: Option<Vec<String>>) -> Option<Vec<String>> {
+        let normalized = Self::normalized_rss_categories(categories.as_deref());
+        (!normalized.is_empty()).then_some(normalized)
     }
 
-    fn rss_request_key(categories: Option<&[String]>) -> String {
+    fn normalized_rss_categories(categories: Option<&[String]>) -> Vec<String> {
         let mut normalized: Vec<String> = categories
             .unwrap_or_default()
             .iter()
@@ -4208,15 +4691,22 @@ impl MultiIndexerSearchClient {
             .collect();
         normalized.sort();
         normalized.dedup();
+        normalized
+    }
+
+    /// The feed-cache key part for one category set. Only the RSS-only feed
+    /// cache uses it, where a non-RSS caller may still ask for a narrower set.
+    fn rss_category_cache_key(categories: Option<&[String]>) -> String {
+        let normalized = Self::normalized_rss_categories(categories);
         if normalized.is_empty() {
-            "rss:*".to_string()
+            RSS_INDEXER_REQUEST_KEY.to_string()
         } else {
             format!("rss:{}", normalized.join(","))
         }
     }
 
     fn rss_feed_cache_key(indexer_id: &str, categories: Option<&[String]>) -> String {
-        format!("{indexer_id}:{}", Self::rss_request_key(categories))
+        format!("{indexer_id}:{}", Self::rss_category_cache_key(categories))
     }
 
     fn execute_legacy_strategy_tier(
@@ -4921,43 +5411,7 @@ impl IndexerClient for MultiIndexerSearchClient {
     /// polled and is due, which is what makes a freshly added indexer run on
     /// the next tick instead of waiting out someone else's interval.
     async fn rss_due_indexers(&self) -> AppResult<RssDueIndexers> {
-        let configs = self.indexer_configs.list(None).await?;
-        let now = chrono::Utc::now();
-        let candidates = configs
-            .iter()
-            .filter(|config| config.is_enabled)
-            .filter(|config| config.disabled_until.is_none_or(|until| until <= now))
-            .filter(|config| Self::auto_mode_enabled(config, true))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Ok(RssDueIndexers::unknown());
-        }
-
-        let snapshot = self
-            .upstream_scheduler
-            .snapshot(SchedulerSnapshotFilter::default())
-            .await?;
-        let mut due = Vec::new();
-        let mut deferred = Vec::new();
-        for config in candidates {
-            let (_, destination_key) = Self::scheduler_keys_for_indexer(config);
-            let mut entries = snapshot
-                .entries
-                .iter()
-                .filter(|entry| entry.destination_key == destination_key)
-                .peekable();
-            // No cadence for this destination at all: never polled, so due.
-            let is_due = entries.peek().is_none()
-                || entries.any(|entry| {
-                    rss_poll_is_due(entry.rss_latest_safe_poll_at, entry.rss_freshness_risk, now)
-                });
-            if is_due {
-                due.push(config.id.clone());
-            } else {
-                deferred.push(config.id.clone());
-            }
-        }
-        Ok(RssDueIndexers { due, deferred })
+        self.rss_due_indexers_at(chrono::Utc::now()).await
     }
 
     async fn reset_indexer_backoff(&self, indexer_id: &str) {
@@ -5129,9 +5583,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                 SearchMode::Interactive => c.enable_interactive_search,
                 SearchMode::Auto => Self::auto_mode_enabled(c, is_rss_request),
             };
-            if mode_ok {
-                enabled.push((c, had_persisted_system_backoff));
-            } else {
+            if !mode_ok {
                 log_indexer_skip(
                     mode,
                     is_rss_request,
@@ -5139,7 +5591,39 @@ impl IndexerClient for MultiIndexerSearchClient {
                     IndexerSkipReason::ModeDisabled,
                     None,
                 );
+                continue;
             }
+            if matches!(mode, SearchMode::Auto)
+                && !is_rss_request
+                && !provider_declares_automatic_search(
+                    &self
+                        .plugin_provider
+                        .capabilities_for_provider(&c.provider_type),
+                )
+            {
+                log_indexer_skip(
+                    mode,
+                    is_rss_request,
+                    c.name.as_str(),
+                    IndexerSkipReason::AutoSearchNotDeclared,
+                    None,
+                );
+                continue;
+            }
+            // Without caps a managed child would be searched query-only and
+            // miss id searches it supports; leave it out of automatic searches
+            // until its caps arrive. The RSS sweep needs no caps.
+            if matches!(mode, SearchMode::Auto) && !is_rss_request && awaits_managed_caps(c) {
+                log_indexer_skip(
+                    mode,
+                    is_rss_request,
+                    c.name.as_str(),
+                    IndexerSkipReason::ManagedCapsPending,
+                    None,
+                );
+                continue;
+            }
+            enabled.push((c, had_persisted_system_backoff));
         }
 
         if enabled.is_empty() {
@@ -5229,6 +5713,11 @@ impl IndexerClient for MultiIndexerSearchClient {
                 .ok()
         } else {
             None
+        };
+        let rss_tick_slots = if is_rss_request {
+            self.rss_tick_slots(&configs)
+        } else {
+            HashMap::new()
         };
         // Resolve each distinct proxy config once per search pass; both the
         // scheduler deadline calculation and client construction read from
@@ -5428,67 +5917,78 @@ impl IndexerClient for MultiIndexerSearchClient {
                         newznab_categories.clone()
                     }
                 });
-            let category_requests = if is_rss_request {
-                Self::split_rss_category_requests(per_indexer_categories)
+            // An RSS poll is one request chain per indexer carrying every routed
+            // category, and one catch-up marker per indexer.
+            let category_request = if is_rss_request {
+                Self::merged_rss_category_request(per_indexer_categories)
             } else {
-                vec![per_indexer_categories]
+                per_indexer_categories
             };
-            for category_request in category_requests {
-                let scheduler_candidate_id = SchedulerCandidateId::new();
-                let rss_request_key =
-                    is_rss_request.then(|| Self::rss_request_key(category_request.as_deref()));
-                let rss_activity = if is_rss_request {
-                    Self::scheduler_rss_activity(
-                        scheduler_snapshot.as_ref(),
-                        &host_key,
-                        &destination_key,
-                        account_quota_key.as_ref(),
-                        rss_request_key.as_deref(),
-                    )
+            let scheduler_candidate_id = SchedulerCandidateId::new();
+            let rss_request_key = is_rss_request.then(|| RSS_INDEXER_REQUEST_KEY.to_string());
+            let rss_activity = if is_rss_request {
+                Self::scheduler_rss_activity(
+                    scheduler_snapshot.as_ref(),
+                    &host_key,
+                    &destination_key,
+                    account_quota_key.as_ref(),
+                    rss_request_key.as_deref(),
+                )
+            } else {
+                SchedulerRssActivity::default()
+            };
+            scheduler_candidates.push(SchedulerCandidate {
+                candidate_id: scheduler_candidate_id.clone(),
+                plugin_config_id: Some(config.id.clone()),
+                plugin_kind: SchedulerPluginKind::Indexer,
+                operation: if is_rss_request {
+                    SchedulerOperation::Rss
                 } else {
-                    SchedulerRssActivity::default()
-                };
-                scheduler_candidates.push(SchedulerCandidate {
-                    candidate_id: scheduler_candidate_id.clone(),
-                    plugin_config_id: Some(config.id.clone()),
-                    plugin_kind: SchedulerPluginKind::Indexer,
-                    operation: if is_rss_request {
-                        SchedulerOperation::Rss
-                    } else {
-                        SchedulerOperation::Search
-                    },
-                    intent: scheduler_intent,
-                    host_key: host_key.clone(),
-                    destination_key: destination_key.clone(),
-                    account_quota_key: account_quota_key.clone(),
-                    rss_request_key: rss_request_key.clone(),
-                    estimated_cost: EstimatedCost::ONE_API_CALL,
-                    expected_value,
-                    learning_context: scheduler_learning_context.clone(),
-                    deadline_at: None,
-                    freshness: is_rss_request.then(|| {
-                        Self::rss_freshness_context(config, scheduler_now, rss_activity.clone())
-                    }),
-                    cancel_token: cancel_token.child_token(),
-                });
-                scheduler_eligible.push(SchedulerEligibleIndexer {
-                    config,
-                    had_persisted_system_backoff: *had_persisted_system_backoff,
-                    candidate_id: scheduler_candidate_id,
-                    category_request,
-                    rss_request_key,
-                    rss_catch_up: rss_activity.rss_catch_up(),
-                });
-            }
+                    SchedulerOperation::Search
+                },
+                intent: scheduler_intent,
+                host_key: host_key.clone(),
+                destination_key: destination_key.clone(),
+                account_quota_key: account_quota_key.clone(),
+                rss_request_key: rss_request_key.clone(),
+                estimated_cost: EstimatedCost::ONE_API_CALL,
+                expected_value,
+                learning_context: scheduler_learning_context.clone(),
+                deadline_at: None,
+                freshness: is_rss_request.then(|| {
+                    let slot = rss_tick_slots
+                        .get(&config.id)
+                        .copied()
+                        .unwrap_or_else(|| Self::rss_fallback_tick_slot(&rss_tick_slots));
+                    Self::rss_freshness_context(scheduler_now, rss_activity.clone(), slot)
+                }),
+                cancel_token: cancel_token.child_token(),
+            });
+            scheduler_eligible.push(SchedulerEligibleIndexer {
+                config,
+                had_persisted_system_backoff: *had_persisted_system_backoff,
+                candidate_id: scheduler_candidate_id,
+                category_request,
+                rss_request_key,
+                rss_catch_up: rss_activity.rss_catch_up(),
+            });
         }
 
-        let unsupported_outcomes = unsupported_indexer_ids
+        let mut unsupported_outcomes = unsupported_indexer_ids
             .into_iter()
             .map(|indexer_id| IndexerQueryOutcome {
                 indexer_id,
                 outcome: IndexerSearchOutcome::Unsupported,
             })
             .collect::<Vec<_>>();
+        if scheduler_intent == SchedulerIntent::BackgroundRss {
+            unsupported_outcomes.extend(self.hold_rss_indexers_over_tick_limit(
+                &mut scheduler_candidates,
+                &mut scheduler_eligible,
+                &rss_tick_slots,
+                scheduler_now,
+            ));
+        }
         if scheduler_candidates.is_empty() {
             debug!(mode = ?mode, "no scheduler-eligible indexer configs found");
             return Ok(IndexerSearchResponse {
@@ -5949,7 +6449,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                                 let request_cancel_token = task_cancel_token.child_token();
                                 let request_deadline =
                                     effective_request_deadline(search_timeout, deadline_at);
-                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: rss_poll_page_budget,
+                                let rss_strategy = IndexerSearchStrategyRequest { page_cursor: None, page_budget: rss_poll_page_budget, result_limit: rss_poll_item_cap,
                                     strategy_id: String::new(),
                                     labels: Vec::new(),
                                     query,
@@ -6014,7 +6514,7 @@ impl IndexerClient for MultiIndexerSearchClient {
                                         // bounded poll.
                                         let mut completion = response.completion;
                                         if let Some(cap) = rss_poll_item_cap
-                                            && truncate_rss_poll_results(&mut response.results, cap) > 0
+                                            && truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap)) > 0
                                         {
                                             completion = IndexerSearchCompletion::Partial {
                                                 reason: Some(
@@ -6469,9 +6969,9 @@ impl IndexerClient for MultiIndexerSearchClient {
                         cancel_token: task_cancel_token.child_token(),
                         deadline_at,
                     };
-                let primary_strategies = prepare_search_strategies(
-                    &primary_context,
-                    primary_strategies,
+                let primary_strategies = with_result_limit(
+                    prepare_search_strategies(&primary_context, primary_strategies),
+                    rss_poll_item_cap,
                 );
                 let primary_selection = match select_reusable_strategies(
                     primary_strategies,
@@ -6591,7 +7091,7 @@ response.next_cursor.is_some(),
 );
                             let raw_result_count = response.results.len();
                             let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
-                                truncate_rss_poll_results(&mut response.results, cap)
+                                truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap))
                             });
                             if let Some(summary) = rss_summary.as_mut() {
                                 summary.observe(&response.results);
@@ -6846,9 +7346,9 @@ response.next_cursor.is_some(),
                             cancel_token: task_cancel_token.child_token(),
                             deadline_at,
                         };
-                    let fallback_strategies = prepare_search_strategies(
-                        &fallback_context,
-                        fallback_strategies,
+                    let fallback_strategies = with_result_limit(
+                        prepare_search_strategies(&fallback_context, fallback_strategies),
+                        rss_poll_item_cap,
                     );
                     let fallback_selection = match select_reusable_strategies(
                         fallback_strategies,
@@ -6961,7 +7461,7 @@ response.next_cursor.is_some(),
 );
                                 let raw_result_count = response.results.len();
                                 let rss_truncated = rss_poll_item_cap.map_or(0, |cap| {
-                                    truncate_rss_poll_results(&mut response.results, cap)
+                                    truncate_rss_poll_results(&mut response.results, rss_poll_safety_cap(cap))
                                 });
                                 if let Some(summary) = rss_summary.as_mut() {
                                     summary.observe(&response.results);
@@ -8079,6 +8579,11 @@ fn rss_request_form(
     } else {
         RssRequestForm::BareQuery
     }
+}
+
+/// A Prowlarr managed child whose caps have not been fetched yet.
+fn awaits_managed_caps(config: &IndexerConfig) -> bool {
+    config.is_prowlarr_nab_proxy() && stored_caps_snapshot(config).is_none()
 }
 
 fn stored_caps_snapshot(config: &IndexerConfig) -> Option<IndexerCapsSnapshot> {
@@ -9448,7 +9953,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_rss_attempt_defers_until_its_cadence_boundary() {
-        let now = Utc::now();
+        let now = aligned_rss_tick_start(1_800_000_000);
+        let slot = rss_tick_slot_owning(now);
         let scheduler = crate::upstream_scheduler::InMemoryUpstreamScheduler::new();
         let host_key = HostKey::from("failed-rss-cadence.example.test");
         let destination_key = DestinationKey::from(host_key.to_string());
@@ -9538,9 +10044,11 @@ mod tests {
             Some(expected_latest_safe_poll_at)
         );
 
-        let freshness =
-            MultiIndexerSearchClient::rss_freshness_context(&mock_indexer_config(), now, activity);
-        assert_eq!(freshness.latest_safe_poll_at, expected_latest_safe_poll_at);
+        // The failed attempt is credited to this slot tick, so the next poll
+        // waits a whole cadence from the tick, not from the attempt.
+        let slot_due_at = slot.tick_start(slot.next_due_tick(now, target_interval));
+        let freshness = MultiIndexerSearchClient::rss_freshness_context(now, activity, slot);
+        assert_eq!(freshness.latest_safe_poll_at, slot_due_at);
 
         let candidate = |candidate_id| SchedulerCandidate {
             candidate_id,
@@ -9583,7 +10091,7 @@ mod tests {
         let admitted = scheduler
             .admit_batch(SchedulerBatchRequest {
                 batch_id: "failed-rss-boundary".to_string(),
-                now: expected_latest_safe_poll_at,
+                now: slot_due_at,
                 candidates: vec![candidate(SchedulerCandidateId::new())],
             })
             .await
@@ -9667,64 +10175,608 @@ mod tests {
         assert!(!inside_cadence.poll_is_warranted());
     }
 
-    #[test]
-    fn persisted_rss_boundary_is_not_shortened_by_activity_timestamps() {
-        let now = Utc::now();
-        let persisted_latest_safe_poll_at = now + Duration::minutes(30);
-        let freshness = MultiIndexerSearchClient::rss_freshness_context(
-            &mock_indexer_config(),
-            now,
-            SchedulerRssActivity {
-                last_successful_poll_at: Some(now - Duration::minutes(20)),
-                last_attempt_at: Some(now),
-                target_interval: Some(std::time::Duration::from_secs(15 * 60)),
-                latest_safe_poll_at: Some(persisted_latest_safe_poll_at),
-                freshness_risk: Some(0.5),
-                ..SchedulerRssActivity::default()
-            },
+    #[tokio::test]
+    async fn superseded_per_category_cadences_do_not_keep_an_indexer_due() {
+        let config = mock_indexer_config();
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config.clone()],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(MockIndexerPluginProvider {
+                rss: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .with_upstream_scheduler(scheduler.clone());
+        // A per-category cadence from long before the merged poll: due.
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:5000",
+            "legacy-marker",
+            fixed_utc("2026-01-01T00:00:00Z"),
+        )
+        .await;
+        assert_eq!(
+            multi.rss_due_indexers().await.expect("due check").due,
+            vec![config.id.clone()]
         );
 
-        assert_eq!(freshness.latest_safe_poll_at, persisted_latest_safe_poll_at);
+        // The merged poll just ran, so the indexer is inside its cadence.
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "merged-marker",
+            Utc::now() - Duration::minutes(1),
+        )
+        .await;
+        let due = multi.rss_due_indexers().await.expect("due check");
+        assert!(due.due.is_empty());
+        assert_eq!(due.deferred, vec![config.id]);
+    }
+
+    /// The shipped grid: a 15-minute cadence on a 5-minute tick, three slots.
+    /// Spelled out rather than read from the process so an env override on
+    /// the test runner cannot move it.
+    const TEST_RSS_TICK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    const TEST_RSS_CADENCE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+    /// The start of the process tick at or before `timestamp`.
+    fn aligned_rss_tick_start(timestamp: i64) -> DateTime<Utc> {
+        let tick_secs = scryer_application::rss_sync_tick_period().as_secs() as i64;
+        DateTime::<Utc>::from_timestamp(timestamp - timestamp.rem_euclid(tick_secs), 0)
+            .expect("valid timestamp")
+    }
+
+    /// A process-grid slot whose own tick is the one holding `now`.
+    fn rss_tick_slot_owning(now: DateTime<Utc>) -> RssTickSlot {
+        let tick = scryer_application::rss_sync_tick_period();
+        let tick_secs = tick.as_secs() as i64;
+        let slots = rss_slot_count(crate::upstream_scheduler::rss_target_interval(), tick);
+        RssTickSlot {
+            tick_secs,
+            slots,
+            slot: now.timestamp().div_euclid(tick_secs).rem_euclid(slots),
+        }
+    }
+
+    fn test_tick_slot(slot: i64) -> RssTickSlot {
+        RssTickSlot {
+            tick_secs: TEST_RSS_TICK.as_secs() as i64,
+            slots: rss_slot_count(TEST_RSS_CADENCE, TEST_RSS_TICK),
+            slot,
+        }
+    }
+
+    /// The start of test tick `index`; tick 6_000_000 is a slot-0 tick.
+    fn test_tick(index: i64) -> DateTime<Utc> {
+        test_tick_slot(0).tick_start(index)
+    }
+
+    const TEST_FIRST_TICK: i64 = 6_000_000;
+
+    fn polled_activity(
+        polled_at: DateTime<Utc>,
+        cadence: std::time::Duration,
+    ) -> SchedulerRssActivity {
+        SchedulerRssActivity {
+            last_successful_poll_at: Some(polled_at),
+            last_attempt_at: Some(polled_at),
+            target_interval: Some(cadence),
+            freshness_risk: Some(0.0),
+            ..SchedulerRssActivity::default()
+        }
+    }
+
+    fn is_due_on(
+        now: DateTime<Utc>,
+        activity: SchedulerRssActivity,
+        slot: RssTickSlot,
+    ) -> (bool, RssFreshnessContext) {
+        let freshness = MultiIndexerSearchClient::rss_freshness_context(now, activity, slot);
+        (
+            rss_poll_is_due(
+                Some(freshness.latest_safe_poll_at),
+                Some(freshness.freshness_risk),
+                now,
+            ),
+            freshness,
+        )
     }
 
     #[test]
-    fn successful_rss_poll_keeps_the_normal_target_interval() {
-        let now = Utc::now();
-        let target_interval = std::time::Duration::from_secs(15 * 60);
-        let freshness = MultiIndexerSearchClient::rss_freshness_context(
-            &mock_indexer_config(),
-            now,
-            SchedulerRssActivity {
-                last_successful_poll_at: Some(now),
-                last_attempt_at: Some(now),
-                target_interval: Some(target_interval),
-                latest_safe_poll_at: Some(now + Duration::minutes(15)),
-                freshness_risk: Some(0.0),
-                ..SchedulerRssActivity::default()
-            },
-        );
+    fn a_polled_indexer_is_due_again_on_its_next_slot_tick() {
+        let slot = test_tick_slot(0);
+        let polled_at = test_tick(TEST_FIRST_TICK) + Duration::seconds(40);
+        let activity = polled_activity(polled_at, TEST_RSS_CADENCE);
 
-        assert_eq!(freshness.target_interval, target_interval);
-        assert_eq!(freshness.latest_safe_poll_at, now + Duration::minutes(15));
+        let (_, freshness) = is_due_on(polled_at, activity.clone(), slot);
+        assert_eq!(freshness.target_interval, TEST_RSS_CADENCE);
+        // Due at the slot tick a cadence on, not a cadence after the poll
+        // finished, so the 40 seconds never push it to the tick after.
+        assert_eq!(
+            freshness.latest_safe_poll_at,
+            test_tick(TEST_FIRST_TICK + 3)
+        );
+        for tick in 1..3 {
+            assert!(!is_due_on(test_tick(TEST_FIRST_TICK + tick), activity.clone(), slot).0);
+        }
+        assert!(is_due_on(test_tick(TEST_FIRST_TICK + 3), activity.clone(), slot).0);
+        // Still due on any later tick until it is polled.
+        assert!(is_due_on(test_tick(TEST_FIRST_TICK + 4), activity, slot).0);
     }
 
     #[test]
-    fn first_rss_poll_keeps_its_stable_phase() {
-        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
-        let target_interval = crate::upstream_scheduler::rss_target_interval();
-        let interval_seconds = target_interval.as_secs() as i64;
-        let window_start = now.timestamp() - now.timestamp().rem_euclid(interval_seconds);
-        let phase = stable_phase_seconds("idx-1", target_interval.as_secs()) as i64;
-        let expected =
-            DateTime::<Utc>::from_timestamp(window_start + phase, 0).expect("valid phase");
-
-        let freshness = MultiIndexerSearchClient::rss_freshness_context(
-            &mock_indexer_config(),
-            now,
-            SchedulerRssActivity::default(),
+    fn a_late_poll_is_credited_back_to_its_slot() {
+        let slot = test_tick_slot(0);
+        // Held back a tick by the per-tick limit, and finishing late in it.
+        let polled_at = test_tick(TEST_FIRST_TICK + 1) + Duration::seconds(290);
+        let (_, freshness) = is_due_on(
+            polled_at,
+            polled_activity(polled_at, TEST_RSS_CADENCE),
+            slot,
         );
+        assert_eq!(
+            freshness.latest_safe_poll_at,
+            test_tick(TEST_FIRST_TICK + 3)
+        );
+    }
 
-        assert_eq!(freshness.latest_safe_poll_at, expected);
+    #[test]
+    fn a_longer_learned_cadence_pushes_the_slot_later() {
+        let slot = test_tick_slot(0);
+        let polled_at = test_tick(TEST_FIRST_TICK) + Duration::seconds(10);
+        let due_at = |cadence_minutes: u64| {
+            is_due_on(
+                polled_at,
+                SchedulerRssActivity {
+                    // Whatever the scheduler persisted after the poll, the slot
+                    // rule derives the boundary from the poll and the cadence.
+                    latest_safe_poll_at: Some(polled_at + Duration::minutes(1)),
+                    ..polled_activity(
+                        polled_at,
+                        std::time::Duration::from_secs(cadence_minutes * 60),
+                    )
+                },
+                slot,
+            )
+            .1
+            .latest_safe_poll_at
+        };
+        // The low-quota hour lands exactly on a slot tick.
+        assert_eq!(due_at(60), test_tick(TEST_FIRST_TICK + 12));
+        // Twenty minutes is not a whole slot cycle: the next slot tick after.
+        assert_eq!(due_at(20), test_tick(TEST_FIRST_TICK + 6));
+        // A cadence faster than a slot cycle runs on its own interval.
+        assert_eq!(due_at(5), test_tick(TEST_FIRST_TICK + 1));
+    }
+
+    #[test]
+    fn a_never_polled_indexer_is_due_on_the_tick_it_is_first_seen() {
+        let now = test_tick(TEST_FIRST_TICK + 1) + Duration::seconds(123);
+        // Slot 0 is not this tick's slot; a never-polled indexer goes anyway.
+        let (due, freshness) = is_due_on(now, SchedulerRssActivity::default(), test_tick_slot(0));
+        assert!(due);
+        assert_eq!(
+            freshness.latest_safe_poll_at,
+            test_tick(TEST_FIRST_TICK + 1)
+        );
+    }
+
+    #[test]
+    fn freshness_escalation_polls_an_indexer_off_its_slot() {
+        let slot = test_tick_slot(0);
+        let polled_at = test_tick(TEST_FIRST_TICK) + Duration::seconds(30);
+        let off_slot = test_tick(TEST_FIRST_TICK + 1);
+        let calm = polled_activity(polled_at, TEST_RSS_CADENCE);
+        let at_risk = SchedulerRssActivity {
+            freshness_risk: Some(scryer_application::RSS_FRESHNESS_ESCALATION_THRESHOLD + 0.05),
+            ..calm.clone()
+        };
+
+        assert!(!is_due_on(off_slot, calm, slot).0);
+        assert!(is_due_on(off_slot, at_risk.clone(), slot).0);
+
+        // The escalated poll counts against the tick's limit like any other.
+        let (polled, deferred) = rss_tick_poll_selection(
+            vec![RssTickDueIndexer {
+                indexer_id: "synthetic-at-risk".into(),
+                last_successful_poll_at: at_risk.last_successful_poll_at,
+                due_since: off_slot,
+                slot,
+            }],
+            off_slot,
+            DEFAULT_RSS_TICK_INDEXER_LIMIT,
+        );
+        assert_eq!(polled, vec!["synthetic-at-risk".to_string()]);
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn slots_spread_indexers_evenly_and_ignore_listing_order() {
+        let ids = (0..50)
+            .map(|index| format!("synthetic-indexer-{index:02}"))
+            .collect::<Vec<_>>();
+        let forward = rss_tick_slots_for(
+            ids.iter().map(String::as_str),
+            TEST_RSS_TICK,
+            TEST_RSS_CADENCE,
+        );
+        let reverse = rss_tick_slots_for(
+            ids.iter().rev().map(String::as_str),
+            TEST_RSS_TICK,
+            TEST_RSS_CADENCE,
+        );
+        assert_eq!(forward, reverse);
+        let mut sizes = [0usize; 3];
+        for slot in forward.values() {
+            assert_eq!(slot.slots, 3);
+            sizes[slot.slot as usize] += 1;
+        }
+        assert_eq!(sizes, [17, 17, 16]);
+
+        let thirty = rss_tick_slots_for(
+            ids.iter().take(30).map(String::as_str),
+            TEST_RSS_TICK,
+            TEST_RSS_CADENCE,
+        );
+        let mut sizes = [0usize; 3];
+        for slot in thirty.values() {
+            sizes[slot.slot as usize] += 1;
+        }
+        assert_eq!(sizes, [10, 10, 10]);
+    }
+
+    #[test]
+    fn a_cadence_equal_to_the_tick_gives_one_slot() {
+        assert_eq!(rss_slot_count(TEST_RSS_CADENCE, TEST_RSS_TICK), 3);
+        let tick = scryer_application::DEFAULT_RSS_SYNC_TICK;
+        assert_eq!(
+            rss_slot_count(
+                scryer_application::parse_rss_target_interval(Some("300")),
+                tick
+            ),
+            1
+        );
+        // A shortened cadence pulls the worker tick down with it.
+        let short = scryer_application::parse_rss_target_interval(Some("30"));
+        assert_eq!(rss_slot_count(short, short.min(tick)), 1);
+        // A cadence just past a whole number of ticks takes the next slot count.
+        assert_eq!(rss_slot_count(std::time::Duration::from_secs(301), tick), 2);
+
+        // One slot: every indexer is due on every tick after it polls.
+        let slots = rss_tick_slots_for(["synthetic-a", "synthetic-b"], tick, tick);
+        for slot in slots.values() {
+            assert_eq!((slot.slots, slot.slot), (1, 0));
+            let polled_at = slot.tick_start(TEST_FIRST_TICK) + Duration::seconds(20);
+            let activity = polled_activity(polled_at, tick);
+            assert!(!is_due_on(polled_at + Duration::seconds(5), activity.clone(), *slot).0);
+            assert!(is_due_on(slot.tick_start(TEST_FIRST_TICK + 1), activity, *slot).0);
+        }
+    }
+
+    #[test]
+    fn rss_tick_indexer_limit_override_parses_and_is_honored() {
+        for raw in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("ten"),
+            Some("0"),
+            Some("-2"),
+        ] {
+            assert_eq!(
+                parse_rss_tick_indexer_limit(raw),
+                DEFAULT_RSS_TICK_INDEXER_LIMIT
+            );
+        }
+        assert_eq!(DEFAULT_RSS_TICK_INDEXER_LIMIT, 10);
+        assert_eq!(parse_rss_tick_indexer_limit(Some(" 4 ")), 4);
+
+        let now = test_tick(TEST_FIRST_TICK);
+        let due = (0..9)
+            .map(|index| RssTickDueIndexer {
+                indexer_id: format!("synthetic-indexer-{index}"),
+                last_successful_poll_at: None,
+                due_since: now,
+                slot: test_tick_slot(index % 3),
+            })
+            .collect();
+        let (polled, deferred) =
+            rss_tick_poll_selection(due, now, parse_rss_tick_indexer_limit(Some("4")));
+        assert_eq!(polled.len(), 4);
+        assert_eq!(deferred.len(), 5);
+    }
+
+    /// Runs `ticks` RSS ticks over `count` synthetic indexers through the slot
+    /// rule and the per-tick limit, every poll succeeding 30 seconds into its
+    /// tick. Returns what each tick polled and held back.
+    fn simulate_rss_ticks(count: usize, ticks: i64) -> Vec<(Vec<String>, Vec<String>)> {
+        let ids = (0..count)
+            .map(|index| format!("synthetic-indexer-{index:02}"))
+            .collect::<Vec<_>>();
+        let slots = rss_tick_slots_for(
+            ids.iter().map(String::as_str),
+            TEST_RSS_TICK,
+            TEST_RSS_CADENCE,
+        );
+        let mut last_poll: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut history = Vec::new();
+        for tick in TEST_FIRST_TICK..TEST_FIRST_TICK + ticks {
+            let now = test_tick(tick);
+            let due = ids
+                .iter()
+                .filter_map(|id| {
+                    let activity = last_poll
+                        .get(id)
+                        .map(|polled_at| polled_activity(*polled_at, TEST_RSS_CADENCE))
+                        .unwrap_or_default();
+                    let (due, freshness) = is_due_on(now, activity, slots[id]);
+                    due.then(|| RssTickDueIndexer {
+                        indexer_id: id.clone(),
+                        last_successful_poll_at: freshness.last_successful_poll_at,
+                        due_since: freshness.latest_safe_poll_at,
+                        slot: slots[id],
+                    })
+                })
+                .collect();
+            let (polled, deferred) =
+                rss_tick_poll_selection(due, now, DEFAULT_RSS_TICK_INDEXER_LIMIT);
+            for id in &polled {
+                last_poll.insert(id.clone(), now + Duration::seconds(30));
+            }
+            history.push((polled, deferred));
+        }
+        history
+    }
+
+    #[test]
+    fn thirty_rss_indexers_poll_ten_per_tick_and_cover_all_once_per_cadence() {
+        let history = simulate_rss_ticks(30, 9);
+        for (cadence, window) in history.chunks(3).enumerate() {
+            let mut covered = HashSet::new();
+            for (polled, deferred) in window {
+                assert_eq!(polled.len(), 10);
+                for id in polled {
+                    assert!(
+                        covered.insert(id.clone()),
+                        "{id} polled twice in one cadence"
+                    );
+                }
+                // Only the first pass, when all thirty have never polled, holds
+                // anyone back; after it every tick's due set is its own slot.
+                if cadence > 0 {
+                    assert!(deferred.is_empty());
+                }
+            }
+            assert_eq!(covered.len(), 30);
+        }
+        // Each indexer settles on its own slot: the same ten every third tick.
+        assert_eq!(history[0].0, history[3].0);
+        assert_eq!(history[1].0, history[4].0);
+        assert_eq!(history[2].0, history[5].0);
+    }
+
+    #[test]
+    fn fifty_rss_indexers_poll_ten_per_tick_and_take_the_held_ones_first() {
+        let history = simulate_rss_ticks(50, 15);
+        let (first_polled, first_deferred) = &history[0];
+        assert_eq!(first_polled.len(), 10);
+        assert_eq!(first_deferred.len(), 40);
+
+        let mut ever_polled = HashSet::new();
+        for (index, (polled, _)) in history.iter().enumerate() {
+            assert_eq!(polled.len(), 10, "tick {index} must poll the limit");
+            ever_polled.extend(polled.iter().cloned());
+            let Some((_, held_before)) = index.checked_sub(1).map(|previous| &history[previous])
+            else {
+                continue;
+            };
+            let held_before = held_before.iter().collect::<HashSet<_>>();
+            if held_before.len() >= 10 {
+                assert!(
+                    polled.iter().all(|id| held_before.contains(id)),
+                    "tick {index} must take the indexers held back by the last tick first"
+                );
+            } else {
+                assert!(
+                    held_before.iter().all(|id| polled.contains(*id)),
+                    "tick {index} must take every indexer held back by the last tick"
+                );
+            }
+        }
+        assert_eq!(ever_polled.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn the_due_check_follows_each_indexers_slot() {
+        let configs = (0..3)
+            .map(|index| IndexerConfig {
+                id: format!("synthetic-slot-{index}"),
+                name: format!("Synthetic slot {index}"),
+                base_url: format!("https://slot-{index}.example.test"),
+                ..mock_indexer_config()
+            })
+            .collect::<Vec<_>>();
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: configs.clone(),
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(MockIndexerPluginProvider {
+                rss: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .with_upstream_scheduler(scheduler.clone());
+        // The process grid; the shipped cadence gives three slots, and the
+        // three ids sort onto slots 0, 1 and 2.
+        let slots = multi.rss_tick_slots(&configs);
+        let grid = slots["synthetic-slot-0"];
+        assert_eq!(grid.slots, 3, "the shipped cadence spans three ticks");
+        for (index, config) in configs.iter().enumerate() {
+            assert_eq!(slots[&config.id].slot, index as i64);
+        }
+        let tick = |offset: i64| grid.tick_start(TEST_FIRST_TICK + offset);
+
+        // Each polled on its own slot tick, finishing 45 seconds in.
+        for (index, config) in configs.iter().enumerate() {
+            let (host_key, destination_key) =
+                MultiIndexerSearchClient::scheduler_keys_for_indexer(config);
+            let observed_at = tick(index as i64) + Duration::seconds(45);
+            scheduler
+                .record_feedback(SchedulerFeedback {
+                    lease: Some(SchedulerLease {
+                        lease_id: uuid::Uuid::new_v4().to_string(),
+                        candidate_id: SchedulerCandidateId::new(),
+                        host_key: host_key.clone(),
+                        destination_key: destination_key.clone(),
+                        account_quota_key: Some(config.id.clone().into()),
+                        rss_request_key: Some(RSS_INDEXER_REQUEST_KEY.to_string()),
+                        operation: SchedulerOperation::Rss,
+                        intent: SchedulerIntent::BackgroundRss,
+                        issued_at: observed_at,
+                    }),
+                    host_key,
+                    destination_key,
+                    account_quota_key: Some(config.id.clone().into()),
+                    outcome: SchedulerFeedbackOutcome::Success,
+                    observed_api_current: None,
+                    observed_api_max: None,
+                    observed_grab_current: None,
+                    observed_grab_max: None,
+                    retry_after: None,
+                    cooldown_action: RateLimitCooldownAction::None,
+                    rss_last_seen_release_identity: None,
+                    rss_last_seen_release_published_at: None,
+                    rss_feed_result_count: Some(0),
+                    rss_seen_release_identities: Vec::new(),
+                    rss_oldest_release_published_at: None,
+                    rss_stopped_at_page_ceiling: false,
+                    observed_at,
+                })
+                .await
+                .expect("RSS feedback should record");
+        }
+
+        let due_at = |now: DateTime<Utc>| {
+            let multi = &multi;
+            async move {
+                let mut due = multi.rss_due_indexers_at(now).await.expect("due check").due;
+                due.sort();
+                due
+            }
+        };
+        let ids = |range: std::ops::Range<usize>| {
+            configs[range]
+                .iter()
+                .map(|config| config.id.clone())
+                .collect::<Vec<_>>()
+        };
+        // After the last of the three polls, nobody is due yet.
+        assert!(due_at(tick(2) + Duration::minutes(2)).await.is_empty());
+        // Then each comes due on its own slot tick a cadence on, and stays due.
+        assert_eq!(due_at(tick(3)).await, ids(0..1));
+        assert_eq!(due_at(tick(3) + Duration::seconds(299)).await, ids(0..1));
+        assert_eq!(due_at(tick(4)).await, ids(0..2));
+        assert_eq!(due_at(tick(5)).await, ids(0..3));
+    }
+
+    #[tokio::test]
+    async fn an_rss_poll_fans_out_to_the_tick_limit_and_holds_the_rest_due() {
+        let configs = (0..12)
+            .map(|index| IndexerConfig {
+                id: format!("synthetic-fanout-{index:02}"),
+                name: format!("Synthetic fan-out {index:02}"),
+                base_url: format!("https://fanout-{index:02}.example.test"),
+                ..mock_indexer_config()
+            })
+            .collect::<Vec<_>>();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        let mut multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository { configs }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(MockIndexerPluginProvider {
+                rss: true,
+                calls: calls.clone(),
+            }),
+        )
+        .with_upstream_scheduler(scheduler);
+        multi.rss_tick_indexer_limit = DEFAULT_RSS_TICK_INDEXER_LIMIT;
+        async fn rss_poll(multi: &MultiIndexerSearchClient) -> AppResult<IndexerSearchResponse> {
+            multi
+                .search(
+                    String::new(),
+                    HashMap::new(),
+                    None,
+                    Some("series".into()),
+                    None,
+                    None,
+                    None,
+                    SearchMode::Auto,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                )
+                .await
+        }
+        let held = |response: &IndexerSearchResponse| {
+            let mut held = response
+                .indexer_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome.outcome, IndexerSearchOutcome::Deferred { .. }))
+                .map(|outcome| outcome.indexer_id.clone())
+                .collect::<Vec<_>>();
+            held.sort();
+            held
+        };
+
+        // All twelve have never polled, so all are due; ten go now.
+        let first = rss_poll(&multi).await.expect("first RSS tick");
+        assert_eq!(calls.load(Ordering::SeqCst), 10);
+        let first_held = held(&first);
+        assert_eq!(first_held.len(), 2);
+
+        // The ten just polled are inside their cadence; the two held back are
+        // still due and go on the next tick.
+        let due = multi.rss_due_indexers().await.expect("due check");
+        let mut due_ids = due.due.clone();
+        due_ids.sort();
+        assert_eq!(due_ids, first_held);
+        let second = rss_poll(&multi).await.expect("second RSS tick");
+        assert_eq!(calls.load(Ordering::SeqCst), 12);
+        // What is deferred now is the ten inside their cadence, not a backlog.
+        let second_held = held(&second);
+        assert_eq!(second_held.len(), 10);
+        assert!(second_held.iter().all(|id| !first_held.contains(id)));
+    }
+
+    #[test]
+    fn automatic_search_follows_declared_feed_modes() {
+        use scryer_domain::IndexerFeedModeCapability as Mode;
+        let with_modes = |feed_modes: Vec<Mode>| IndexerProviderCapabilities {
+            feed_modes,
+            ..IndexerProviderCapabilities::default()
+        };
+        // Legacy and feed-only declarations keep automatic search.
+        assert!(provider_declares_automatic_search(&with_modes(vec![])));
+        assert!(provider_declares_automatic_search(&with_modes(vec![
+            Mode::Recent,
+            Mode::Rss
+        ])));
+        // A provider that names search modes is taken at its word.
+        assert!(provider_declares_automatic_search(&with_modes(vec![
+            Mode::Rss,
+            Mode::AutomaticSearch,
+            Mode::InteractiveSearch,
+        ])));
+        assert!(!provider_declares_automatic_search(&with_modes(vec![
+            Mode::InteractiveSearch
+        ])));
     }
 
     fn managed_auto_mode_metadata(enable_rss: bool, enable_automatic_search: bool) -> String {
@@ -9832,7 +10884,9 @@ mod tests {
                 episode: request.episode,
                 absolute_episode: request.absolute_episode,
                 rss_catch_up: request.rss_catch_up,
-                limit: None,
+                limit: request
+                    .result_limit
+                    .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX)),
                 page_cursor: request.page_cursor,
                 page_budget: request.page_budget,
             };
@@ -10305,6 +11359,7 @@ mod tests {
 
     fn search_result(title: &str) -> IndexerSearchResult {
         IndexerSearchResult {
+            http: None,
             indexer_id: None,
             source: "mock".into(),
             title: title.into(),
@@ -10399,6 +11454,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_http_release_result_is_only_ever_taken_from_a_live_search() {
+        let now = Utc::now();
+        let mut http = search_result("Synthetic.Show.S01E01.720p.WEB");
+        http.http = Some(scryer_plugin_sdk::PluginHttpRelease {
+            provider: "synthetic-provider".into(),
+            item_id: "item-1".into(),
+            page_url: "https://provider.invalid/watch/item-1".into(),
+            ..Default::default()
+        });
+        assert!(
+            candidate_reusable_until(&http, now) < now,
+            "a replay would drop the HTTP release description"
+        );
+
+        let repo_impl = InMemorySearchLearningRepository::default();
+        let diagnostics = repo_impl.diagnostics.clone();
+        let context = SearchDiagnosticsContext {
+            repository: StdArc::new(repo_impl),
+            indexer_id: "indexer-http".into(),
+            provider_type: "synthetic".into(),
+            search_session_id: "session-http".into(),
+            scope_key: "scope-http".into(),
+            indexer_fingerprint: "fingerprint-http".into(),
+            background: false,
+        };
+        let response = IndexerSearchResponse {
+            results: vec![http],
+            completion: IndexerSearchCompletion::Complete,
+            api_current: None,
+            api_max: None,
+            grab_current: None,
+            grab_max: None,
+            indexer_outcomes: Vec::new(),
+            next_cursor: None,
+        };
+        context
+            .persist_response("signature-http", "primary", 1, &response, None, None)
+            .await
+            .expect("the response is recorded");
+        let recorded = diagnostics.lock().expect("search diagnostics mutex");
+        let (run, candidates) = &recorded[0];
+        assert_eq!(run.completion_state, "received_partial");
+        assert!(candidates[0].reusable_until < candidates[0].created_at);
+    }
+
     #[test]
     fn a_replayed_result_keeps_the_listing_facts_rules_read() {
         let mut live = search_result("Synthetic.Release.2024.1080p.WEB-DL-GRP");
@@ -10446,6 +11547,7 @@ mod tests {
             request: IndexerSearchStrategyRequest {
                 page_cursor: None,
                 page_budget: None,
+                result_limit: None,
                 strategy_id: strategy_id.to_string(),
                 labels: vec![format!("strategy:{strategy_id}")],
                 query: format!("synthetic-{strategy_id}"),
@@ -13010,6 +14112,63 @@ mod tests {
         assert_eq!(recorded[0].absolute_episode, None);
     }
 
+    #[tokio::test]
+    async fn automatic_search_leaves_out_a_managed_child_without_caps() {
+        let mut config = mock_indexer_config();
+        config.provider_type = "newznab".into();
+        config.managed_parent_config_id = Some("parent".into());
+        config.managed_metadata_json = Some(managed_metadata_with_caps(None));
+        assert!(awaits_managed_caps(&config));
+
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let client = Arc::new(ScriptedIndexerClient {
+            calls: calls.clone(),
+            responder: StdArc::new(|_| response_with_titles(&["Harbor.Tempest.09.1080p"])),
+        });
+        let multi = MultiIndexerSearchClient::new(
+            Arc::new(MockIndexerConfigRepository {
+                configs: vec![config],
+            }),
+            Arc::new(MockIndexerStatsTracker),
+            Arc::new(ScriptedIndexerPluginProvider {
+                client,
+                caps: anime_caps(),
+            }),
+        );
+
+        let search = |mode| {
+            multi.search(
+                "Harbor Tempest 09".to_string(),
+                HashMap::from([("anidb_id".to_string(), "1234".to_string())]),
+                Some("anime".to_string()),
+                Some("anime".to_string()),
+                None,
+                Some(vec!["5070".to_string()]),
+                None,
+                mode,
+                Some(1),
+                Some(9),
+                Some(9),
+                vec![],
+            )
+        };
+
+        let automatic = search(SearchMode::Auto)
+            .await
+            .expect("automatic search without candidates still answers");
+        assert!(automatic.results.is_empty());
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "a managed child without caps must not be searched automatically"
+        );
+
+        // An operator's interactive search still reaches it query-only.
+        search(SearchMode::Interactive)
+            .await
+            .expect("interactive search reaches the child");
+        assert_eq!(calls.lock().expect("calls").len(), 1);
+    }
+
     #[test]
     fn the_rss_form_uses_the_nab_function_only_where_the_caps_advertise_it() {
         let facet_capable = IndexerProviderCapabilities {
@@ -13612,20 +14771,20 @@ mod tests {
             .expect("rss sync search with categories should succeed");
 
         assert!(response.results.is_empty());
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn rss_sync_search_runs_each_newznab_category_in_a_separate_request() {
+    async fn rss_sync_search_runs_every_newznab_category_in_one_request() {
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, calls) =
             scripted_search_client(caps, |call| match call.categories.as_slice() {
-                [category] if category == "2000" => {
-                    response_with_titles(&["Movies.Release.2000.1080p.WEB-DL"])
-                }
-                [category] if category == "5030" => {
-                    response_with_titles(&["Series.Release.5030.720p.WEB-DL"])
+                [movies, series] if movies == "2000" && series == "5030" => {
+                    response_with_titles(&[
+                        "Movies.Release.2000.1080p.WEB-DL",
+                        "Series.Release.5030.720p.WEB-DL",
+                    ])
                 }
                 other => Err(AppError::Validation(format!(
                     "unexpected rss categories: {:?}",
@@ -13653,25 +14812,15 @@ mod tests {
                 vec![],
             )
             .await
-            .expect("rss sync search should fan out per category");
+            .expect("rss sync search should poll the merged categories");
 
         let calls = calls.lock().expect("call log mutex");
-        let mut categories: Vec<Vec<String>> =
-            calls.iter().map(|call| call.categories.clone()).collect();
-        categories.sort();
-
-        assert_eq!(
-            categories,
-            vec![vec!["2000".to_string()], vec!["5030".to_string()]]
-        );
+        assert_eq!(calls.len(), 1);
         let scheduler_batches = recorded_candidates.lock().expect("scheduler candidates");
         assert_eq!(scheduler_batches.len(), 1);
-        assert_eq!(
-            scheduler_batches[0],
-            vec!["idx-1".to_string(), "idx-1".to_string()]
-        );
+        assert_eq!(scheduler_batches[0], vec!["idx-1".to_string()]);
         let feedback_candidate_ids = recorded_feedback.lock().expect("scheduler feedback");
-        assert_eq!(feedback_candidate_ids.len(), 2);
+        assert_eq!(feedback_candidate_ids.len(), 1);
         assert_eq!(response.results.len(), 2);
     }
 
@@ -13776,53 +14925,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rss_poll_sends_the_marker_stored_for_its_own_category_set() {
-        let movies_marker_at = fixed_utc("2026-09-20T10:00:00Z");
-        let series_marker_at = fixed_utc("2026-09-20T11:30:00Z");
-        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(
-            &scheduler,
-            "rss:2000",
-            "movies-marker-guid",
-            movies_marker_at,
-        )
-        .await;
-        record_previous_rss_poll(
-            &scheduler,
-            "rss:5000",
-            "series-marker-guid",
-            series_marker_at,
-        )
-        .await;
+    async fn rss_poll_is_one_request_per_indexer_with_every_routed_category() {
+        let scheduler = Arc::new(RecordingScheduler::default());
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, calls) = scripted_search_client(caps, |_| response_with_titles(&[]));
         let client = client.with_upstream_scheduler(scheduler);
 
-        run_rss_poll(&client, &["2000", "5000"]).await;
+        run_rss_poll(&client, &["5070", " 2000", "5000", "2000", ""]).await;
 
         let calls = calls.lock().expect("call log mutex");
-        let catch_up_for = |category: &str| {
-            calls
-                .iter()
-                .find(|call| call.categories == vec![category.to_string()])
-                .unwrap_or_else(|| panic!("no rss call for category {category}"))
-                .rss_catch_up
-                .clone()
-        };
+        assert_eq!(calls.len(), 1, "one RSS request chain per indexer");
         assert_eq!(
-            catch_up_for("2000"),
-            Some(IndexerRssCatchUp {
-                last_seen_published_at: movies_marker_at,
-                last_seen_identity: Some("movies-marker-guid".to_string()),
-            })
+            calls[0].categories,
+            vec!["2000".to_string(), "5000".to_string(), "5070".to_string()]
+        );
+    }
+
+    #[test]
+    fn merged_rss_category_request_normalizes_and_keeps_no_category_broad() {
+        assert_eq!(
+            MultiIndexerSearchClient::merged_rss_category_request(Some(vec![
+                "5040".to_string(),
+                " 5030 ".to_string(),
+                "5040".to_string(),
+            ])),
+            Some(vec!["5030".to_string(), "5040".to_string()])
         );
         assert_eq!(
-            catch_up_for("5000"),
-            Some(IndexerRssCatchUp {
-                last_seen_published_at: series_marker_at,
-                last_seen_identity: Some("series-marker-guid".to_string()),
-            })
+            MultiIndexerSearchClient::merged_rss_category_request(Some(vec![" ".to_string()])),
+            None
+        );
+        assert_eq!(
+            MultiIndexerSearchClient::merged_rss_category_request(None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_merged_rss_poll_resumes_from_the_oldest_per_category_marker() {
+        let movies_marker_at = fixed_utc("2026-09-20T10:00:00Z");
+        let series_marker_at = fixed_utc("2026-09-20T11:30:00Z");
+        let anime_marker_at = fixed_utc("2026-09-20T09:15:00Z");
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        for (key, identity, at) in [
+            ("rss:2000", "movies-marker-guid", movies_marker_at),
+            ("rss:5000", "series-marker-guid", series_marker_at),
+            ("rss:5070", "anime-marker-guid", anime_marker_at),
+        ] {
+            record_previous_rss_poll(&scheduler, key, identity, at).await;
+        }
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (client, calls) = scripted_search_client(caps, |_| response_with_titles(&[]));
+        let client = client.with_upstream_scheduler(scheduler.clone());
+
+        run_rss_poll(&client, &["2000", "5000", "5070"]).await;
+
+        {
+            let calls = calls.lock().expect("call log mutex");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].rss_catch_up,
+                Some(IndexerRssCatchUp {
+                    last_seen_published_at: anime_marker_at,
+                    last_seen_identity: Some("anime-marker-guid".to_string()),
+                })
+            );
+        }
+        // The merged poll records its cadence under the indexer's one key.
+        rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
+    }
+
+    #[tokio::test]
+    async fn a_merged_rss_marker_supersedes_every_per_category_marker() {
+        let config = mock_indexer_config();
+        let (host_key, destination_key) =
+            MultiIndexerSearchClient::scheduler_keys_for_indexer(&config);
+        let account_quota_key: Option<scryer_application::AccountQuotaKey> =
+            Some(config.id.clone().into());
+        let scheduler = crate::upstream_scheduler::InMemoryUpstreamScheduler::new();
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:2000",
+            "earlier-legacy",
+            fixed_utc("2026-09-20T08:00:00Z"),
+        )
+        .await;
+        record_previous_rss_poll(
+            &scheduler,
+            "rss:5000",
+            "later-legacy",
+            fixed_utc("2026-09-20T12:00:00Z"),
+        )
+        .await;
+        let activity_now = || async {
+            let snapshot = scheduler
+                .snapshot(SchedulerSnapshotFilter::default())
+                .await
+                .expect("scheduler snapshot should succeed");
+            MultiIndexerSearchClient::scheduler_rss_activity(
+                Some(&snapshot),
+                &host_key,
+                &destination_key,
+                account_quota_key.as_ref(),
+                Some(RSS_INDEXER_REQUEST_KEY),
+            )
+        };
+        assert_eq!(
+            activity_now().await.last_seen_release_identity.as_deref(),
+            Some("earlier-legacy")
+        );
+
+        // Once the merged feed has a marker of its own, the old per-category
+        // markers are never read again, even one that is newer.
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "merged-marker",
+            fixed_utc("2026-09-20T10:00:00Z"),
+        )
+        .await;
+        assert_eq!(
+            activity_now().await.last_seen_release_identity.as_deref(),
+            Some("merged-marker")
         );
     }
 
@@ -13865,7 +15091,9 @@ mod tests {
         }
         assert_eq!(parse_rss_indexer_poll_concurrency(Some(" 4 ")), 4);
         assert_eq!(parse_rss_poll_page_budget(Some("12")), 12);
-        assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 500);
+        assert_eq!(rss_poll_item_cap(DEFAULT_RSS_POLL_PAGE_BUDGET), 1_000);
+        assert_eq!(rss_poll_safety_cap(1_000), 3_000);
+        assert_eq!(rss_poll_safety_cap(4_000), 4_000);
     }
 
     #[test]
@@ -13916,15 +15144,22 @@ mod tests {
             let calls = calls.lock().expect("call log mutex");
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].page_budget, Some(3));
+            assert_eq!(calls[0].limit, Some(300));
         }
     }
 
     #[tokio::test]
-    async fn an_rss_poll_over_its_budget_keeps_the_newest_and_records_the_gap() {
+    async fn an_rss_poll_past_its_request_limit_keeps_every_result_under_the_plugin_ceiling() {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (mut client, _calls) = scripted_search_client(caps, move |_| {
@@ -13952,31 +15187,84 @@ mod tests {
                 grab_max: None,
             })
         });
-        // One page: a hundred results.
+        // One page asked for: a hundred results. The plugin kept paging
+        // because the feed is all recent, which the host must not undo.
         client.rss_poll_page_budget = 1;
         let client = client.with_upstream_scheduler(scheduler.clone());
 
         let response = run_rss_poll(&client, &["2000"]).await;
 
-        assert_eq!(response.results.len(), 100);
+        assert_eq!(response.results.len(), 251);
         let guids = response
             .results
             .iter()
             .filter_map(|result| result.guid.as_deref())
             .collect::<HashSet<_>>();
         assert!(guids.contains("newest-guid"));
-        assert!(guids.contains("paged-guid-98"));
-        assert!(!guids.contains("paged-guid-99"));
-        assert!(!guids.contains("late-indexed-guid"));
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        assert!(guids.contains("paged-guid-248"));
+        assert!(guids.contains("late-indexed-guid"));
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(
             entry.rss_last_seen_release_identity.as_deref(),
             Some("newest-guid")
         );
+        assert_eq!(entry.rss_last_feed_gap_start_at, None);
+        assert_eq!(entry.rss_last_feed_gap_end_at, None);
+    }
+
+    #[tokio::test]
+    async fn an_rss_poll_stops_at_the_plugin_ceiling_and_records_the_gap_it_left() {
+        let marker_at = fixed_utc("2026-09-20T10:00:00Z");
+        let newest_at = fixed_utc("2026-09-21T10:00:00Z");
+        let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
+        let mut caps = movie_caps();
+        caps.rss = true;
+        let (client, calls) = scripted_search_client(caps, move |_| {
+            // Thirty-two pages of releases all newer than the marker: a
+            // plugin that ignored its limit and its own ceiling.
+            let results = (0..3_200)
+                .map(|index| {
+                    dated_rss_result(
+                        &format!("feed-guid-{index}"),
+                        newest_at - Duration::minutes(index),
+                    )
+                })
+                .collect();
+            Ok(IndexerSearchResponse {
+                next_cursor: None,
+                completion: IndexerSearchCompletion::Complete,
+                indexer_outcomes: Vec::new(),
+                results,
+                api_current: None,
+                api_max: None,
+                grab_current: None,
+                grab_max: None,
+            })
+        });
+        assert_eq!(client.rss_poll_page_budget, DEFAULT_RSS_POLL_PAGE_BUDGET);
+        let client = client.with_upstream_scheduler(scheduler.clone());
+
+        let response = run_rss_poll(&client, &["2000", "5000"]).await;
+
+        // The plugin was asked for the default item cap, not the ceiling.
+        {
+            let calls = calls.lock().expect("call log mutex");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].limit, Some(1_000));
+        }
+        assert_eq!(response.results.len(), 3_000);
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(
             entry.rss_last_feed_gap_end_at,
-            Some(newest_at - Duration::minutes(99))
+            Some(newest_at - Duration::minutes(2_999))
         );
     }
 
@@ -14151,7 +15439,13 @@ mod tests {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14190,7 +15484,7 @@ mod tests {
         let response = run_rss_poll(&client, &["2000"]).await;
 
         assert_eq!(response.results.len(), 250);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(
             entry.rss_last_seen_release_identity.as_deref(),
             Some("newest-guid")
@@ -14207,7 +15501,13 @@ mod tests {
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let oldest_at = fixed_utc("2026-09-20T12:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14236,7 +15536,7 @@ mod tests {
         let response = run_rss_poll(&client, &["2000"]).await;
 
         assert_eq!(response.results.len(), 120);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(entry.rss_last_feed_gap_end_at, Some(oldest_at));
         assert_eq!(
@@ -14270,7 +15570,13 @@ mod tests {
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let stray_at = fixed_utc("2026-08-01T09:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14292,7 +15598,7 @@ mod tests {
 
         // The cut-off poll's releases still reach RSS evaluation.
         assert_eq!(response.results.len(), 100);
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, Some(marker_at));
         assert_eq!(entry.rss_last_feed_gap_end_at, Some(stray_at));
         assert_eq!(
@@ -14306,7 +15612,13 @@ mod tests {
         let marker_at = fixed_utc("2026-09-20T10:00:00Z");
         let newest_at = fixed_utc("2026-09-20T14:00:00Z");
         let scheduler = Arc::new(crate::upstream_scheduler::InMemoryUpstreamScheduler::new());
-        record_previous_rss_poll(&scheduler, "rss:2000", "marker-guid", marker_at).await;
+        record_previous_rss_poll(
+            &scheduler,
+            RSS_INDEXER_REQUEST_KEY,
+            "marker-guid",
+            marker_at,
+        )
+        .await;
         let mut caps = movie_caps();
         caps.rss = true;
         let (client, _calls) = scripted_search_client(caps, move |_| {
@@ -14319,7 +15631,7 @@ mod tests {
 
         run_rss_poll(&client, &["2000"]).await;
 
-        let entry = rss_snapshot_entry(&scheduler, "rss:2000").await;
+        let entry = rss_snapshot_entry(&scheduler, RSS_INDEXER_REQUEST_KEY).await;
         assert_eq!(entry.rss_last_feed_gap_start_at, None);
         assert_eq!(entry.rss_last_feed_gap_end_at, None);
         assert_eq!(entry.rss_last_seen_release_published_at, Some(newest_at));

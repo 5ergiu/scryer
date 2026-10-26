@@ -1163,7 +1163,8 @@ impl AppUseCase {
     /// Only indexers the background search would actually query count: a
     /// disabled indexer, or one with automatic search turned off, never fires
     /// and so never earns a receipt, and routing a scope to it would keep that
-    /// scope in the walk forever.
+    /// scope in the walk forever. A managed child still waiting for its caps
+    /// is left out the same way until they arrive.
     async fn routed_indexer_ids_for_routing_scope(
         &self,
         library_id: &str,
@@ -1182,7 +1183,11 @@ impl AppUseCase {
             .map(|configs| {
                 configs
                     .into_iter()
-                    .filter(|config| config.is_enabled && config.enable_auto_search)
+                    .filter(|config| {
+                        config.is_enabled
+                            && config.enable_auto_search
+                            && !crate::integration::indexer_caps_cache::awaits_managed_caps(config)
+                    })
                     .map(|config| config.id)
                     .collect::<Vec<_>>()
             });

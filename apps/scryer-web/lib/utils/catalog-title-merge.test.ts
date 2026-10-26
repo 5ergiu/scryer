@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { TitleRecord } from "@/lib/types";
-import { mergePreferLoadedImageFields } from "./catalog-title-merge.ts";
+import {
+  applyRefreshedCatalogTitle,
+  buildActiveCatalogListFilters,
+  mergePreferLoadedImageFields,
+} from "./catalog-title-merge.ts";
 
 /**
  * A title as the side panel loads it: the movie side-panel selection is much
@@ -161,4 +165,92 @@ test("a narrower column projection does not blank the columns it left out", () =
   assert.equal(merged.rootFolderPath, hydratedPanelTitle.rootFolderPath);
   assert.equal(merged.sizeBytes, hydratedPanelTitle.sizeBytes);
   assert.equal(merged.qualityTier, "HD-1080p");
+});
+
+const movieFilters = buildActiveCatalogListFilters("MOVIE", "", []);
+const loadedTitle: TitleRecord = {
+  ...listRefreshTitle,
+  id: "title-loaded",
+  name: "Placeholder Loaded",
+};
+
+test("a newly added title that passes the active filters joins the list", () => {
+  const next = applyRefreshedCatalogTitle(
+    [loadedTitle],
+    listRefreshTitle,
+    movieFilters,
+    true,
+  );
+
+  assert.deepEqual(
+    next.map((title) => title.id),
+    ["title-loaded", "title-1"],
+  );
+});
+
+test("a newly added title outside the active filters stays out", () => {
+  const current = [loadedTitle];
+  for (const filters of [
+    buildActiveCatalogListFilters("SERIES", "", []),
+    buildActiveCatalogListFilters("MOVIE", "unrelated", []),
+    buildActiveCatalogListFilters("MOVIE", "", ["library-other"]),
+  ]) {
+    assert.equal(
+      applyRefreshedCatalogTitle(current, listRefreshTitle, filters, true),
+      current,
+    );
+  }
+});
+
+test("an update to a title that is not loaded does not pull it into the list", () => {
+  const current = [loadedTitle];
+
+  assert.equal(
+    applyRefreshedCatalogTitle(current, listRefreshTitle, movieFilters, false),
+    current,
+  );
+});
+
+test("a refreshed loaded title is merged in place or dropped by the filters", () => {
+  const renamed = { ...loadedTitle, name: "Placeholder Renamed" };
+  const merged = applyRefreshedCatalogTitle(
+    [loadedTitle, listRefreshTitle],
+    renamed,
+    movieFilters,
+    false,
+  );
+  assert.deepEqual(
+    merged.map((title) => title.name),
+    ["Placeholder Renamed", "Placeholder Feature"],
+  );
+
+  const filtered = applyRefreshedCatalogTitle(
+    [loadedTitle, listRefreshTitle],
+    renamed,
+    buildActiveCatalogListFilters("MOVIE", "feature", []),
+    false,
+  );
+  assert.deepEqual(
+    filtered.map((title) => title.id),
+    ["title-1"],
+  );
+});
+
+test("a new title is left out while filters only the server can apply are active", () => {
+  const current = [loadedTitle];
+  const serverFiltered = buildActiveCatalogListFilters("MOVIE", "", [], true);
+
+  assert.equal(
+    applyRefreshedCatalogTitle(current, listRefreshTitle, serverFiltered, true),
+    current,
+  );
+
+  // A title already listed is still refreshed in place.
+  const renamed = { ...loadedTitle, name: "Placeholder Renamed" };
+  assert.deepEqual(
+    applyRefreshedCatalogTitle(current, renamed, serverFiltered, true).map(
+      (title) => title.name,
+    ),
+    ["Placeholder Renamed"],
+  );
 });

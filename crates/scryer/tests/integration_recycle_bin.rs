@@ -191,6 +191,7 @@ async fn seed_library(ctx: &TestContext, name: &str, root: &Path) -> Library {
             MediaFacet::Movie,
             name.to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: root.to_string_lossy().to_string(),
                 is_default: true,
             }],
@@ -218,6 +219,7 @@ async fn seed_library_in_store(ctx: &TestContext, name: &str, root: &Path) -> Li
             updated_at: now,
         },
         vec![LibraryRootDraft {
+            id: None,
             path: root.to_string_lossy().to_string(),
             is_default: true,
         }],
@@ -1281,10 +1283,12 @@ async fn delete_title_purges_recycle_entries_from_all_library_roots() {
             "Movies Multi Root".to_string(),
             vec![
                 LibraryRootDraft {
+                    id: None,
                     path: root_a.path().to_string_lossy().to_string(),
                     is_default: true,
                 },
                 LibraryRootDraft {
+                    id: None,
                     path: root_b.path().to_string_lossy().to_string(),
                     is_default: false,
                 },
@@ -1297,7 +1301,9 @@ async fn delete_title_purges_recycle_entries_from_all_library_roots() {
     let entry_a = seed_recycled_file(root_a.path(), "title-multi-root-delete", "movie-a").await;
     let entry_b = seed_recycled_file(root_b.path(), "title-multi-root-delete", "movie-b").await;
 
-    let manager = manage_titles_actor("manager", std::slice::from_ref(&library.id));
+    // Deletion reloads current grants, so the manager must be a real account.
+    let manager =
+        persisted_manage_titles_actor(&ctx, "manager", std::slice::from_ref(&library.id)).await;
     ctx.app
         .delete_title(&manager, "title-multi-root-delete", false, None)
         .await

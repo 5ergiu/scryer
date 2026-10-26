@@ -29,6 +29,7 @@ import {
 import { useGlobalStatus } from "@/lib/context/global-status-context";
 import { useTranslate } from "@/lib/context/translate-context";
 import { userFacingGraphQlErrorMessage } from "@/lib/graphql/error-message";
+import { grabErrorMessage } from "@/lib/utils/http-release-error-message";
 import {
   issueInteractiveReleaseCandidateTokenMutation,
   queueIndexerSearchAssignmentMutation,
@@ -388,10 +389,7 @@ export function GrabDialog({
           setQueuedRowKeys((current) => new Set(current).add(rowKey));
         } catch (error) {
           failures += 1;
-          const reason = userFacingGraphQlErrorMessage(
-            error,
-            t("status.queueFailed"),
-          );
+          const reason = grabErrorMessage(error, t, t("status.queueFailed"));
           setErrorMessage(reason);
           setGlobalStatus(
             t("grabDialog.status.failed", { name: release.title, reason }),

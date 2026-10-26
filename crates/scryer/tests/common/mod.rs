@@ -765,9 +765,11 @@ pub async fn test_title_index(
     use scryer_infrastructure_library::media::{
         search::title_search::TitleFuzzyIndex, titles::fuzzy_source::DatastoreTitleTermSource,
     };
-    TitleFuzzyIndex::open(
+    // Drains on every read, so a test's writes are visible to its next read.
+    TitleFuzzyIndex::open_with_drain_interval(
         directory,
         Arc::new(DatastoreTitleTermSource::new(db.datastore())),
+        std::time::Duration::ZERO,
     )
     .await
     .expect("test title index must open ready")

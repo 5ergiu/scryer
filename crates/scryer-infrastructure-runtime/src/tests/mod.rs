@@ -444,9 +444,15 @@ async fn fuzzy_test_index(
             services.datastore(),
         ),
     );
-    let index = scryer_infrastructure_library_search::TitleFuzzyIndex::open(dir.path(), source)
-        .await
-        .expect("index should open ready");
+    // Tests write a title and read it back at once; the production drain
+    // interval would let that read lag the write.
+    let index = scryer_infrastructure_library_search::TitleFuzzyIndex::open_with_drain_interval(
+        dir.path(),
+        source,
+        std::time::Duration::ZERO,
+    )
+    .await
+    .expect("index should open ready");
     (index, dir)
 }
 

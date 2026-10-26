@@ -135,6 +135,7 @@ export type EpisodeRowProps = {
   onClearReleaseBlocklistEntry?: (entryId: string) => Promise<void> | void;
   onDeleteFile?: (fileId: string) => void;
   onMakePrimaryFile?: (fileId: string) => Promise<void> | void;
+  onAssignFileToEpisode?: (fileId: string) => void;
   onOpenHistory?: (episode: CollectionEpisode) => void;
   onQueueFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
   onQueueAdditionalFromEpisodeSearch?: (episode: CollectionEpisode, release: Release) => Promise<void> | void;
@@ -174,6 +175,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
   onClearReleaseBlocklistEntry,
   onDeleteFile,
   onMakePrimaryFile,
+  onAssignFileToEpisode,
   onOpenHistory,
   onQueueFromEpisodeSearch,
   onQueueAdditionalFromEpisodeSearch,
@@ -301,6 +303,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
       onClearReleaseBlocklistEntry={onClearReleaseBlocklistEntry}
       onDeleteFile={onDeleteFile}
       onMakePrimaryFile={onMakePrimaryFile}
+      onAssignFileToEpisode={onAssignFileToEpisode}
       onRefreshSubtitles={onRefreshSubtitles}
       onTabChange={handleEpisodeTabChange}
       showHistoryTab={Boolean(onOpenHistory)}
@@ -371,7 +374,7 @@ export const EpisodeRow = React.memo(function EpisodeRow({
         data-episode-id={episode.id}
         className={cn(
           "@container rounded-lg border border-border bg-card/50 p-3",
-          !episode.monitored && "opacity-60",
+          !episode.monitored && "opacity-[var(--scry-unmonitored-opacity,0.6)]",
         )}
       >
         <div className="flex items-start gap-3">
@@ -505,7 +508,8 @@ export const EpisodeRow = React.memo(function EpisodeRow({
           episode.absoluteNumber,
         )}
         data-episode-id={episode.id}
-        className={`cv-auto-row-sm${episode.monitored ? "" : " opacity-50"}`}
+        data-ui="episode-row"
+        className={cn("cv-auto-row-sm", !episode.monitored && "opacity-[var(--scry-unmonitored-opacity,0.5)]")}
       >
         {selectionCheckbox ? (
           <TableCell className="px-2 text-center align-middle">

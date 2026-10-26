@@ -265,6 +265,7 @@ where
             name.to_string(),
             slug.to_string(),
             vec![LibraryRootDraft {
+                id: None,
                 path: root_path.to_string(),
                 is_default: true,
             }],
@@ -855,8 +856,8 @@ async fn multi_indexer_url_trace_movie() {
     println!("\n=== Lattice Zero (movie, imdb=tt0133093) ===");
     print_summary(&newznab_urls, &torznab_urls);
 
-    assert_id_only_then_fallback(&newznab_urls, "imdbid=000133093", "q=Lattice+Zero");
-    assert_id_only_then_fallback(&torznab_urls, "imdbid=000133093", "q=Lattice+Zero");
+    assert_id_only_then_fallback(&newznab_urls, "imdbid=0133093", "q=Lattice+Zero");
+    assert_id_only_then_fallback(&torznab_urls, "imdbid=0133093", "q=Lattice+Zero");
 }
 
 // ---------------------------------------------------------------------------
@@ -902,12 +903,12 @@ async fn multi_indexer_url_trace_movie_lantern_tide() {
     print_summary(&newznab_urls, &torznab_urls);
     assert_id_only_then_fallback(
         &newznab_urls,
-        "imdbid=000245429",
+        "imdbid=0245429",
         "q=Lantern+Tide+Hidden+Current",
     );
     assert_id_only_then_fallback(
         &torznab_urls,
-        "imdbid=000245429",
+        "imdbid=0245429",
         "q=Lantern+Tide+Hidden+Current",
     );
 }

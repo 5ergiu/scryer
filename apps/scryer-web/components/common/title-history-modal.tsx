@@ -174,21 +174,21 @@ export function TitleHistoryModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         id="title-history-dialog"
-        className="w-[calc(100%-1rem)] max-w-[95vw] sm:max-w-5xl lg:max-w-6xl max-h-[85vh] overflow-hidden flex flex-col"
+        className="flex h-[min(56rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] min-w-0 max-w-[90rem] flex-col overflow-hidden p-4 sm:max-w-[90rem] sm:p-6"
       >
-        <DialogHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between sm:pr-8">
-          <DialogTitle className="min-w-0">{titleName} — {t("history.title")}</DialogTitle>
+        <DialogHeader className="min-w-0 shrink-0 gap-3 text-left lg:flex-row lg:items-center lg:justify-between lg:pr-8">
+          <DialogTitle className="min-w-0 break-words pr-8 lg:pr-0">{titleName} — {t("history.title")}</DialogTitle>
           <HistoryEventTypeMultiSelect
             id="title-history-event-types"
             eventTypes={TITLE_HISTORY_FILTERS}
             selectedEventTypes={activeFilters}
             onSelectedEventTypesChange={setActiveFilters}
-            triggerClassName="h-9 sm:w-[320px] sm:shrink-0"
+            triggerClassName="h-9 w-full min-w-0 lg:w-[320px] lg:shrink-0"
           />
         </DialogHeader>
 
         {activeScopedEpisode || activeCollection ? (
-          <div className="flex flex-wrap items-center gap-2 pb-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 pb-2">
             <span className="text-xs text-muted-foreground">{t("label.filter")}</span>
             <Button
               type="button"
@@ -196,17 +196,17 @@ export function TitleHistoryModal({
               variant="secondary"
               onClick={clearScopedEpisode}
               aria-label={`${t("label.remove")} ${(activeScopedEpisode?.episodeLabel ?? activeCollection?.collectionLabel)}`}
-              className="h-7 gap-1.5 px-2 text-xs"
+              className="h-auto min-h-7 min-w-0 max-w-full gap-1.5 px-2 py-1 text-xs"
             >
-              <span className="max-w-[32rem] truncate">
+              <span className="min-w-0 max-w-[32rem] whitespace-normal break-words text-left">
                 {(activeScopedEpisode?.episodeLabel ?? activeCollection?.collectionLabel)}
               </span>
-              <X className="h-3 w-3" />
+              <X className="h-3 w-3 shrink-0" />
             </Button>
           </div>
         ) : null}
 
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
           {error ? (
             <div
               role="alert"

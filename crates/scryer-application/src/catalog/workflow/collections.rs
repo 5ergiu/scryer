@@ -1543,22 +1543,112 @@ impl AppUseCase {
                 .cloned()
                 .collect::<HashSet<_>>()
         };
+        if visible_library_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let episodes = self
             .services
             .catalog
             .shows
             .list_episodes_in_date_range(start_date, end_date)
             .await?;
-        Ok(episodes
+        let mut events = episodes
             .into_iter()
             .filter(|episode| {
-                visible_library_ids.contains(&episode.library_id)
+                episode.title_facet != "movie"
+                    && visible_library_ids.contains(&episode.library_id)
                     && calendar_episode_is_visible(
                         episode.season_number.as_deref(),
                         episode.monitored,
                     )
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        let libraries = self
+            .services
+            .catalog
+            .libraries
+            .list(Some(MediaFacet::Movie))
+            .await?
+            .into_iter()
+            .filter(|library| visible_library_ids.contains(&library.id))
+            .map(|library| (library.id.clone(), library))
+            .collect::<HashMap<_, _>>();
+        if !libraries.is_empty() {
+            let policies = self.movie_availability_policies().await?;
+            let movie_library_ids = libraries.keys().cloned().collect::<Vec<_>>();
+            let now = Utc::now();
+            let mut offset = 0;
+            // Availability depends on market, threshold, and delay. Filter by
+            // the policy's effective date, never by the legacy theatrical column.
+            // Page the input so a calendar read does not hydrate the entire catalog.
+            loop {
+                let page = self
+                    .services
+                    .catalog
+                    .titles
+                    .list_for_libraries_catalog(
+                        Some(MediaFacet::Movie),
+                        &movie_library_ids,
+                        None,
+                        crate::TitleCatalogFilter::default(),
+                        crate::TitleCatalogSort::default(),
+                        256,
+                        offset,
+                        crate::TitleListProjection {
+                            include_external_ids: false,
+                            include_canonical_tags: false,
+                        },
+                        crate::TitleCatalogAggregates::default(),
+                    )
+                    .await?;
+                let page_len = page.items.len();
+                for title in page.items {
+                    let decision =
+                        crate::acquisition::targets::movie_availability_decision_for_title(
+                            &title, &policies, &now,
+                        );
+                    let Some(date) = decision.effective_date else {
+                        continue;
+                    };
+                    if date.as_str() < start_date || date.as_str() > end_date {
+                        continue;
+                    }
+                    let Some(library) = libraries.get(&title.library_id) else {
+                        continue;
+                    };
+                    events.push(CalendarEpisode {
+                        id: format!("movie:{}", title.id),
+                        title_id: title.id,
+                        library_id: title.library_id,
+                        library_name: Some(library.name.clone()),
+                        library_slug: Some(library.slug.clone()),
+                        title_name: title.name,
+                        title_slug: title.slug,
+                        title_facet: "movie".into(),
+                        season_number: None,
+                        episode_number: None,
+                        episode_title: None,
+                        overview: title.overview,
+                        image_url: title.poster_url,
+                        title_background_url: None,
+                        air_date: Some(date),
+                        air_date_estimated: decision.estimated,
+                        monitored: title.monitored,
+                    });
+                }
+                if !page.has_more || page_len == 0 {
+                    break;
+                }
+                offset += page_len;
+            }
+        }
+        events.sort_by(|left, right| {
+            left.air_date
+                .cmp(&right.air_date)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(events)
     }
 }
 
@@ -1569,6 +1659,307 @@ fn calendar_episode_is_visible(season_number: Option<&str>, monitored: bool) -> 
 #[cfg(test)]
 mod calendar_episode_visibility_tests {
     use super::calendar_episode_is_visible;
+    use crate::{
+        AppUseCase, MovieAvailabilityOverrides, TitleMetadataUpdate, lib_tests::bootstrap,
+    };
+    use scryer_domain::{MediaFacet, MovieReleaseDates, NewTitle, Title, User};
+
+    async fn movie(
+        app: &AppUseCase,
+        user: &User,
+        name: &str,
+        threshold: Option<&str>,
+        dates: Option<MovieReleaseDates>,
+        legacy_date: Option<&str>,
+    ) -> Title {
+        let title = app
+            .add_title(
+                user,
+                NewTitle {
+                    name: name.into(),
+                    facet: MediaFacet::Movie,
+                    monitored: false,
+                    min_availability: threshold.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        app.services
+            .catalog
+            .titles
+            .update_title_hydrated_metadata(
+                &title.id,
+                TitleMetadataUpdate {
+                    movie_release_dates: dates,
+                    digital_release_date: legacy_date.map(str::to_string),
+                    metadata_fetched_at: Some("2026-01-01T00:00:00Z".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn calendar_movie_uses_library_policy_and_title_threshold() {
+        let (app, user) = bootstrap();
+        let dates = MovieReleaseDates {
+            market: "GB".into(),
+            fetched: true,
+            theatrical_dates: vec!["2026-10-01".into()],
+            digital_dates: vec!["2026-10-20".into()],
+            physical_dates: vec!["2026-10-18".into()],
+            ..Default::default()
+        };
+        let inherited = movie(
+            &app,
+            &user,
+            "Inherited",
+            None,
+            Some(dates.clone()),
+            Some("2026-01-01"),
+        )
+        .await;
+        let explicit = movie(&app, &user, "Explicit", Some("released"), Some(dates), None).await;
+        app.write_movie_availability_values(
+            &inherited.library_id,
+            &MovieAvailabilityOverrides {
+                default_availability: Some("in_cinemas".into()),
+                release_market: Some("GB".into()),
+                delay_days: Some(3),
+            },
+            false,
+            &user.id,
+        )
+        .await
+        .unwrap();
+
+        let events = app
+            .list_calendar_episodes(&user, "2026-10-01", "2026-10-31", None)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].title_id, inherited.id);
+        assert_eq!(events[0].air_date.as_deref(), Some("2026-10-04"));
+        assert_eq!(events[1].title_id, explicit.id);
+        assert_eq!(events[1].air_date.as_deref(), Some("2026-10-21"));
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.air_date_estimated && !event.monitored)
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.season_number.is_none() && event.episode_number.is_none())
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.library_name.is_some() && event.library_slug.is_some())
+        );
+
+        let projection = app
+            .get_movie_availability_for_title(&user, &explicit.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(events[1].air_date, projection.effective_date);
+        assert!(
+            app.list_calendar_episodes(&user, "2026-01-01", "2026-01-31", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let boundary = app
+            .list_calendar_episodes(&user, "2026-10-21", "2026-10-21", None)
+            .await
+            .unwrap();
+        assert_eq!(boundary.len(), 1);
+        assert_eq!(boundary[0].id, format!("movie:{}", explicit.id));
+        assert!(
+            app.list_calendar_episodes(
+                &user,
+                "2026-10-01",
+                "2026-10-31",
+                Some(vec!["inaccessible-library".into()])
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut denied = user.clone();
+        denied.id = "calendar-viewer-without-grants".into();
+        denied.authorization = Default::default();
+        assert!(
+            app.list_calendar_episodes(&denied, "2026-10-01", "2026-10-31", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_movie_estimates_follow_the_same_fallbacks_as_acquisition() {
+        let (app, user) = bootstrap();
+        let worldwide = movie(
+            &app,
+            &user,
+            "Worldwide",
+            None,
+            Some(MovieReleaseDates {
+                market: "US".into(),
+                fetched: true,
+                any_market_digital_dates: vec!["2026-10-08".into()],
+                ..Default::default()
+            }),
+            None,
+        )
+        .await;
+        let theatrical = movie(
+            &app,
+            &user,
+            "Theatrical estimate",
+            None,
+            Some(MovieReleaseDates {
+                market: "US".into(),
+                fetched: true,
+                theatrical_dates: vec!["2026-07-10".into()],
+                ..Default::default()
+            }),
+            None,
+        )
+        .await;
+        let legacy = movie(
+            &app,
+            &user,
+            "Legacy estimate",
+            None,
+            None,
+            Some("2026-07-10"),
+        )
+        .await;
+        let events = app
+            .list_calendar_episodes(&user, "2026-10-08", "2026-10-08", None)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        for title in [worldwide, theatrical, legacy] {
+            let event = events
+                .iter()
+                .find(|event| event.title_id == title.id)
+                .unwrap();
+            let projection = app
+                .get_movie_availability_for_title(&user, &title.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.air_date, projection.effective_date);
+            assert!(event.air_date_estimated);
+        }
+    }
+
+    #[tokio::test]
+    async fn calendar_movie_does_not_invent_dates_for_unknown_or_announced_titles() {
+        let (app, user) = bootstrap();
+        for (name, threshold, dates) in [
+            (
+                "Wrong market",
+                None,
+                MovieReleaseDates {
+                    market: "GB".into(),
+                    fetched: true,
+                    digital_dates: vec!["2026-10-08".into()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "Not fetched",
+                None,
+                MovieReleaseDates {
+                    market: "US".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Unknown",
+                None,
+                MovieReleaseDates {
+                    market: "US".into(),
+                    fetched: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "Announced",
+                Some("announced"),
+                MovieReleaseDates {
+                    market: "US".into(),
+                    fetched: true,
+                    digital_dates: vec!["2026-10-08".into()],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            movie(
+                &app,
+                &user,
+                name,
+                threshold,
+                Some(dates),
+                Some("2026-10-01"),
+            )
+            .await;
+        }
+        assert!(
+            app.list_calendar_episodes(&user, "2026-01-01", "2027-12-31", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_movie_reads_beyond_the_first_catalog_page() {
+        let (app, user) = bootstrap();
+        let first = movie(
+            &app,
+            &user,
+            "Paged 000",
+            None,
+            Some(MovieReleaseDates {
+                market: "US".into(),
+                fetched: true,
+                digital_dates: vec!["2026-10-08".into()],
+                ..Default::default()
+            }),
+            None,
+        )
+        .await;
+        for index in 1..257 {
+            let mut title = first.clone();
+            title.id = format!("calendar-movie-{index}");
+            title.name = format!("Paged {index:03}");
+            title.slug = Some(format!("paged-{index}"));
+            app.services
+                .catalog
+                .titles
+                .create_or_get_existing(title)
+                .await
+                .unwrap();
+        }
+        let events = app
+            .list_calendar_episodes(&user, "2026-10-08", "2026-10-08", None)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 257);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.title_id == "calendar-movie-256")
+        );
+    }
 
     #[test]
     fn hides_unmonitored_season_zero_episodes() {

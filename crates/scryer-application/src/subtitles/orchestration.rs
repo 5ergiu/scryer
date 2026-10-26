@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -491,16 +491,103 @@ async fn runtime_subtitle_provider_for_download(
     )))
 }
 
+/// Consecutive failed searches after which a provider sits out the rest of a
+/// subtitle search cycle. Kept small on purpose: a provider that failed three
+/// searches in a row (a host timeout, a deferral, a hard error) nearly always
+/// fails the rest, and every failed call can hold the cycle for up to the full
+/// plugin deadline.
+const SUBTITLE_PROVIDER_CIRCUIT_THRESHOLD: usize = 3;
+
+/// A per-cycle circuit breaker over subtitle providers, keyed by config id.
+///
+/// Any failed search counts; a successful one, results or not, resets the
+/// count. A provider whose circuit opens is not called again this cycle. One
+/// that opened last cycle starts on probation: its first failure opens it
+/// again at once, and its first success clears it.
+#[derive(Debug, Default)]
+struct SubtitleProviderCircuit {
+    consecutive_failures: HashMap<String, usize>,
+    open: HashSet<String>,
+    on_probation: HashSet<String>,
+}
+
+impl SubtitleProviderCircuit {
+    fn with_probation(on_probation: HashSet<String>) -> Self {
+        Self {
+            on_probation,
+            ..Self::default()
+        }
+    }
+
+    fn is_open(&self, config_id: &str) -> bool {
+        self.open.contains(config_id)
+    }
+
+    fn record_success(&mut self, config_id: &str) {
+        self.consecutive_failures.remove(config_id);
+        self.on_probation.remove(config_id);
+    }
+
+    /// Count one failed search. Returns the run of failures when this one
+    /// opened the circuit.
+    fn record_failure(&mut self, config_id: &str) -> Option<usize> {
+        if self.open.contains(config_id) {
+            return None;
+        }
+        let failures = self
+            .consecutive_failures
+            .entry(config_id.to_string())
+            .or_default();
+        *failures += 1;
+        let threshold = if self.on_probation.contains(config_id) {
+            1
+        } else {
+            SUBTITLE_PROVIDER_CIRCUIT_THRESHOLD
+        };
+        if *failures < threshold {
+            return None;
+        }
+        let failures = *failures;
+        self.open.insert(config_id.to_string());
+        Some(failures)
+    }
+
+    /// The providers the next cycle tries only once: those open now, and
+    /// those still on probation because this cycle never got to try them.
+    fn into_probation(self) -> HashSet<String> {
+        let mut probation = self.on_probation;
+        probation.extend(self.open);
+        probation
+    }
+}
+
+/// The stable reason a failed subtitle search is reported under.
+fn subtitle_failure_reason_code(error: &AppError) -> &str {
+    if let Some(failure) = error.plugin_failure() {
+        return failure.reason.as_str();
+    }
+    match error {
+        AppError::TemporaryUnavailable { .. } => "TEMPORARY_UNAVAILABLE",
+        _ => "PROVIDER_ERROR",
+    }
+}
+
 async fn search_all_subtitle_providers(
     app: &AppUseCase,
     providers: &[PluginSubtitleProviderAdapter],
     file_path: &Path,
     query: &SubtitleQuery,
     min_score: i32,
+    mut circuit: Option<&mut SubtitleProviderCircuit>,
 ) -> AppResult<Vec<SubtitleMatch>> {
     let filtered_providers = providers
         .iter()
         .filter(|provider| provider_enabled_for_query_facet(provider, query.facet.as_deref()))
+        .filter(|provider| {
+            circuit
+                .as_deref()
+                .is_none_or(|circuit| !circuit.is_open(&provider.config_id))
+        })
         .cloned()
         .collect::<Vec<_>>();
     if filtered_providers.is_empty() {
@@ -573,6 +660,9 @@ async fn search_all_subtitle_providers(
                     results.len(),
                 )
                 .await;
+                if let Some(circuit) = circuit.as_deref_mut() {
+                    circuit.record_success(&provider_config_id);
+                }
                 for result in results {
                     let key = (result.provider.clone(), result.provider_file_id.clone());
                     match merged.get(&key) {
@@ -607,6 +697,17 @@ async fn search_all_subtitle_providers(
                     error = %error,
                     "subtitle provider search failed"
                 );
+                if let Some(failures) = circuit
+                    .as_deref_mut()
+                    .and_then(|circuit| circuit.record_failure(&provider_config_id))
+                {
+                    warn!(
+                        subtitle_provider = provider_name.as_str(),
+                        failures,
+                        reason = subtitle_failure_reason_code(&error),
+                        "subtitle provider keeps failing; skipping it for the rest of this cycle"
+                    );
+                }
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -878,6 +979,7 @@ impl AppUseCase {
             &stored_path_to_path_buf(&media_file.file_path),
             &query,
             0,
+            None,
         )
         .await?;
 
@@ -2029,6 +2131,7 @@ async fn run_subtitle_search_for_file(
             file_path.as_path(),
             &query,
             min_score,
+            None,
         )
         .await
         {
@@ -2235,8 +2338,16 @@ async fn run_subtitle_search_cycle(app: &AppUseCase) -> AppResult<()> {
         .await?;
     let mut searched = 0u32;
     let mut downloaded = 0u32;
+    let mut circuit = SubtitleProviderCircuit::with_probation(std::mem::take(
+        &mut *app
+            .runtime
+            .plugins
+            .subtitle_providers_on_probation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    ));
 
-    for title in &titles {
+    'titles: for title in &titles {
         if !title.monitored {
             continue;
         }
@@ -2284,12 +2395,24 @@ async fn run_subtitle_search_cycle(app: &AppUseCase) -> AppResult<()> {
                     include_machine,
                 );
 
+                if providers
+                    .iter()
+                    .all(|provider| circuit.is_open(&provider.config_id))
+                {
+                    info!(
+                        searched,
+                        downloaded,
+                        "every subtitle provider is failing; ending this subtitle search cycle early"
+                    );
+                    break 'titles;
+                }
                 let results = match search_all_subtitle_providers(
                     app,
                     &providers,
                     file_path.as_path(),
                     &query,
                     min_score,
+                    Some(&mut circuit),
                 )
                 .await
                 {
@@ -2518,6 +2641,11 @@ async fn run_subtitle_search_cycle(app: &AppUseCase) -> AppResult<()> {
         }
     }
 
+    *app.runtime
+        .plugins
+        .subtitle_providers_on_probation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = circuit.into_probation();
     debug!(searched, downloaded, "subtitle search cycle completed");
     Ok(())
 }

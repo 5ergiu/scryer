@@ -110,6 +110,14 @@ fn merge_managed_child_metadata(existing: Option<&str>, desired: Option<&str>) -
     serde_json::to_string(&desired_value).ok()
 }
 
+/// Whether a sync rewrite of a managed child changed anything besides its
+/// write time.
+fn managed_child_visibly_changed(before: &IndexerConfig, after: &IndexerConfig) -> bool {
+    let mut after = after.clone();
+    after.updated_at = before.updated_at;
+    *before != after
+}
+
 /// A query budget is a positive count; `None` means the indexer has none.
 /// A parent that syncs managed children never searches under its own rate
 /// limit domain, so a budget there would pace nothing.
@@ -250,6 +258,21 @@ pub(crate) fn normalize_indexer_config_json(
 
     let mut object = parse_indexer_config_json(config_json)?;
     let persisted = parse_indexer_config_json(persisted_config_json)?;
+
+    // Guidance fields are read-only text: whatever a client sends under their
+    // keys is dropped, never saved, defaulted, or required.
+    let value_fields = fields
+        .iter()
+        .filter(|field| field.field_type != scryer_domain::ConfigFieldType::Info)
+        .cloned()
+        .collect::<Vec<_>>();
+    for field in fields
+        .iter()
+        .filter(|field| field.field_type == scryer_domain::ConfigFieldType::Info)
+    {
+        object.remove(&field.key);
+    }
+    let fields = value_fields.as_slice();
 
     for field in fields {
         if field.role == Some(scryer_domain::ConfigFieldRole::ConnectionUrl)
@@ -428,7 +451,7 @@ impl AppUseCase {
     /// by the same route as the indexer's searches: an assignment that points at
     /// a missing or disabled proxy is an error, never a reason to send the
     /// request directly.
-    async fn assigned_indexer_proxy(
+    pub(crate) async fn assigned_indexer_proxy(
         &self,
         config: &IndexerConfig,
     ) -> AppResult<Option<scryer_domain::ProxyConfig>> {
@@ -765,7 +788,9 @@ impl AppUseCase {
             return Err(AppError::Validation("provider type is required".into()));
         }
 
-        let fields = self.indexer_config_fields_for_provider_type(&provider_type)?;
+        let fields = self
+            .effective_indexer_config_fields(&provider_type, &[input.config_json.as_deref()])
+            .await?;
         let management_capabilities =
             self.indexer_management_capabilities_for_provider_type(&provider_type);
         let max_queries_per_minute = validate_max_queries_per_minute(
@@ -977,7 +1002,18 @@ impl AppUseCase {
                 .map(|id| id.trim().to_string())
                 .filter(|id| !id.is_empty())
         });
-        let fields = self.indexer_config_fields_for_provider_type(&effective_provider)?;
+        let same_provider_existing_json = existing
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case(effective_provider.trim())
+            .then_some(existing.config_json.as_deref())
+            .flatten();
+        let fields = self
+            .effective_indexer_config_fields(
+                &effective_provider,
+                &[update.config_json.as_deref(), same_provider_existing_json],
+            )
+            .await?;
         let normalized_config_json = update
             .config_json
             .as_deref()
@@ -1610,6 +1646,32 @@ impl AppUseCase {
                         })
                         .await
                 );
+                // Capabilities fetched over the old connection stay usable but
+                // become due, so the caps pass that follows this sync refetches
+                // them instead of waiting out their week.
+                let updated = match updated.caps_snapshot_json.as_deref().filter(|_| {
+                    crate::integration::indexer_caps_cache::connection_identity(&existing)
+                        != crate::integration::indexer_caps_cache::connection_identity(&updated)
+                }) {
+                    Some(snapshot) => {
+                        match crate::integration::indexer_caps_cache::mark_snapshot_stale(snapshot)
+                        {
+                            Some(stale) => try_sync_step!(
+                                self.services
+                                    .integrations
+                                    .indexer_configs
+                                    .update(IndexerConfigUpdate {
+                                        id: updated.id.clone(),
+                                        caps_snapshot_json: Some(Some(stale)),
+                                        ..Default::default()
+                                    })
+                                    .await
+                            ),
+                            None => updated,
+                        }
+                    }
+                    None => updated,
+                };
                 if crate::indexer_search_identity(&existing, None)
                     != crate::indexer_search_identity(&updated, None)
                 {
@@ -1619,7 +1681,9 @@ impl AppUseCase {
                     )
                     .await;
                 }
-                indexers_changed = true;
+                if managed_child_visibly_changed(&existing, &updated) {
+                    indexers_changed = true;
+                }
                 apply_managed_child_routing(
                     &mut routing_by_scope,
                     &updated.id,
@@ -1689,6 +1753,9 @@ impl AppUseCase {
 
         routing_by_scope
             .retain(|scope, entries| previous_routing_by_scope.get(scope) != Some(entries));
+        if !routing_by_scope.is_empty() {
+            indexers_changed = true;
+        }
         try_sync_step!(
             self.save_indexer_routing_by_scope(actor, routing_by_scope)
                 .await
@@ -1901,6 +1968,7 @@ fn protocol_families_from_capabilities(
         match protocol {
             scryer_domain::IndexerProtocolCapability::Usenet => families.push("usenet"),
             scryer_domain::IndexerProtocolCapability::Torrent => families.push("torrent"),
+            scryer_domain::IndexerProtocolCapability::Http => families.push("http"),
             scryer_domain::IndexerProtocolCapability::Mixed => {
                 families.push("usenet");
                 families.push("torrent");
@@ -1917,6 +1985,7 @@ fn download_client_supports_protocol_families(
     client_type: &str,
     plugin_provider: Option<&Arc<dyn DownloadClientPluginProvider>>,
     required_families: &[&str],
+    indexer_http: Option<&scryer_domain::IndexerHttpCapabilities>,
 ) -> bool {
     let accepted_inputs = crate::accepted_inputs_for_client(client_type, plugin_provider);
     let supports_usenet = accepted_inputs.iter().any(|input| {
@@ -1931,11 +2000,31 @@ fn download_client_supports_protocol_families(
             DownloadSourceKind::TorrentFile | DownloadSourceKind::MagnetUri
         )
     });
+    let supports_http = accepted_inputs
+        .iter()
+        .any(|input| matches!(input, DownloadSourceKind::HttpResource))
+        && download_client_supports_http_transports(
+            crate::http_capabilities_for_client(client_type, plugin_provider).as_ref(),
+            indexer_http,
+        );
     required_families.iter().all(|family| match *family {
         "usenet" => supports_usenet,
         "torrent" => supports_torrent,
+        "http" => supports_http,
         _ => false,
     })
+}
+
+/// Within the `http` family, a client is usable for an indexer only when
+/// some transport the indexer may emit is one the client declared. A client
+/// without an `http` capability block cannot take any HTTP release.
+fn download_client_supports_http_transports(
+    client_http: Option<&scryer_domain::DownloadClientHttpCapabilities>,
+    indexer_http: Option<&scryer_domain::IndexerHttpCapabilities>,
+) -> bool {
+    let default_indexer_http = scryer_domain::IndexerHttpCapabilities::default();
+    let indexer_http = indexer_http.unwrap_or(&default_indexer_http);
+    client_http.is_some_and(|client_http| client_http.accepts_indexer(indexer_http))
 }
 
 impl AppUseCase {
@@ -1947,6 +2036,18 @@ impl AppUseCase {
             .available()?
             .capabilities_for_provider(provider_type);
         protocol_families_from_capabilities(&capabilities)
+    }
+
+    fn indexer_http_capabilities(
+        &self,
+        provider_type: &str,
+    ) -> Option<scryer_domain::IndexerHttpCapabilities> {
+        self.services
+            .integrations
+            .plugin_provider
+            .available()?
+            .capabilities_for_provider(provider_type)
+            .http
     }
 
     fn indexer_download_client_provider_compatibility(
@@ -1961,6 +2062,7 @@ impl AppUseCase {
         } else {
             self.indexer_download_mapping_families(provider_type)
         };
+        let indexer_http = self.indexer_http_capabilities(provider_type);
         let compatible_client_ids = families
             .as_ref()
             .map(|required_families| {
@@ -1971,6 +2073,7 @@ impl AppUseCase {
                             &client.client_type,
                             plugin_provider,
                             required_families,
+                            indexer_http.as_ref(),
                         )
                     })
                     .map(|client| client.id.clone())
@@ -2016,10 +2119,12 @@ impl AppUseCase {
             .integrations
             .download_client_plugin_provider
             .available();
+        let indexer_http = self.indexer_http_capabilities(&indexer.provider_type);
         if !download_client_supports_protocol_families(
             &client.client_type,
             plugin_provider,
             &required_families,
+            indexer_http.as_ref(),
         ) {
             return Err(AppError::Validation(format!(
                 "download client '{}' does not support all protocol families required by indexer '{}'",
