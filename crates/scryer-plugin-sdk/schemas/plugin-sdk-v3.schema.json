@@ -3040,6 +3040,12 @@
         },
         "language": {
           "type": "string"
+        },
+        "country": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

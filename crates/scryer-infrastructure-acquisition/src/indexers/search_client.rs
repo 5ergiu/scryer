@@ -19639,6 +19639,7 @@ mod tests {
             &[scryer_domain::TaggedAlias {
                 name: "Sora no Vale".into(),
                 language: "jpn".into(),
+                country: None,
             }],
         );
 
@@ -19653,10 +19654,12 @@ mod tests {
                 scryer_domain::TaggedAlias {
                     name: "Silver Horizon: Beyond Harbor's End".into(),
                     language: "jpn".into(),
+                    country: None,
                 },
                 scryer_domain::TaggedAlias {
                     name: "Sora no Vale".into(),
                     language: "jpn".into(),
+                    country: None,
                 },
             ],
         );

@@ -690,6 +690,7 @@ pub(crate) fn series_movie_search_title(
         .map(|alias| scryer_domain::TaggedAlias {
             name: alias.clone(),
             language: "und".to_string(),
+            country: None,
         })
         .collect();
     search_title
@@ -4013,6 +4014,7 @@ mod tests {
             name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
                 .into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
 
@@ -4049,6 +4051,7 @@ mod tests {
         title.tagged_aliases = vec![scryer_domain::TaggedAlias {
             name: "Hoshizora no Kanata dewa Nemurenai".into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
 
@@ -4090,6 +4093,7 @@ mod tests {
             name: "Hagane no Renkinjutsushi Saigo no Gassho o Utau Toki no Hikari to Kage no Uta"
                 .into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let mut rival = title.clone();
         rival.id = "rival".to_string();
@@ -4098,6 +4102,7 @@ mod tests {
             name: "Hagane no Renkinjutsushi Saigo no Gasshoo o Utau Toki no Hikari to Kage no Uta"
                 .into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let evidence = spelling_evidence(&title, &[title.clone(), rival]).await;
 
@@ -4123,6 +4128,7 @@ mod tests {
         spaced.tagged_aliases = vec![scryer_domain::TaggedAlias {
             name: "Kumori no Oka to wa Iwanai".into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let mut joined = spaced.clone();
         joined.id = "joined".to_string();
@@ -4130,6 +4136,7 @@ mod tests {
         joined.tagged_aliases = vec![scryer_domain::TaggedAlias {
             name: "Kumori no Oka towa Iwanai".into(),
             language: "x-jat".into(),
+            country: None,
         }];
         let library = [spaced.clone(), joined.clone()];
         let spaced_evidence = spelling_evidence(&spaced, &library).await;
@@ -4326,6 +4333,7 @@ mod tests {
         title.tagged_aliases.push(TaggedAlias {
             name: "Die zwei Päpste".to_string(),
             language: "deu".to_string(),
+            country: None,
         });
         let evidence = spelling_evidence(&title, std::slice::from_ref(&title)).await;
         assert_eq!(
@@ -4409,6 +4417,7 @@ mod tests {
             tagged_aliases: vec![TaggedAlias {
                 name: "Nightfall Heavy Chorus Dark Lantern".to_string(),
                 language: "eng".to_string(),
+                country: None,
             }],
             metadata_language: None,
             metadata_fetched_at: None,
@@ -5696,6 +5705,7 @@ mod tests {
         title.tagged_aliases = vec![TaggedAlias {
             name: "Fixture Sitcom Television Series".to_string(),
             language: "eng".to_string(),
+            country: None,
         }];
         let evidence = canonical_title_evidence(&title);
 
@@ -6413,6 +6423,7 @@ mod tests {
         title.tagged_aliases = vec![TaggedAlias {
             name: "Silver Horizon Beyond the Vale".to_string(),
             language: "eng".to_string(),
+            country: None,
         }];
 
         let candidate = make_candidate(

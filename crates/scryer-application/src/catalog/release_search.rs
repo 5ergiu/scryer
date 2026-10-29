@@ -156,6 +156,7 @@ fn release_search_tagged_aliases(title: &Title) -> Vec<TaggedAlias> {
         aliases.push(TaggedAlias {
             name: alias.clone(),
             language: "und".to_string(),
+            country: None,
         });
     }
     aliases
