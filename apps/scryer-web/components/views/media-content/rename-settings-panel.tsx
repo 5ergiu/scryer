@@ -35,7 +35,7 @@ const RENAME_MISSING_METADATA_POLICY_OPTIONS = [
 
 const COMMON_RENAME_TOKENS = [
   "title", "title_with_year", "title_without_year", "year", "quality", "source",
-  "video_codec", "audio_codec", "audio_channels", "group", "ext",
+  "dynamic_range", "revision", "is_3d", "video_codec", "audio_codec", "audio_channels", "group", "ext",
   "title_with_article", "title_first_character",
 ];
 const EXTERNAL_ID_RENAME_TOKENS = [
@@ -100,6 +100,9 @@ const SHARED_RENAME_TOKEN_DESCRIPTIONS: { token: string; labelKey: string }[] = 
   { token: "year", labelKey: "settings.renameTokenYear" },
   { token: "quality", labelKey: "settings.renameTokenQuality" },
   { token: "source", labelKey: "settings.renameTokenSource" },
+  { token: "dynamic_range", labelKey: "settings.renameTokenDynamicRange" },
+  { token: "revision", labelKey: "settings.renameTokenRevision" },
+  { token: "is_3d", labelKey: "settings.renameTokenIs3d" },
   { token: "video_codec", labelKey: "settings.renameTokenVideoCodec" },
   { token: "audio_codec", labelKey: "settings.renameTokenAudioCodec" },
   { token: "audio_channels", labelKey: "settings.renameTokenAudioChannels" },
@@ -325,7 +328,8 @@ const RENAME_PREVIEW_MOVIE_SAMPLE: Record<string, string> = {
   title: "The Grey Harbor", title_with_year: "The Grey Harbor (2008)",
   title_without_year: "The Grey Harbor", year: "2008", quality: "2160p", edition: "IMAX",
   title_with_article: "Grey Harbor, The", title_first_character: "G",
-  source: "BluRay", video_codec: "x265", audio_codec: "DTS-HD MA",
+  source: "BluRay", dynamic_range: "HDR10", revision: "Proper", is_3d: "3D",
+  video_codec: "x265", audio_codec: "DTS-HD MA",
   audio_channels: "5.1", group: "FraMeSToR", ext: "mkv",
   imdb_id: "tt0468569", tmdb_id: "155", tvdb_id: "123456",
   anidb_id: "", mal_id: "", anilist_id: "",
@@ -335,7 +339,8 @@ const RENAME_PREVIEW_MOVIE_SAMPLE: Record<string, string> = {
 const RENAME_PREVIEW_SERIES_SAMPLE: Record<string, string> = {
   title: "Harbor Lights", title_with_year: "Harbor Lights (1994)",
   title_without_year: "Harbor Lights", year: "1994", quality: "1080p", edition: "Director's Cut",
-  source: "WEB-DL", video_codec: "x264", audio_codec: "AAC",
+  source: "WEB-DL", dynamic_range: "HDR10+", revision: "Proper", is_3d: "3D",
+  video_codec: "x264", audio_codec: "AAC",
   audio_channels: "2.0", group: "NTb", ext: "mkv",
   imdb_id: "tt0108778", tmdb_id: "1668", tvdb_id: "79168",
   anidb_id: "", mal_id: "", anilist_id: "",
@@ -346,7 +351,8 @@ const RENAME_PREVIEW_SERIES_SAMPLE: Record<string, string> = {
 const RENAME_PREVIEW_ANIME_SAMPLE: Record<string, string> = {
   title: "Tidebreaker", title_with_year: "Tidebreaker (1999)",
   title_without_year: "Tidebreaker", year: "1999", quality: "1080p", edition: "Director's Cut",
-  source: "WEB-DL", video_codec: "x265", audio_codec: "AAC",
+  source: "WEB-DL", dynamic_range: "DV", revision: "REPACK", is_3d: "3D",
+  video_codec: "x265", audio_codec: "AAC",
   audio_channels: "2.0", group: "SubsPlease", ext: "mkv",
   imdb_id: "tt0388629", tmdb_id: "37854", tvdb_id: "81797",
   anidb_id: "69", mal_id: "21", anilist_id: "21",
