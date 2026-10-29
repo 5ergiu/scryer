@@ -115,6 +115,7 @@ type SystemJobsViewState = {
   triggeringKeys: Partial<Record<string, boolean>>;
   onSelectJob: (target: JobTarget | null) => void;
   onTriggerJob: (target: JobTarget) => void;
+  onCancelAcquisitionSearch: (runId: string) => void | Promise<void>;
   customJobEditor: CustomJobEditorState;
 };
 
@@ -582,6 +583,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
     triggeringKeys,
     onSelectJob,
     onTriggerJob,
+    onCancelAcquisitionSearch,
     customJobEditor,
   } = state;
 
@@ -744,7 +746,7 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
   }, [jobRows, sortDirection, sortKey, t]);
 
   const renderRows = (rows: JobTableRow[]) =>
-    rows.map(({ instanceKey, job, lastRun, status, isDisabled }) => (
+    rows.map(({ instanceKey, job, activeRun, lastRun, status, isDisabled }) => (
       <TableRow
         key={instanceKey}
         data-ui="activity-row"
@@ -777,7 +779,20 @@ export function SystemJobsView({ state }: { state: SystemJobsViewState }) {
           <span className={runStatusTone(status)}>{runStatusLabel(status, t)}</span>
         </TableCell>
         <TableCell className="min-w-[6rem] text-right">
-          {job.manualTriggerAllowed ? (
+          {activeRun?.jobKey === "ACQUISITION_SEARCH" ? (
+            <Button
+              size="sm"
+              variant="destructive"
+              aria-label={t("jobs.action.cancelSearch")}
+              title={t("jobs.action.cancelSearch")}
+              onClick={(event) => {
+                event.stopPropagation();
+                void onCancelAcquisitionSearch(activeRun.id);
+              }}
+            >
+              {t("jobs.action.cancelSearch")}
+            </Button>
+          ) : job.manualTriggerAllowed ? (
             <Button
               size="sm"
               variant="primary"

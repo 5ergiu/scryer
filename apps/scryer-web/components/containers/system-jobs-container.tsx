@@ -144,7 +144,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
   const client = useClient();
   const setGlobalStatus = useGlobalStatus();
   const t = useTranslate();
-  const { registerInteractiveJobRun } = useJobRunToasts();
+  const { cancelAcquisitionSearch, registerInteractiveJobRun } = useJobRunToasts();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedJobRunId = searchParams.get("jobRun")?.trim() || null;
   const [jobs, setJobs] = useState<JobDefinition[]>([]);
@@ -456,6 +456,7 @@ export const SystemJobsContainer = memo(function SystemJobsContainer() {
           triggeringKeys,
           onSelectJob,
           onTriggerJob,
+          onCancelAcquisitionSearch: cancelAcquisitionSearch,
           customJobEditor: {
             isOpen: scriptEditor.isEditorOpen,
             isEditing: scriptEditor.editingScriptId !== null,

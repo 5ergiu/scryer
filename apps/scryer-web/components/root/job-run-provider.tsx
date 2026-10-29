@@ -9,6 +9,7 @@ import {
   jobRunsQuery,
   jobRunEventsSubscription,
 } from "@/lib/graphql/queries";
+import { cancelAcquisitionSearchMutation } from "@/lib/graphql/mutations";
 import { useDeferredWsSubscription } from "@/lib/hooks/use-deferred-ws-subscription";
 import { normalizeApplicationUpgradeProgress } from "@/lib/utils/application-upgrade-progress";
 import {
@@ -27,6 +28,7 @@ const APPLICATION_UPGRADE_RUN_STORAGE_KEY = "scryer:application-upgrade-run";
 type JobRunToastContextValue = {
   /** Every run the stream and the active-runs load have surfaced, newest state each. */
   runs: JobRun[];
+  cancelAcquisitionSearch: (runId: string) => Promise<void>;
   registerInteractiveJobRun: (
     run: JobRun,
     onTerminal?: (run: JobRun) => void,
@@ -120,6 +122,23 @@ export function JobRunProvider({
 }) {
   const client = useClient();
   const t = useTranslate();
+  const cancelAcquisitionSearch = React.useCallback(async (runId: string) => {
+    try {
+      const { data, error } = await client
+        .mutation(cancelAcquisitionSearchMutation, { id: runId })
+        .toPromise();
+      if (error) {
+        throw error;
+      }
+      const payload = data?.cancelAcquisitionSearch as { accepted?: unknown } | undefined;
+      toast.info(t(payload?.accepted === true
+        ? "jobs.cancelSearchRequested"
+        : "jobs.cancelSearchNotRunning"));
+    } catch (error) {
+      console.error("[job-runs] failed to cancel acquisition search:", error);
+      toast.error(t("jobs.cancelSearchFailed"));
+    }
+  }, [client, t]);
   const [runsById, setRunsById] = React.useState<Record<string, JobRun>>({});
   // A terminal event can arrive and leave the visible list before its start response.
   const terminalSnapshotsRef = React.useRef(new Map<string, JobRun>());
@@ -432,6 +451,12 @@ export function JobRunProvider({
         id: run.id,
         description,
         duration: Infinity,
+        action: run.jobKey === "ACQUISITION_SEARCH"
+          ? {
+            label: t("jobs.action.cancelSearch"),
+            onClick: () => void cancelAcquisitionSearch(run.id),
+          }
+          : undefined,
       });
     }
 
@@ -445,7 +470,7 @@ export function JobRunProvider({
         return next;
       });
     }
-  }, [clearReconcileTimers, runsById, t]);
+  }, [cancelAcquisitionSearch, clearReconcileTimers, runsById, t]);
 
   React.useEffect(
     () => () => {
@@ -471,8 +496,9 @@ export function JobRunProvider({
 
   const contextValue = React.useMemo<JobRunToastContextValue>(() => ({
     runs,
+    cancelAcquisitionSearch,
     registerInteractiveJobRun,
-  }), [registerInteractiveJobRun, runs]);
+  }), [cancelAcquisitionSearch, registerInteractiveJobRun, runs]);
 
   return (
     <JobRunToastContext.Provider value={contextValue}>
